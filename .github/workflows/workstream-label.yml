@@ -22,9 +22,14 @@ jobs:
             const pri = grab('Priority');
             if (pri && /^(P1|P2|T2|T3)$/.test(pri)) labels.push(pri);
             if (!labels.length) return;
+            const assertWs = !!(ws && /^[A-K]/i.test(ws));
+            const assertPri = !!(pri && /^(P1|P2|T2|T3)$/.test(pri));
             const stale = (context.payload.issue.labels || [])
               .map(l => l.name)
-              .filter(n => (n.startsWith('workstream:') || /^(P1|P2|T2|T3)$/.test(n)) && !labels.includes(n));
+              .filter(n => !labels.includes(n) && (
+                (assertWs && n.startsWith('workstream:')) ||
+                (assertPri && /^(P1|P2|T2|T3)$/.test(n))
+              ));
             for (const name of stale) {
               try { await github.rest.issues.removeLabel({ ...context.repo, issue_number: context.payload.issue.number, name }); }
               catch (e) { if (e.status !== 404) throw e; }
