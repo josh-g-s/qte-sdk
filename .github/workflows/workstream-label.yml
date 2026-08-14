@@ -22,6 +22,13 @@ jobs:
             const pri = grab('Priority');
             if (pri && /^(P1|P2|T2|T3)$/.test(pri)) labels.push(pri);
             if (!labels.length) return;
+            const stale = (context.payload.issue.labels || [])
+              .map(l => l.name)
+              .filter(n => (n.startsWith('workstream:') || /^(P1|P2|T2|T3)$/.test(n)) && !labels.includes(n));
+            for (const name of stale) {
+              try { await github.rest.issues.removeLabel({ ...context.repo, issue_number: context.payload.issue.number, name }); }
+              catch (e) { if (e.status !== 404) throw e; }
+            }
             for (const name of labels) {
               try {
                 await github.rest.issues.createLabel({ ...context.repo, name, color: name.startsWith('workstream:') ? '0366d6' : 'd73a4a' });
