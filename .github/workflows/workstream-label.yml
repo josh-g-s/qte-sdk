@@ -1,0 +1,30 @@
+name: Workstream label
+on:
+  issues:
+    types: [opened, edited]
+permissions:
+  issues: write
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+            const grab = (heading) => {
+              const m = body.match(new RegExp('###\\s*' + heading + '\\s*\\n+([^\\n]+)'));
+              return m ? m[1].trim() : null;
+            };
+            const labels = [];
+            const ws = grab('Workstream');
+            if (ws && /^[A-K]/i.test(ws)) labels.push('workstream:' + ws[0].toUpperCase());
+            const pri = grab('Priority');
+            if (pri && /^(P1|P2|T2|T3)$/.test(pri)) labels.push(pri);
+            if (!labels.length) return;
+            for (const name of labels) {
+              try {
+                await github.rest.issues.createLabel({ ...context.repo, name, color: name.startsWith('workstream:') ? '0366d6' : 'd73a4a' });
+              } catch (e) { if (e.status !== 422) throw e; }
+            }
+            await github.rest.issues.addLabels({ ...context.repo, issue_number: context.payload.issue.number, labels });
