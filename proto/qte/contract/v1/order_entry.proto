@@ -1,11 +1,23 @@
-// Inbound order entry (`schemas/contract/02-inbound-order-entry.md`).
+// Inbound order entry.
 //
-// **Version:** 1.3
+// **Version:** 1.5
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`. Every new, cancel, amend and mass-cancel message is released
 // to the engine delta_oe after gateway receipt (SPEC 8.1, SPEC 8.2); nothing
 // about that timing is a field here.
+//
+// The book is addressed by instrument, side and price; no inbound message
+// carries an order identifier. A team holds at most one resting order per
+// instrument, side and price, across all of its strategies (SPEC 8.2).
+//
+// Identifier limits: request_ref, strat_id and instrument are each at most 32
+// bytes of UTF-8. The limit counts bytes, not characters, so a character
+// outside ASCII counts two to four towards it. Any text is allowed except the
+// NUL character. A message with a longer identifier, or one containing NUL,
+// is rejected MALFORMED_MESSAGE at receipt, and the reject still echoes
+// request_ref as sent. An empty request_ref or strat_id counts as absent and
+// is rejected MALFORMED_MESSAGE too.
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -15,58 +27,56 @@ import "qte/contract/v1/common.proto";
 option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
 
 // Creates a new order with the stated size, price and side (SPEC 8.2). A new
-// order at a level key (strat_id, instrument, side, price) that already has
-// a resting order is rejected, and the existing order is unchanged (SPEC
-// 8.2, director follow-up answer G-07). On the missing side of a one-sided
-// live quote, an order has no band limit but must have a non-zero price
-// (SPEC 5.2, director answer Q-14). While the live quote is empty a limit
-// order has no band limit either but must carry a positive price and meet
-// the 5% collar at the frozen mark, and a market order with no wall on the
-// side it would execute against is rejected (SPEC 5.2, SPEC 8.1, director
-// follow-up answer G-17). A NewOrder or AmendOrder released while a
-// Director-declared exchange outage is in force is rejected, tested at
-// release step 1 with the kill switch, while a CancelOrder and a
-// MassCancel are accepted and nothing matches (SPEC 4.3, SPEC 9.4.3,
-// director follow-up answer G-18), rejected `EXCHANGE_OUTAGE`
-// (`06-reason-codes.md`). Option entitlement and sizing wait for the
-// Options section. TODO(#4-D13)
+// order is rejected DUPLICATE_ORDER_AT_LEVEL if the team already has a
+// resting order in that instrument, side and price, from any of its
+// strategies, and the existing order is unchanged; to change the size of a
+// resting order, send an AmendOrder (SPEC 8.2). On the missing side of a
+// one-sided live quote, an order has no band limit but must have a non-zero
+// price (SPEC 5.2). While the live quote is empty a limit order has no band
+// limit either but must carry a positive price and meet the 5% collar at the
+// frozen mark, and a market order with no wall on the side it would execute
+// against is rejected (SPEC 5.2, SPEC 8.1). A NewOrder or AmendOrder released
+// while a Director-declared exchange outage is in force is rejected
+// EXCHANGE_OUTAGE, tested at release step 1 with the kill switch, while a
+// CancelOrder and a MassCancel are accepted and nothing matches (SPEC 4.3,
+// SPEC 9.4.3). Order entry for options (contract identifiers and sizes) is
+// not yet specified.
 message NewOrder {
-  string request_ref = 1;   // id. Client correlation id, echoed on the response. TODO(#4-H2)
-  string strat_id = 2;      // id. SPEC 2.5, SPEC 11.3
-  string instrument = 3;    // id. SPEC 3.1
+  string request_ref = 1;   // id, 1 to 32 bytes. Client correlation id, echoed on the response. Its other rules are not yet specified
+  string strat_id = 2;      // id, 1 to 32 bytes. SPEC 2.5, SPEC 11.3
+  string instrument = 3;    // id, at most 32 bytes. SPEC 3.1
   Side side = 4;            // SPEC 8.2
   OrderType order_type = 5; // SPEC 6.3, SPEC 8.1
   // Required iff order_type = LIMIT; absent for MARKET. SPEC 8.2
   optional int64 price = 6; // int64-micro
-  int64 size = 7;           // int64-qty, a whole number of shares. SPEC 0.1, SPEC 8.2, G-06
+  int64 size = 7;           // int64-qty, a whole number of shares. SPEC 0.1, SPEC 8.2
 }
 
-// Cancels all of the team's existing orders at the stated price and side,
-// across every strategy of the team (SPEC 8.2). Where the level holds orders
-// of more than one strategy and any of them is younger than the 50 ms minimum
-// rest, the whole message is rejected and nothing is changed; mass-cancel
-// stays exempt (SPEC 8.1, director follow-up answer G-09).
+// Cancels the team's resting order in the stated instrument at the stated
+// price and side, whichever of the team's strategies holds it (SPEC 8.2). An
+// order may not be cancelled until 50 ms after its submission, both times
+// taken at gateway receipt: an earlier cancel is rejected MIN_REST_VIOLATION
+// and nothing is changed; MassCancel is exempt (SPEC 8.1).
 message CancelOrder {
-  string request_ref = 1; // id. TODO(#4-H2)
-  string instrument = 2;  // id. SPEC 8.2
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id. Its other rules are not yet specified
+  string instrument = 2;  // id, at most 32 bytes. SPEC 8.2
   Side side = 3;          // SPEC 8.2
   int64 price = 4;        // int64-micro. The price level to clear. SPEC 8.2
 }
 
-// Changes the price and size of the team's existing orders at the stated
-// amend price (SPEC 8.2). `new_size` is the new remaining size, not a
-// lifetime total: it is the new total remaining size of the team's orders at
-// the level, cut in reverse time priority and added to the most recent order,
-// and an amend is never scoped to one strategy. As on a CancelOrder, where
-// any of the orders the amend acts on is younger than the 50 ms minimum rest
-// the whole message is rejected and nothing is changed (SPEC 8.1, director
-// follow-up answer G-09). An order the cut leaves with no size is cancelled
-// AMEND_CUT. A new_price where one of the amended strategies already has an
-// order is rejected DUPLICATE_ORDER_AT_LEVEL, and one at or beyond the wall on
-// the order's own side AMEND_PRICE_AT_OR_BEYOND_WALL; a marketable new_price
-// executes each amended order at release, oldest first, each its own
-// execution event; a rejected amend leaves every order unchanged (SPEC 8.2,
-// director follow-up answer G-08).
+// Changes the price and size of the team's resting order at the stated
+// amend price, whichever of the team's strategies holds it (SPEC 8.2).
+// `new_size` is the new remaining size, not a lifetime total: an amend from
+// 10 to 8 with 5 filled during the delay leaves 8 resting and 13 traded.
+// Cutting size keeps the order's queue priority; adding size or changing
+// price loses it (SPEC 8.2). As on a CancelOrder, an amend within 50 ms of
+// the order's submission is rejected MIN_REST_VIOLATION and nothing is
+// changed (SPEC 8.1). A new_price where the team already has another
+// resting order in that instrument and side is rejected
+// DUPLICATE_ORDER_AT_LEVEL, and one at or beyond the wall on the order's own
+// side AMEND_PRICE_AT_OR_BEYOND_WALL; a marketable new_price executes at
+// release as an aggressive order at that price, its own execution event; a
+// rejected amend leaves the order unchanged (SPEC 6.3, SPEC 8.2).
 // An amend of a STALE order to a lawful price stays STALE with its original
 // timer running: the amend keeps the order rather than replacing it
 // (SPEC 8.2), and the timer is never reset or stopped once started
@@ -74,17 +84,17 @@ message CancelOrder {
 // AMEND_WOULD_MAKE_STALE_MARKETABLE, so a STALE order never reaches the wall
 // (SPEC 8.2, SPEC 8.4).
 message AmendOrder {
-  string request_ref = 1; // id. TODO(#4-H2)
-  string instrument = 2;  // id. SPEC 8.2
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id. Its other rules are not yet specified
+  string instrument = 2;  // id, at most 32 bytes. SPEC 8.2
   Side side = 3;          // SPEC 8.2
-  int64 price = 4;        // int64-micro. The amend price: the level whose orders change. SPEC 8.2
+  int64 price = 4;        // int64-micro. The amend price: the price the order rests at now. SPEC 8.2
   int64 new_price = 5;    // int64-micro. Equal to price for a size-only amend. SPEC 8.2
-  int64 new_size = 6;     // int64-qty, a whole number of shares. The new remaining size. SPEC 0.1, SPEC 8.2, G-06
+  int64 new_size = 6;     // int64-qty, a whole number of shares. The new remaining size. SPEC 0.1, SPEC 8.2
 }
 
 // Cancels every order the team has on the exchange (SPEC 8.2). Falls into no
 // allowance category, ignores the message cap, and is exempt from the
 // minimum rest (SPEC 8.1, SPEC 8.2).
 message MassCancel {
-  string request_ref = 1; // id. TODO(#4-H2)
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id. Its other rules are not yet specified
 }

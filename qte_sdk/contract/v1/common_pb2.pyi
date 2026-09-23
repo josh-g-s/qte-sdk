@@ -142,6 +142,10 @@ class ReasonCodes(_message.Message):
         POSITION_REDUCING_ONLY: _ClassVar[ReasonCodes.ReasonCode]
         RISK_REDUCING_ONLY: _ClassVar[ReasonCodes.ReasonCode]
         SANITY_GATE_REJECTED: _ClassVar[ReasonCodes.ReasonCode]
+        HEDGE_ONLY: _ClassVar[ReasonCodes.ReasonCode]
+        PARENT_NOT_WORKING: _ClassVar[ReasonCodes.ReasonCode]
+        PARENT_MISMATCH: _ClassVar[ReasonCodes.ReasonCode]
+        PARENT_QUANTITY_EXCEEDED: _ClassVar[ReasonCodes.ReasonCode]
         CANCEL_REQUEST: _ClassVar[ReasonCodes.ReasonCode]
         MASS_CANCEL: _ClassVar[ReasonCodes.ReasonCode]
         SELF_TRADE: _ClassVar[ReasonCodes.ReasonCode]
@@ -153,6 +157,7 @@ class ReasonCodes(_message.Message):
         STRATEGY_NOT_LIVE: _ClassVar[ReasonCodes.ReasonCode]
         KILL_SWITCH: _ClassVar[ReasonCodes.ReasonCode]
         AMEND_CUT: _ClassVar[ReasonCodes.ReasonCode]
+        HEDGE_RECHECK_FAILED: _ClassVar[ReasonCodes.ReasonCode]
     REASON_CODE_UNSPECIFIED: ReasonCodes.ReasonCode
     NOT_AUTHENTICATED: ReasonCodes.ReasonCode
     VERSION_MISMATCH: ReasonCodes.ReasonCode
@@ -187,6 +192,10 @@ class ReasonCodes(_message.Message):
     POSITION_REDUCING_ONLY: ReasonCodes.ReasonCode
     RISK_REDUCING_ONLY: ReasonCodes.ReasonCode
     SANITY_GATE_REJECTED: ReasonCodes.ReasonCode
+    HEDGE_ONLY: ReasonCodes.ReasonCode
+    PARENT_NOT_WORKING: ReasonCodes.ReasonCode
+    PARENT_MISMATCH: ReasonCodes.ReasonCode
+    PARENT_QUANTITY_EXCEEDED: ReasonCodes.ReasonCode
     CANCEL_REQUEST: ReasonCodes.ReasonCode
     MASS_CANCEL: ReasonCodes.ReasonCode
     SELF_TRADE: ReasonCodes.ReasonCode
@@ -198,4 +207,5 @@ class ReasonCodes(_message.Message):
     STRATEGY_NOT_LIVE: ReasonCodes.ReasonCode
     KILL_SWITCH: ReasonCodes.ReasonCode
     AMEND_CUT: ReasonCodes.ReasonCode
+    HEDGE_RECHECK_FAILED: ReasonCodes.ReasonCode
     def __init__(self) -> None: ...
