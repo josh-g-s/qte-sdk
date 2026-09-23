@@ -19,7 +19,8 @@ from typing import Any
 from google.protobuf.json_format import ParseError
 from google.protobuf.message import Message
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.frames import Frame
+from websockets.exceptions import ConnectionClosed
+from websockets.frames import Close, Frame
 
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import CONTRACT_VERSION, INBOUND
@@ -64,6 +65,18 @@ def _without_handshake_values(msg: Any, args: tuple[Any, ...]) -> tuple[Any, ...
     if msg == "< HTTP/1.1 %d %s" and len(args) == 2:
         return (args[0], "<withheld>")
     return args
+
+
+def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
+    """The same close, with the reason text withheld: a close reason is free text from the
+    server, and the client echoes it back, so it could carry the token either way."""
+
+    def withheld(close: Close | None) -> Close | None:
+        if close is None:
+            return None
+        return Close(close.code, "<withheld>" if close.reason else "")
+
+    return type(error)(withheld(error.rcvd), withheld(error.sent), error.rcvd_then_sent)
 
 
 def _exception_name(exc_info: Any) -> str:
@@ -160,22 +173,42 @@ class Connection:
         if self._used:
             raise RuntimeError("a Connection is single-use; create a new one to reconnect")
         self._used = True
-        self._ws = await connect(self.url, **self._connect_options)
+        try:
+            self._ws = await connect(self.url, **self._connect_options)
+        except ConnectionClosed as error:
+            closed = _without_close_reasons(error)
+        else:
+            return
+        raise closed
 
     async def close(self) -> None:
         if self._ws is not None:
             await self._ws.close()
 
     async def send(self, type_: str, payload: Message) -> None:
-        await self._open_ws().send(codec.encode(self.contract_version, type_, payload))
+        text = codec.encode(self.contract_version, type_, payload)
+        try:
+            await self._open_ws().send(text)
+        except ConnectionClosed as error:
+            closed = _without_close_reasons(error)
+        else:
+            return
+        # Raised outside the handler, so the original, which holds the reasons, is not chained.
+        raise closed
 
     def __aiter__(self) -> AsyncIterator[Event]:
         return self.events()
 
     async def events(self) -> AsyncIterator[Event]:
-        async for frame in self._open_ws():
-            for event in self._handle(frame):
-                yield event
+        try:
+            async for frame in self._open_ws():
+                for event in self._handle(frame):
+                    yield event
+        except ConnectionClosed as error:
+            closed = _without_close_reasons(error)
+        else:
+            return
+        raise closed
 
     def _open_ws(self) -> ClientConnection:
         if self._ws is None:

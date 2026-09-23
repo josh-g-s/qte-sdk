@@ -353,3 +353,63 @@ async def test_handshake_trace_withholds_query_and_header_values(caplog):
     assert any(line.startswith("> GET /ws ") for line in lines)
     assert any(line.startswith("> X-Api-Key: ") for line in lines)
     assert_no_token(lines, token)
+
+
+def assert_withheld(error: BaseException, token: str) -> None:
+    shown = [str(error), repr(error)]
+    for close in (getattr(error, "rcvd", None), getattr(error, "sent", None)):
+        if close is not None:
+            shown.append(close.reason)
+    assert error.__cause__ is None and error.__context__ is None
+    assert_no_token(shown, token)
+
+
+async def test_a_close_reason_carrying_the_token_is_withheld_from_the_error():
+    token = secrets.token_hex(16)
+
+    async def close_with_token(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(4000, token)
+
+    async with serve_local(close_with_token) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            with pytest.raises(ConnectionClosedError) as caught:
+                [event async for event in conn]
+    assert caught.value.rcvd is not None and caught.value.rcvd.code == 4000
+    assert caught.value.rcvd_then_sent is True
+    assert_withheld(caught.value, token)
+
+
+async def test_sending_after_a_close_withholds_the_reason_too():
+    token = secrets.token_hex(16)
+
+    async def close_with_token(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(4000, token)
+
+    async with serve_local(close_with_token) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            with pytest.raises(ConnectionClosedError):
+                [event async for event in conn]
+            with pytest.raises(ConnectionClosedError) as caught:
+                await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
+    assert_withheld(caught.value, token)
+
+
+async def test_a_close_during_the_handshake_withholds_the_reason(monkeypatch):
+    from websockets.frames import Close
+
+    import qte_sdk.connection as connection_module
+
+    token = secrets.token_hex(16)
+
+    async def closed_during_handshake(*args, **kwargs):
+        raise ConnectionClosedError(Close(4000, token), Close(4000, token), True)
+
+    monkeypatch.setattr(connection_module, "connect", closed_during_handshake)
+    with pytest.raises(ConnectionClosedError) as caught:
+        await Connection("ws://127.0.0.1:1").open()
+    assert caught.value.rcvd.code == 4000
+    assert_withheld(caught.value, token)
