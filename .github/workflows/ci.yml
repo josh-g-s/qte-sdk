@@ -54,6 +54,7 @@ jobs:
           cd /tmp
           /tmp/wheel-venv/bin/python -c "import qte_sdk; print(qte_sdk.__version__)"
           /tmp/wheel-venv/bin/python -c "from qte_sdk.contract import codec; from qte_sdk.contract.v1 import envelope_pb2, market_data_pb2, order_entry_pb2, order_events_pb2, session_pb2"
+          /tmp/wheel-venv/bin/python -c "from qte_sdk.connection import Connection"
 
   contract-drift:
     runs-on: ubuntu-latest
