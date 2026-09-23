@@ -17,14 +17,17 @@ The exchange is specified in qte-platform `SPEC.md`, whose Section 0 sets which 
 
 ## Workflow: issue -> branch -> PR
 
-- All work starts from an issue. No issue, no branch.
+- All work starts from an issue. No issue, no branch. An issue labelled `ready` is approved to be picked up.
 - An assigned issue is claimed (qte-platform DL-11). Agents build only unassigned issues and never pick up, push to or re-scope an assigned one. A developer who wants an agent to take over unassigns themselves.
 - Branch from main, named `issue-<n>-<slug>`.
 - One issue = one branch = one PR. Keep a PR reviewable in one sitting.
 - Direct pushes to main are blocked; everything merges by PR.
 - The PR body must contain `Closes #<n>` so the merge closes the issue. Merged branches auto-delete.
 - Squash-merge is the default; write the squash title imperative.
-- The author never approves their own PR. Agent-authored PRs are reviewed by a human, or by a different person's agent with that human's sign-off.
+- The author never approves their own PR. Agent-authored PRs are labelled `agent-authored`.
+- **Until the Head revokes it, every PR is approved and merged automatically.** The Head's decision of 23 September 2026 extends qte-platform DL-07 to this repo, with a review date of 14 October 2026; it is recorded in the qte-platform Decision Log through qte-platform #477. The QTEReviewBot approver account approves and squash-merges a PR once automated gates pass on its latest commit: every required and reported check green; an independent Codex review of that commit with no blocking findings; every review conversation resolved; no `needs-head` label on the PR or its issue; `Closes #<n>` present; and every PR it depends on already merged. Human review, including Jidneya's, is welcome but not required.
+- State ordering in the PR body as a dependency declaration: a line that, after trimming surrounding whitespace, is exactly `Depends on #<n>`, one PR per line and nothing else on the line. Nothing else in the body counts.
+- If the work hits a spec conflict or an OPEN point, stop, comment on the issue, add the `needs-head` label and escalate to the Head of Technology. `needs-head` also blocks automatic merge.
 - CI must be green before review is requested.
 - Put work-in-progress up as a draft PR early rather than a large PR late.
 
