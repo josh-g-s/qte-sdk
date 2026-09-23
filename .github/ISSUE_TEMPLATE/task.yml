@@ -6,7 +6,7 @@ body:
     id: workstream
     attributes:
       label: Workstream
-      description: Which workstream does this belong to? (Delivery Plan Section 3)
+      description: Which workstream does this belong to? (map carried over under qte-platform DL-02)
       options:
         - A - Market data ingest & synthetic book
         - B - Matching engine & order book

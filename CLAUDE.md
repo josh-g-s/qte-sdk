@@ -4,20 +4,21 @@ Python SDK and client library for the Queen's Tower Exchange (QTE). Public MIT r
 
 ## Authority order
 
-The exchange is specified in qte-platform `SPEC.md`, the build specification derived from the directors' Draft 6.3, and the wire contract is defined in qte-platform `schemas/`. This repo consumes the frozen API; it never defines exchange semantics. Where anything here disagrees with the platform contract, the contract wins; conflicts escalate to the Head of Technology, never resolved silently.
+The exchange is specified in qte-platform `SPEC.md`, whose Section 0 sets which source wins, and decisions are recorded in qte-platform `docs/QTE_Decision_Log.md`. Cite those two, never a draft number. The wire contract is the set of `.proto` files in qte-platform `schemas/proto/qte/contract/v1`, which this repo vendors at a pinned qte-platform commit (being set up under #5). The contract is not frozen yet (change control is provisional, H5), so the pin is bumped deliberately. This repo consumes the contract; it never defines exchange semantics. Where anything here disagrees with the platform contract, the contract wins; conflicts escalate to the Head of Technology, never resolved silently.
 
 ## Design facts that changed recently (do not build against the old ones)
 
-- Market data is ONE conflated 100 ms feed for everyone. There is no raw stream.
-- Draft 6.3 says recorded sessions serve backtesting and that counterparty identity never leaves the tape, but how teams get backtest access is not yet decided. Until it is, do not build a local fill-simulator against downloaded recordings.
-- Each order message addresses one price level of one instrument, every order carries a registered strategy ID, and per-team message budgets apply. The exact message shapes wait on open director questions; build against the contract's generated types, not hand-written ones.
-- In Term 1, teams trade only through the API and this SDK; there is no hosted strategy runtime yet.
-- Every student order message carries a symmetric 150 ms delay; examples and docs must not pretend otherwise.
-- The mock server (in qte-platform) is the test target for everything here. Examples never point at production.
+- Market data (book, trades, instrument conditions) is ONE conflated 100 ms grid for everyone. There is no raw stream. The mark publishing on a 1 s grid is a Technology Arm assumption (`SPEC.md` 4.3).
+- Recorded sessions serve backtesting (`SPEC.md` 4.2, 4.4), but how teams get backtest access is open. Until it is decided, do not build a local fill simulator against downloaded recordings.
+- New, cancel and amend each address one price level of one instrument, mass-cancel addresses the whole team, and there is no order ID on the wire. A new order carries a registered strategy ID, a team holds at most one resting order per instrument, side and price (DL-22), and per-team message budgets apply. Build against the generated types, not hand-written ones.
+- In Term 1, teams trade through the API, directly or through this SDK, from their own machines; there is no hosted strategy runtime yet (DL-05).
+- Every student order message, mass-cancel included, carries a symmetric 150 ms delay (`SPEC.md` 8.1). The delay, minimum rest, collar and budgets are values the exchange sets: never compile them in, and examples and docs must not pretend them away.
+- The test target is the qte-skeleton walking-skeleton exchange from qte-platform, run locally. Examples never point at production.
 
 ## Workflow: issue -> branch -> PR
 
 - All work starts from an issue. No issue, no branch.
+- An assigned issue is claimed (qte-platform DL-11). Agents build only unassigned issues and never pick up, push to or re-scope an assigned one. A developer who wants an agent to take over unassigns themselves.
 - Branch from main, named `issue-<n>-<slug>`.
 - One issue = one branch = one PR. Keep a PR reviewable in one sitting.
 - Direct pushes to main are blocked; everything merges by PR.
@@ -34,11 +35,13 @@ An issue created via the API must carry:
 - an imperative title;
 - a `workstream:<A-K>` label (the map is carried over unchanged under qte-platform DL-02);
 - a priority label (P1/P2/T2/T3) only when known - absence means untriaged, do not guess;
-- a "What and why" citing the qte-platform `SPEC.md` section it derives from;
+- a "What and why" citing the qte-platform `SPEC.md` section or Decision Log entry it derives from;
 - a testable "Done when";
 - a duplicate check first (`gh issue list` search); comment on the existing issue instead of filing a twin.
 
 ## Public-repo rules
 
 - MIT licence. No internal URLs, keys, credentials, student data, or platform internals in code, tests, docs, or history.
+- Pushing to any branch, or writing an issue, PR or comment, publishes it. Check before pushing, not before merging.
+- The only platform files that may be published here are the Head-approved allowlist: the six v1 `.proto` files (decision recorded on #5). The contract prose in qte-platform `schemas/contract/` stays private; cite its paths, never copy it.
 - Document headers carry `**Version:**`; no standalone Date line. No em-dashes in documents.
