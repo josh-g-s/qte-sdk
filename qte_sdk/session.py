@@ -11,15 +11,14 @@ A session is a `Connection` that has sent `auth` with your account's token and r
 environment variable. Keep it out of source files and out of the repository.
 
 The token is sent once, in the `auth` message, and is not kept afterwards. The SDK never
-logs it or puts it in an exception: the frame-level debug lines of the `websockets`
-library, which would show the `auth` message, are dropped for session connections. While
+logs it or puts it in an exception: the connection drops the frame-level debug lines of
+the `websockets` library, which would show the `auth` message (see `qte_sdk.connection`). While
 the session opens, a message from the exchange that repeats the token is also kept out of
 the exception raised; once the session is open the SDK no longer holds the token, and what
 the exchange sends is passed on as it arrives.
 """
 
 import asyncio
-import logging
 import os
 from collections import deque
 from collections.abc import AsyncIterator
@@ -140,8 +139,8 @@ async def open_session(
     secret = _Secret(resolve_token(token))
     del token
 
-    base_logger = connection_options.pop("logger", None) or logging.getLogger("websockets.client")
-    conn = Connection(url, logger=_WithoutFrames(base_logger), **connection_options)
+    # Connection keeps the token out of the websockets log itself, for any logger passed.
+    conn = Connection(url, **connection_options)
     try:
         await conn.open()
         await _send_auth(conn, secret)
@@ -192,7 +191,8 @@ async def _wait_for_ack(conn: Connection, timeout: float | None) -> tuple[Sessio
                         detail = (
                             message.reason_detail if message.HasField("reason_detail") else None
                         )
-                        raise SessionRejected(message.reason_code, detail)
+                        name = event.unknown_enum_names().get("reason_code")
+                        raise SessionRejected(message.reason_code, detail, reason_name=name)
                 elif isinstance(event, DecodeFailed) and event.type == "session_ack":
                     # Not chained: the decoder's frames hold the raw payload in their locals.
                     raise SessionNotAcknowledged(f"session_ack could not be decoded: {event.error}")
@@ -245,19 +245,3 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
     if isinstance(error, SessionNotAcknowledged):
         return SessionNotAcknowledged(_redact(str(error), secret))
     return SessionNotAcknowledged(_redact(f"{type(error).__name__}: {error}", secret))
-
-
-# The `websockets` library logs every frame at DEBUG, in lines that start "> " (sent) or
-# "< " (received), and the HTTP handshake the same way. A sent frame here can be the `auth`
-# message, so those lines are dropped; other records (state changes, errors) pass through.
-_WIRE_PREFIXES = ("> ", "< ")
-
-
-class _WithoutFrames(logging.LoggerAdapter):
-    def __init__(self, logger: logging.Logger | logging.LoggerAdapter) -> None:
-        super().__init__(logger, {})
-
-    def log(self, level: int, msg: object, *args: object, **kwargs: Any) -> None:
-        if isinstance(msg, str) and msg.startswith(_WIRE_PREFIXES):
-            return
-        super().log(level, msg, *args, **kwargs)

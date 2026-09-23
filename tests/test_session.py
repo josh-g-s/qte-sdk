@@ -409,3 +409,12 @@ async def test_a_logger_the_caller_passes_does_not_log_frames_either(every_logge
     ]
     assert lines
     assert_token_absent(token, "\n".join(lines))
+
+
+async def test_a_reject_before_the_ack_keeps_a_reason_name_from_a_newer_contract():
+    server = Server(frame("reject", {"reason_code": "A_REASON_FROM_A_NEWER_CONTRACT"}, 1))
+    async with serve_local(server) as url:
+        with pytest.raises(SessionRejected) as caught:
+            await open_session(url, synthetic_token())
+    assert caught.value.reason_code == ReasonCodes.REASON_CODE_UNSPECIFIED
+    assert caught.value.reason_name == "A_REASON_FROM_A_NEWER_CONTRACT"
