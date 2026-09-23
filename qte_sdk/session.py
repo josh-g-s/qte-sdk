@@ -27,6 +27,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+from websockets.exceptions import ConnectionClosed
+
 from qte_sdk.connection import (
     Connection,
     DecodeFailed,
@@ -176,6 +178,7 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
 async def _wait_for_ack(conn: Connection, timeout: float | None) -> tuple[SessionAck, list[Event]]:
     early: list[Event] = []
     events = conn.events()
+    close_code: int | None = None
     try:
         async with asyncio.timeout(timeout):
             async for event in events:
@@ -194,9 +197,13 @@ async def _wait_for_ack(conn: Connection, timeout: float | None) -> tuple[Sessio
                     # Not chained: the decoder's frames hold the raw payload in their locals.
                     raise SessionNotAcknowledged(f"session_ack could not be decoded: {event.error}")
                 early.append(event)
+    except ConnectionClosed as error:
+        # Only the code is kept: the close reason is server text and could echo the token.
+        close_code = error.rcvd.code if error.rcvd is not None else None
     finally:
         await events.aclose()
-    raise SessionNotAcknowledged("the connection closed before session_ack")
+    detail = f" (close code {close_code})" if close_code is not None else ""
+    raise SessionNotAcknowledged(f"the connection closed before session_ack{detail}")
 
 
 class _Secret:

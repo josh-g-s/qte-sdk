@@ -198,6 +198,16 @@ async def test_a_connection_that_closes_before_the_ack_is_an_error():
             await open_session(url, synthetic_token())
 
 
+async def test_an_abnormal_close_before_the_ack_is_an_error():
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(1011, "internal error")
+
+    async with serve_local(handler) as url:
+        with pytest.raises(SessionNotAcknowledged, match="close code 1011"):
+            await open_session(url, synthetic_token())
+
+
 async def test_an_undecodable_ack_is_an_error():
     bad = frame("session_ack", {"server_time": "not a number"}, 1)
     server = Server(bad)
