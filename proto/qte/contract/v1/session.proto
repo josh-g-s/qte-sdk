@@ -1,0 +1,87 @@
+// Session and subscription messages (`schemas/contract/01-envelope-and-session.md`).
+//
+// **Version:** 1.1
+//
+// Status: PROVISIONAL. Everything in this file waits on the Head of
+// Technology for the session layer. TODO(#4-H2) Carried from #20's working
+// proposal, unchanged in shape, so the walking skeleton (#73) and #5's mock
+// server have something to build against; it is not in force. The one
+// exception is Auth.token: the Head's H2 credential decision settles it
+// (DL-16), so it is no longer part of what TODO(#4-H2) marks undecided.
+syntax = "proto3";
+
+package qte.contract.v1;
+
+import "qte/contract/v1/common.proto";
+
+option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
+
+// Inbound. Presents the gateway's per-account token credential: the scheme
+// built for issue #186 (gateway/ws/handle.go handleAuth, gateway/cmd/
+// tokendigest), adopted as the contract's authentication by the Head's H2
+// credential decision (DL-16). The frontend asks for the token on its
+// connect screen and keeps it in memory only, never persisted to storage
+// (DL-16). Every other H2 item (roles, request_ref and exec_id, sequence
+// numbers, heartbeats, subscription, resume) stays open.
+message Auth {
+  string token = 1; // string. The gateway's per-account token. DL-16.
+}
+
+// Outbound.
+message SessionAck {
+  string session_id = 1;      // id. TODO(#4-H2)
+  string team = 2;             // id. The team the authenticated account trades for. SPEC 2.1, SPEC 2.5
+  int64 server_time = 3;       // timestamp. TODO(#4-H2)
+  string contract_version = 4; // string. TODO(#4-H2)
+  // bool. True when this is an unscored recorded session: no metric, score or
+  // leaderboard counts it. False in a scored session. The same flag the
+  // session-open record carries in the event log. SPEC 4.2. TODO(#4-H7)
+  bool unscored = 5;
+}
+
+// Outbound.
+message SessionReject {
+  // Band 1000 of ReasonCodes.ReasonCode, e.g. NOT_AUTHENTICATED or
+  // VERSION_MISMATCH. TODO(#4-H2)
+  ReasonCodes.ReasonCode reason_code = 1;
+  optional string reason_detail = 2; // string. TODO(#4-H2)
+}
+
+// Outbound. Envelope only: no payload fields. TODO(#4-H2)
+message Heartbeat {
+}
+
+// Inbound.
+message Resume {
+  string session_id = 1;        // id. TODO(#4-H2)
+  int32 last_seq_received = 2;  // integer. TODO(#4-H2)
+}
+
+// Outbound. One per resting order of the team after a resume that cannot
+// replay: the fields of `order_state` (`03-outbound-order-events.md`),
+// flattened directly onto this message (`01-envelope-and-session.md` says
+// "the fields of order_state", not a nested order_state field), so this
+// mirrors `order_events.proto`'s OrderState field for field, including its
+// field numbers. TODO(#4-H2)
+message OrderSnapshot {
+  string strat_id = 1;   // id. SPEC 2.5
+  string instrument = 2; // id. SPEC 8.2
+  Side side = 3;          // SPEC 8.2
+  int64 price = 4;        // int64-micro. SPEC 8.2
+  OrderLifecycleState state = 5; // RESTING or STALE. SPEC 8.4
+  int64 remaining_size = 6;      // int64-qty. SPEC 8.2
+  // Present iff state = STALE: when the order became STALE. SPEC 8.4
+  optional int64 stale_since = 7; // timestamp
+  int64 timestamp = 8; // timestamp. SPEC 9.2
+}
+
+// Inbound. One market-data feed, the same for every team (SPEC 4.3): no
+// channel selector and no per-team cadence.
+message Subscribe {
+  repeated string instruments = 1; // array of id. TODO(#4-H2)
+}
+
+// Inbound.
+message Unsubscribe {
+  repeated string instruments = 1; // array of id. TODO(#4-H2)
+}

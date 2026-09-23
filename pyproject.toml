@@ -10,7 +10,9 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "protobuf>=6.33.6,<7",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
@@ -22,6 +24,10 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
     "build>=1.2",
+]
+codegen = [
+    "grpcio-tools==1.80.0",
+    "protobuf==6.33.6",
 ]
 
 [project.urls]
@@ -35,11 +41,21 @@ packages = ["qte_sdk"]
 
 # An explicit allowlist, so untracked local files (such as .envrc) never reach a public sdist.
 [tool.hatch.build.targets.sdist]
-only-include = ["qte_sdk", "tests", "docs", "README.md", "LICENSE", "pyproject.toml"]
+only-include = [
+    "qte_sdk",
+    "proto",
+    "scripts",
+    "tests",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["qte_sdk/contract/v1/*_pb2.py", "qte_sdk/contract/v1/*_pb2.pyi"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]

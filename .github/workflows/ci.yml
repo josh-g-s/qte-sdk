@@ -53,3 +53,19 @@ jobs:
           /tmp/wheel-venv/bin/pip install dist/*.whl
           cd /tmp
           /tmp/wheel-venv/bin/python -c "import qte_sdk; print(qte_sdk.__version__)"
+          /tmp/wheel-venv/bin/python -c "from qte_sdk.contract import codec; from qte_sdk.contract.v1 import envelope_pb2, market_data_pb2, order_entry_pb2, order_events_pb2, session_pb2"
+
+  contract-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev,codegen]"
+      - run: python scripts/generate_contract.py
+      - name: Fail if the committed generated code differs from the vendored protos
+        run: |
+          git status --porcelain qte_sdk/contract
+          git diff --exit-code qte_sdk/contract
+          test -z "$(git status --porcelain qte_sdk/contract)"

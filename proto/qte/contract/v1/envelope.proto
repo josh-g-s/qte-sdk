@@ -1,0 +1,44 @@
+// The envelope (`schemas/contract/01-envelope-and-session.md`).
+//
+// **Version:** 1.0
+//
+// Status: PROVISIONAL. Everything in this file waits on the Head of
+// Technology for the session layer. TODO(#4-H2) The transport and encoding
+// are decided: WebSocket, JSON messages, `.proto` as the schema source
+// (DL-09). This message is carried from #20's working proposal, unchanged in
+// shape, so the walking skeleton (#73) and #5's mock server have something to
+// build against; it is not in force.
+syntax = "proto3";
+
+package qte.contract.v1;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
+
+// Wraps every message on the wire.
+message Envelope {
+  string version = 1; // string. Contract version the message conforms to. TODO(#4-H5)
+  // Message kind: a type named in 01-envelope-and-session.md,
+  // 02-inbound-order-entry.md, 03-outbound-order-events.md or
+  // 05-outbound-market-data.md. `schemas/contract/00-conventions.md` types
+  // this field `enum`, but it is left `string` here rather than a proto
+  // enum: 08-versioning-and-freeze.md lists "a new message type" as an
+  // Additive change, while a new value in a *closed* proto enum is its own
+  // Breaking case in that same table. Closing this set now would misstate
+  // an additive change as a breaking one. TODO(#4-H5)
+  string type = 2;
+  // Required on outbound; absent on inbound. Strictly increasing per
+  // connection, for gap detection and resume. Unrelated to the sequencer's
+  // log order (SPEC 20.2). Deliberately int32, not int64: see
+  // `schemas/proto/README.md`'s type mapping for `integer`. TODO(#4-H2)
+  optional int32 seq = 3;
+  optional int64 sent_at = 4; // timestamp. Required on outbound: server send time. TODO(#4-H2)
+  // The type-specific body. `google.protobuf.Struct` stands in for the
+  // abstract `object` type while the session layer, and so the discriminated
+  // union this might become, are undecided (TODO(#4-H2)). The payload's own
+  // message type (NewOrder, Accepted, Book, and so on, in the sibling
+  // `.proto` files) is what is round-tripped for JSON conformance; this
+  // field does not itself enforce that shape.
+  google.protobuf.Struct payload = 5;
+}

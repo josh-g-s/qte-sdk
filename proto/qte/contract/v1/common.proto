@@ -1,0 +1,195 @@
+// Common types shared across the wire contract (issue #4, #72, DL-09).
+//
+// **Version:** 1.2
+//
+// Field-number and enum-value policy for the whole `schemas/proto/` tree is in
+// `schemas/proto/README.md`. Read it before adding a field or an enum value here.
+syntax = "proto3";
+
+package qte.contract.v1;
+
+option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
+
+// BUY or SELL (SPEC 8.2). Shared by every `side` and `aggressor_side` field so
+// the token set cannot drift between messages.
+enum Side {
+  SIDE_UNSPECIFIED = 0; // proto3's required zero value; never valid on the wire.
+  BUY = 1;
+  SELL = 2;
+}
+
+// LIMIT or MARKET (SPEC 6.3, SPEC 8.1). `new`'s `order_type` field.
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  LIMIT = 1;
+  MARKET = 2;
+}
+
+// The inbound message kind an `accepted` or `reject` responds to (SPEC 8.2).
+// `reject.request_type` additionally allows SUBSCRIBE and UNSUBSCRIBE
+// (`03-outbound-order-events.md`); `accepted.request_type` only ever carries
+// the first four values, a subset of this same enum.
+enum RequestType {
+  REQUEST_TYPE_UNSPECIFIED = 0;
+  NEW = 1;
+  CANCEL = 2;
+  AMEND = 3;
+  MASS_CANCEL = 4;
+  SUBSCRIBE = 5;
+  UNSUBSCRIBE = 6;
+}
+
+// The origin of a fill or a cancellation (SPEC 11.1, SPEC 11.2).
+enum Origin {
+  ORIGIN_UNSPECIFIED = 0;
+  TEAM = 1;
+  CURE_TRADE = 2;
+  AUTO_FLATTEN = 3;
+  // 4 reserved for HOUSE: engine/event logs house orders (SPEC 14) as origin 4,
+  // and the event-log numbering equals this enum's. Whether HOUSE is a wire
+  // value is undecided (issue #179); no value is added here until it is.
+}
+
+// MAKER or TAKER (SPEC 12.1, SPEC 16.4). `execution.liquidity`.
+enum Liquidity {
+  LIQUIDITY_UNSPECIFIED = 0;
+  MAKER = 1;
+  TAKER = 2;
+}
+
+// The match classification, shared by `execution.fill_kind` and
+// `TapePrint.kind`: "the same tokens as the tape's print kinds"
+// (`03-outbound-order-events.md`). `execution.fill_kind` never carries
+// RESIDUAL: residual prints are tape bookkeeping, never a fill of any team's
+// order (SPEC 10).
+enum MatchKind {
+  MATCH_KIND_UNSPECIFIED = 0;
+  STUDENT_TO_STUDENT = 1;
+  STUDENT_TO_WALL = 2;
+  TRADE_BASED_MATCH = 3;
+  RESIDUAL = 4;
+}
+
+// The order lifecycle state (`04-order-state-model.md`, SPEC 8.4, SPEC 8.5).
+// `order_state.state`.
+enum OrderLifecycleState {
+  ORDER_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  RESTING = 1;
+  STALE = 2;
+  FILLED = 3;
+  CANCELLED = 4;
+  PURGED = 5;
+}
+
+// OPEN or CLOSED (SPEC 8.1, SPEC 13.1). `session_state.state`. Named
+// `MarketSessionPhase`, not `SessionState`, so it does not collide with the
+// `SessionState` message it is a field of (`market_data.proto`).
+enum MarketSessionPhase {
+  MARKET_SESSION_PHASE_UNSPECIFIED = 0;
+  OPEN = 1;
+  CLOSED = 2;
+}
+
+// `risk_notice.kind` (SPEC 11.1). A loss halt, a cure window and its deadline,
+// a cure trade, the auto-flatten and the Directors' kill switch are notified
+// on this connection alongside the loss warning, when the engine records them
+// (SPEC 11.1, SPEC 15.4, director follow-up answer G-15); their kind values
+// are still to be shaped. TODO(#4-D9)
+//
+// This enum is documented open to extension: a later value is additive, not
+// a breaking change, once TODO(#4-D9) is decided (`schemas/proto/README.md`).
+enum RiskNoticeKind {
+  RISK_NOTICE_KIND_UNSPECIFIED = 0;
+  LOSS_WARNING = 1;
+  // 2-15 reserved for TODO(#4-D9): loss halt start, cure window open and its
+  // deadline, cure trade, auto-flatten, kill switch.
+}
+
+// Namespacing wrapper. `ReasonCode`'s values would otherwise collide with
+// `RequestType.MASS_CANCEL` and other tokens in this package: proto enum
+// values share their enclosing package's scope, not just their own enum's
+// (`schemas/proto/README.md`). Nesting inside a message gives the enum its
+// own scope without renaming a registry token.
+message ReasonCodes {
+  // The reason-code registry (`06-reason-codes.md`). One flat enum: every
+  // `reject` and every `order_cancelled` carries exactly one value from it.
+  // The band (the registry's own grouping) is never a wire field; it is
+  // carried only in the value's number, which is why the numbers below are
+  // not sequential from 1.
+  enum ReasonCode {
+    REASON_CODE_UNSPECIFIED = 0;
+
+    // 1000: Session and access (TODO(#4-H2), TODO(#4-H5))
+    NOT_AUTHENTICATED = 1000;
+    VERSION_MISMATCH = 1001;
+    NO_MARKET_ACCESS = 1002;
+    TEAM_DISABLED = 1003;
+    MARKET_CLOSED = 1004;
+    RELEASE_AFTER_CLOSE = 1005;
+    // A `new` or `amend` rejected at release because a Director-declared
+    // exchange outage is in force, checked at release step 1 with the kill
+    // switch (SPEC 4.3, SPEC 9.4.3, director follow-up answer G-18;
+    // `06-reason-codes.md` D17). A `cancel` or `mass_cancel` still applies.
+    EXCHANGE_OUTAGE = 1006;
+    // 1007-1099 reserved for band 1000 growth.
+
+    // 1100: Registration and entitlement
+    STRATEGY_NOT_REGISTERED = 1100;
+    OUTSIDE_DECLARED_SCOPE = 1101;
+    INSTRUMENT_NOT_PERMITTED = 1102;
+    INSTRUMENT_SUSPENDED = 1103;
+    // 1104-1199 reserved for band 1100 growth.
+
+    // 1200: Message validity (TODO(#4-H4))
+    MALFORMED_MESSAGE = 1200;
+    UNKNOWN_INSTRUMENT = 1201;
+    TICK_VIOLATION = 1202;
+    INVALID_SIZE = 1203;
+    NON_POSITIVE_PRICE = 1204;
+    NO_ORDER_AT_LEVEL = 1205;
+    SIZE_OUT_OF_RANGE = 1206;
+    // 1207-1299 reserved for band 1200 growth.
+
+    // 1300: Price
+    PRICE_COLLAR = 1300;
+    REFERENCE_UNAVAILABLE = 1301;
+    NO_WALL_ON_SIDE = 1302;
+    AMEND_PRICE_AT_OR_BEYOND_WALL = 1303;
+    // 1304-1399 reserved for band 1300 growth.
+
+    // 1400: Order handling
+    MIN_REST_VIOLATION = 1400;
+    DUPLICATE_ORDER_AT_LEVEL = 1401;
+    AMEND_WOULD_MAKE_STALE_MARKETABLE = 1402;
+    // 1403-1499 reserved for band 1400 growth.
+
+    // 1500: Message budgets
+    MESSAGE_BUDGET_EXCEEDED = 1500;
+    BURST_CAP_EXCEEDED = 1501;
+    NEW_ORDER_CAP_EXCEEDED = 1502;
+    // 1503-1599 reserved for band 1500 growth.
+
+    // 1600: Risk (TODO(#4-D15))
+    RISK_LIMIT_BREACH = 1600;
+    PARTICIPATION_CAP_EXCEEDED = 1601;
+    POSITION_REDUCING_ONLY = 1602;
+    RISK_REDUCING_ONLY = 1603;
+    SANITY_GATE_REJECTED = 1604;
+    // 1605-1799 reserved for bands 1600 and 1700 growth; band 1700 is unused
+    // by the registry today.
+
+    // 1800: Cancellation. Carried on `order_cancelled`, never on `reject`.
+    CANCEL_REQUEST = 1800;
+    MASS_CANCEL = 1801;
+    SELF_TRADE = 1802;
+    PURGE_STALE = 1803;
+    SESSION_CLOSE = 1804;
+    MARKET_REMAINDER = 1805;
+    REMAINDER_OUTSIDE_BAND = 1806;
+    CURE_WINDOW = 1807;
+    STRATEGY_NOT_LIVE = 1808;
+    KILL_SWITCH = 1809;
+    AMEND_CUT = 1810;
+    // 1811-1899 reserved for band 1800 growth.
+  }
+}

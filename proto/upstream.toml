@@ -1,0 +1,13 @@
+# The one place that records where the vendored contract came from.
+# Bump `commit` deliberately: contract change control is still provisional.
+repo = "qte-platform"
+commit = "e2d44621acfb31b802f3497cc34144b1a222baad"
+path = "schemas/proto/qte/contract/v1"
+files = [
+    "common.proto",
+    "envelope.proto",
+    "session.proto",
+    "order_entry.proto",
+    "order_events.proto",
+    "market_data.proto",
+]
