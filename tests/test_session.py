@@ -3,6 +3,7 @@ import dataclasses
 import json
 import logging
 import secrets
+import traceback
 from collections.abc import Awaitable, Callable, Iterator
 
 import pytest
@@ -12,6 +13,7 @@ from websockets.asyncio.server import ServerConnection
 from qte_sdk.connection import ContractVersionMismatch, Received, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
+from qte_sdk.contract.v1.session_pb2 import Heartbeat
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     MissingToken,
@@ -116,14 +118,17 @@ async def test_a_token_argument_takes_precedence_over_the_environment(monkeypatc
     assert server.received[0]["payload"] == {"token": token}
 
 
-async def test_messages_after_the_ack_reach_the_caller_and_earlier_ones_are_discarded():
+async def test_iterating_the_session_delivers_events_from_before_and_after_the_ack():
     book = frame("book", {"instrument": "AAPL", "grid_time": "2", "bid_levels": []}, 2)
     heartbeat = frame("heartbeat", {})
     server = Server(heartbeat, ack(), book, hold_open=False)
     async with serve_local(server) as url:
         async with await open_session(url, synthetic_token()) as session:
-            events = [event async for event in session.connection]
-    assert events == [Received("book", Book(instrument="AAPL", grid_time=2), 2)]
+            events = [event async for event in session]
+    assert events == [
+        Received("heartbeat", Heartbeat(), None),
+        Received("book", Book(instrument="AAPL", grid_time=2), 2),
+    ]
 
 
 async def test_closing_the_session_closes_the_connection():
@@ -211,7 +216,70 @@ async def test_no_ack_within_the_timeout_is_an_error_and_closes_the_connection()
         await asyncio.wait_for(server.client_closed.wait(), 5)
 
 
-# The token never reaches a log, stdout or stderr
+# The token never reaches an exception, a log, stdout or stderr
+
+
+def shown(error: BaseException) -> str:
+    """What a traceback showing local variables could print for `error`, its causes and
+    contexts (even suppressed ones), leaving out this test module's own frames, which hold
+    the token by design."""
+    parts = [str(error), repr(error)]
+    pending = [traceback.TracebackException.from_exception(error, capture_locals=True)]
+    seen: set[int] = set()
+    while pending:
+        link = pending.pop()
+        if id(link) in seen:
+            continue
+        seen.add(id(link))
+        parts.extend(link.format_exception_only())
+        for summary in link.stack:
+            if summary.filename != __file__:
+                parts.append(f"{summary.filename}:{summary.lineno} {summary.locals}")
+        pending.extend(n for n in (link.__cause__, link.__context__) if n is not None)
+    return "\n".join(parts)
+
+
+async def test_a_token_echoed_in_a_reject_is_withheld_and_the_reason_code_kept():
+    token = synthetic_token()
+    server = Server(session_reject("NOT_AUTHENTICATED", f"bad token {token}"))
+    async with serve_local(server) as url:
+        with pytest.raises(SessionRejected) as caught:
+            await open_session(url, token)
+    assert caught.value.reason_code == ReasonCodes.NOT_AUTHENTICATED
+    assert caught.value.detail == "bad token <token withheld>"
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_token_echoed_in_a_close_reason_is_withheld():
+    token = synthetic_token()
+
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(4000, token)
+
+    async with serve_local(handler) as url:
+        with pytest.raises(SessionNotAcknowledged) as caught:
+            await open_session(url, token)
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_token_echoed_in_an_undecodable_ack_is_withheld():
+    token = synthetic_token()
+    server = Server(frame("session_ack", {"server_time": token}, 1))
+    async with serve_local(server) as url:
+        with pytest.raises(SessionNotAcknowledged) as caught:
+            await open_session(url, token)
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_failed_connection_attempt_does_not_show_the_token(monkeypatch):
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    async with serve_local(Server()) as url:
+        pass  # the server is gone, so its port refuses connections
+    with pytest.raises(OSError) as caught:
+        await open_session(url)
+    assert_token_absent(token, shown(caught.value))
 
 
 class Recorder(logging.Handler):

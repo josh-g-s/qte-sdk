@@ -3,7 +3,7 @@
     session = await open_session("ws://127.0.0.1:8080/ws")  # token from QTE_TOKEN
     async with session:
         print(session.info.team, session.info.unscored)
-        async for event in session.connection:
+        async for event in session:
             ...
 
 A session is a `Connection` that has sent `auth` with your account's token and received
@@ -11,13 +11,15 @@ A session is a `Connection` that has sent `auth` with your account's token and r
 environment variable. Keep it out of source files and out of the repository.
 
 The token is sent once, in the `auth` message, and is not kept afterwards. The SDK never
-logs it: the frame-level debug lines of the `websockets` library, which would show the
-`auth` message, are dropped for session connections.
+logs it or puts it in an exception: the frame-level debug lines of the `websockets`
+library, which would show the `auth` message, are dropped for session connections.
 """
 
 import asyncio
 import logging
 import os
+from collections import deque
+from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +27,7 @@ from typing import Any
 from qte_sdk.connection import (
     Connection,
     DecodeFailed,
+    Event,
     Received,
     SessionRejected,
 )
@@ -64,12 +67,29 @@ class SessionInfo:
         )
 
 
-@dataclass(frozen=True)
 class Session:
-    """An acknowledged session: the open connection and what the exchange said about it."""
+    """An acknowledged session: the open connection and what the exchange said about it.
 
-    connection: Connection
-    info: SessionInfo
+    Iterate the session, not its connection, to receive every event: anything the exchange
+    sent before `session_ack` is delivered first, then the rest of the stream.
+    """
+
+    def __init__(self, connection: Connection, info: SessionInfo, early: list[Event]) -> None:
+        self.connection = connection
+        self.info = info
+        self._early = deque(early)
+
+    def __repr__(self) -> str:
+        return f"Session({self.connection.url!r}, {self.info!r})"
+
+    def __aiter__(self) -> AsyncIterator[Event]:
+        return self.events()
+
+    async def events(self) -> AsyncIterator[Event]:
+        while self._early:
+            yield self._early.popleft()
+        async for event in self.connection:
+            yield event
 
     async def close(self) -> None:
         await self.connection.close()
@@ -111,27 +131,42 @@ async def open_session(
     Raises `SessionNotAcknowledged` if the connection ends first, and `TimeoutError` if no
     acknowledgement arrives within `ack_timeout` seconds. The connection is closed whenever
     no session is returned.
-
-    Anything else the exchange sends before `session_ack` is discarded.
     """
-    secret = resolve_token(token)
+    secret = _Secret(resolve_token(token))
     del token
 
     base_logger = connection_options.pop("logger", None) or logging.getLogger("websockets.client")
     conn = Connection(url, logger=_WithoutFrames(base_logger), **connection_options)
     try:
         await conn.open()
-        await conn.send("auth", Auth(token=secret))
-        del secret
-        ack = await _wait_for_ack(conn, ack_timeout)
-    except BaseException:
+        await _send_auth(conn, secret)
+        ack, early = await _wait_for_ack(conn, ack_timeout)
+    except BaseException as error:
         with suppress(Exception):
             await conn.close()
-        raise
-    return Session(conn, SessionInfo.from_ack(ack))
+        safe = _without_token(error, secret)
+        if safe is None:
+            raise
+    else:
+        return Session(conn, SessionInfo.from_ack(ack), early)
+    # Raised outside the handler, so the original error, which mentions the token, is not
+    # chained to it.
+    raise safe
 
 
-async def _wait_for_ack(conn: Connection, timeout: float | None) -> SessionAck:
+async def _send_auth(conn: Connection, secret: "_Secret") -> None:
+    try:
+        await conn.send("auth", Auth(token=secret.value))
+        return
+    except Exception as error:
+        failure = _redact(f"could not send auth: {type(error).__name__}: {error}", secret)
+    # Raised outside the handler: the frames of the failed send hold the auth message, so
+    # the original error and its traceback are not chained to this one.
+    raise SessionNotAcknowledged(failure)
+
+
+async def _wait_for_ack(conn: Connection, timeout: float | None) -> tuple[SessionAck, list[Event]]:
+    early: list[Event] = []
     events = conn.events()
     try:
         async with asyncio.timeout(timeout):
@@ -139,7 +174,7 @@ async def _wait_for_ack(conn: Connection, timeout: float | None) -> SessionAck:
                 if isinstance(event, Received):
                     if event.type == "session_ack":
                         assert isinstance(event.message, SessionAck)
-                        return event.message
+                        return event.message, early
                     if event.type == "reject":
                         # Before the acknowledgement, the only request in flight is `auth`.
                         message: Any = event.message
@@ -151,9 +186,51 @@ async def _wait_for_ack(conn: Connection, timeout: float | None) -> SessionAck:
                     raise SessionNotAcknowledged(
                         "session_ack could not be decoded"
                     ) from event.error
+                early.append(event)
     finally:
         await events.aclose()
     raise SessionNotAcknowledged("the connection closed before session_ack")
+
+
+class _Secret:
+    """Holds the token so that no repr, and so no traceback that shows locals, reveals it."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def __repr__(self) -> str:
+        return "<token withheld>"
+
+    __str__ = __repr__
+
+
+def _redact(text: str, secret: _Secret) -> str:
+    return text.replace(secret.value, repr(secret))
+
+
+def _without_token(error: BaseException, secret: _Secret) -> BaseException | None:
+    """None if `error` and its chain never mention the token, else a replacement that does not.
+
+    The exchange is not expected to echo a token back, but if a message from it did, it
+    would otherwise reach an exception message.
+    """
+    seen: set[int] = set()
+    link: BaseException | None = error
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if secret.value in str(link) or secret.value in repr(link):
+            break
+        link = link.__cause__ or link.__context__
+    else:
+        return None
+    if isinstance(error, SessionRejected):
+        detail = None if error.detail is None else _redact(error.detail, secret)
+        return type(error)(error.reason_code, detail)
+    if isinstance(error, SessionNotAcknowledged):
+        return SessionNotAcknowledged(_redact(str(error), secret))
+    return SessionNotAcknowledged(_redact(f"{type(error).__name__}: {error}", secret))
 
 
 # The `websockets` library logs every frame at DEBUG, in lines that start "> " (sent) or
