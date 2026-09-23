@@ -23,7 +23,7 @@ caller's own URL or headers is the caller's configuration.
 import logging
 import sys
 from collections.abc import AsyncIterator, Iterator, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from google.protobuf.json_format import ParseError
@@ -139,11 +139,27 @@ def _exception_name(exc_info: Any) -> str:
 
 @dataclass(frozen=True)
 class Received:
-    """A message of a type this SDK knows, decoded into its generated class."""
+    """A message of a type this SDK knows, decoded into its generated class.
+
+    `payload` is the JSON payload as received. It is not compared, so two events with the
+    same type, message and seq are equal however they were built.
+    """
 
     type: str
     message: Message
     seq: int | None
+    payload: dict[str, Any] | None = field(default=None, compare=False, repr=False)
+
+    def unknown_enum_names(self) -> dict[str, str]:
+        """Enum names this SDK does not know, keyed by field path.
+
+        Such a name, for example a reason code from a newer contract, decodes to the
+        field's zero value (`..._UNSPECIFIED`); this returns the name the exchange sent.
+        Empty when every name is known or when the event carries no payload.
+        """
+        if self.payload is None:
+            return {}
+        return codec.unknown_enum_names(self.payload, type(self.message))
 
 
 @dataclass(frozen=True)
@@ -175,16 +191,24 @@ Event = Received | Unknown | DecodeFailed | SeqGap
 
 
 class SessionRejected(Exception):
-    """The exchange rejected the session."""
+    """The exchange rejected the session.
 
-    def __init__(self, reason_code: int, detail: str | None) -> None:
-        try:
-            name = ReasonCodes.ReasonCode.Name(reason_code)
-        except ValueError:  # a code from a newer contract
-            name = str(reason_code)
-        super().__init__(f"{name}: {detail}" if detail else name)
+    `reason_name` is the reason as a name. A name from a newer contract that this SDK
+    does not know is kept there, while `reason_code` is `REASON_CODE_UNSPECIFIED`.
+    """
+
+    def __init__(
+        self, reason_code: int, detail: str | None, *, reason_name: str | None = None
+    ) -> None:
+        if reason_name is None:
+            try:
+                reason_name = ReasonCodes.ReasonCode.Name(reason_code)
+            except ValueError:  # a code from a newer contract
+                reason_name = str(reason_code)
+        super().__init__(f"{reason_name}: {detail}" if detail else reason_name)
         self.reason_code = reason_code
         self.detail = detail
+        self.reason_name = reason_name
 
 
 class ContractVersionMismatch(SessionRejected):
@@ -341,10 +365,12 @@ class Connection:
             yield DecodeFailed(env.type, error)
             return
 
+        event = Received(env.type, message, seq, decoded.payload)
         if env.type in ("session_reject", "reject"):
             detail = message.reason_detail if message.HasField("reason_detail") else None
             if message.reason_code == ReasonCodes.VERSION_MISMATCH:
                 raise ContractVersionMismatch(message.reason_code, detail)
             if env.type == "session_reject":
-                raise SessionRejected(message.reason_code, detail)
-        yield Received(env.type, message, seq)
+                name = event.unknown_enum_names().get("reason_code")
+                raise SessionRejected(message.reason_code, detail, reason_name=name)
+        yield event

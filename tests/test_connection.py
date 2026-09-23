@@ -628,7 +628,8 @@ async def test_cancelling_iteration_keeps_the_type_and_drops_the_chain():
     token = secrets.token_hex(16)
 
     async def silent_after_auth(ws: ServerConnection) -> None:
-        await ws.recv()
+        # Echo the auth frame once, so the reader's last frame and event hold the token.
+        await ws.send(await ws.recv())
         await ws.wait_closed()
 
     async with serve_local(silent_after_auth) as url:
@@ -656,3 +657,47 @@ async def test_breaking_out_of_iteration_still_closes_cleanly():
             async for event in conn:
                 assert isinstance(event, Received)
                 break
+
+
+async def test_an_order_reject_with_an_unknown_reason_name_keeps_the_name():
+    payload = {"reason_code": "BRAND_NEW_REASON", "receipt_time": "5"}
+    async with exchange([frame("reject", payload, 1)]) as url:
+        [event] = await collect(url)
+    assert isinstance(event, Received)
+    assert event.message.reason_code == ReasonCodes.REASON_CODE_UNSPECIFIED
+    assert event.message.receipt_time == 5
+    assert event.payload == payload
+    assert event.unknown_enum_names() == {"reason_code": "BRAND_NEW_REASON"}
+
+
+async def test_an_order_reject_with_an_unknown_numeric_reason_code_keeps_the_number():
+    async with exchange([frame("reject", {"reason_code": 1999}, 1)]) as url:
+        [event] = await collect(url)
+    assert event.message.reason_code == 1999
+    assert event.unknown_enum_names() == {}
+
+
+async def test_a_session_reject_with_an_unknown_reason_name_raises_with_the_name():
+    payload = {"reason_code": "BRAND_NEW_REASON", "reason_detail": "try later"}
+    async with exchange([frame("session_reject", payload, 1)]) as url:
+        with pytest.raises(SessionRejected) as info:
+            await collect(url)
+    assert not isinstance(info.value, ContractVersionMismatch)
+    assert info.value.reason_code == ReasonCodes.REASON_CODE_UNSPECIFIED
+    assert info.value.reason_name == "BRAND_NEW_REASON"
+    assert str(info.value) == "BRAND_NEW_REASON: try later"
+
+
+def test_session_rejected_names_known_and_numeric_codes():
+    assert SessionRejected(ReasonCodes.NOT_AUTHENTICATED, None).reason_name == "NOT_AUTHENTICATED"
+    assert SessionRejected(1999, None).reason_name == "1999"
+
+
+async def test_received_built_positionally_still_works_and_equals_a_decoded_event():
+    async with exchange([book(1)]) as url:
+        [event] = await collect(url)
+    built = Received("book", Book(instrument="AAPL", grid_time=1), 1)
+    assert built.payload is None
+    assert built.unknown_enum_names() == {}
+    assert event.payload is not None
+    assert event == built

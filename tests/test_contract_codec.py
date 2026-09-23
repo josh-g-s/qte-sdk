@@ -3,10 +3,10 @@ import json
 import pytest
 
 from qte_sdk.contract import codec
-from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, TEAM
-from qte_sdk.contract.v1.market_data_pb2 import Book
+from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, TEAM, ReasonCodes
+from qte_sdk.contract.v1.market_data_pb2 import Book, Trades
 from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
-from qte_sdk.contract.v1.order_events_pb2 import Execution
+from qte_sdk.contract.v1.order_events_pb2 import Execution, Reject
 from qte_sdk.contract.v1.session_pb2 import Resume
 
 BIG = 9_007_199_254_740_993  # 2**53 + 1: not exactly representable as a float
@@ -82,3 +82,51 @@ def test_generated_messages_pickle():
     import pickle
 
     assert pickle.loads(pickle.dumps(new_order())) == new_order()
+
+
+def test_an_unknown_enum_name_decodes_to_zero_and_is_reported():
+    payload = {"reason_code": "BRAND_NEW_REASON", "reason_detail": "d"}
+    reject = codec.unpack(payload, Reject)
+    assert reject.reason_code == ReasonCodes.REASON_CODE_UNSPECIFIED
+    assert reject.reason_detail == "d"
+    assert codec.unknown_enum_names(payload, Reject) == {"reason_code": "BRAND_NEW_REASON"}
+
+
+@pytest.mark.parametrize("code", [1999, "1999"])
+def test_an_unknown_numeric_enum_value_is_kept_and_not_reported(code):
+    payload = {"reason_code": code}
+    assert codec.unpack(payload, Reject).reason_code == 1999
+    assert codec.unknown_enum_names(payload, Reject) == {}
+
+
+def test_known_names_and_unknown_fields_are_not_reported():
+    payload = {"reason_code": "MARKET_CLOSED", "a_field_from_a_newer_contract": "BRAND_NEW"}
+    assert codec.unknown_enum_names(payload, Reject) == {}
+
+
+def test_unknown_enum_names_inside_repeated_messages_are_reported_by_path():
+    payload = {
+        "instrument": "AAPL",
+        "prints": [
+            {"aggressor_side": "BUY", "kind": "STUDENT_TO_WALL"},
+            {"aggressorSide": "BRAND_NEW_SIDE", "kind": "BRAND_NEW_KIND"},
+        ],
+    }
+    trades = codec.unpack(payload, Trades)
+    assert trades.prints[1].kind == 0
+    assert codec.unknown_enum_names(payload, Trades) == {
+        "prints[1].aggressor_side": "BRAND_NEW_SIDE",
+        "prints[1].kind": "BRAND_NEW_KIND",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"reason_code": {"not": "a name"}}, {"reason_code": None}, {"reason_code": ["X"]}],
+)
+def test_values_of_the_wrong_shape_are_left_to_decoding(payload):
+    assert codec.unknown_enum_names(payload, Reject) == {}
+
+
+def test_a_non_list_repeated_field_is_left_to_decoding():
+    assert codec.unknown_enum_names({"prints": {"kind": "BRAND_NEW"}}, Trades) == {}
