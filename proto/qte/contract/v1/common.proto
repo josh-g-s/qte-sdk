@@ -1,9 +1,9 @@
-// Common types shared across the wire contract (issue #4, #72, DL-09).
+// Common types shared across the wire contract: the enums the message files
+// in this package use.
 //
-// **Version:** 1.2
+// **Version:** 1.4
 //
-// Field-number and enum-value policy for the whole `schemas/proto/` tree is in
-// `schemas/proto/README.md`. Read it before adding a field or an enum value here.
+// A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -26,9 +26,9 @@ enum OrderType {
 }
 
 // The inbound message kind an `accepted` or `reject` responds to (SPEC 8.2).
-// `reject.request_type` additionally allows SUBSCRIBE and UNSUBSCRIBE
-// (`03-outbound-order-events.md`); `accepted.request_type` only ever carries
-// the first four values, a subset of this same enum.
+// `reject.request_type` additionally allows SUBSCRIBE and UNSUBSCRIBE (see
+// `Reject` in `order_events.proto`); `accepted.request_type` only ever
+// carries the first four values, a subset of this same enum.
 enum RequestType {
   REQUEST_TYPE_UNSPECIFIED = 0;
   NEW = 1;
@@ -45,9 +45,10 @@ enum Origin {
   TEAM = 1;
   CURE_TRADE = 2;
   AUTO_FLATTEN = 3;
-  // 4 reserved for HOUSE: engine/event logs house orders (SPEC 14) as origin 4,
-  // and the event-log numbering equals this enum's. Whether HOUSE is a wire
-  // value is undecided (issue #179); no value is added here until it is.
+  // 4 is reserved for HOUSE: the exchange's own event log records house
+  // orders (SPEC 14) as origin 4, numbered the same as this enum. Whether
+  // HOUSE is ever sent on the wire is not yet specified, so no value is
+  // added here until it is.
 }
 
 // MAKER or TAKER (SPEC 12.1, SPEC 16.4). `execution.liquidity`.
@@ -58,10 +59,9 @@ enum Liquidity {
 }
 
 // The match classification, shared by `execution.fill_kind` and
-// `TapePrint.kind`: "the same tokens as the tape's print kinds"
-// (`03-outbound-order-events.md`). `execution.fill_kind` never carries
-// RESIDUAL: residual prints are tape bookkeeping, never a fill of any team's
-// order (SPEC 10).
+// `TapePrint.kind`, so a fill and its tape print use the same tokens.
+// `execution.fill_kind` never carries RESIDUAL: residual prints are tape
+// bookkeeping, never a fill of any team's order (SPEC 10).
 enum MatchKind {
   MATCH_KIND_UNSPECIFIED = 0;
   STUDENT_TO_STUDENT = 1;
@@ -70,8 +70,7 @@ enum MatchKind {
   RESIDUAL = 4;
 }
 
-// The order lifecycle state (`04-order-state-model.md`, SPEC 8.4, SPEC 8.5).
-// `order_state.state`.
+// The order lifecycle state (SPEC 8.4, SPEC 8.5). `order_state.state`.
 enum OrderLifecycleState {
   ORDER_LIFECYCLE_STATE_UNSPECIFIED = 0;
   RESTING = 1;
@@ -93,33 +92,33 @@ enum MarketSessionPhase {
 // `risk_notice.kind` (SPEC 11.1). A loss halt, a cure window and its deadline,
 // a cure trade, the auto-flatten and the Directors' kill switch are notified
 // on this connection alongside the loss warning, when the engine records them
-// (SPEC 11.1, SPEC 15.4, director follow-up answer G-15); their kind values
-// are still to be shaped. TODO(#4-D9)
+// (SPEC 11.1, SPEC 15.4). Their kind values are not yet specified.
 //
-// This enum is documented open to extension: a later value is additive, not
-// a breaking change, once TODO(#4-D9) is decided (`schemas/proto/README.md`).
+// This enum is open to extension: adding those values later is an additive
+// change, not a breaking one.
 enum RiskNoticeKind {
   RISK_NOTICE_KIND_UNSPECIFIED = 0;
   LOSS_WARNING = 1;
-  // 2-15 reserved for TODO(#4-D9): loss halt start, cure window open and its
-  // deadline, cure trade, auto-flatten, kill switch.
+  // 2-15 reserved for the notices not yet specified: loss halt start, cure
+  // window open and its deadline, cure trade, auto-flatten, kill switch.
 }
 
 // Namespacing wrapper. `ReasonCode`'s values would otherwise collide with
 // `RequestType.MASS_CANCEL` and other tokens in this package: proto enum
-// values share their enclosing package's scope, not just their own enum's
-// (`schemas/proto/README.md`). Nesting inside a message gives the enum its
-// own scope without renaming a registry token.
+// values share their enclosing package's scope, not just their own enum's.
+// Nesting inside a message gives the enum its own scope without renaming a
+// reason code.
 message ReasonCodes {
-  // The reason-code registry (`06-reason-codes.md`). One flat enum: every
-  // `reject` and every `order_cancelled` carries exactly one value from it.
-  // The band (the registry's own grouping) is never a wire field; it is
-  // carried only in the value's number, which is why the numbers below are
-  // not sequential from 1.
+  // The reason codes. One flat enum: every `reject` and every
+  // `order_cancelled` carries exactly one value from it. The band (the
+  // grouping by kind of check) is never a wire field; it is carried only in
+  // the value's number, which is why the numbers below are not sequential
+  // from 1.
   enum ReasonCode {
     REASON_CODE_UNSPECIFIED = 0;
 
-    // 1000: Session and access (TODO(#4-H2), TODO(#4-H5))
+    // 1000: Session and access. NOT_AUTHENTICATED and VERSION_MISMATCH
+    // belong to the session layer, which is not yet specified.
     NOT_AUTHENTICATED = 1000;
     VERSION_MISMATCH = 1001;
     NO_MARKET_ACCESS = 1002;
@@ -128,8 +127,8 @@ message ReasonCodes {
     RELEASE_AFTER_CLOSE = 1005;
     // A `new` or `amend` rejected at release because a Director-declared
     // exchange outage is in force, checked at release step 1 with the kill
-    // switch (SPEC 4.3, SPEC 9.4.3, director follow-up answer G-18;
-    // `06-reason-codes.md` D17). A `cancel` or `mass_cancel` still applies.
+    // switch (SPEC 4.3, SPEC 9.4.3). A `cancel` or `mass_cancel` still
+    // applies.
     EXCHANGE_OUTAGE = 1006;
     // 1007-1099 reserved for band 1000 growth.
 
@@ -140,7 +139,10 @@ message ReasonCodes {
     INSTRUMENT_SUSPENDED = 1103;
     // 1104-1199 reserved for band 1100 growth.
 
-    // 1200: Message validity (TODO(#4-H4))
+    // 1200: Message validity. MALFORMED_MESSAGE, UNKNOWN_INSTRUMENT,
+    // TICK_VIOLATION, INVALID_SIZE and NO_ORDER_AT_LEVEL are validation
+    // rejects SPEC.md does not list by name; their exact scope is not yet
+    // specified.
     MALFORMED_MESSAGE = 1200;
     UNKNOWN_INSTRUMENT = 1201;
     TICK_VIOLATION = 1202;
@@ -169,13 +171,18 @@ message ReasonCodes {
     NEW_ORDER_CAP_EXCEEDED = 1502;
     // 1503-1599 reserved for band 1500 growth.
 
-    // 1600: Risk (TODO(#4-D15))
+    // 1600: Risk. SANITY_GATE_REJECTED's median window and start-up are not
+    // yet specified.
     RISK_LIMIT_BREACH = 1600;
     PARTICIPATION_CAP_EXCEEDED = 1601;
     POSITION_REDUCING_ONLY = 1602;
     RISK_REDUCING_ONLY = 1603;
     SANITY_GATE_REJECTED = 1604;
-    // 1605-1799 reserved for bands 1600 and 1700 growth; band 1700 is unused
+    HEDGE_ONLY = 1605;
+    PARENT_NOT_WORKING = 1606;
+    PARENT_MISMATCH = 1607;
+    PARENT_QUANTITY_EXCEEDED = 1608;
+    // 1609-1799 reserved for bands 1600 and 1700 growth; band 1700 is unused
     // by the registry today.
 
     // 1800: Cancellation. Carried on `order_cancelled`, never on `reject`.
@@ -189,7 +196,10 @@ message ReasonCodes {
     CURE_WINDOW = 1807;
     STRATEGY_NOT_LIVE = 1808;
     KILL_SWITCH = 1809;
+    // A resting order the team's amend cut to nothing, which leaves the book
+    // (SPEC 8.2).
     AMEND_CUT = 1810;
-    // 1811-1899 reserved for band 1800 growth.
+    HEDGE_RECHECK_FAILED = 1811;
+    // 1812-1899 reserved for band 1800 growth.
   }
 }
