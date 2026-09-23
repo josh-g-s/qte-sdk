@@ -45,10 +45,13 @@ from qte_sdk.contract.v1.session_pb2 import Subscribe, Unsubscribe
 __all__ = [
     "MARKET_DATA_TYPES",
     "Book",
+    "DecodeFailed",
     "InstrumentCondition",
     "Mark",
     "MarketData",
     "MarketDataEvent",
+    "Reject",
+    "SeqGap",
     "SessionState",
     "StudentLevel",
     "TapePrint",

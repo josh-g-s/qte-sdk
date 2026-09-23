@@ -177,7 +177,9 @@ async def test_session_state_decodes_typed():
     assert state.outage_active is True
 
 
-@pytest.mark.parametrize("condition", ["LIVE", "ONE_SIDED", "EMPTY", "FROZEN", "DISABLED"])
+@pytest.mark.parametrize(
+    "condition", ["LIVE", "ONE_SIDED", "EMPTY", "FROZEN", "REFERENCE_UNAVAILABLE", "DISABLED"]
+)
 async def test_every_book_condition_is_exposed(condition):
     [book] = await received([frame("book", book_payload(condition=condition), 1)])
     assert book.condition == InstrumentCondition.Value(condition)
