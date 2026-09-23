@@ -308,8 +308,11 @@ async def test_a_bad_identifier_is_refused_and_nothing_is_sent(sender, field, ba
 
     assert await messages_sent_by(refused) == []
     [error] = errors
+    # The message names the field, never the value, raw or escaped.
+    assert str(error).startswith(f"{field} must ")
     if bad:
-        assert bad not in str(error)  # the message names the field, never the value
+        assert bad not in str(error)
+        assert repr(bad)[1:-1] not in str(error)
 
 
 @pytest.mark.parametrize("sender", SENDERS)
