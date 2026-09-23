@@ -24,6 +24,11 @@ Every order message is held by the exchange for its order delay before it is app
 an `accepted` arrives no sooner than that delay after the send. The delay, the minimum
 time an order must rest before it may be cancelled or amended, the price collar and the
 message budgets are all set by the exchange. This module assumes none of their values.
+
+Before sending, every send checks each `request_ref`, `strat_id` and `instrument` its
+message carries: each must be 1 to 32 bytes of UTF-8 (bytes, not characters, so a
+character outside ASCII counts two to four) with no NUL character. A send that breaks
+this raises `ValueError` and sends nothing.
 """
 
 import uuid
@@ -84,6 +89,29 @@ def new_request_ref() -> str:
     return uuid.uuid4().hex
 
 
+_ID_MAX_BYTES = 32
+
+
+def _id(name: str, value: str) -> str:
+    """Check one identifier against the contract's rule. Errors name the field, never `value`."""
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError(f"{name} must be valid UTF-8 text") from None
+    if not 1 <= size <= _ID_MAX_BYTES:
+        raise ValueError(f"{name} must be 1 to {_ID_MAX_BYTES} bytes of UTF-8, got {size}")
+    if "\0" in value:
+        raise ValueError(f"{name} must not contain the NUL character")
+    return value
+
+
+def _ref(request_ref: str | None) -> str:
+    """The caller's `request_ref`, or a fresh one when none is given, checked either way."""
+    return _id("request_ref", new_request_ref() if request_ref is None else request_ref)
+
+
 def _side(side: Side) -> Side:
     if side not in (BUY, SELL):
         raise ValueError(f"side must be BUY or SELL, got {side!r}")
@@ -106,6 +134,9 @@ async def send_new(
     A LIMIT order needs `price`; a MARKET order must not have one. To change the size of an
     order already resting, use `send_amend` rather than a second `new` at the same level.
     """
+    ref = _ref(request_ref)
+    _id("strat_id", strat_id)
+    _id("instrument", instrument)
     if order_type == LIMIT:
         if price is None:
             raise ValueError("a LIMIT order needs a price")
@@ -114,7 +145,6 @@ async def send_new(
             raise ValueError("a MARKET order carries no price")
     else:
         raise ValueError(f"order_type must be LIMIT or MARKET, got {order_type!r}")
-    ref = new_request_ref() if request_ref is None else request_ref
     msg = NewOrder(
         request_ref=ref,
         strat_id=strat_id,
@@ -139,7 +169,8 @@ async def send_cancel(
 ) -> str:
     """Send `cancel`: clear every order the team has at one price level. Returns its
     `request_ref`, which each resulting `order_cancelled` echoes."""
-    ref = new_request_ref() if request_ref is None else request_ref
+    ref = _ref(request_ref)
+    _id("instrument", instrument)
     msg = CancelOrder(request_ref=ref, instrument=instrument, side=_side(side), price=price)
     await conn.send("cancel", msg)
     return ref
@@ -159,10 +190,11 @@ async def send_amend(
 
     `price` names the level to change. `new_size` is the new total remaining size of the
     team's orders there, not a size to add. Leave `new_price` out, or pass `price`, for a
-    size-only amend. An order the amend cuts to nothing is reported as `order_cancelled`
-    with reason `AMEND_CUT`, echoing this `request_ref`.
+    size-only amend. To remove the team's orders at a level, use `send_cancel`, not an
+    amend.
     """
-    ref = new_request_ref() if request_ref is None else request_ref
+    ref = _ref(request_ref)
+    _id("instrument", instrument)
     msg = AmendOrder(
         request_ref=ref,
         instrument=instrument,
@@ -178,7 +210,7 @@ async def send_amend(
 async def send_mass_cancel(conn: Sender, *, request_ref: str | None = None) -> str:
     """Send `mass_cancel`: cancel every order the team has on the exchange. Returns its
     `request_ref`, which each resulting `order_cancelled` echoes."""
-    ref = new_request_ref() if request_ref is None else request_ref
+    ref = _ref(request_ref)
     await conn.send("mass_cancel", MassCancel(request_ref=ref))
     return ref
 
