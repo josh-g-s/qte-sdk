@@ -6,7 +6,7 @@ body:
     id: workstream
     attributes:
       label: Workstream
-      description: Which workstream does this belong to? (Delivery Plan Section 3)
+      description: Which workstream does this belong to?
       options:
         - A - Market data ingest & synthetic book
         - B - Matching engine & order book
@@ -25,7 +25,7 @@ body:
     id: priority
     attributes:
       label: Priority
-      description: Draft 5 Table 28 dependency layer, if known
+      description: P1 blocks the start of the build; P2 is needed before launch. Leave as triage if unknown
       options:
         - P1
         - P2
@@ -37,7 +37,7 @@ body:
     id: what
     attributes:
       label: What and why
-      description: What needs to be done. Cite Draft 5 sections and tables where relevant.
+      description: What needs to be done and why. Do not quote private platform material; this repo is public.
     validations:
       required: true
   - type: textarea
