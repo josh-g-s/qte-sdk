@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "proto" / "upstream.toml"
 DEST = ROOT / "proto" / "qte" / "contract" / "v1"
 
-# The Head-approved publication allowlist (decision recorded on qte-sdk #5).
+# The files approved for publication in this public repo.
 ALLOWED = (
     "common.proto",
     "envelope.proto",
