@@ -15,8 +15,10 @@ Prices are integers in micro-dollars (1 dollar is 1_000_000) and sizes are whole
 Every send returns the `request_ref` it put on the message, so a caller can match the
 `accepted` or `reject` that answers it, and the `order_cancelled` events a `cancel`,
 `amend` or `mass_cancel` causes. Fills (`execution`), `order_state` and `risk_notice`
-carry no `request_ref`; match a fill to an order by its strategy, instrument, side and
-order price.
+carry no `request_ref`. A fill of a limit order names the order's price level through its
+strategy, instrument, side and `order_price`; a fill of a market order has no
+`order_price`, so nothing on it ties it to one particular `new` when several market
+orders for the same strategy, instrument and side are in flight.
 
 Every order message is held by the exchange for its order delay before it is applied, so
 an `accepted` arrives no sooner than that delay after the send. The delay, the minimum
@@ -82,7 +84,7 @@ def new_request_ref() -> str:
     return uuid.uuid4().hex
 
 
-def _side(side: Side.ValueType) -> Side.ValueType:
+def _side(side: Side) -> Side:
     if side not in (BUY, SELL):
         raise ValueError(f"side must be BUY or SELL, got {side!r}")
     return side
@@ -93,8 +95,8 @@ async def send_new(
     *,
     strat_id: str,
     instrument: str,
-    side: Side.ValueType,
-    order_type: OrderType.ValueType,
+    side: Side,
+    order_type: OrderType,
     size: int,
     price: int | None = None,
     request_ref: str | None = None,
@@ -131,7 +133,7 @@ async def send_cancel(
     conn: Sender,
     *,
     instrument: str,
-    side: Side.ValueType,
+    side: Side,
     price: int,
     request_ref: str | None = None,
 ) -> str:
@@ -147,7 +149,7 @@ async def send_amend(
     conn: Sender,
     *,
     instrument: str,
-    side: Side.ValueType,
+    side: Side,
     price: int,
     new_size: int,
     new_price: int | None = None,
