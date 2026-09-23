@@ -6,7 +6,7 @@ body:
     id: workstream
     attributes:
       label: Workstream
-      description: Which workstream does this belong to? (map carried over under qte-platform DL-02)
+      description: Which workstream does this belong to?
       options:
         - A - Market data ingest & synthetic book
         - B - Matching engine & order book
@@ -37,7 +37,7 @@ body:
     id: what
     attributes:
       label: What and why
-      description: What needs to be done. Cite the qte-platform SPEC.md section it derives from.
+      description: What needs to be done and why. Do not quote private platform material; this repo is public.
     validations:
       required: true
   - type: textarea
