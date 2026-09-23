@@ -12,7 +12,10 @@ environment variable. Keep it out of source files and out of the repository.
 
 The token is sent once, in the `auth` message, and is not kept afterwards. The SDK never
 logs it or puts it in an exception: the frame-level debug lines of the `websockets`
-library, which would show the `auth` message, are dropped for session connections.
+library, which would show the `auth` message, are dropped for session connections. While
+the session opens, a message from the exchange that repeats the token is also kept out of
+the exception raised; once the session is open the SDK no longer holds the token, and what
+the exchange sends is passed on as it arrives.
 """
 
 import asyncio
@@ -159,10 +162,15 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
         await conn.send("auth", Auth(token=secret.value))
         return
     except Exception as error:
-        failure = _redact(f"could not send auth: {type(error).__name__}: {error}", secret)
-    # Raised outside the handler: the frames of the failed send hold the auth message, so
-    # the original error and its traceback are not chained to this one.
-    raise SessionNotAcknowledged(failure)
+        replacement: BaseException = SessionNotAcknowledged(
+            _redact(f"could not send auth: {type(error).__name__}: {error}", secret)
+        )
+    except BaseException as error:
+        # Cancellation and interrupts keep their type, so they behave as they otherwise would.
+        replacement = type(error)(*error.args)
+    # Raised outside the handler: the frames of the interrupted send hold the auth message,
+    # so the original error and its traceback are not chained to this one.
+    raise replacement
 
 
 async def _wait_for_ack(conn: Connection, timeout: float | None) -> tuple[SessionAck, list[Event]]:

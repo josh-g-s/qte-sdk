@@ -4,10 +4,11 @@ import json
 import logging
 import secrets
 import traceback
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Iterator
 
 import pytest
 from fake_exchange import CONTRACT_VERSION, frame, serve_local
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
 from qte_sdk.connection import ContractVersionMismatch, Received, SessionRejected
@@ -21,8 +22,6 @@ from qte_sdk.session import (
     SessionNotAcknowledged,
     open_session,
 )
-
-Handler = Callable[[ServerConnection], Awaitable[None]]
 
 
 def synthetic_token() -> str:
@@ -269,6 +268,28 @@ async def test_a_token_echoed_in_an_undecodable_ack_is_withheld():
     async with serve_local(server) as url:
         with pytest.raises(SessionNotAcknowledged) as caught:
             await open_session(url, token)
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_cancelling_while_auth_is_sent_does_not_show_the_token(monkeypatch):
+    token = synthetic_token()
+    sending = asyncio.Event()
+
+    async def stalled_send(self: ClientConnection, message: object) -> None:
+        # The SDK's own frames above this one hold the auth message while it is sent.
+        sending.set()
+        await asyncio.Event().wait()
+
+    async def idle(ws: ServerConnection) -> None:
+        await ws.wait_closed()
+
+    monkeypatch.setattr(ClientConnection, "send", stalled_send)
+    async with serve_local(idle) as url:
+        task = asyncio.create_task(open_session(url, token))
+        await asyncio.wait_for(sending.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
     assert_token_absent(token, shown(caught.value))
 
 
