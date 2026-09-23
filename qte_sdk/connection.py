@@ -9,14 +9,15 @@ A connection is single-use: it does not authenticate, reconnect or resubscribe. 
 ends when the server closes the connection normally and raises
 `websockets.exceptions.ConnectionClosedError` when it drops.
 
-Credentials: the SDK never itself writes the session token into a log record, an exception
-message or attribute, or a traceback local variable it creates. That includes text a
-server reflects back through a close reason, the opening handshake or a response header:
-frame traces are not logged, close reasons and handshake details are withheld from errors,
-handshake header values are withheld from logs, log records carry only a snapshot of
-the connection's id and address, and redirects are not followed. Out of
-scope are the caller's own code and configuration holding the token, and a server that
-already holds the token and discloses it by some other route.
+Credentials: the SDK never itself writes the session token it holds into a log record, an
+exception message, attribute or chain, or a traceback local variable that it creates or
+lets escape. Text a server reflects back is withheld on these paths: close reasons, the
+opening handshake and response headers, and redirects, which are not followed. Frame
+traces are not logged, and log records carry only a snapshot of the connection's id and
+address. Server-supplied protocol content (a rejection's reason_detail, the text of a
+frame that fails to decode) is passed through as-is, because it is what a caller needs to
+understand a failure; the QTE gateway never echoes credentials. A token placed in the
+caller's own URL or headers is the caller's configuration.
 """
 
 import logging
@@ -289,17 +290,23 @@ class Connection:
     async def events(self) -> AsyncIterator[Event]:
         frame: str | bytes | None = None
         event: Event | None = None
+        failure: BaseException
         try:
             async for frame in self._open_ws():
                 for event in self._handle(frame):
                     yield event
+        except GeneratorExit:
+            raise
         except ConnectionClosed as error:
-            closed = _without_close_reasons(error)
+            failure = _without_close_reasons(error)
+        except BaseException as error:
+            # Keep the type, as open() and send() do, but not the frames below or the chain.
+            failure = error.with_traceback(None)
+            failure.__cause__ = failure.__context__ = None
         else:
             return
-        # The last frame could be a server echo of the token: keep it out of traceback locals.
         frame = event = None
-        raise closed
+        raise failure
 
     def _open_ws(self) -> ClientConnection:
         if self._ws is None:

@@ -622,3 +622,37 @@ async def test_cancelling_the_handshake_keeps_request_headers_out_of_the_traceba
             await opening
     assert caught.value.__cause__ is None and caught.value.__context__ is None
     assert_no_token(shown_with_locals(caught.value), token)
+
+
+async def test_cancelling_iteration_keeps_the_type_and_drops_the_chain():
+    token = secrets.token_hex(16)
+
+    async def silent_after_auth(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.wait_closed()
+
+    async with serve_local(silent_after_auth) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+
+            async def read() -> list:
+                return [event async for event in conn]
+
+            reading = asyncio.create_task(read())
+            await asyncio.sleep(0.1)
+            reading.cancel()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await reading
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert not any(
+        "websockets" in s.filename for s in traceback.extract_tb(caught.value.__traceback__)
+    )
+    assert_no_token(shown_with_locals(caught.value), token)
+
+
+async def test_breaking_out_of_iteration_still_closes_cleanly():
+    async with exchange([book(1), book(2), book(3)]) as url:
+        async with Connection(url) as conn:
+            async for event in conn:
+                assert isinstance(event, Received)
+                break
