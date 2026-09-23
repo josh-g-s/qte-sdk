@@ -1,21 +1,21 @@
 """Subscribe to market data and consume it as typed messages.
 
-    async with Connection("ws://127.0.0.1:8080/ws") as conn:
-        await subscribe(conn, ["AAPL", "MSFT"])
-        async for item in market_data(conn):
-            match item:
-                case Book():
-                    best_bid = item.bid_levels[0].price if item.bid_levels else None
-                case Trades() | Mark() | SessionState():
-                    ...
-                case SeqGap() | DecodeFailed():
-                    ...  # messages were lost: treat what you hold as uncertain
-                case Reject():
-                    ...  # a subscribe or unsubscribe was refused
+    # `conn` must be authenticated first: the exchange refuses a subscribe on a
+    # connection whose session it has not acknowledged.
+    await subscribe(conn, ["AAPL", "MSFT"])
+    async for item in market_data(conn):
+        match item:
+            case Book():
+                best_bid = item.bid_levels[0].price if item.bid_levels else None
+            case Trades() | Mark() | SessionState():
+                ...
+            case SeqGap() | DecodeFailed():
+                ...  # messages were lost: treat what you hold as uncertain
+            case Reject():
+                ...  # a subscribe or unsubscribe was refused
 
-There is one market-data feed, the same for every participant: `book`, `trades` and
-`session_state` arrive on a 100 ms grid and `mark` on its own one-second grid. Messages
-are delivered as they arrive; nothing here waits for, fills in or assumes a grid time.
+There is one conflated market-data feed, the same for every participant. Messages are
+delivered as they arrive; nothing here waits for, fills in or assumes a grid time.
 
 Messages are the generated contract classes. Prices are `int` micro-dollars and sizes are
 `int` shares, exact at any size; use `qte_sdk.units.to_decimal` for exact `Decimal`
