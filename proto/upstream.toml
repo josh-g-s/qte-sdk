@@ -1,13 +1,16 @@
 # The one place that records where the vendored contract came from.
-# Bump `commit` deliberately: contract change control is still provisional.
+# Written by scripts/vendor_contract.py; bump `commit` deliberately and re-run it.
+# Each blob is the git blob hash of that file at `commit`, and CI checks the vendored
+# bytes against it.
+
 repo = "qte-platform"
 commit = "e2d44621acfb31b802f3497cc34144b1a222baad"
 path = "schemas/proto/qte/contract/v1"
-files = [
-    "common.proto",
-    "envelope.proto",
-    "session.proto",
-    "order_entry.proto",
-    "order_events.proto",
-    "market_data.proto",
-]
+
+[blobs]
+"common.proto" = "52c1c3e24b9d1fd75f995e90ee781d0a78273cbf"
+"envelope.proto" = "cd1bf9ff66ba450c111a13d091063ca0d2e1796a"
+"session.proto" = "d58cf30677c7db92bc1418f28c3978de22e156b5"
+"order_entry.proto" = "6639d07988a0ed516fd32c0d28e3b524cac10956"
+"order_events.proto" = "786966850095bfdd4873ae231d83cee4ab78e860"
+"market_data.proto" = "828e18547b1ac14e62a9d951d181c2739a6cf05b"

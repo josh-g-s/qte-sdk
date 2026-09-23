@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.2
+**Version:** 0.3
 
 ## Requirements
 
@@ -33,7 +33,7 @@ CI also installs the built wheel into a clean virtualenv and imports `qte_sdk`, 
 
 ## Contract types
 
-The wire contract is defined by six `.proto` files vendored from qte-platform into `proto/qte/contract/v1/`. `proto/upstream.toml` records the one qte-platform commit they came from. Only these six files are approved for publication in this repo; never add other platform files.
+The wire contract is defined by six `.proto` files vendored from qte-platform into `proto/qte/contract/v1/`. `proto/upstream.toml` records the one qte-platform commit they came from and each file's git blob hash at that commit. Generation and the tests fail if a vendored file's bytes do not hash to its recorded blob, so the protos cannot drift from the pin unnoticed. Only these six files are approved for publication in this repo; never add other platform files.
 
 The Python types in `qte_sdk/contract/v1/` are generated from the vendored protos and are never edited by hand. Import them as `qte_sdk.contract.v1`, for example `from qte_sdk.contract.v1.order_entry_pb2 import NewOrder`, and use `qte_sdk.contract.codec` to encode and decode the JSON wire format.
 
@@ -53,4 +53,4 @@ python scripts/vendor_contract.py /path/to/qte-platform
 python scripts/generate_contract.py
 ```
 
-and commit the protos, the manifest and the generated code together.
+and commit the protos, the manifest and the generated code together. The vendor script rewrites the blob hashes itself. `python scripts/vendor_contract.py /path/to/qte-platform --check` confirms that the recorded hashes belong to the pinned commit without changing anything.

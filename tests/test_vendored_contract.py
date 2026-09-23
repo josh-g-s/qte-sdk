@@ -1,4 +1,6 @@
+import hashlib
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -14,8 +16,29 @@ APPROVED = {
 }
 
 
+def git_blob_sha(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
 def test_manifest_lists_exactly_the_approved_files():
-    assert set(MANIFEST["files"]) == APPROVED
+    assert set(MANIFEST["blobs"]) == APPROVED
+
+
+def test_vendored_bytes_hash_to_the_pinned_blobs():
+    for name, sha in MANIFEST["blobs"].items():
+        data = (ROOT / "proto" / "qte" / "contract" / "v1" / name).read_bytes()
+        assert git_blob_sha(data) == sha, f"{name} differs from the pinned blob"
+
+
+def test_blob_hash_matches_git():
+    path = ROOT / "proto" / "qte" / "contract" / "v1" / "common.proto"
+    expected = subprocess.run(
+        ["git", "hash-object", "--no-filters", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert git_blob_sha(path.read_bytes()) == expected
 
 
 def test_manifest_pins_a_full_commit():
