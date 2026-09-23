@@ -55,10 +55,13 @@ def decode(text: str | bytes) -> Decoded:
     data = json.loads(text)
     if not isinstance(data, dict):
         raise ValueError("envelope is not a JSON object")
-    payload = data.get("payload", {})
+    if "payload" not in data:
+        raise ValueError("envelope has no payload")
+    payload = data["payload"]
     if not isinstance(payload, dict):
         raise ValueError("envelope payload is not a JSON object")
-    return Decoded(from_dict(data, Envelope), payload)
+    head = {key: value for key, value in data.items() if key != "payload"}
+    return Decoded(from_dict(head, Envelope), payload)
 
 
 def unpack(payload: dict[str, Any], cls: type[M]) -> M:
