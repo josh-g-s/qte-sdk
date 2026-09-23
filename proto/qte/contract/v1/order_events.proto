@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.2
+// **Version:** 1.4
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `risk_notice`. These are
@@ -44,11 +44,12 @@ message Reject {
 }
 
 // One fill of one of the team's orders. Counterparty identity is never
-// disclosed (SPEC 10). The ticket principal owns the position and cash,
-// debited to the Fundamentals pod or house account once the ticket
-// completes, and fees and rebates post to the ticket's cash position (SPEC
-// 18). Ticket format, lifecycle and how a ticket's child orders link to this
-// report are not yet specified.
+// disclosed (SPEC 10). Every fill, fee and rebate an Execution ticket's child
+// orders generate posts immediately to the originating Fundamentals pod's or
+// house's own cash balance and position; a desk holds no separate ticket cash
+// position of its own (SPEC 12.2, SPEC 24). How a child order names its parent
+// ticket, and how a fill in this report links to one, are not yet in this
+// contract.
 message Execution {
   string exec_id = 1;  // id. Fill report identity. SPEC 8.2. Its format is not yet specified
   Origin origin = 2;   // SPEC 11.1, SPEC 11.2

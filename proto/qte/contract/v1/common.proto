@@ -179,7 +179,10 @@ message ReasonCodes {
     RISK_REDUCING_ONLY = 1603;
     SANITY_GATE_REJECTED = 1604;
     HEDGE_ONLY = 1605;
-    // 1606-1799 reserved for bands 1600 and 1700 growth; band 1700 is unused
+    PARENT_NOT_WORKING = 1606;
+    PARENT_MISMATCH = 1607;
+    PARENT_QUANTITY_EXCEEDED = 1608;
+    // 1609-1799 reserved for bands 1600 and 1700 growth; band 1700 is unused
     // by the registry today.
 
     // 1800: Cancellation. Carried on `order_cancelled`, never on `reject`.

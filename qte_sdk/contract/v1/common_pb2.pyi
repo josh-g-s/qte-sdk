@@ -143,6 +143,9 @@ class ReasonCodes(_message.Message):
         RISK_REDUCING_ONLY: _ClassVar[ReasonCodes.ReasonCode]
         SANITY_GATE_REJECTED: _ClassVar[ReasonCodes.ReasonCode]
         HEDGE_ONLY: _ClassVar[ReasonCodes.ReasonCode]
+        PARENT_NOT_WORKING: _ClassVar[ReasonCodes.ReasonCode]
+        PARENT_MISMATCH: _ClassVar[ReasonCodes.ReasonCode]
+        PARENT_QUANTITY_EXCEEDED: _ClassVar[ReasonCodes.ReasonCode]
         CANCEL_REQUEST: _ClassVar[ReasonCodes.ReasonCode]
         MASS_CANCEL: _ClassVar[ReasonCodes.ReasonCode]
         SELF_TRADE: _ClassVar[ReasonCodes.ReasonCode]
@@ -190,6 +193,9 @@ class ReasonCodes(_message.Message):
     RISK_REDUCING_ONLY: ReasonCodes.ReasonCode
     SANITY_GATE_REJECTED: ReasonCodes.ReasonCode
     HEDGE_ONLY: ReasonCodes.ReasonCode
+    PARENT_NOT_WORKING: ReasonCodes.ReasonCode
+    PARENT_MISMATCH: ReasonCodes.ReasonCode
+    PARENT_QUANTITY_EXCEEDED: ReasonCodes.ReasonCode
     CANCEL_REQUEST: ReasonCodes.ReasonCode
     MASS_CANCEL: ReasonCodes.ReasonCode
     SELF_TRADE: ReasonCodes.ReasonCode

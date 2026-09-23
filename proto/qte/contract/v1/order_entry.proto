@@ -1,6 +1,6 @@
 // Inbound order entry.
 //
-// **Version:** 1.4
+// **Version:** 1.5
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`. Every new, cancel, amend and mass-cancel message is released
@@ -10,6 +10,14 @@
 // The book is addressed by instrument, side and price; no inbound message
 // carries an order identifier. A team holds at most one resting order per
 // instrument, side and price, across all of its strategies (SPEC 8.2).
+//
+// Identifier limits: request_ref, strat_id and instrument are each at most 32
+// bytes of UTF-8. The limit counts bytes, not characters, so a character
+// outside ASCII counts two to four towards it. Any text is allowed except the
+// NUL character. A message with a longer identifier, or one containing NUL,
+// is rejected MALFORMED_MESSAGE at receipt, and the reject still echoes
+// request_ref as sent. An empty request_ref or strat_id counts as absent and
+// is rejected MALFORMED_MESSAGE too.
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -34,9 +42,9 @@ option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
 // SPEC 9.4.3). Order entry for options (contract identifiers and sizes) is
 // not yet specified.
 message NewOrder {
-  string request_ref = 1;   // id. Client correlation id, echoed on the response. Its rules are not yet specified
-  string strat_id = 2;      // id. SPEC 2.5, SPEC 11.3
-  string instrument = 3;    // id. SPEC 3.1
+  string request_ref = 1;   // id, 1 to 32 bytes. Client correlation id, echoed on the response. Its other rules are not yet specified
+  string strat_id = 2;      // id, 1 to 32 bytes. SPEC 2.5, SPEC 11.3
+  string instrument = 3;    // id, at most 32 bytes. SPEC 3.1
   Side side = 4;            // SPEC 8.2
   OrderType order_type = 5; // SPEC 6.3, SPEC 8.1
   // Required iff order_type = LIMIT; absent for MARKET. SPEC 8.2
@@ -50,8 +58,8 @@ message NewOrder {
 // taken at gateway receipt: an earlier cancel is rejected MIN_REST_VIOLATION
 // and nothing is changed; MassCancel is exempt (SPEC 8.1).
 message CancelOrder {
-  string request_ref = 1; // id. Client correlation id. Its rules are not yet specified
-  string instrument = 2;  // id. SPEC 8.2
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id. Its other rules are not yet specified
+  string instrument = 2;  // id, at most 32 bytes. SPEC 8.2
   Side side = 3;          // SPEC 8.2
   int64 price = 4;        // int64-micro. The price level to clear. SPEC 8.2
 }
@@ -76,8 +84,8 @@ message CancelOrder {
 // AMEND_WOULD_MAKE_STALE_MARKETABLE, so a STALE order never reaches the wall
 // (SPEC 8.2, SPEC 8.4).
 message AmendOrder {
-  string request_ref = 1; // id. Client correlation id. Its rules are not yet specified
-  string instrument = 2;  // id. SPEC 8.2
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id. Its other rules are not yet specified
+  string instrument = 2;  // id, at most 32 bytes. SPEC 8.2
   Side side = 3;          // SPEC 8.2
   int64 price = 4;        // int64-micro. The amend price: the price the order rests at now. SPEC 8.2
   int64 new_price = 5;    // int64-micro. Equal to price for a size-only amend. SPEC 8.2
@@ -88,5 +96,5 @@ message AmendOrder {
 // allowance category, ignores the message cap, and is exempt from the
 // minimum rest (SPEC 8.1, SPEC 8.2).
 message MassCancel {
-  string request_ref = 1; // id. Client correlation id. Its rules are not yet specified
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id. Its other rules are not yet specified
 }
