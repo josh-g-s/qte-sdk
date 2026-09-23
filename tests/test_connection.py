@@ -1,11 +1,11 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from typing import Any
 
 import pytest
-from websockets.asyncio.server import ServerConnection, serve
+from fake_exchange import exchange, frame, serve_local
+from websockets.asyncio.server import ServerConnection
 
 from qte_sdk.connection import (
     Connection,
@@ -25,31 +25,8 @@ from qte_sdk.contract.v1.session_pb2 import Subscribe
 BIG = 9_007_199_254_740_993  # 2**53 + 1
 
 
-def frame(type_: str, payload: Any, seq: int | None = None, **extra: Any) -> str:
-    env: dict[str, Any] = {"version": "0.x", "type": type_, "payload": payload, **extra}
-    if seq is not None:
-        env["seq"] = seq
-    return json.dumps(env)
-
-
 def book(seq: int | None) -> str:
     return frame("book", {"instrument": "AAPL", "grid_time": "1", "bid_levels": []}, seq)
-
-
-@asynccontextmanager
-async def exchange(frames: list[str | bytes], inbox: list[str] | None = None) -> AsyncIterator[str]:
-    """A local server that records one client message (if asked), sends frames, then closes."""
-
-    async def handler(ws: ServerConnection) -> None:
-        if inbox is not None:
-            inbox.append(await ws.recv())
-        for f in frames:
-            await ws.send(f)
-        await ws.close()
-
-    async with serve(handler, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        yield f"ws://127.0.0.1:{port}"
 
 
 async def collect(url: str, before: Callable[[Connection], Any] | None = None) -> list:
@@ -197,8 +174,7 @@ async def test_an_int64_above_2_to_the_53_survives_a_send_and_return_trip():
         await ws.close()
 
     order = NewOrder(request_ref="r", strat_id="s", instrument="AAPL", side=BUY, price=BIG, size=1)
-    async with serve(echo, "127.0.0.1", 0) as server:
-        url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    async with serve_local(echo) as url:
         [event] = await collect(url, before=lambda conn: conn.send("new", order))
     assert event.message.fill_price == BIG
 
