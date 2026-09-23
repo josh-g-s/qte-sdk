@@ -2,18 +2,20 @@ import asyncio
 import json
 import logging
 import secrets
+import traceback
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 from fake_exchange import exchange, frame, serve_local
-from websockets.asyncio.server import ServerConnection
-from websockets.exceptions import ConnectionClosedError
+from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from qte_sdk.connection import (
     Connection,
     ContractVersionMismatch,
     DecodeFailed,
+    HandshakeFailed,
     Received,
     SeqGap,
     SessionRejected,
@@ -242,8 +244,10 @@ async def test_connection_events_are_still_logged_without_frames(caplog):
     lines = [r.getMessage() for r in records]
     assert any("connection is" in line for line in lines)
     assert not any(line.startswith(FRAME_TRACES) for line in lines)
-    # Once connected, websockets attaches the connection to its records; the wrapper keeps it.
-    assert any(getattr(r, "websocket", None) is not None for r in records)
+    # Once connected, records carry a snapshot of the connection, never the connection.
+    attached = [r.websocket for r in records if getattr(r, "websocket", None) is not None]
+    assert attached and all(w.id is not None for w in attached)
+    assert not any(hasattr(w, "protocol") or hasattr(w, "response") for w in attached)
 
 
 FRAME_TRACES = tuple(
@@ -408,8 +412,171 @@ async def test_a_close_during_the_handshake_withholds_the_reason(monkeypatch):
     async def closed_during_handshake(*args, **kwargs):
         raise ConnectionClosedError(Close(4000, token), Close(4000, token), True)
 
-    monkeypatch.setattr(connection_module, "connect", closed_during_handshake)
+    monkeypatch.setattr(connection_module, "_connect", closed_during_handshake)
     with pytest.raises(ConnectionClosedError) as caught:
         await Connection("ws://127.0.0.1:1").open()
     assert caught.value.rcvd.code == 4000
     assert_withheld(caught.value, token)
+
+
+def shown_with_locals(error: BaseException) -> list[str]:
+    """What a traceback that prints local variables would show, leaving out this test
+    module's own frames, which hold the token by design."""
+    parts = [str(error), repr(error)]
+    pending = [traceback.TracebackException.from_exception(error, capture_locals=True)]
+    while pending:
+        link = pending.pop()
+        parts.extend(link.format_exception_only())
+        for summary in link.stack:
+            if summary.filename != __file__:
+                parts.append(f"{summary.filename}:{summary.lineno} {summary.locals}")
+        pending.extend(n for n in (link.__cause__, link.__context__) if n is not None)
+    return parts
+
+
+async def test_no_traceback_local_shows_the_token_after_a_close():
+    token = secrets.token_hex(16)
+
+    async def echo_then_close_with_token(ws: ServerConnection) -> None:
+        await ws.send(await ws.recv())
+        await ws.close(4000, token)
+
+    async with serve_local(echo_then_close_with_token) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            with pytest.raises(ConnectionClosedError) as reading:
+                [event async for event in conn]
+            with pytest.raises(ConnectionClosedError) as sending:
+                await conn.send("auth", Auth(token=token))
+    assert_no_token(shown_with_locals(reading.value), token)
+    assert_no_token(shown_with_locals(sending.value), token)
+
+
+def reflect_into_upgrade(connection, request, response):
+    del response.headers["Upgrade"]
+    response.headers["Upgrade"] = request.headers.get("X-Key", "")
+    return response
+
+
+def refuse_with_token(connection, request):
+    return connection.respond(403, f"denied {request.headers.get('X-Key', '')}")
+
+
+@pytest.mark.parametrize(
+    ("hooks", "kind", "status"),
+    [
+        ({"process_response": reflect_into_upgrade}, "InvalidUpgrade", None),
+        ({"process_request": refuse_with_token}, "InvalidStatus", 403),
+    ],
+)
+async def test_a_failed_handshake_withholds_reflected_values(caplog, hooks, kind, status):
+    caplog.set_level(logging.DEBUG, logger="websockets.client")
+    token = secrets.token_hex(16)
+    async with serve(echo_then_close, "127.0.0.1", 0, **hooks) as server:
+        port = server.sockets[0].getsockname()[1]
+        conn = Connection(f"ws://127.0.0.1:{port}", additional_headers={"X-Key": token})
+        with pytest.raises(HandshakeFailed) as caught:
+            await conn.open()
+    error = caught.value
+    assert isinstance(error, InvalidHandshake)
+    assert (error.kind, error.status_code) == (kind, status)
+    assert error.__cause__ is None and error.__context__ is None
+    assert_no_token([*shown_with_locals(error), repr(vars(error))], token)
+    assert_no_token(rendered(caplog, "websockets.client"), token)
+
+
+async def test_a_reflected_response_header_name_is_withheld_from_the_log(caplog):
+    caplog.set_level(logging.DEBUG)
+    token = secrets.token_hex(16)
+
+    def add_reflected_header(connection, request, response):
+        response.headers[request.headers.get("X-Key", "x")] = "1"
+        return response
+
+    async with serve(
+        echo_then_close, "127.0.0.1", 0, process_response=add_reflected_header
+    ) as server:
+        port = server.sockets[0].getsockname()[1]
+        url = f"ws://127.0.0.1:{port}"
+        async with Connection(url, additional_headers={"X-Key": token}) as conn:
+            await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
+            [event async for event in conn]
+    lines = rendered(caplog, "websockets.client")
+    assert any(line.startswith("< Upgrade: ") for line in lines)
+    assert any(line.startswith("< <withheld>: ") for line in lines)
+    assert_no_token(lines, token)
+
+
+def redirect_to_token(connection, request):
+    response = connection.respond(302, "")
+    response.headers["Location"] = f"/{request.headers.get('X-Key', '')}"
+    return response
+
+
+async def test_a_redirect_is_not_followed_and_its_location_is_withheld(caplog):
+    caplog.set_level(logging.DEBUG, logger="websockets.client")
+    token = secrets.token_hex(16)
+    async with serve(echo_then_close, "127.0.0.1", 0, process_request=redirect_to_token) as server:
+        port = server.sockets[0].getsockname()[1]
+        conn = Connection(f"ws://127.0.0.1:{port}", additional_headers={"X-Key": token})
+        with pytest.raises(HandshakeFailed) as caught:
+            await conn.open()
+    assert (caught.value.kind, caught.value.status_code) == ("InvalidStatus", 302)
+    assert_no_token([*shown_with_locals(caught.value), repr(vars(caught.value))], token)
+    lines = rendered(caplog, "websockets.client")
+    assert sum(line.startswith("> GET ") for line in lines) == 1
+    assert_no_token(lines, token)
+
+
+async def test_a_send_before_open_keeps_the_token_out_of_the_traceback():
+    token = secrets.token_hex(16)
+    with pytest.raises(RuntimeError) as caught:
+        await Connection("ws://127.0.0.1:1").send("auth", Auth(token=token))
+    assert_no_token(shown_with_locals(caught.value), token)
+
+
+async def test_any_send_failure_keeps_the_token_out_of_the_traceback(monkeypatch):
+    token = secrets.token_hex(16)
+
+    async def failing_send(message, text=None):
+        raise ValueError("the socket refused the write")
+
+    async with serve_local(echo_then_close) as url:
+        async with Connection(url) as conn:
+            monkeypatch.setattr(conn._ws, "send", failing_send)
+            with pytest.raises(ValueError) as caught:
+                await conn.send("auth", Auth(token=token))
+    assert caught.value.__context__ is None
+    assert_no_token(shown_with_locals(caught.value), token)
+
+
+async def test_log_records_expose_no_route_to_reflected_text(caplog):
+    caplog.set_level(logging.DEBUG, logger="websockets.client")
+    token = secrets.token_hex(16)
+
+    def reflect_header(connection, request, response):
+        response.headers["X-Reflected"] = request.headers.get("X-Key", "")
+        return response
+
+    async def close_with_token(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(4000, token)
+
+    async with serve(close_with_token, "127.0.0.1", 0, process_response=reflect_header) as server:
+        port = server.sockets[0].getsockname()[1]
+        conn = Connection(f"ws://127.0.0.1:{port}", additional_headers={"X-Key": token})
+        async with conn:
+            await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
+            with pytest.raises(ConnectionClosedError):
+                [event async for event in conn]
+    for record in caplog.records:
+        if not record.name.startswith("websockets.client"):
+            continue
+        reachable = [repr(vars(record))]
+        attached = getattr(record, "websocket", None)
+        for path in ("protocol.close_rcvd.reason", "response.headers", "request.headers"):
+            value = attached
+            for name in path.split("."):
+                value = getattr(value, name, None)
+            reachable.append(repr(value))
+        assert_no_token(reachable, token)

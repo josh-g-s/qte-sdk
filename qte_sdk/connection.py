@@ -8,6 +8,15 @@
 A connection is single-use: it does not authenticate, reconnect or resubscribe. Iteration
 ends when the server closes the connection normally and raises
 `websockets.exceptions.ConnectionClosedError` when it drops.
+
+Credentials: the SDK never itself writes the session token into a log record, an exception
+message or attribute, or a traceback local variable it creates. That includes text a
+server reflects back through a close reason, the opening handshake or a response header:
+frame traces are not logged, close reasons and handshake details are withheld from errors,
+handshake header values are withheld from logs, log records carry only a snapshot of
+the connection's id and address, and redirects are not followed. Out of
+scope are the caller's own code and configuration holding the token, and a server that
+already holds the token and discloses it by some other route.
 """
 
 import logging
@@ -19,12 +28,27 @@ from typing import Any
 from google.protobuf.json_format import ParseError
 from google.protobuf.message import Message
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.frames import Close, Frame
 
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import CONTRACT_VERSION, INBOUND
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+
+
+@dataclass(frozen=True)
+class _LoggedConnection:
+    """What a log record may say about the connection it came from."""
+
+    id: Any
+    remote_address: Any
+
+    @classmethod
+    def of(cls, connection: Any) -> "_LoggedConnection":
+        try:
+            return cls(getattr(connection, "id", None), getattr(connection, "remote_address", None))
+        except ReferenceError:
+            return cls(None, None)
 
 
 class _WithoutCredentials(logging.LoggerAdapter):
@@ -39,7 +63,11 @@ class _WithoutCredentials(logging.LoggerAdapter):
     def process(
         self, msg: Any, kwargs: MutableMapping[str, Any]
     ) -> tuple[Any, MutableMapping[str, Any]]:
-        # Pass the `extra` websockets attaches to each record through unchanged.
+        # websockets attaches the live connection to each record, from which a handler could
+        # reach close reasons and response headers; attach a snapshot of safe fields instead.
+        extra = kwargs.get("extra")
+        if extra and "websocket" in extra:
+            kwargs["extra"] = {**extra, "websocket": _LoggedConnection.of(extra["websocket"])}
         return msg, kwargs
 
     def log(self, level: int, msg: Any, *args: Any, **kwargs: Any) -> None:
@@ -55,13 +83,33 @@ class _WithoutCredentials(logging.LoggerAdapter):
         super().log(level, msg, *args, **kwargs)
 
 
+# Response header names a server could not have filled with reflected text.
+_KNOWN_RESPONSE_HEADERS = frozenset(
+    name.lower()
+    for name in (
+        "Connection",
+        "Upgrade",
+        "Sec-WebSocket-Accept",
+        "Sec-WebSocket-Extensions",
+        "Sec-WebSocket-Protocol",
+        "Date",
+        "Server",
+        "Content-Length",
+        "Content-Type",
+    )
+)
+
+
 def _without_handshake_values(msg: Any, args: tuple[Any, ...]) -> tuple[Any, ...]:
     # The handshake trace logs the request path, headers and status phrase as plain text;
     # a query string, header value or phrase could carry a credential, so only names stay.
     if msg == "> GET %s HTTP/1.1" and args:
         return (str(args[0]).split("?", 1)[0], *args[1:])
-    if msg in ("> %s: %s", "< %s: %s") and len(args) == 2:
+    if msg == "> %s: %s" and len(args) == 2:
         return (args[0], "<withheld>")
+    if msg == "< %s: %s" and len(args) == 2:
+        name = args[0] if str(args[0]).lower() in _KNOWN_RESPONSE_HEADERS else "<withheld>"
+        return (name, "<withheld>")
     if msg == "< HTTP/1.1 %d %s" and len(args) == 2:
         return (args[0], "<withheld>")
     return args
@@ -146,6 +194,29 @@ class ContractVersionMismatch(SessionRejected):
     """
 
 
+class _connect(connect):
+    """`connect` that never follows a redirect: the Location header is server text, and a
+    redirect is reported as a failed handshake instead."""
+
+    def process_redirect(self, exc: Exception) -> Exception | str:
+        return exc
+
+
+class HandshakeFailed(InvalidHandshake):
+    """The opening handshake failed. Only the kind of failure and the HTTP status are kept:
+    the library's own error carries header values and the response, which a server could
+    fill with reflected text."""
+
+    def __init__(self, kind: str, status_code: int | None) -> None:
+        super().__init__(kind, status_code)
+        self.kind = kind
+        self.status_code = status_code
+
+    def __str__(self) -> str:
+        status = f", HTTP {self.status_code}" if self.status_code is not None else ""
+        return f"opening handshake failed ({self.kind}{status}); details withheld"
+
+
 class Connection:
     def __init__(
         self, url: str, *, contract_version: str = CONTRACT_VERSION, **connect_options: Any
@@ -173,33 +244,46 @@ class Connection:
         if self._used:
             raise RuntimeError("a Connection is single-use; create a new one to reconnect")
         self._used = True
+        failure: Exception
         try:
-            self._ws = await connect(self.url, **self._connect_options)
+            self._ws = await _connect(self.url, **self._connect_options)
         except ConnectionClosed as error:
-            closed = _without_close_reasons(error)
+            failure = _without_close_reasons(error)
+        except InvalidHandshake as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            failure = HandshakeFailed(type(error).__name__, status)
         else:
             return
-        raise closed
+        raise failure
 
     async def close(self) -> None:
         if self._ws is not None:
             await self._ws.close()
 
     async def send(self, type_: str, payload: Message) -> None:
-        text = codec.encode(self.contract_version, type_, payload)
+        failure: BaseException
         try:
-            await self._open_ws().send(text)
+            await self._open_ws().send(codec.encode(self.contract_version, type_, payload))
         except ConnectionClosed as error:
-            closed = _without_close_reasons(error)
+            failure = _without_close_reasons(error)
+        except BaseException as error:
+            # Keep the type, but not the frames below this one or the chain: they hold the
+            # encoded message, which may be `auth`.
+            failure = error.with_traceback(None)
+            failure.__cause__ = failure.__context__ = None
         else:
             return
-        # Raised outside the handler, so the original, which holds the reasons, is not chained.
-        raise closed
+        # Nor this frame's own copy of the message. Raised outside the handler, so the
+        # original error is not chained to it.
+        del payload
+        raise failure
 
     def __aiter__(self) -> AsyncIterator[Event]:
         return self.events()
 
     async def events(self) -> AsyncIterator[Event]:
+        frame: str | bytes | None = None
+        event: Event | None = None
         try:
             async for frame in self._open_ws():
                 for event in self._handle(frame):
@@ -208,6 +292,8 @@ class Connection:
             closed = _without_close_reasons(error)
         else:
             return
+        # The last frame could be a server echo of the token: keep it out of traceback locals.
+        frame = event = None
         raise closed
 
     def _open_ws(self) -> ClientConnection:
