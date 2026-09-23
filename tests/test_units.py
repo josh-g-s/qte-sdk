@@ -50,6 +50,9 @@ def test_conversion_does_not_depend_on_the_decimal_context():
         (Decimal("0.0000010000"), 1),
         ("-0", 0),
         (Decimal("0E-50"), 0),
+        ("1." + "0" * 5000, 1_000_000),  # more digits than int() accepts from a string
+        (Decimal("1." + "0" * 5000), 1_000_000),
+        ("12345.678900000000000000000000000000", 12_345_678_900),
     ],
 )
 def test_prices_convert_to_whole_micros(dollars, micros):
@@ -62,6 +65,7 @@ def test_prices_convert_to_whole_micros(dollars, micros):
         "0.0000001",
         Decimal("199.9900001"),
         "1.00000000000000000000000000001",  # a stray digit beyond default decimal precision
+        "0." + "0" * 5000 + "1",
         "1E-999999999",
         "NaN",
         "Infinity",

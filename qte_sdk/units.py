@@ -60,21 +60,20 @@ def to_micros(dollars: Decimal | str | int) -> int:
     # rounds to the current context's precision and could turn a price with a stray
     # far-off digit into a whole number of micro-dollars.
     sign, digits, exponent = value.as_tuple()
-    shift = int(exponent) + 6
-    coefficient = int("".join(map(str, digits)))
-    if coefficient == 0:
+    if not any(digits):
         return 0
-    # Both early exits below also avoid building a power of ten with a huge exponent.
-    if shift >= 0:
-        if len(digits) + shift > 20:  # more than 20 digits is beyond 64 bits
-            raise ValueError(f"{dollars!r} does not fit in a 64-bit micro-dollar price")
-        micros = coefficient * 10**shift
-    else:
-        if -shift > len(digits):  # a nonzero value smaller than one micro-dollar
-            raise ValueError(f"{dollars!r} is not a whole number of micro-dollars")
-        micros, remainder = divmod(coefficient, 10**-shift)
-        if remainder:
-            raise ValueError(f"{dollars!r} is not a whole number of micro-dollars")
+    # Trailing zeros carry no value ("1.000000000" is 1), so drop them first. The last
+    # digit left is then nonzero, and any digit below the micro-dollar place makes the
+    # price a fraction of a micro-dollar.
+    significant = len(digits)
+    while digits[significant - 1] == 0:
+        significant -= 1
+    shift = int(exponent) + len(digits) - significant + 6
+    if shift < 0:
+        raise ValueError(f"{dollars!r} is not a whole number of micro-dollars")
+    if significant + shift > 20:  # more than 20 digits is beyond 64 bits
+        raise ValueError(f"{dollars!r} does not fit in a 64-bit micro-dollar price")
+    micros = int("".join(map(str, digits[:significant]))) * 10**shift
     if sign:
         micros = -micros
     if not INT64_MIN <= micros <= INT64_MAX:

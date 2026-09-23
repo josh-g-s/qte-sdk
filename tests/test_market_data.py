@@ -317,16 +317,22 @@ async def test_a_refused_subscription_is_passed_on():
     assert item.instrument == "APPL"
 
 
-async def test_gaps_and_undecodable_market_data_are_passed_on_not_hidden():
+async def test_gaps_and_undecodable_frames_are_passed_on_not_hidden():
     bad_book = frame("book", {"instrument": "AAPL", "grid_time": "not a number"}, 1)
-    bad_order_event = frame("execution", {"exec_id": ["not", "a", "string"]}, 2)
-    frames = [bad_book, bad_order_event, "not json", frame("book", book_payload(), 5)]
+    # A reject that cannot be decoded may have been a refused subscription.
+    bad_reject = frame("reject", {"request_type": "SUBSCRIBE", "reason_code": ["x"]}, 2)
+    frames = [bad_book, bad_reject, "not json", frame("book", book_payload(), 5)]
     items = await received(frames)
 
-    assert [type(item) for item in items] == [DecodeFailed, DecodeFailed, SeqGap, Book]
-    assert items[0].type == "book"
-    assert items[1].type is None
-    assert items[2] == SeqGap(expected=3, received=5)
+    assert [type(item) for item in items] == [
+        DecodeFailed,
+        DecodeFailed,
+        DecodeFailed,
+        SeqGap,
+        Book,
+    ]
+    assert [item.type for item in items[:3]] == ["book", "reject", None]
+    assert items[3] == SeqGap(expected=3, received=5)
 
 
 def test_as_market_data_classifies_single_events():
@@ -339,7 +345,8 @@ def test_as_market_data_classifies_single_events():
     assert as_market_data(Unknown("book_v2", {}, 1)) is None
     gap = SeqGap(1, 3)
     assert as_market_data(gap) is gap
-    assert as_market_data(DecodeFailed("execution", ValueError())) is None
+    failed = DecodeFailed("execution", ValueError())
+    assert as_market_data(failed) is failed
 
 
 def test_no_option_chain_types_are_exposed():

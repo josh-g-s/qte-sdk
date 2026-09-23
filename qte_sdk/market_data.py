@@ -76,9 +76,10 @@ _SUBSCRIPTION_REQUESTS = frozenset({RequestType.SUBSCRIBE, RequestType.UNSUBSCRI
 async def subscribe(conn: Connection, instruments: Iterable[str]) -> None:
     """Ask the exchange to start sending market data for `instruments`.
 
-    Sends one `subscribe` message. The contract defines no acknowledgement for it; an
-    instrument the exchange does not know comes back as a `Reject`, which `market_data`
-    passes on.
+    Returns once the request is sent, which does not mean the exchange has accepted it:
+    no acknowledgement message is defined. An instrument the exchange does not know comes
+    back as a `Reject`, which `market_data` passes on. The subscription messages are not
+    final yet and may change in a later contract version.
     """
     await conn.send("subscribe", Subscribe(instruments=_instrument_list(instruments)))
 
@@ -86,8 +87,9 @@ async def subscribe(conn: Connection, instruments: Iterable[str]) -> None:
 async def unsubscribe(conn: Connection, instruments: Iterable[str]) -> None:
     """Ask the exchange to stop sending market data for `instruments`.
 
-    Sends one `unsubscribe` message. This SDK keeps no subscription state and filters
-    nothing locally: whatever the exchange sends is delivered.
+    Returns once the request is sent, which does not mean the exchange has acted on it.
+    This SDK keeps no subscription state and filters nothing locally: whatever the
+    exchange sends is delivered.
     """
     await conn.send("unsubscribe", Unsubscribe(instruments=_instrument_list(instruments)))
 
@@ -97,8 +99,9 @@ def as_market_data(event: Event) -> MarketDataEvent | None:
 
     Use this in your own loop over a connection when you also handle order events there.
     Returns the message for `book`, `trades`, `mark` and `session_state`; a `Reject` of a
-    `subscribe` or `unsubscribe`; every `SeqGap`; and a `DecodeFailed` for a market-data
-    message or for a frame whose type could not be read, since either may have been one.
+    `subscribe` or `unsubscribe`; and every `SeqGap` and `DecodeFailed`, since a message
+    that could not be decoded may have been market data or a refused subscription, and
+    sequence tracking has already counted it, so no later gap will report it.
     """
     if isinstance(event, Received):
         if event.type in MARKET_DATA_TYPES:
@@ -110,9 +113,7 @@ def as_market_data(event: Event) -> MarketDataEvent | None:
         ):
             return event.message
         return None
-    if isinstance(event, SeqGap):
-        return event
-    if isinstance(event, DecodeFailed) and (event.type is None or event.type in MARKET_DATA_TYPES):
+    if isinstance(event, SeqGap | DecodeFailed):
         return event
     return None
 
