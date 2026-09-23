@@ -10,17 +10,69 @@ ends when the server closes the connection normally and raises
 `websockets.exceptions.ConnectionClosedError` when it drops.
 """
 
-from collections.abc import AsyncIterator, Iterator
+import logging
+import sys
+from collections.abc import AsyncIterator, Iterator, MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
 from google.protobuf.json_format import ParseError
 from google.protobuf.message import Message
 from websockets.asyncio.client import ClientConnection, connect
+from websockets.frames import Frame
 
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import CONTRACT_VERSION, INBOUND
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+
+
+class _WithoutCredentials(logging.LoggerAdapter):
+    """Keeps the session token out of every log record the websockets library writes.
+
+    Any frame on this connection can carry the token, whole or in pieces (fragments,
+    control frames, truncated traces), so frame traces are dropped outright rather than
+    inspected. Exceptions are logged by type only, because their messages and tracebacks
+    can hold frame data.
+    """
+
+    def process(
+        self, msg: Any, kwargs: MutableMapping[str, Any]
+    ) -> tuple[Any, MutableMapping[str, Any]]:
+        # Pass the `extra` websockets attaches to each record through unchanged.
+        return msg, kwargs
+
+    def log(self, level: int, msg: Any, *args: Any, **kwargs: Any) -> None:
+        if not self.isEnabledFor(level):
+            return
+        if any(isinstance(arg, Frame) for arg in args):
+            return
+        args = _without_handshake_values(msg, args)
+        args = tuple(type(arg).__name__ if isinstance(arg, BaseException) else arg for arg in args)
+        exc_info = kwargs.pop("exc_info", None)
+        if exc_info:
+            msg = f"{msg} ({_exception_name(exc_info)}; details withheld)"
+        super().log(level, msg, *args, **kwargs)
+
+
+def _without_handshake_values(msg: Any, args: tuple[Any, ...]) -> tuple[Any, ...]:
+    # The handshake trace logs the request path, headers and status phrase as plain text;
+    # a query string, header value or phrase could carry a credential, so only names stay.
+    if msg == "> GET %s HTTP/1.1" and args:
+        return (str(args[0]).split("?", 1)[0], *args[1:])
+    if msg in ("> %s: %s", "< %s: %s") and len(args) == 2:
+        return (args[0], "<withheld>")
+    if msg == "< HTTP/1.1 %d %s" and len(args) == 2:
+        return (args[0], "<withheld>")
+    return args
+
+
+def _exception_name(exc_info: Any) -> str:
+    if isinstance(exc_info, BaseException):
+        return type(exc_info).__name__
+    if isinstance(exc_info, tuple) and exc_info and exc_info[0] is not None:
+        return exc_info[0].__name__
+    current = sys.exc_info()[0]
+    return current.__name__ if current is not None else "error"
 
 
 @dataclass(frozen=True)
@@ -87,7 +139,11 @@ class Connection:
     ) -> None:
         self.url = url
         self.contract_version = contract_version
-        self._connect_options = connect_options
+        # Any logger the caller passes is wrapped too, so no route logs the token.
+        logger = connect_options.pop("logger", None) or logging.getLogger("websockets.client")
+        if isinstance(logger, str):
+            logger = logging.getLogger(logger)
+        self._connect_options = {**connect_options, "logger": _WithoutCredentials(logger, {})}
         self._ws: ClientConnection | None = None
         self._used = False
         self._expected_seq = 1

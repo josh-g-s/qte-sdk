@@ -60,6 +60,10 @@ def decode(text: str | bytes) -> Decoded:
     payload = data["payload"]
     if not isinstance(payload, dict):
         raise ValueError("envelope payload is not a JSON object")
+    for required in ("version", "type"):
+        value = data.get(required)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"envelope {required} is missing or empty")
     head = {key: value for key, value in data.items() if key != "payload"}
     return Decoded(from_dict(head, Envelope), payload)
 

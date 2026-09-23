@@ -1,11 +1,14 @@
 import asyncio
 import json
+import logging
+import secrets
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 from fake_exchange import exchange, frame, serve_local
 from websockets.asyncio.server import ServerConnection
+from websockets.exceptions import ConnectionClosedError
 
 from qte_sdk.connection import (
     Connection,
@@ -20,7 +23,7 @@ from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
 from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 from qte_sdk.contract.v1.order_events_pb2 import Execution, Reject
-from qte_sdk.contract.v1.session_pb2 import Subscribe
+from qte_sdk.contract.v1.session_pb2 import Auth, Subscribe
 
 BIG = 9_007_199_254_740_993  # 2**53 + 1
 
@@ -84,6 +87,12 @@ async def test_a_bad_payload_still_advances_seq_and_a_missing_seq_is_not_a_gap()
         json.dumps({"version": "0.x", "type": "book", "payload": 3}),
         json.dumps({"version": "0.x", "type": "book", "seq": "abc", "payload": {}}),
         json.dumps({"version": "0.x", "type": "execution"}),
+        json.dumps({"version": "0.x", "payload": {}}),
+        json.dumps({"version": "0.x", "type": None, "payload": {}}),
+        json.dumps({"type": "book", "payload": {}}),
+        json.dumps({"version": "0.x", "type": "", "payload": {}}),
+        json.dumps({"version": "", "type": "book", "payload": {}}),
+        json.dumps({"version": None, "type": "book", "payload": {}}),
         b"\x00binary",
     ],
 )
@@ -193,3 +202,154 @@ async def test_a_connection_is_single_use():
         async with conn:
             with pytest.raises(RuntimeError):
                 await conn.open()
+
+
+async def echo_then_close(ws: ServerConnection) -> None:
+    await ws.send(await ws.recv())
+    await ws.close()
+
+
+def pieces(token: str, size: int = 6) -> set[str]:
+    return {token[i : i + size] for i in range(len(token) - size + 1)}
+
+
+def client_log(caplog: pytest.LogCaptureFixture, name: str) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name.startswith(name)]
+
+
+@pytest.mark.parametrize("logger_name", [None, "student.client"])
+async def test_the_token_never_reaches_the_debug_log(caplog, logger_name):
+    caplog.set_level(logging.DEBUG)
+    token = secrets.token_hex(32)
+    options = {} if logger_name is None else {"logger": logging.getLogger(logger_name)}
+    async with serve_local(echo_then_close) as url:
+        async with Connection(url, **options) as conn:
+            await conn.send("auth", Auth(token=token))
+            [event async for event in conn]
+    lines = client_log(caplog, logger_name or "websockets.client")
+    assert lines, "the frame trace should still be logged"
+    for line in lines:
+        assert not any(piece in line for piece in pieces(token)), line
+
+
+async def test_connection_events_are_still_logged_without_frames(caplog):
+    caplog.set_level(logging.DEBUG)
+    async with serve_local(echo_then_close) as url:
+        async with Connection(url) as conn:
+            await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
+            [event async for event in conn]
+    records = [r for r in caplog.records if r.name.startswith("websockets.client")]
+    lines = [r.getMessage() for r in records]
+    assert any("connection is" in line for line in lines)
+    assert not any(line.startswith(FRAME_TRACES) for line in lines)
+    # Once connected, websockets attaches the connection to its records; the wrapper keeps it.
+    assert any(getattr(r, "websocket", None) is not None for r in records)
+
+
+FRAME_TRACES = tuple(
+    f"{d} {op}" for d in "<>" for op in ("TEXT", "BINARY", "CONT", "PING", "PONG", "CLOSE")
+)
+
+
+def rendered(caplog: pytest.LogCaptureFixture, name: str) -> list[str]:
+    formatter = logging.Formatter("%(message)s")
+    out = []
+    for record in caplog.records:
+        if record.name.startswith(name):
+            out.append(formatter.format(record))
+    return out
+
+
+def assert_no_token(lines: list[str], token: str) -> None:
+    for line in lines:
+        assert not any(piece in line for piece in pieces(token)), line
+
+
+async def test_a_fragmented_echo_does_not_leak_the_token(caplog):
+    caplog.set_level(logging.DEBUG)
+    token = secrets.token_hex(32)
+
+    async def fragmented_echo(ws: ServerConnection) -> None:
+        text = await ws.recv()
+        await ws.send([text[i : i + 10] for i in range(0, len(text), 10)])
+        await ws.close()
+
+    async with serve_local(fragmented_echo) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            [event async for event in conn]
+    assert_no_token(rendered(caplog, "websockets.client"), token)
+
+
+async def test_control_frames_carrying_the_token_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    token = secrets.token_hex(16)
+
+    async def ping_then_close(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.ping(token.encode())
+        await asyncio.sleep(0.05)
+        await ws.close(4000, token)
+
+    async with serve_local(ping_then_close) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            with pytest.raises(ConnectionClosedError):
+                [event async for event in conn]
+    lines = rendered(caplog, "websockets.client")
+    assert not any(line.startswith(FRAME_TRACES) for line in lines)
+    assert_no_token(lines, token)
+
+
+def test_exceptions_are_logged_by_type_only(caplog):
+    from qte_sdk.connection import _WithoutCredentials
+
+    caplog.set_level(logging.DEBUG)
+    token = secrets.token_hex(32)
+    adapter = _WithoutCredentials(logging.getLogger("websockets.client"), {})
+    try:
+        raise ValueError(f"bad frame {token}")
+    except ValueError as error:
+        adapter.error("parser failed", exc_info=True)
+        adapter.warning("closing: %s", error)
+    lines = rendered(caplog, "websockets.client")
+    assert any("ValueError" in line for line in lines)
+    assert all(record.exc_info is None for record in caplog.records)
+    assert_no_token(lines, token)
+
+
+async def test_a_character_split_across_fragments_still_arrives_with_debug_on(caplog):
+    caplog.set_level(
+        logging.DEBUG, logger="websockets.client"
+    )  # the fake server's own trace cannot render a split character
+    envelope = {"version": "0.x", "type": "book", "seq": 1}
+    envelope["payload"] = {"instrument": "\u00e9t\u00e9", "grid_time": "1"}
+    encoded = json.dumps(envelope, ensure_ascii=False).encode()
+    cut = encoded.index("\u00e9".encode()) + 1  # inside the two-byte character
+
+    async def split_utf8(ws: ServerConnection) -> None:
+        async with ws.send_context():
+            ws.protocol.send_text(encoded[:cut], fin=False)
+            ws.protocol.send_continuation(encoded[cut:], fin=True)
+        await ws.close()
+
+    async with serve_local(split_utf8) as url:
+        async with Connection(url) as conn:
+            events = [event async for event in conn]
+    assert len(events) == 1
+    assert isinstance(events[0], Received)
+    assert events[0].message.instrument == "\u00e9t\u00e9"
+
+
+async def test_handshake_trace_withholds_query_and_header_values(caplog):
+    caplog.set_level(logging.DEBUG)
+    token = secrets.token_hex(32)
+    async with serve_local(echo_then_close) as url:
+        options = {"additional_headers": {"X-Api-Key": token}}
+        async with Connection(f"{url}/ws?key={token}", **options) as conn:
+            await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
+            [event async for event in conn]
+    lines = rendered(caplog, "websockets.client")
+    assert any(line.startswith("> GET /ws ") for line in lines)
+    assert any(line.startswith("> X-Api-Key: ") for line in lines)
+    assert_no_token(lines, token)
