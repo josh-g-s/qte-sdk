@@ -1,0 +1,193 @@
+// Outbound market data.
+//
+// **Version:** 1.8
+//
+// Message types on the envelope `type` field: `book`, `trades`, `mark`,
+// `session_state`. One feed for everyone (SPEC 4.3): the same publisher, the
+// same timestamp, the same 100 ms conflation grid for `book`, `trades` and
+// `session_state`; `mark` is published on its own one-second grid (SPEC 4.3,
+// SPEC 7.1). Engine state (the flow accumulators, the impact offset, the
+// carry, the Tier-M state) is not published and has no field here (SPEC 6.1,
+// SPEC 9.3.3, SPEC 9.3.5). Every `timestamp` field's wire resolution and
+// representation is not yet specified.
+syntax = "proto3";
+
+package qte.contract.v1;
+
+import "qte/contract/v1/common.proto";
+
+option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
+
+// An instrument's condition, published with the adjusted book and with the
+// mark (SPEC 4.3, SPEC 7.1, SPEC 7.2): one enum shared by `Book.condition`
+// and `Mark.condition` rather than two separate top-level enums, since both
+// draw from the same named set of conditions and a second top-level enum
+// could not redeclare FROZEN or REFERENCE_UNAVAILABLE (proto enum values
+// share their package's scope). A
+// `Mark` only ever carries LIVE, FROZEN or REFERENCE_UNAVAILABLE: ONE_SIDED,
+// EMPTY and DISABLED describe the wall (SPEC 5.2, SPEC 3.3), which a mark,
+// reading only the raw live quote (SPEC 7.1, I1), has no notion of.
+//
+// More than one condition can hold at once. `Book.condition` then reports
+// the first that applies, in this order: DISABLED, then
+// REFERENCE_UNAVAILABLE, then the live quote's shape (ONE_SIDED or EMPTY),
+// then FROZEN, then LIVE. The value comments below restate each step.
+enum InstrumentCondition {
+  INSTRUMENT_CONDITION_UNSPECIFIED = 0;
+  // The live quote is two-sided and the mark tracks it (SPEC 7.1). Also
+  // `Book.condition` while the mark is live, even though the SPEC 4.3 list
+  // itself never names a "normal" condition: a value is still needed to
+  // populate a Required field when none of the other conditions holds.
+  LIVE = 1;
+  // The live quote is one-sided: the wall shows only the quoted side
+  // (SPEC 5.2). This also means the mark is frozen (SPEC 7.2), and
+  // `Book.condition` reports the more specific ONE_SIDED rather than
+  // FROZEN. `Mark.condition` never carries this value.
+  ONE_SIDED = 2;
+  // No wall is shown because the live quote is genuinely empty (SPEC 5.2).
+  // Students may still trade with each other, and the mark is frozen on the
+  // same basis as ONE_SIDED. `Mark.condition` never carries this value.
+  // (A disabled instrument shows no wall too, but for an unrelated reason,
+  // and publishes DISABLED instead, never EMPTY: see that value.)
+  EMPTY = 3;
+  // The mark is held at its last live value: the live spread exceeded the
+  // fallback multiple of the instrument's 20-session median while the quote
+  // was two-sided (SPEC 7.2). It stays held, not an instantaneous test
+  // re-run each second, until five consecutive one-second two-sided marks
+  // each also pass the spread test, recovering it to the live midpoint
+  // (SPEC 7.2). A one-sided or empty quote also
+  // freezes the mark, but `Book.condition` reports ONE_SIDED or EMPTY then,
+  // not this value, since the quote's shape is the more specific fact. This
+  // value also covers a freeze carried over from an earlier one-sided or
+  // empty quote that has since gone two-sided again: ONE_SIDED and EMPTY no
+  // longer apply, but the mark is still held from before, its five-sample
+  // recovery not yet complete (SPEC 7.2).
+  FROZEN = 4;
+  // Before the instrument's first valid mark of the session: no
+  // risk-increasing order is accepted in it (SPEC 7.2). `Book.condition`
+  // reports this over ONE_SIDED, EMPTY, FROZEN and LIVE, whatever the live
+  // quote's shape: it is the strongest fact about an enabled instrument's
+  // condition. Only DISABLED is reported over it.
+  REFERENCE_UNAVAILABLE = 5;
+  // The instrument itself is disabled (SPEC 3.3): its frozen statistics are
+  // degenerate, so it accepts no orders and shows no wall, whatever its live
+  // quote looks like. Only `Book.condition` carries this value; a disabled
+  // instrument's mark keeps reading the raw live quote as usual (SPEC 7.1,
+  // I1) and can still be LIVE, FROZEN or REFERENCE_UNAVAILABLE.
+  // `Book.condition` reports this over every other value, whatever the live
+  // quote or the mark shows: it is the strongest fact about the
+  // instrument's condition.
+  DISABLED = 6;
+}
+
+// One level of the wall ladder (SPEC 5.3).
+message WallLevel {
+  int64 price = 1; // int64-micro. SPEC 5.3, SPEC 6.2
+  int64 size = 2;  // int64-qty. The displayed size, at least one share. SPEC 5.3
+}
+
+// One price of resting student depth (SPEC 4.3).
+message StudentLevel {
+  int64 price = 1; // int64-micro. The price the orders rest at. SPEC 4.3
+  // int64-qty. The total resting size at that price, STALE orders included,
+  // with no team, no strategy and no order count. SPEC 4.3, SPEC 8.4
+  int64 size = 2;
+}
+
+// The adjusted book of one instrument at the end of one 100 ms interval: the
+// wall ladder and the resting student depth (SPEC 4.3, SPEC 5.3, SPEC 5.4).
+message Book {
+  string instrument = 1;  // id. SPEC 3.1
+  int64 grid_time = 2;    // timestamp. The end of the interval; identical for every subscriber. SPEC 4.3
+  // Ten levels, level 1 first, running outward. Empty when the live quote
+  // has no bid. SPEC 5.2, SPEC 5.3
+  repeated WallLevel bid_levels = 3;
+  // As above, for the ask side. Empty when the live quote has no offer.
+  repeated WallLevel ask_levels = 4;
+  // Resting student buy orders, one entry per price, best price first, with
+  // no identity of any kind. A price a wall level also stands at keeps its
+  // own entry here: student size is never folded into the wall's. Empty when
+  // no student order rests on the side. SPEC 4.3
+  repeated StudentLevel student_bid_levels = 5;
+  // As above, for resting student sell orders. SPEC 4.3
+  repeated StudentLevel student_ask_levels = 6;
+  // The instrument's condition, one of the SPEC 4.3 names or LIVE (SPEC 4.3,
+  // SPEC 7.1). Derived from whether the instrument is disabled (DISABLED;
+  // SPEC 3.3), the wall shown above (ONE_SIDED, EMPTY) and the instrument's
+  // last-sampled Mark (FROZEN, REFERENCE_UNAVAILABLE). When more than one
+  // applies, the first in this order is shown: DISABLED, then
+  // REFERENCE_UNAVAILABLE, then ONE_SIDED or EMPTY, then FROZEN, then LIVE
+  // (see InstrumentCondition). Required; never
+  // INSTRUMENT_CONDITION_UNSPECIFIED on the wire.
+  InstrumentCondition condition = 7;
+}
+
+// One tape print (SPEC 10).
+message TapePrint {
+  // int64-micro. Depends on kind (SPEC 10): STUDENT_TO_STUDENT and
+  // TRADE_BASED_MATCH print at the resting student order's own limit price;
+  // STUDENT_TO_WALL at the wall execution price, one print per wall fill;
+  // RESIDUAL at the impact-shifted wall price on the side the aggressor
+  // took. When that side shows no wall, a RESIDUAL prints at the last
+  // published price that side showed this session, else at the last price
+  // it showed in the previous session; where there is no previous session
+  // to carry from, the price is not yet specified (SPEC 9.3.1).
+  // SPEC 9.1, SPEC 9.3.1, SPEC 10
+  int64 price = 1;
+  int64 size = 2;         // int64-qty. Shares. SPEC 10
+  Side aggressor_side = 3; // SPEC 10
+  // timestamp. The print time shown on the tape: equal to the sequencer
+  // timestamp, except for a trade-based match and its residual prints,
+  // where it is the time of the first live print in the aggregate.
+  // SPEC 9.4.2 rank 8, SPEC 9.4.5 Example C
+  int64 timestamp = 4;
+  MatchKind kind = 5;     // Includes RESIDUAL, unlike execution.fill_kind. SPEC 10
+}
+
+// The tape prints of one instrument published at one grid boundary
+// (SPEC 4.3, SPEC 10).
+message Trades {
+  string instrument = 1; // id. SPEC 3.1
+  int64 grid_time = 2;   // timestamp. The grid boundary the prints are published at. SPEC 4.3
+  // The prints since the previous boundary, in sequencer order. At least one
+  // element. Where several prints happen within one interval, each is
+  // published individually, as here, never aggregated (SPEC 4.3, SPEC 10).
+  repeated TapePrint prints = 3;
+}
+
+// The official mark of one instrument, sampled and published on the
+// one-second grid (SPEC 4.3, SPEC 7.1, SPEC 7.2).
+message Mark {
+  string instrument = 1; // id. SPEC 3.1
+  // timestamp. The one-second grid instant this mark was sampled at
+  // (SPEC 7.1), not the 100 ms grid `grid_time` uses on `Book`, `Trades` and
+  // `SessionState`.
+  int64 sampled_at = 2;
+  // int64-micro. The raw live NBBO midpoint, off the tick where it falls:
+  // the one published price that is not a tick multiple (SPEC 5.1, SPEC
+  // 7.1). The zero value while condition is REFERENCE_UNAVAILABLE, which
+  // carries no mark value.
+  int64 value = 3;
+  // LIVE, FROZEN or REFERENCE_UNAVAILABLE; never ONE_SIDED or EMPTY (see
+  // InstrumentCondition). Required; never INSTRUMENT_CONDITION_UNSPECIFIED
+  // on the wire.
+  InstrumentCondition condition = 4;
+}
+
+// SPEC 8.1, SPEC 13.1. No order entry before the open; every order is
+// cancelled at the close.
+message SessionState {
+  MarketSessionPhase state = 1; // OPEN or CLOSED. SPEC 8.1, SPEC 13.1
+  string session_date = 2;      // string. The US session date, ISO 8601. SPEC 13.1
+  int64 open_time = 3;          // timestamp. 09:30 America/New_York. SPEC 13.1
+  // 16:00 America/New_York, or 13:00 on an early-close day.
+  int64 close_time = 4;         // timestamp. SPEC 13.1, SPEC 13.2
+  int64 grid_time = 5;          // timestamp. The grid boundary this message is published at. SPEC 4.3
+  // Whether a Director-declared exchange outage is in force. Orthogonal to
+  // `state`: a cancel and a mass-cancel still apply during an outage, unlike
+  // during CLOSED, so this is not a third session-phase value (SPEC 4.3). A
+  // feed gap or a regulatory or feed halt in one instrument is not an outage
+  // and carries no field here: it is that instrument's `Book.condition`
+  // (ONE_SIDED or EMPTY) instead (SPEC 5.2, InstrumentCondition above).
+  bool outage_active = 6;
+}

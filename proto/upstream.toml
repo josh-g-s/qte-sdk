@@ -1,0 +1,16 @@
+# The one place that records where the vendored contract came from.
+# Written by scripts/vendor_contract.py; bump `commit` deliberately and re-run it.
+# Each blob is the git blob hash of that file at `commit`, and CI checks the vendored
+# bytes against it.
+
+repo = "qte-platform"
+commit = "4fea4e319bae9d7abe53effef3a382136c27e731"
+path = "schemas/proto/qte/contract/v1"
+
+[blobs]
+"common.proto" = "b87d21a48b9577e5145d29ace4a685355b34c808"
+"envelope.proto" = "872bd4e64591972ad9c52af1d0ec5cc0d0db3cf7"
+"session.proto" = "b4b54de9ca841b338aa8332e2a17bea403007cbe"
+"order_entry.proto" = "81c1b41b97d0ca9131274f387d0a2710dca18b60"
+"order_events.proto" = "acdefdbf366008c9c84346e5a005a5959da1df89"
+"market_data.proto" = "7bf7c956eb266884d3fe273269fb1843f7d981fe"

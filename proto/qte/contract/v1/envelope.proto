@@ -1,0 +1,48 @@
+// The envelope that wraps every message on the wire.
+//
+// **Version:** 1.1
+//
+// Status: PROVISIONAL. The session layer (the envelope, the handshake,
+// sequence numbers, heartbeats and resume) is not yet specified; SPEC.md
+// does not define it. The transport and encoding are decided: WebSocket,
+// JSON messages, with these `.proto` files as the schema source and the
+// canonical protobuf JSON mapping. This message is a working proposal, so
+// clients have something to build against; it is not in force and its shape
+// may change.
+syntax = "proto3";
+
+package qte.contract.v1;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
+
+// Wraps every message on the wire.
+message Envelope {
+  // string. The contract version the message conforms to. How versions are
+  // numbered and changed is not yet specified.
+  string version = 1;
+  // Message kind: one of the message-type tokens named at the top of
+  // `session.proto`, `order_entry.proto`, `order_events.proto` and
+  // `market_data.proto`, for example `new` or `book`. Left a `string`
+  // rather than a proto enum on purpose: a new message type is meant to be
+  // an additive change, and a new value in a closed enum would make it a
+  // breaking one. The contract's versioning rules are not yet specified.
+  string type = 2;
+  // Required on outbound; absent on inbound. Strictly increasing per
+  // connection, for gap detection and resume. Unrelated to the exchange's
+  // own event ordering (SPEC 20.2). Deliberately int32, not int64: it is a
+  // transport counter, so it stays an ordinary JSON number rather than the
+  // decimal string the JSON mapping uses for 64-bit fields. Sequence
+  // numbering is not yet specified.
+  optional int32 seq = 3;
+  // timestamp. Required on outbound: the server's send time. Part of the
+  // session layer, not yet specified.
+  optional int64 sent_at = 4;
+  // The type-specific body. `google.protobuf.Struct` stands in for a JSON
+  // object while the session layer, and so the typed union this might
+  // become, is not yet specified. The payload's own message type
+  // (NewOrder, Accepted, Book, and so on, in the sibling `.proto` files)
+  // defines its shape; this field does not itself enforce that shape.
+  google.protobuf.Struct payload = 5;
+}

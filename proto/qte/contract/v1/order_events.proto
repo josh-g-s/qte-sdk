@@ -1,0 +1,116 @@
+// Outbound order events.
+//
+// **Version:** 1.4
+//
+// Message types on the envelope `type` field: `accepted`, `reject`,
+// `execution`, `order_cancelled`, `order_state`, `risk_notice`. These are
+// private to the team whose orders they concern. Each is sent as soon as the
+// engine records it, not held to the market-data publication grid (SPEC 4.3).
+// Every `timestamp` field's wire resolution and representation is not yet
+// specified.
+syntax = "proto3";
+
+package qte.contract.v1;
+
+import "qte/contract/v1/common.proto";
+
+option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
+
+// The inbound message was released after delta_oe and applied (SPEC 8.1).
+message Accepted {
+  string request_ref = 1;     // id. Echoes the inbound message. Its rules are not yet specified
+  RequestType request_type = 2; // NEW, CANCEL, AMEND or MASS_CANCEL. SPEC 8.2
+  int64 receipt_time = 3;     // timestamp. Gateway receipt. SPEC 8.1
+  int64 release_time = 4;     // timestamp. receipt_time plus delta_oe. SPEC 8.1
+}
+
+// One reject shape for every inbound message. Every reject carries one
+// reason code from the registry (`common.proto`'s `ReasonCodes.ReasonCode`).
+// When a reject is issued depends on where its check sits: a receipt-stage
+// reject is sent at gateway receipt; a release-stage reject is logged at
+// release (SPEC 9.4).
+message Reject {
+  // Required, except absent when the message could not be parsed far enough
+  // to read one. Not yet specified.
+  optional string request_ref = 1; // id
+  // Required when the received `type` token is one of the enum values;
+  // absent when it is not, independently of request_ref. Not yet specified.
+  optional RequestType request_type = 2;
+  ReasonCodes.ReasonCode reason_code = 3; // Bands 1000-1600. SPEC 8.1, SPEC 8.3, SPEC 11
+  optional string reason_detail = 4;      // Free text, for example the risk limit that failed
+  int64 receipt_time = 5;                 // timestamp. Gateway receipt. SPEC 8.1
+  // Present iff reason_code = UNKNOWN_INSTRUMENT on a subscription. Not yet specified.
+  optional string instrument = 6; // id
+}
+
+// One fill of one of the team's orders. Counterparty identity is never
+// disclosed (SPEC 10). Every fill, fee and rebate an Execution ticket's child
+// orders generate posts immediately to the originating Fundamentals pod's or
+// house's own cash balance and position; a desk holds no separate ticket cash
+// position of its own (SPEC 12.2, SPEC 24). How a child order names its parent
+// ticket, and how a fill in this report links to one, are not yet in this
+// contract.
+message Execution {
+  string exec_id = 1;  // id. Fill report identity. SPEC 8.2. Its format is not yet specified
+  Origin origin = 2;   // SPEC 11.1, SPEC 11.2
+  optional string strat_id = 3; // id. Required iff origin = TEAM. SPEC 2.5
+  string instrument = 4;        // id. SPEC 8.2
+  Side side = 5;                // The team's side. SPEC 8.2
+  // Required iff the filled order is a limit order: the order's limit price,
+  // whether the order was resting or filled on arrival.
+  optional int64 order_price = 6; // int64-micro. SPEC 8.2
+  int64 fill_price = 7;   // int64-micro. SPEC 5.3, SPEC 9.1, SPEC 9.3.1
+  int64 fill_size = 8;    // int64-qty. SPEC 5.3, SPEC 9.3.3
+  int64 remaining_size = 9; // int64-qty. 0 when filled. SPEC 8.2
+  MatchKind fill_kind = 10; // Never RESIDUAL here. SPEC 10
+  Liquidity liquidity = 11; // SPEC 12.1, SPEC 16.4
+  // Signed cash flow to the team: negative taker fee, positive maker rebate,
+  // 0 when neither applies. SPEC 12.1
+  int64 fee = 12; // int64-micro
+  int64 timestamp = 13; // timestamp. The execution event's sequencer timestamp. SPEC 9.2
+}
+
+// One order of the team was cancelled with its remaining size unfilled:
+// either removed from the book, or an aggressive order's unfilled remainder
+// cancelled on arrival without ever resting.
+message OrderCancelled {
+  Origin origin = 1; // As on Execution. SPEC 11.2
+  optional string strat_id = 2; // id. Required iff origin = TEAM. SPEC 2.5
+  string instrument = 3;        // id. SPEC 8.2
+  Side side = 4;                // SPEC 8.2
+  // Required iff the order is a limit order: the order's limit price, also
+  // for an aggressive order's remainder that was cancelled without resting.
+  optional int64 price = 5; // int64-micro. SPEC 8.2
+  int64 cancelled_size = 6; // int64-qty. The remaining size removed. SPEC 8.2
+  ReasonCodes.ReasonCode reason_code = 7; // Band 1800. SPEC 8
+  // Present iff reason_code is CANCEL_REQUEST, MASS_CANCEL or AMEND_CUT. Not yet specified.
+  optional string request_ref = 8; // id
+  int64 timestamp = 9; // timestamp. Sequencer timestamp of the cancellation. SPEC 9.2
+}
+
+// The current state of one resting order, identified by its instrument,
+// side and price (a team holds at most one there, SPEC 8.2).
+message OrderState {
+  string strat_id = 1;   // id. SPEC 2.5
+  string instrument = 2; // id. SPEC 8.2
+  Side side = 3;          // SPEC 8.2
+  int64 price = 4;        // int64-micro. SPEC 8.2
+  // RESTING or STALE. A STALE transition is never reported to the owner, who
+  // recognises the band move from the book; the purge that ends the order is
+  // reported as an OrderCancelled with PURGE_STALE (SPEC 4.3, SPEC 8.4).
+  OrderLifecycleState state = 5; // SPEC 8.4
+  int64 remaining_size = 6;      // int64-qty. SPEC 8.2
+  // Present iff state = STALE: when the order became STALE. SPEC 8.4
+  optional int64 stale_since = 7; // timestamp
+  int64 timestamp = 8; // timestamp. SPEC 9.2
+}
+
+// SPEC 11.1. A team is told on this connection, when the engine records it,
+// of the daily loss warning, a loss halt, a cure window opening and its
+// deadline, a cure trade, the auto-flatten and the kill switch (SPEC 11.1,
+// SPEC 15.4). Only LOSS_WARNING has a kind value so far; the other five, and
+// any field carrying a cure deadline, are not yet specified.
+message RiskNotice {
+  RiskNoticeKind kind = 1; // SPEC 11.1
+  int64 timestamp = 2;     // timestamp. SPEC 9.2
+}
