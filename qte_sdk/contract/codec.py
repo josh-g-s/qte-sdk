@@ -1,6 +1,6 @@
 """JSON codec for the QTE wire contract.
 
-The wire is JSON in the canonical protobuf JSON mapping (qte-platform DL-09): proto field
+The wire is JSON in the canonical protobuf JSON mapping: proto field
 names are kept as written, 64-bit integers travel as decimal strings, and unknown fields
 are ignored so the SDK keeps working when the contract adds fields.
 """

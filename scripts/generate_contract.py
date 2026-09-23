@@ -6,6 +6,7 @@
 CI runs this and fails if the committed generated code differs.
 """
 
+import hashlib
 import re
 import shutil
 import sys
@@ -33,13 +34,23 @@ IMPORT = re.compile(r"^from qte\.contract\.v1 import ", re.MULTILINE)
 MODULE_NAME = re.compile(r"(BuildTopDescriptorsAndMessages\(DESCRIPTOR, )'qte\.contract\.v1\.")
 
 
+def git_blob_sha(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
 def main() -> int:
     manifest = tomllib.loads(MANIFEST.read_text())
-    listed = sorted(manifest["files"])
+    blobs: dict[str, str] = manifest["blobs"]
+    listed = sorted(blobs)
     present = sorted(p.name for p in PROTO_DIR.iterdir())
     if present != listed:
         print(f"proto dir {present} does not match the manifest {listed}", file=sys.stderr)
         return 1
+    for name, sha in blobs.items():
+        actual = git_blob_sha((PROTO_DIR / name).read_bytes())
+        if actual != sha:
+            print(f"{name} hashes to {actual}, but the manifest pins {sha}", file=sys.stderr)
+            return 1
     protos = [PROTO_DIR / name for name in listed]
     well_known = str(resources.files("grpc_tools") / "_proto")
     with tempfile.TemporaryDirectory() as tmp:
