@@ -3,7 +3,8 @@ import json
 import logging
 import secrets
 import traceback
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -580,3 +581,44 @@ async def test_log_records_expose_no_route_to_reflected_text(caplog):
                 value = getattr(value, name, None)
             reachable.append(repr(value))
         assert_no_token(reachable, token)
+
+
+@asynccontextmanager
+async def silent_server() -> AsyncIterator[str]:
+    """Accepts TCP connections and never answers the opening handshake."""
+    held: list[asyncio.StreamWriter] = []
+
+    async def hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    server = await asyncio.start_server(hold, "127.0.0.1", 0)
+    try:
+        yield f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    finally:
+        for writer in held:
+            writer.close()
+        server.close()
+        await server.wait_closed()
+
+
+async def test_a_handshake_timeout_keeps_request_headers_out_of_the_traceback():
+    token = secrets.token_hex(16)
+    async with silent_server() as url:
+        conn = Connection(url, additional_headers={"X-Key": token}, open_timeout=0.2)
+        with pytest.raises(TimeoutError) as caught:
+            await conn.open()
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert_no_token(shown_with_locals(caught.value), token)
+
+
+async def test_cancelling_the_handshake_keeps_request_headers_out_of_the_traceback():
+    token = secrets.token_hex(16)
+    async with silent_server() as url:
+        conn = Connection(url, additional_headers={"X-Key": token}, open_timeout=10)
+        opening = asyncio.create_task(conn.open())
+        await asyncio.sleep(0.1)
+        opening.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await opening
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert_no_token(shown_with_locals(caught.value), token)

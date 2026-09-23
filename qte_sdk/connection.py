@@ -252,6 +252,11 @@ class Connection:
         except InvalidHandshake as error:
             status = getattr(getattr(error, "response", None), "status_code", None)
             failure = HandshakeFailed(type(error).__name__, status)
+        except BaseException as error:
+            # A timeout or cancellation keeps its type, but not the handshake frames below
+            # this one or the chain: they hold the request headers.
+            failure = error.with_traceback(None)
+            failure.__cause__ = failure.__context__ = None
         else:
             return
         raise failure
