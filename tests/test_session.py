@@ -262,9 +262,11 @@ async def test_a_token_echoed_in_a_close_reason_is_withheld():
     assert_token_absent(token, shown(caught.value))
 
 
-async def test_a_token_echoed_in_an_undecodable_ack_is_withheld():
+@pytest.mark.parametrize("field", ["server_time", "session_id"])
+async def test_a_token_echoed_in_an_undecodable_ack_is_withheld(field: str):
     token = synthetic_token()
-    server = Server(frame("session_ack", {"server_time": token}, 1))
+    payload = {"session_id": "s-1", "server_time": "not a number", field: token}
+    server = Server(frame("session_ack", payload, 1))
     async with serve_local(server) as url:
         with pytest.raises(SessionNotAcknowledged) as caught:
             await open_session(url, token)

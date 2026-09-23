@@ -191,9 +191,8 @@ async def _wait_for_ack(conn: Connection, timeout: float | None) -> tuple[Sessio
                         )
                         raise SessionRejected(message.reason_code, detail)
                 elif isinstance(event, DecodeFailed) and event.type == "session_ack":
-                    raise SessionNotAcknowledged(
-                        "session_ack could not be decoded"
-                    ) from event.error
+                    # Not chained: the decoder's frames hold the raw payload in their locals.
+                    raise SessionNotAcknowledged(f"session_ack could not be decoded: {event.error}")
                 early.append(event)
     finally:
         await events.aclose()
