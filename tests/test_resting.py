@@ -130,14 +130,17 @@ def test_a_size_only_amend_sets_the_remaining_size():
     assert len(view) == 1
 
 
-def test_an_amend_that_moves_price_adds_the_entry_at_the_new_price():
-    # Removing the entry at the old price is not asserted: no event names that price.
+def test_known_limitation_a_price_moving_amend_leaves_the_old_entry():
+    # Pinned on purpose: no event names the price an amend moved an order away from, so the
+    # old entry stays until the contract reports it. Update this when that changes.
     view = view_of(
         rested(price=PX),
         Accepted(request_ref="r-2", request_type=AMEND),
         rested(price=PX2, size=70),
     )
     assert view.get("AAPL", BUY, PX2).remaining_size == 70
+    assert view.get("AAPL", BUY, PX) is not None
+    assert not view.incomplete
 
 
 def test_a_rejected_amend_leaves_the_entry_unchanged():

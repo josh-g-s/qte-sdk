@@ -23,9 +23,12 @@ What the view cannot know:
 
 - An order becoming STALE is never reported to its owner, so an entry can read RESTING
   while the exchange holds it STALE. The purge that follows is reported and removes it.
-- No event names the price an amend moved an order away from. If the order still rests,
-  an `order_state` at the new price adds the new entry; if it executed in full at the new
-  price, nothing names it at all. Either way the entry at the old price is not removed.
+- Known limitation, pending a contract change: no event names the price an amend moved an
+  order away from. If the order still rests, an `order_state` at the new price adds the
+  new entry; if it executed in full at the new price, nothing names it at all. Either way
+  the entry at the old price stays in the view, and `incomplete` is not set. If you need
+  an accurate view, cancel and re-enter instead of amending the price, or reconcile the
+  old level yourself. Size-only amends are tracked correctly.
 - A new view starts empty, which is right only if the team has no resting orders when it
   starts. If orders may already rest (for example on a reconnect), call
   `mark_incomplete()`: nothing yet reports the orders already on the book.
@@ -73,7 +76,12 @@ class RestingOrder:
 
 
 class RestingOrders:
-    """The team's resting orders, keyed by level key, updated only from exchange events."""
+    """The team's resting orders, keyed by level key, updated only from exchange events.
+
+    Known limitation: after an amend that changes an order's price, the entry at the old
+    price is not removed, because no exchange event names that price yet. Cancel and
+    re-enter instead of amending the price if you rely on this view.
+    """
 
     def __init__(self) -> None:
         self._orders: dict[LevelKey, RestingOrder] = {}
