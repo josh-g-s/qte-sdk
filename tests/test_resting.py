@@ -1,3 +1,5 @@
+from contextlib import aclosing
+
 import pytest
 from fake_exchange import frame, serve_local
 from websockets.asyncio.server import ServerConnection
@@ -129,6 +131,7 @@ def test_a_size_only_amend_sets_the_remaining_size():
 
 
 def test_an_amend_that_moves_price_adds_the_entry_at_the_new_price():
+    # Removing the entry at the old price is not asserted: no event names that price.
     view = view_of(
         rested(price=PX),
         Accepted(request_ref="r-2", request_type=AMEND),
@@ -298,6 +301,21 @@ async def test_events_decoded_from_the_wire_update_the_view():
     assert view.get("AAPL", BUY, PX).remaining_size == 60
     # The connection has ended, so later events can no longer reach the view.
     assert view.incomplete
+
+
+async def test_stopping_early_marks_the_view_incomplete_when_the_iterator_is_closed():
+    async def handler(ws: ServerConnection) -> None:
+        await ws.send(frame("order_state", _json_state(PX), 1))
+        await ws.wait_closed()
+
+    view = RestingOrders()
+    async with serve_local(handler) as url:
+        async with Connection(url) as conn:
+            async with aclosing(view.follow(conn)) as events:
+                async for _ in events:
+                    break
+            assert view.incomplete
+    assert view.get("AAPL", BUY, PX).remaining_size == 100
 
 
 def _json_state(price: int) -> dict:

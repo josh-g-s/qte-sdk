@@ -23,12 +23,15 @@ What the view cannot know:
 
 - An order becoming STALE is never reported to its owner, so an entry can read RESTING
   while the exchange holds it STALE. The purge that follows is reported and removes it.
-- An amend that moves an order to a new price is reported with an `order_state` at the new
-  price only; no event names the price it left. The new entry appears, but the entry at
-  the old price is not removed by the view.
+- No event names the price an amend moved an order away from. If the order still rests,
+  an `order_state` at the new price adds the new entry; if it executed in full at the new
+  price, nothing names it at all. Either way the entry at the old price is not removed.
+- A new view starts empty, which is right only if the team has no resting orders when it
+  starts. If orders may already rest (for example on a reconnect), call
+  `mark_incomplete()`: nothing yet reports the orders already on the book.
 - Events missed on a sequence gap, a frame that could not be decoded, or a disconnect can
-  leave the view wrong. It is then marked `incomplete` and stays so: there is no resume
-  yet, so a fresh view on a fresh session is the only way back to a complete one.
+  leave the view wrong. It is then marked `incomplete` and stays so, since there is no
+  resume yet.
 """
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator
@@ -117,8 +120,9 @@ class RestingOrders:
     async def follow(self, events: AsyncIterable[Event]) -> AsyncIterator[Event]:
         """Apply every event from a connection and pass it on.
 
-        When iteration ends for any reason (the connection closes or drops, or the caller
-        stops), the view is marked incomplete, since later events will not reach it.
+        When the connection closes or drops, the view is marked incomplete, since later
+        events will not reach it. A caller that stops iterating early should close the
+        iterator, for example with `contextlib.aclosing`, so the view is marked at once.
         """
         try:
             async for event in events:
