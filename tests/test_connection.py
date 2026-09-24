@@ -636,9 +636,13 @@ async def deaf_server() -> AsyncIterator[str]:
 
 
 async def fill_until_stalled(conn: Connection) -> "asyncio.Task[None]":
-    """Send until a send cannot complete; returns that send, still waiting."""
-    message = Subscribe(instruments=["X" * 1000] * 16)
-    for _ in range(10_000):
+    """Send until a send cannot complete; returns that send, still waiting.
+
+    Each message is 64 KB of random text, so with compression off the writes back up
+    after a few megabytes whatever the host's socket buffer sizes; the cap is 64 MB.
+    """
+    message = Subscribe(instruments=[secrets.token_hex(500) for _ in range(64)])
+    for _ in range(1_000):
         sending = asyncio.create_task(conn.send("subscribe", message))
         done, _ = await asyncio.wait({sending}, timeout=0.05)
         if not done:
@@ -649,7 +653,7 @@ async def fill_until_stalled(conn: Connection) -> "asyncio.Task[None]":
 
 async def test_close_is_bounded_when_the_peer_stops_reading():
     async with deaf_server() as url:
-        conn = Connection(url, close_timeout=0.2)
+        conn = Connection(url, close_timeout=0.2, compression=None)
         await conn.open()
         stalled = await fill_until_stalled(conn)
         started = asyncio.get_running_loop().time()
