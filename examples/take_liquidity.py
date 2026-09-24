@@ -205,7 +205,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosedError:
-        return fail("the connection dropped; the SDK does not reconnect for you yet, so run again")
+        return fail(
+            "the connection dropped, so the order's outcome may not be known; the SDK does "
+            "not reconnect for you yet. Check your fills before running this again"
+        )
     except KeyboardInterrupt:
         return 130
 

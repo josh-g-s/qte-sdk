@@ -71,7 +71,9 @@ class FakeExchange:
         move_bid_after: int | None = None,
         teammate_fill_first: bool = False,
         gap_after_resting: int | None = None,
+        reject_first_cancel_then_gap: bool = False,
     ) -> None:
+        self.reject_first_cancel_then_gap = reject_first_cancel_then_gap
         self.reject_new = reject_new
         self.partial_fill = partial_fill
         self.move_bid_after = move_bid_after
@@ -140,6 +142,16 @@ class FakeExchange:
         ref = p.get("request_ref")
         accepted = {"request_ref": ref, "request_type": type_.upper(), "receipt_time": "1"}
         if type_ == "new":
+            level = (p["instrument"], p["side"], int(p.get("price", 0)))
+            if p["order_type"] == "LIMIT" and level in self.resting:
+                reject = {
+                    "request_ref": ref,
+                    "request_type": "NEW",
+                    "reason_code": "DUPLICATE_ORDER_AT_LEVEL",
+                    "receipt_time": "1",
+                }
+                await self.send(ws, "reject", reject)
+                return
             if self.reject_new is not None:
                 reject = {
                     "request_ref": ref,
@@ -187,15 +199,6 @@ class FakeExchange:
                 await self.send(ws, "execution", fill)
                 return
             key = (p["instrument"], p["side"], int(p["price"]))
-            if key in self.resting:
-                reject = {
-                    "request_ref": ref,
-                    "request_type": "NEW",
-                    "reason_code": "DUPLICATE_ORDER_AT_LEVEL",
-                    "receipt_time": "1",
-                }
-                await self.send(ws, "reject", reject)
-                return
             self.resting[key] = (p["strat_id"], size)
             await self.send(ws, "order_state", self.order_state(key))
             self.resting_reports += 1
@@ -226,6 +229,17 @@ class FakeExchange:
             await self.send(ws, "order_state", self.order_state(key))
         elif type_ == "cancel":
             key = (p["instrument"], p["side"], int(p["price"]))
+            if self.reject_first_cancel_then_gap:
+                self.reject_first_cancel_then_gap = False
+                reject = {
+                    "request_ref": ref,
+                    "request_type": "CANCEL",
+                    "reason_code": "MIN_REST_VIOLATION",
+                    "receipt_time": "1",
+                }
+                await self.send(ws, "reject", reject)
+                self._seq += 1  # one message the client never receives
+                return
             if key not in self.resting:
                 reject = {
                     "request_ref": ref,
@@ -430,6 +444,41 @@ async def test_quote_both_sides_stops_sending_when_messages_are_missed():
     assert f"BUY {INSTRUMENT} @ 99.960000" in out
     assert exchange.types().count("new") == 2
     assert "cancel" not in exchange.types()  # it sends nothing more
+
+
+async def test_quote_both_sides_sends_no_retry_after_missing_messages_while_cancelling():
+    exchange = FakeExchange(reject_first_cancel_then_gap=True)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "1", "--requote-seconds", "0.1", "--drain-seconds", "5"),
+        )
+    assert code == 1, out + err
+    assert "REJECTED cancel: MIN_REST_VIOLATION" in out
+    assert "can no longer tell which orders are its own" in out
+    # The two cancels sent before the gap, and no retry of the rejected one after it.
+    assert exchange.types().count("cancel") == 2
+
+
+async def test_the_fake_rejects_a_duplicate_without_accepting_it():
+    exchange = FakeExchange()
+    exchange.resting[(INSTRUMENT, "BUY", BID + TICK)] = ("teammate", 7)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "0.5", "--requote-seconds", "1", "--drain-seconds", "5"),
+        )
+    assert code == 0, out + err
+    assert "REJECTED new: DUPLICATE_ORDER_AT_LEVEL" in out
+    assert out.count("accepted new") == 1  # only the sell side was accepted
+    # The teammate's order at that level is untouched.
+    assert exchange.resting == {(INSTRUMENT, "BUY", BID + TICK): ("teammate", 7)}
 
 
 async def test_quote_both_sides_cancels_its_orders_on_ctrl_c():

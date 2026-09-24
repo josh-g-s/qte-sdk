@@ -13,12 +13,20 @@ have passed:
 - when a fill leaves an order smaller than --size, it amends the order's size back up;
 - when an order fills completely or is cancelled, it enters a new one.
 
-It then cancels its own orders, and only those, and waits at most --drain-seconds for the
+It then cancels the two levels it quoted and waits at most --drain-seconds for the
 exchange to confirm. Pressing Ctrl+C does the same; press it twice to stop at once. If
 messages from the exchange are missed, the example can no longer tell which orders are
 its own, so it stops sending, lists the orders it believes it has, and leaves them for
-you to check. The exchange decides which prices are valid and where an order may rest: an
-order it will not take comes back as a `reject`, and one it will not leave resting as an
+you to check.
+
+Run it on prices your team is not otherwise trading. A cancel names a price level, not
+an order, and is applied only after the order delay, so it removes whichever of your
+team's orders rests at that level by then: if this example's order fills while its
+cancel is delayed and a teammate's strategy enters an order at the same price, the
+cancel removes the teammate's order.
+
+The exchange decides which prices are valid and where an order may rest: an order it
+will not take comes back as a `reject`, and one it will not leave resting as an
 `order_cancelled`, each printed with its reason code. This is a teaching example, not a
 strategy: it makes no attempt to make money.
 
@@ -385,25 +393,39 @@ async def quote_until(
 
 async def cancel_own_orders(
     quoter: Quoter, view: RestingOrders, queue: asyncio.Queue, seconds: float
-) -> bool:
-    """Cancel this example's orders. Returns True once the exchange has confirmed each is
-    gone, False if that is not known within `seconds`."""
+) -> str:
+    """Cancel this example's orders. Returns "done" once the exchange has confirmed each
+    is gone, "unreliable" if events were missed (it then sends nothing more), or
+    "unconfirmed" if neither happens within `seconds`."""
     quoter.quoting = False
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
-    while not await quoter.cancel_own():
-        if loop.time() >= deadline or view.incomplete:
-            return False
+    while True:
+        # Checked before every send: after missed events, ownership is no longer known.
+        if view.incomplete:
+            return "unreliable"
+        if await quoter.cancel_own():
+            return "done"
+        if loop.time() >= deadline:
+            return "unconfirmed"
         # Wake at least every requote interval, to retry a rejected cancel.
         item = await next_event(queue, min(deadline - loop.time(), quoter.requote_seconds))
         if item is None:
-            return False
+            return "unconfirmed"
         if isinstance(item, TimeoutError):
             continue
         if isinstance(item, Exception):
             raise item
         await handle(quoter, view, item)
-    return True
+
+
+def unreliable(quoter: Quoter) -> int:
+    print(
+        "messages were missed, so this example can no longer tell which orders are its "
+        "own and sends nothing more. Check your team's orders; it believes it may have: "
+        f"{quoter.believed_resting()}"
+    )
+    return 1
 
 
 async def run(url: str, args: argparse.Namespace) -> int:
@@ -432,18 +454,16 @@ async def run(url: str, args: argparse.Namespace) -> int:
                 print(f"orders this example may still have: {quoter.believed_resting()}")
                 return 1
             if why == "unreliable":
-                print(
-                    "messages were missed, so this example can no longer tell which orders "
-                    "are its own and sends nothing more. Check your team's orders; it "
-                    f"believes it may have: {quoter.believed_resting()}"
-                )
-                return 1
+                return unreliable(quoter)
 
             reason = {"time": "time is up", "refused": "nothing to quote"}.get(why, why)
             print(f"{reason}: cancelling this example's orders")
-            if await cancel_own_orders(quoter, view, queue, args.drain_seconds):
+            outcome = await cancel_own_orders(quoter, view, queue, args.drain_seconds)
+            if outcome == "done":
                 print("all of this example's orders are cancelled")
                 return 0
+            if outcome == "unreliable":
+                return unreliable(quoter)
             print(
                 "WARNING: not confirmed cancelled, so these may still rest: "
                 f"{quoter.believed_resting()}; check and cancel them yourself"

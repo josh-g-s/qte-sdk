@@ -150,10 +150,10 @@ try:
                 continue  # a real program handles market data here too
             message = event.message
             ref = request_ref_of(message)
-            if event.type == "reject" and ref in (new_ref, cancel_ref):
+            if event.type == "reject" and ref is not None and ref in (new_ref, cancel_ref):
                 print("rejected:", reason_code_name(message.reason_code))
                 break  # if it was the cancel, the order may still rest
-            if event.type == "accepted" and ref in (new_ref, cancel_ref):
+            if event.type == "accepted" and ref is not None and ref in (new_ref, cancel_ref):
                 print("accepted:", "new" if ref == new_ref else "cancel")
             elif event.type == "order_state" and is_this_order(message, "price"):
                 print("resting:", message.remaining_size)
@@ -176,6 +176,8 @@ except TimeoutError:
 Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it, and so does each `order_cancelled` that your cancel, amend or mass cancel causes. Match on it with `request_ref_of`.
 
 An amend changes the orders at one level: `send_amend(conn, instrument=..., side=..., price=..., new_size=...)`. `new_size` is the new total remaining size, not an amount to add. `send_mass_cancel(conn)` cancels **every order your team has on the exchange**, including those of your teammates' strategies.
+
+Because a cancel or amend names a level, not an order, it acts on whichever of your team's orders rests at that level when the exchange applies it, after the order delay. If your order fills in the meantime and a teammate's strategy enters an order at the same price, your cancel removes theirs. Agree within your team who trades which instruments or prices.
 
 A send checks its identifiers before anything leaves your machine: `strat_id` and `request_ref` must be 1 to 32 bytes of UTF-8 and `instrument` at most 32 bytes. A send that breaks this raises `ValueError`.
 
