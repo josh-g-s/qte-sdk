@@ -1,7 +1,7 @@
 """Subscribe to market data and consume it as typed messages.
 
-    # `conn` must be authenticated first: the exchange refuses a subscribe on a
-    # connection whose session it has not acknowledged.
+    # Subscribe once `conn` is authenticated and the exchange has acknowledged its
+    # session.
     await subscribe(conn, ["AAPL", "MSFT"])
     async for item in market_data(conn):
         match item:

@@ -226,6 +226,123 @@ async def test_cancel_and_amend_refuse_an_unspecified_side_before_sending():
     assert conn.sent == []
 
 
+# Identifiers: each one a message carries is checked before anything is sent.
+
+SENDERS: dict[str, tuple[Callable[..., Awaitable[str]], dict[str, Any]]] = {
+    "new": (
+        send_new,
+        {
+            "strat_id": "s",
+            "instrument": "AAPL",
+            "side": BUY,
+            "order_type": LIMIT,
+            "price": PRICE,
+            "size": 1,
+        },
+    ),
+    "cancel": (send_cancel, {"instrument": "AAPL", "side": BUY, "price": PRICE}),
+    "amend": (send_amend, {"instrument": "AAPL", "side": BUY, "price": PRICE, "new_size": 1}),
+    "mass_cancel": (send_mass_cancel, {}),
+}
+
+# Every identifier each sender puts on its message.
+IDENTIFIERS = [
+    ("new", "request_ref"),
+    ("new", "strat_id"),
+    ("new", "instrument"),
+    ("cancel", "request_ref"),
+    ("cancel", "instrument"),
+    ("amend", "request_ref"),
+    ("amend", "instrument"),
+    ("mass_cancel", "request_ref"),
+]
+
+LONGEST_ID = "é" * 16  # 16 characters, 32 bytes of UTF-8: the longest allowed
+BAD_IDS = {
+    "empty": "",
+    "33 bytes": "é" * 16 + "x",  # only 17 characters, but 33 bytes
+    "33 multi-byte": "€" * 11,  # 3 bytes each
+    "NUL": "ab\0cd",
+    "not UTF-8": "ab\ud800",  # a lone surrogate has no UTF-8 encoding
+}
+
+
+async def messages_sent_by(send: Callable[[Connection], Awaitable[Any]]) -> list[dict[str, Any]]:
+    """Run `send` against a local server; return every message the server received."""
+    inbox: list[dict[str, Any]] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        async for message in ws:
+            inbox.append(json.loads(message))
+
+    async with serve_local(handler) as url:
+        async with Connection(url) as conn:
+            await send(conn)
+    return inbox
+
+
+def test_the_longest_and_the_bad_identifiers_are_what_they_claim():
+    assert len(LONGEST_ID.encode("utf-8")) == 32
+    assert len(BAD_IDS["33 bytes"].encode("utf-8")) == 33
+    assert len(BAD_IDS["33 multi-byte"].encode("utf-8")) == 33
+
+
+@pytest.mark.parametrize("sender, field", IDENTIFIERS)
+async def test_a_32_byte_multi_byte_identifier_is_sent_as_given(sender, field):
+    send, args = SENDERS[sender]
+    [env] = await messages_sent_by(lambda conn: send(conn, **{**args, field: LONGEST_ID}))
+    assert env["type"] == sender
+    assert env["payload"][field] == LONGEST_ID
+
+
+@pytest.mark.parametrize("bad", BAD_IDS.values(), ids=BAD_IDS.keys())
+@pytest.mark.parametrize("sender, field", IDENTIFIERS)
+async def test_a_bad_identifier_is_refused_and_nothing_is_sent(sender, field, bad):
+    if field == "instrument" and bad == "":
+        pytest.skip("an empty instrument is only limited in length; see the test below")
+    send, args = SENDERS[sender]
+    errors: list[ValueError] = []
+
+    async def refused(conn: Connection) -> None:
+        with pytest.raises(ValueError, match=f"^{field} ") as err:
+            await send(conn, **{**args, field: bad})
+        errors.append(err.value)
+
+    assert await messages_sent_by(refused) == []
+    [error] = errors
+    # The message names the field, never the value, raw or escaped.
+    assert str(error).startswith(f"{field} must ")
+    if bad:
+        assert bad not in str(error)
+        assert repr(bad)[1:-1] not in str(error)
+
+
+@pytest.mark.parametrize("sender", ["new", "cancel", "amend"])
+async def test_an_empty_instrument_is_sent_as_given(sender):
+    # The contract limits instrument to at most 32 bytes and does not require it to be
+    # non-empty, so the SDK leaves an empty one for the exchange to judge.
+    send, args = SENDERS[sender]
+    [env] = await messages_sent_by(lambda conn: send(conn, **{**args, "instrument": ""}))
+    assert env["payload"]["instrument"] == ""
+
+
+@pytest.mark.parametrize("sender", SENDERS)
+async def test_a_generated_request_ref_is_checked_too(sender, monkeypatch):
+    send, args = SENDERS[sender]
+    monkeypatch.setattr(orders, "new_request_ref", lambda: "x" * 33)
+    conn = Recorder()
+    with pytest.raises(ValueError, match="^request_ref "):
+        await send(conn, **args)
+    assert conn.sent == []
+
+
+async def test_an_identifier_that_is_not_text_is_refused_before_sending():
+    conn = Recorder()
+    with pytest.raises(TypeError, match="^instrument "):
+        await send_cancel(conn, instrument=None, side=BUY, price=PRICE)  # type: ignore[arg-type]
+    assert conn.sent == []
+
+
 # Receiving: each order event decodes into its generated type.
 
 EXECUTION = {
