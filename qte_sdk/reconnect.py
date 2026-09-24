@@ -268,6 +268,7 @@ class ReconnectingSession:
         """
         session = self._session
         if session is None or not self._up:
+            del payload  # it may be `auth`, so it stays out of the traceback
             raise NotConnected(f"no session is up, so {type_} was not sent")
         if isinstance(payload, Subscribe):
             self._instruments.update(dict.fromkeys(payload.instruments))
@@ -311,6 +312,8 @@ class ReconnectingSession:
                     if waits and self.backoff is not None:
                         delay = self.backoff.delay(waits, self._rng())
                         yield Retrying(failures + 1, delay, last)
+                        if self._closed:
+                            return
                         if await self._unless_closed(self._sleep(delay)) is _CLOSED:
                             return
                     if self._closed:
@@ -376,8 +379,11 @@ class ReconnectingSession:
         if self.resting is not None:
             self.resting.mark_incomplete()
         pending = self._pending
-        if pending is not None:
+        if pending is not None and pending is not asyncio.current_task():
+            # Wait for the attempt to wind down, so its socket is closed when this returns.
             pending.cancel()
+            await asyncio.wait({pending})
+            await _close_result(pending)
         session = self._session
         self._session = None
         if session is not None:
@@ -425,17 +431,25 @@ class ReconnectingSession:
 
         Cancelling the task that iterates the session still raises `CancelledError`.
         """
+        current = asyncio.current_task()
+        # Compared, not tested for zero: an earlier cancellation the caller caught still counts.
+        cancelling = current.cancelling() if current is not None else 0
         task = asyncio.ensure_future(awaitable)
         self._pending = task
         try:
             return await task
         except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if self._closed and task.cancelled() and (current is None or not current.cancelling()):
+            if current is not None and current.cancelling() > cancelling:
+                # This task was cancelled. A session the attempt opened just before is
+                # closed rather than left behind.
+                await _close_result(task)
+                raise
+            if self._closed and task.cancelled():
                 return _CLOSED
             raise
         finally:
-            self._pending = None
+            if self._pending is task:
+                self._pending = None
 
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):
@@ -453,6 +467,15 @@ class ReconnectingSession:
 
 
 _CLOSED = object()
+
+
+async def _close_result(task: "asyncio.Future[Any]") -> None:
+    """Close the session `task` opened, if it finished with one."""
+    if task.done() and not task.cancelled() and task.exception() is None:
+        result = task.result()
+        if isinstance(result, Session):
+            with suppress(Exception):
+                await result.close()
 
 
 def _instrument_list(instruments: Iterable[str]) -> list[str]:

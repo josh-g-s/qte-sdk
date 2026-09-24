@@ -624,7 +624,76 @@ async def test_closing_while_the_exchange_has_not_acknowledged_stops_the_attempt
         consumer = asyncio.create_task(asyncio.wait_for(anext(rs.events(), None), 5))
         await asyncio.wait_for(received_auth.wait(), 5)
         await rs.close()
+        # The socket is closed by the time close() returns, not only once the consumer runs.
+        await asyncio.wait_for(exchange.closed.wait(), 5)
         assert await consumer is None  # iteration ended, with nothing delivered
+
+
+async def test_closing_while_handling_retrying_starts_no_wait():
+    async def forever(delay: float) -> None:
+        await asyncio.Event().wait()
+
+    exchange = Exchange(session(then=drop), session())
+    events: list[object] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=forever)
+
+        async def consume() -> None:
+            async for event in rs:
+                events.append(event)
+                if isinstance(event, Retrying):
+                    await rs.close()
+
+        await asyncio.wait_for(consume(), 5)
+    assert [type(e) for e in events] == [Connected, Disconnected, Retrying]
+    assert exchange.connections == 1
+
+
+async def test_closing_ends_iteration_in_a_task_that_once_caught_a_cancellation():
+    exchange = Exchange(session(then=drop), session())
+    events: list[object] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url, synthetic_token(), backoff=Backoff(initial=3600, maximum=3600)
+        )
+        started = asyncio.Event()
+
+        async def consume() -> None:
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                pass  # caught, and the task carries on
+            async for event in rs:
+                events.append(event)
+                if isinstance(event, Retrying):
+                    asyncio.get_running_loop().call_soon(asyncio.ensure_future, rs.close())
+
+        task = asyncio.create_task(consume())
+        await started.wait()
+        task.cancel()
+        await asyncio.wait_for(task, 5)
+    assert [type(e) for e in events] == [Connected, Disconnected, Retrying]
+
+
+async def test_cancelling_just_as_a_session_opens_closes_that_session(monkeypatch):
+    real_open = qte_sdk.reconnect.open_session
+    consumer: asyncio.Task | None = None
+
+    async def open_then_cancel(*args, **kwargs):
+        opened = await real_open(*args, **kwargs)
+        # The consumer is cancelled after the session opened but before it resumes.
+        assert consumer is not None
+        asyncio.get_running_loop().call_soon(consumer.cancel)
+        return opened
+
+    monkeypatch.setattr(qte_sdk.reconnect, "open_session", open_then_cancel)
+    exchange = Exchange(session())
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token())
+        consumer = asyncio.create_task(anext(rs.events()))
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
         await asyncio.wait_for(exchange.closed.wait(), 5)
 
 
@@ -724,6 +793,15 @@ async def test_a_failed_send_does_not_show_what_was_sent(monkeypatch):
             monkeypatch.setattr(ClientConnection, "send", failing_send)
             with pytest.raises(RuntimeError) as caught:
                 await rs.send("auth", Auth(token=token))
+    assert "reconnect.py" in shown(caught.value)
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_sending_while_not_connected_does_not_show_what_was_sent():
+    token = synthetic_token()
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    with pytest.raises(NotConnected) as caught:
+        await rs.send("auth", Auth(token=token))
     assert "reconnect.py" in shown(caught.value)
     assert_token_absent(token, shown(caught.value))
 
