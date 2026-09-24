@@ -14,8 +14,9 @@ The token is sent once, in the `auth` message, and is not kept afterwards. The S
 logs it or puts it in an exception: the connection drops the frame-level debug lines of
 the `websockets` library, which would show the `auth` message (see `qte_sdk.connection`). While
 the session opens, a message from the exchange that repeats the token is also kept out of
-the exception raised; once the session is open the SDK no longer holds the token, and what
-the exchange sends is passed on as it arrives.
+the exception raised; once the session is open a `Session` no longer holds the token, and
+what the exchange sends is passed on as it arrives. A `qte_sdk.reconnect.ReconnectingSession`
+keeps it, in a wrapper no repr shows, to authenticate each new session.
 """
 
 import asyncio
@@ -241,7 +242,8 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
         return None
     if isinstance(error, SessionRejected):
         detail = None if error.detail is None else _redact(error.detail, secret)
-        return type(error)(error.reason_code, detail)
+        name = _redact(error.reason_name, secret)
+        return type(error)(error.reason_code, detail, reason_name=name)
     if isinstance(error, SessionNotAcknowledged):
         return SessionNotAcknowledged(_redact(str(error), secret))
     return SessionNotAcknowledged(_redact(f"{type(error).__name__}: {error}", secret))

@@ -418,3 +418,24 @@ async def test_a_reject_before_the_ack_keeps_a_reason_name_from_a_newer_contract
             await open_session(url, synthetic_token())
     assert caught.value.reason_code == ReasonCodes.REASON_CODE_UNSPECIFIED
     assert caught.value.reason_name == "A_REASON_FROM_A_NEWER_CONTRACT"
+
+
+async def test_withholding_an_echoed_token_keeps_a_reason_name_from_a_newer_contract():
+    token = synthetic_token()
+    reject = session_reject("A_REASON_FROM_A_NEWER_CONTRACT", f"bad token {token}")
+    async with serve_local(Server(reject)) as url:
+        with pytest.raises(SessionRejected) as caught:
+            await open_session(url, token)
+    assert caught.value.reason_code == ReasonCodes.REASON_CODE_UNSPECIFIED
+    assert caught.value.reason_name == "A_REASON_FROM_A_NEWER_CONTRACT"
+    assert caught.value.detail == "bad token <token withheld>"
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_token_echoed_as_the_reason_name_is_withheld():
+    token = synthetic_token()
+    async with serve_local(Server(session_reject(token))) as url:
+        with pytest.raises(SessionRejected) as caught:
+            await open_session(url, token)
+    assert caught.value.reason_name == "<token withheld>"
+    assert_token_absent(token, shown(caught.value))
