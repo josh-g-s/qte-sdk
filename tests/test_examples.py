@@ -6,6 +6,7 @@ student would start it, with the exchange URL and a synthetic token in its envir
 """
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import os
@@ -14,6 +15,7 @@ import re
 import secrets
 import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -73,13 +75,12 @@ class FakeExchange:
         gap_after_resting: int | None = None,
         reject_first_cancel_then_gap: bool = False,
         stray_reject: bool = False,
-        cancel_delay: float = 0.0,
-        hold_cancels: bool = False,
+        confirm_cancels: asyncio.Event | None = None,
     ) -> None:
-        # Cancels are accepted at once, then confirmed after `cancel_delay` seconds, or
-        # never confirmed with `hold_cancels` (the order stays on the book).
-        self.cancel_delay = cancel_delay
-        self.hold_cancels = hold_cancels
+        # With `confirm_cancels`, a cancel is accepted at once but its order_cancelled is
+        # sent only once the test sets that event (never, if it does not).
+        self.confirm_cancels = confirm_cancels
+        self._confirming: set[asyncio.Task] = set()
         self.stray_reject = stray_reject
         self.reject_first_cancel_then_gap = reject_first_cancel_then_gap
         self.reject_new = reject_new
@@ -127,6 +128,8 @@ class FakeExchange:
         finally:
             if ticker is not None:
                 ticker.cancel()
+            for task in self._confirming:
+                task.cancel()
 
     async def publish(self, ws: ServerConnection) -> None:
         book = {
@@ -262,15 +265,22 @@ class FakeExchange:
                 await self.send(ws, "reject", reject)
                 return
             await self.send(ws, "accepted", accepted)
-            if self.hold_cancels:
+            if self.confirm_cancels is not None:
+                self._confirming.add(asyncio.create_task(self.confirm_later(ws, key, ref)))
                 return
-            if self.cancel_delay:
-                await asyncio.sleep(self.cancel_delay)
             await self.send(ws, "order_cancelled", self.cancelled(key, ref, "CANCEL_REQUEST"))
         elif type_ == "mass_cancel":
             await self.send(ws, "accepted", accepted)
             for key in list(self.resting):
                 await self.send(ws, "order_cancelled", self.cancelled(key, ref, "MASS_CANCEL"))
+
+    async def confirm_later(
+        self, ws: ServerConnection, key: tuple[str, str, int], ref: str
+    ) -> None:
+        assert self.confirm_cancels is not None
+        await self.confirm_cancels.wait()
+        with contextlib.suppress(ConnectionClosed):
+            await self.send(ws, "order_cancelled", self.cancelled(key, ref, "CANCEL_REQUEST"))
 
     def order_state(self, key: tuple[str, str, int]) -> dict[str, Any]:
         strat_id, size = self.resting[key]
@@ -465,12 +475,14 @@ async def test_quote_both_sides_stops_sending_when_messages_are_missed():
 async def test_quote_both_sides_sends_no_retry_after_missing_messages_while_cancelling():
     exchange = FakeExchange(reject_first_cancel_then_gap=True)
     async with serve_local(exchange) as url:
+        # --requote-seconds is well above the book interval, so the gap is seen before a
+        # retry is due even on a slow machine; a retry after it would still be caught.
         code, out, err = await run_example(
             "quote_both_sides.py",
             url,
             synthetic_token(),
             *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
-            *("--seconds", "1", "--requote-seconds", "0.1", "--drain-seconds", "5"),
+            *("--seconds", "1", "--requote-seconds", "0.5", "--drain-seconds", "5"),
         )
     assert code == 1, out + err
     assert "REJECTED cancel: MIN_REST_VIOLATION" in out
@@ -543,19 +555,28 @@ async def test_quote_both_sides_cancels_its_orders_on_ctrl_c():
     assert exchange.resting == {}
 
 
+async def until(condition: Callable[[], bool]) -> None:
+    while not condition():
+        await asyncio.sleep(0.01)
+
+
 async def test_quote_both_sides_finishes_cancelling_on_ctrl_c_during_cleanup():
-    # Each cancel is confirmed a second after it is accepted, so the Ctrl+C sent once
-    # cleanup has started lands while the example waits for those confirmations.
-    exchange = FakeExchange(cancel_delay=1.0)
+    # The cancels are confirmed only when the test says so, so the Ctrl+C lands while the
+    # example waits for those confirmations.
+    confirm = asyncio.Event()
+    exchange = FakeExchange(confirm_cancels=confirm)
     async with serve_local(exchange) as url:
         process = await start_quoter(
-            url, *("--seconds", "1", "--requote-seconds", "0.1", "--drain-seconds", "10")
+            url, *("--seconds", "1", "--requote-seconds", "0.1", "--drain-seconds", "20")
         )
         seen = bytearray()
         try:
             async with asyncio.timeout(RUN_LIMIT):
                 await read_until(process, b"cancelling this example's orders", seen)
+                await until(lambda: exchange.types().count("cancel") == 2)
                 process.send_signal(signal.SIGINT)
+                await read_until(process, b"still cancelling", seen)
+                confirm.set()
                 out, err = await process.communicate()
         finally:
             if process.returncode is None:
@@ -576,7 +597,7 @@ async def test_quote_both_sides_finishes_cancelling_on_ctrl_c_during_cleanup():
 async def test_quote_both_sides_stops_at_once_on_a_second_ctrl_c_during_cleanup():
     # Cancels are never confirmed, so without a second Ctrl+C cleanup would run for the
     # whole of --drain-seconds.
-    exchange = FakeExchange(hold_cancels=True)
+    exchange = FakeExchange(confirm_cancels=asyncio.Event())
     loop = asyncio.get_running_loop()
     async with serve_local(exchange) as url:
         process = await start_quoter(
@@ -586,6 +607,7 @@ async def test_quote_both_sides_stops_at_once_on_a_second_ctrl_c_during_cleanup(
         try:
             async with asyncio.timeout(RUN_LIMIT):
                 await read_until(process, b"cancelling this example's orders", seen)
+                await until(lambda: exchange.types().count("cancel") == 2)
                 process.send_signal(signal.SIGINT)
                 await read_until(process, b"still cancelling", seen)
                 process.send_signal(signal.SIGINT)

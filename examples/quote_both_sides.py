@@ -57,7 +57,9 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Coroutine
 from dataclasses import dataclass
+from typing import Any
 
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
@@ -86,6 +88,9 @@ from qte_sdk.session import MissingToken, Session, SessionNotAcknowledged, open_
 from qte_sdk.units import to_decimal, to_micros
 
 SIDE_NAMES = {BUY: "BUY", SELL: "SELL"}
+# pending_ref while a message is being sent. A request_ref is 1 to 32 bytes, so no reply
+# from the exchange matches it.
+SENDING = ""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -186,10 +191,20 @@ class Quoter:
             return None
         return order
 
-    def sent(self, quote: Quote, ref: str, kind: str) -> None:
-        quote.pending_ref, quote.pending_kind, quote.sent_at = ref, kind, time.monotonic()
+    async def send(self, quote: Quote, kind: str, sending: Coroutine[Any, Any, str]) -> None:
+        """Send one order message for this side and record its request_ref.
+
+        The side counts as busy from the start, so nothing else is sent for it meanwhile.
+        The send is shielded: a Ctrl+C part-way through lets it finish and be recorded,
+        rather than leave a message out that the example does not know it sent."""
+        quote.pending_ref, quote.pending_kind, quote.sent_at = SENDING, kind, time.monotonic()
         where = f"{SIDE_NAMES[quote.side]} {self.instrument} @ {price_text(quote.price or 0)}"
-        print(f"sent   {kind:<6} {where}")
+
+        async def send_and_record() -> None:
+            quote.pending_ref = await sending
+            print(f"sent   {kind:<6} {where}")
+
+        await asyncio.shield(send_and_record())
 
     async def manage(self, quote: Quote, best: int) -> None:
         """Move one side towards resting --size shares at `best`."""
@@ -197,7 +212,7 @@ class Quoter:
             return
         if quote.price is None:
             quote.price = best
-            ref = await send_new(
+            new = send_new(
                 self.conn,
                 strat_id=self.strat_id,
                 instrument=self.instrument,
@@ -206,27 +221,27 @@ class Quoter:
                 price=best,
                 size=self.size,
             )
-            self.sent(quote, ref, "new")
+            await self.send(quote, "new", new)
             return
         order = self.resting(quote)
         if order is None:
             return  # not reported resting yet: wait rather than guess
         if quote.price != best:
             # Cancel and re-enter: the new order goes in once the cancel is confirmed.
-            ref = await send_cancel(
+            cancel = send_cancel(
                 self.conn, instrument=self.instrument, side=quote.side, price=quote.price
             )
-            self.sent(quote, ref, "cancel")
+            await self.send(quote, "cancel", cancel)
         elif order.remaining_size < self.size:
             # new_size is the new total remaining size, not an amount to add.
-            ref = await send_amend(
+            amend = send_amend(
                 self.conn,
                 instrument=self.instrument,
                 side=quote.side,
                 price=quote.price,
                 new_size=self.size,
             )
-            self.sent(quote, ref, "amend")
+            await self.send(quote, "amend", amend)
 
     async def cancel_own(self) -> bool:
         """Cancel this example's orders. Returns True once none are left or in flight."""
@@ -237,10 +252,10 @@ class Quoter:
             elif quote.price is not None:
                 done = False
                 if self.ready(quote) and not quote.cancelling and self.resting(quote):
-                    ref = await send_cancel(
+                    cancel = send_cancel(
                         self.conn, instrument=self.instrument, side=quote.side, price=quote.price
                     )
-                    self.sent(quote, ref, "cancel")
+                    await self.send(quote, "cancel", cancel)
         # Done once the exchange has also reported each order gone from the book.
         return done and not any(
             order.strat_id == self.strat_id and order.key.instrument == self.instrument
@@ -264,7 +279,7 @@ class Quoter:
 
     def pending(self, ref: str | None) -> Quote | None:
         for quote in self.quotes.values():
-            if ref is not None and quote.pending_ref == ref:
+            if ref and quote.pending_ref == ref:
                 return quote
         return None
 
@@ -361,10 +376,12 @@ async def pump(session: Session, queue: asyncio.Queue) -> None:
 
 async def next_event(queue: asyncio.Queue, timeout: float):
     """The next item from `pump`, or TimeoutError if none arrives within `timeout`."""
+    if timeout <= 0:
+        return TimeoutError()  # even if events are waiting: the time is up
     # asyncio.timeout rather than asyncio.wait_for: on Python 3.11, wait_for can lose a
     # Ctrl+C that arrives just as an event does, and the example would not stop.
     try:
-        async with asyncio.timeout(max(timeout, 0)):
+        async with asyncio.timeout(timeout):
             return await queue.get()
     except TimeoutError as timeout_error:
         return timeout_error
@@ -449,6 +466,25 @@ def unreliable(quoter: Quoter) -> int:
 async def run(url: str, args: argparse.Namespace) -> int:
     # The token comes from the QTE_TOKEN environment variable.
     session = await open_session(url)
+    # Each Ctrl+C from here on cancels this task. The first cancellation is absorbed,
+    # whether it lands while quoting or while cancelling, so the run still cancels its
+    # orders; a second is let through and stops the run, and a third also stops it
+    # waiting for the connection to close. The event loop handles Ctrl+C itself where it
+    # can (not on Windows), so a press never interrupts asyncio's own code part-way.
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None
+    with contextlib.suppress(NotImplementedError):
+        loop.add_signal_handler(signal.SIGINT, task.cancel)
+    try:
+        return await quote_and_clean_up(session, args, task)
+    finally:
+        with contextlib.suppress(NotImplementedError):
+            loop.remove_signal_handler(signal.SIGINT)
+
+
+async def quote_and_clean_up(session: Session, args: argparse.Namespace, task: asyncio.Task) -> int:
+    loop = asyncio.get_running_loop()
     async with session:
         print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
         await subscribe(session.connection, [args.instrument])
@@ -457,17 +493,6 @@ async def run(url: str, args: argparse.Namespace) -> int:
         quoter = Quoter(session, view, args)
         queue: asyncio.Queue = asyncio.Queue()
         reader = asyncio.create_task(pump(session, queue))
-
-        # Each Ctrl+C cancels this task. The first cancellation is absorbed, whether it
-        # lands while quoting or while cancelling, so the run still cancels its orders; a
-        # second one is let through and stops the run at once. The event loop handles
-        # Ctrl+C itself where it can (not on Windows), so a press never interrupts
-        # asyncio's own code part-way through.
-        loop = asyncio.get_running_loop()
-        task = asyncio.current_task()
-        assert task is not None
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(signal.SIGINT, task.cancel)
         interrupted = False
 
         def absorb_first_interrupt() -> bool:
@@ -520,8 +545,6 @@ async def run(url: str, args: argparse.Namespace) -> int:
             return 1
         finally:
             reader.cancel()
-            with contextlib.suppress(NotImplementedError):
-                loop.remove_signal_handler(signal.SIGINT)
 
 
 def fail(message: str) -> int:
