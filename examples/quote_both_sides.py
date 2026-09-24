@@ -534,7 +534,7 @@ async def quote_and_clean_up(session: Session, args: argparse.Namespace, task: a
             async with asyncio.timeout(args.seconds):
                 await subscribe(session.connection, [args.instrument])
         except TimeoutError:
-            print("could not subscribe within --seconds; nothing was sent")
+            print("could not subscribe within --seconds; no orders were sent")
             return 1
 
         view = RestingOrders()

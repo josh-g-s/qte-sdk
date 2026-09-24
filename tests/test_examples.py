@@ -881,3 +881,30 @@ async def test_each_example_stops_in_time_on_a_connection_that_stalls(
     assert session.sent[0] == "subscribe"
     assert session.close_started
     assert "did not close in time" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("presses", [1, 2], ids=["interrupt", "interrupt-during-close"])
+async def test_the_bounded_close_lets_an_interrupt_through(presses: int):
+    # In quote_both_sides a Ctrl+C that stops the run cancels its task, and the close then
+    # runs while that cancellation is on its way out. The close must not swallow it, and a
+    # further Ctrl+C during the close must end it at once.
+    example = load_example("quote_both_sides.py")
+    example.CLOSE_SECONDS = 0.2 if presses == 1 else 20.0
+    session = StalledSession(stall_sends=False)
+
+    async def body() -> None:
+        async with example.closing(session):
+            await asyncio.Event().wait()
+
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(body())
+    started = loop.time()
+    async with asyncio.timeout(RUN_LIMIT):
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await until(lambda: session.close_started)
+        if presses == 2:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert loop.time() - started < 3
