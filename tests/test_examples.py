@@ -722,15 +722,19 @@ async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short()
     buy.price = BID + TICK
 
     cleanup = asyncio.create_task(quoter.cancel_own())
-    await until(lambda: len(sent) == 1)
-    cleanup.cancel()  # Ctrl+C during the send
-    with pytest.raises(asyncio.CancelledError):
-        await cleanup
+    try:
+        async with asyncio.timeout(RUN_LIMIT):
+            await until(lambda: len(sent) == 1)
+            cleanup.cancel()  # Ctrl+C during the send
+            with pytest.raises(asyncio.CancelledError):
+                await cleanup
 
-    assert buy.pending_ref == sent[0]  # recorded before it was sent
-    buy.sent_at = float("-inf")  # however long cleanup waits, it does not send it again
-    quoter.view = []  # no order is reported gone yet
-    assert await quoter.cancel_own() is False
+            assert buy.pending_ref == sent[0]  # recorded before it was sent
+            buy.sent_at = float("-inf")  # however long cleanup waits, no second send
+            quoter.view = []  # no order is reported gone yet
+            assert await quoter.cancel_own() is False
+    finally:
+        cleanup.cancel()
     assert len(sent) == 1
     # The exchange's reply to that cancel is still matched to it.
     quoter.on_order_event(Accepted(request_ref=sent[0]))
