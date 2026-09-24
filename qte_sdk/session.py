@@ -14,15 +14,15 @@ The token is sent once, in the `auth` message, and is not kept afterwards. The S
 logs it or puts it in an exception: the connection drops the frame-level debug lines of
 the `websockets` library, which would show the `auth` message (see `qte_sdk.connection`). While
 the session opens, a message from the exchange that repeats the token is also kept out of
-the exception raised; once the session is open the SDK no longer holds the token, and what
-the exchange sends is passed on as it arrives.
+the exception raised; once the session is open a `Session` no longer holds the token, and
+what the exchange sends is passed on as it arrives. A `qte_sdk.reconnect.ReconnectingSession`
+keeps it, in a wrapper no repr shows, to authenticate each new session.
 """
 
 import asyncio
 import os
 from collections import deque
 from collections.abc import AsyncIterator
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +48,11 @@ class MissingToken(ValueError):
 class SessionNotAcknowledged(Exception):
     """The connection ended, or the acknowledgement could not be read, before the session
     was acknowledged."""
+
+
+class AuthNotSent(SessionNotAcknowledged):
+    """The `auth` message could not be encoded or sent, for a reason other than the
+    connection closing, such as a bad `contract_version`. Trying again fails the same way."""
 
 
 @dataclass(frozen=True)
@@ -141,21 +146,46 @@ async def open_session(
 
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)
+    interrupted = False
     try:
         await conn.open()
         await _send_auth(conn, secret)
         ack, early = await _wait_for_ack(conn, ack_timeout)
     except BaseException as error:
-        with suppress(Exception):
-            await conn.close()
+        interrupted = await _finish_closing(conn)
         safe = _without_token(error, secret)
-        if safe is None:
+        if safe is None and not interrupted:
             raise
     else:
         return Session(conn, SessionInfo.from_ack(ack), early)
-    # Raised outside the handler, so the original error, which mentions the token, is not
-    # chained to it.
+    # Raised outside the handler, so the original error, which may mention the token, is
+    # not chained to it.
+    if interrupted:
+        raise asyncio.CancelledError
+    assert safe is not None
     raise safe
+
+
+async def _finish_closing(conn: Connection) -> bool:
+    """Close `conn` and wait until it is closed, even if cancelled meanwhile, so no socket
+    is left half closed. Returns True if a cancellation arrived, for the caller to raise."""
+    return await _wait_out(asyncio.ensure_future(conn.close()))
+
+
+async def _wait_out(task: "asyncio.Future[Any]") -> bool:
+    """Wait for `task` to finish, even through cancellation. Returns True if a cancellation
+    arrived meanwhile, for the caller to raise once the task is done."""
+    interrupted = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            interrupted = True
+        except Exception:
+            break
+    if not task.cancelled():
+        task.exception()  # retrieved, so a failure is not reported as unread
+    return interrupted
 
 
 async def _send_auth(conn: Connection, secret: "_Secret") -> None:
@@ -163,7 +193,8 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
         await conn.send("auth", Auth(token=secret.value))
         return
     except Exception as error:
-        replacement: BaseException = SessionNotAcknowledged(
+        kind = SessionNotAcknowledged if isinstance(error, ConnectionClosed) else AuthNotSent
+        replacement: BaseException = kind(
             _redact(f"could not send auth: {type(error).__name__}: {error}", secret)
         )
     except BaseException as error:
@@ -241,7 +272,8 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
         return None
     if isinstance(error, SessionRejected):
         detail = None if error.detail is None else _redact(error.detail, secret)
-        return type(error)(error.reason_code, detail)
+        name = _redact(error.reason_name, secret)
+        return type(error)(error.reason_code, detail, reason_name=name)
     if isinstance(error, SessionNotAcknowledged):
-        return SessionNotAcknowledged(_redact(str(error), secret))
+        return type(error)(_redact(str(error), secret))
     return SessionNotAcknowledged(_redact(f"{type(error).__name__}: {error}", secret))
