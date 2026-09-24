@@ -73,7 +73,13 @@ class FakeExchange:
         gap_after_resting: int | None = None,
         reject_first_cancel_then_gap: bool = False,
         stray_reject: bool = False,
+        cancel_delay: float = 0.0,
+        hold_cancels: bool = False,
     ) -> None:
+        # Cancels are accepted at once, then confirmed after `cancel_delay` seconds, or
+        # never confirmed with `hold_cancels` (the order stays on the book).
+        self.cancel_delay = cancel_delay
+        self.hold_cancels = hold_cancels
         self.stray_reject = stray_reject
         self.reject_first_cancel_then_gap = reject_first_cancel_then_gap
         self.reject_new = reject_new
@@ -256,6 +262,10 @@ class FakeExchange:
                 await self.send(ws, "reject", reject)
                 return
             await self.send(ws, "accepted", accepted)
+            if self.hold_cancels:
+                return
+            if self.cancel_delay:
+                await asyncio.sleep(self.cancel_delay)
             await self.send(ws, "order_cancelled", self.cancelled(key, ref, "CANCEL_REQUEST"))
         elif type_ == "mass_cancel":
             await self.send(ws, "accepted", accepted)
@@ -487,23 +497,36 @@ async def test_the_fake_rejects_a_duplicate_without_accepting_it():
     assert exchange.resting == {(INSTRUMENT, "BUY", BID + TICK): ("teammate", 7)}
 
 
+async def start_quoter(url: str, *args: str) -> asyncio.subprocess.Process:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(EXAMPLES_DIR / "quote_both_sides.py"),
+        *("--instrument", INSTRUMENT, "--strat-id", "quote-test", *args),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+
+async def read_until(process: asyncio.subprocess.Process, text: bytes, seen: bytearray) -> None:
+    """Read the example's output into `seen` until it contains `text`."""
+    assert process.stdout is not None
+    while text not in seen:
+        line = await process.stdout.readline()
+        assert line, seen.decode()
+        seen += line
+
+
 async def test_quote_both_sides_cancels_its_orders_on_ctrl_c():
     exchange = FakeExchange()
     async with serve_local(exchange) as url:
-        env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
-        env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(EXAMPLES_DIR / "quote_both_sides.py"),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--seconds", "60"),
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        assert process.stdout is not None
-        seen = b""
+        process = await start_quoter(url, "--seconds", "60")
+        seen = bytearray()
         try:
             async with asyncio.timeout(RUN_LIMIT):
+                assert process.stdout is not None
                 while seen.count(b"resting ") < 2:
                     line = await process.stdout.readline()
                     assert line, seen.decode()
@@ -518,6 +541,66 @@ async def test_quote_both_sides_cancels_its_orders_on_ctrl_c():
     assert "all of this example's orders are cancelled" in out.decode()
     assert exchange.types().count("cancel") == 2
     assert exchange.resting == {}
+
+
+async def test_quote_both_sides_finishes_cancelling_on_ctrl_c_during_cleanup():
+    # Each cancel is confirmed a second after it is accepted, so the Ctrl+C sent once
+    # cleanup has started lands while the example waits for those confirmations.
+    exchange = FakeExchange(cancel_delay=1.0)
+    async with serve_local(exchange) as url:
+        process = await start_quoter(
+            url, *("--seconds", "1", "--requote-seconds", "0.1", "--drain-seconds", "10")
+        )
+        seen = bytearray()
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                await read_until(process, b"cancelling this example's orders", seen)
+                process.send_signal(signal.SIGINT)
+                out, err = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    output = (seen + out).decode()
+    assert process.returncode == 0, output + err.decode()
+    assert "interrupted: still cancelling this example's orders" in output
+    assert "all of this example's orders are cancelled" in output
+    cancels = [m["payload"] for m in exchange.received if m["type"] == "cancel"]
+    assert sorted((c["side"], int(c["price"])) for c in cancels) == [
+        ("BUY", BID + TICK),
+        ("SELL", ASK - TICK),
+    ]
+    assert exchange.resting == {}
+
+
+async def test_quote_both_sides_stops_at_once_on_a_second_ctrl_c_during_cleanup():
+    # Cancels are never confirmed, so without a second Ctrl+C cleanup would run for the
+    # whole of --drain-seconds.
+    exchange = FakeExchange(hold_cancels=True)
+    loop = asyncio.get_running_loop()
+    async with serve_local(exchange) as url:
+        process = await start_quoter(
+            url, *("--seconds", "1", "--requote-seconds", "0.1", "--drain-seconds", "20")
+        )
+        seen = bytearray()
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                await read_until(process, b"cancelling this example's orders", seen)
+                process.send_signal(signal.SIGINT)
+                await read_until(process, b"still cancelling", seen)
+                process.send_signal(signal.SIGINT)
+                stopping = loop.time()
+                out, err = await process.communicate()
+                stopped_after = loop.time() - stopping
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    assert process.returncode == 1, (seen + out + err).decode()
+    assert "interrupted: this example's orders may still rest" in err.decode()
+    assert stopped_after < 5, stopped_after  # well inside the 20 s drain
+    assert "all of this example's orders are cancelled" not in (seen + out).decode()
+    assert exchange.types().count("cancel") == 2
 
 
 async def test_take_liquidity_sends_one_market_order_and_reports_the_fill():
@@ -580,3 +663,12 @@ async def test_each_example_refuses_to_start_without_a_token(path: Path):
         code, out, err = await run_example(path.name, url, None, QTE_STRAT_ID="x")
     assert code == 2
     assert "QTE_TOKEN" in err
+
+
+@pytest.mark.parametrize("inside", ["0", "-0.01"])
+async def test_quote_both_sides_refuses_an_inside_of_less_than_a_tick(inside: str):
+    code, out, err = await run_example(
+        "quote_both_sides.py", None, synthetic_token(), "--strat-id", "x", f"--inside={inside}"
+    )
+    assert code == 2
+    assert "--inside must be at least one price tick" in err

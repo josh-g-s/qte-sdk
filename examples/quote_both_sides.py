@@ -14,10 +14,10 @@ have passed:
 - when an order fills completely or is cancelled, it enters a new one.
 
 It then cancels the two levels it quoted and waits at most --drain-seconds for the
-exchange to confirm. Pressing Ctrl+C does the same; press it twice to stop at once. If
-messages from the exchange are missed, the example can no longer tell which orders are
-its own, so it stops sending, lists the orders it believes it has, and leaves them for
-you to check.
+exchange to confirm. Pressing Ctrl+C does the same, even while those cancels are being
+confirmed; press it twice to stop at once. If messages from the exchange are missed,
+the example can no longer tell which orders are its own, so it stops sending, lists the
+orders it believes it has, and leaves them for you to check.
 
 Run it on prices your team is not otherwise trading. A cancel names a price level, not
 an order, and is applied only after the order delay, so it removes whichever of your
@@ -29,6 +29,13 @@ The exchange decides which prices are valid and where an order may rest: an orde
 will not take comes back as a `reject`, and one it will not leave resting as an
 `order_cancelled`, each printed with its reason code. This is a teaching example, not a
 strategy: it makes no attempt to make money.
+
+Why --inside. Your orders may rest only strictly inside the band between the wall's best
+bid and best ask. An order at the wall's own price is not left resting: it comes back as
+an `order_cancelled` with reason REMAINDER_OUTSIDE_BAND. So --inside must be at least one
+tick, and it must be a whole number of ticks, since the exchange rejects a price that is
+not on the tick. The exchange sets each instrument's tick: the default, 0.01, is one tick
+only where the tick is $0.01.
 
 Timing. The exchange holds every order message (new, cancel, amend and mass cancel) for
 its order delay before applying it, currently 150 ms, so an `accepted` arrives at least
@@ -45,7 +52,9 @@ MESSAGE_BUDGET_EXCEEDED), the reject is printed and the example tries again late
 
 import argparse
 import asyncio
+import contextlib
 import os
+import signal
 import sys
 import time
 from dataclasses import dataclass
@@ -97,8 +106,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=to_micros,  # dollars as text, converted exactly to micro-dollars
         default="0.01",
         help=(
-            "how far inside the wall's best price to quote, in dollars (default 0.01); "
-            "the exchange sets the price tick and where an order may rest"
+            "how far inside the wall's best price to quote, in dollars (default 0.01): a "
+            "whole number of the instrument's price ticks, and at least one, because an "
+            "order at the wall's own price is not left resting (orders rest strictly "
+            "inside the wall's best bid and ask); the exchange sets the tick"
         ),
     )
     parser.add_argument(
@@ -117,6 +128,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="longest wait for the final cancels to be confirmed (default 5)",
     )
     args = parser.parse_args(argv)
+    if args.inside <= 0:
+        # The tick is not known here, so this only checks for at least something; a
+        # price off the tick comes back as a reject with its reason code.
+        parser.error("--inside must be at least one price tick, for example 0.01")
     if not args.strat_id:
         parser.error(
             "pass --strat-id or set QTE_STRAT_ID to a strategy ID registered for your team"
@@ -346,8 +361,11 @@ async def pump(session: Session, queue: asyncio.Queue) -> None:
 
 async def next_event(queue: asyncio.Queue, timeout: float):
     """The next item from `pump`, or TimeoutError if none arrives within `timeout`."""
+    # asyncio.timeout rather than asyncio.wait_for: on Python 3.11, wait_for can lose a
+    # Ctrl+C that arrives just as an event does, and the example would not stop.
     try:
-        return await asyncio.wait_for(queue.get(), max(timeout, 0))
+        async with asyncio.timeout(max(timeout, 0)):
+            return await queue.get()
     except TimeoutError as timeout_error:
         return timeout_error
 
@@ -392,14 +410,14 @@ async def quote_until(
 
 
 async def cancel_own_orders(
-    quoter: Quoter, view: RestingOrders, queue: asyncio.Queue, seconds: float
+    quoter: Quoter, view: RestingOrders, queue: asyncio.Queue, deadline: float
 ) -> str:
     """Cancel this example's orders. Returns "done" once the exchange has confirmed each
     is gone, "unreliable" if events were missed (it then sends nothing more), or
-    "unconfirmed" if neither happens within `seconds`."""
+    "unconfirmed" if neither happens by `deadline`, a time on the event loop's clock.
+    Safe to call again after an interruption: it resends nothing already in flight."""
     quoter.quoting = False
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + seconds
     while True:
         # Checked before every send: after missed events, ownership is no longer known.
         if view.incomplete:
@@ -439,14 +457,34 @@ async def run(url: str, args: argparse.Namespace) -> int:
         quoter = Quoter(session, view, args)
         queue: asyncio.Queue = asyncio.Queue()
         reader = asyncio.create_task(pump(session, queue))
+
+        # Each Ctrl+C cancels this task. The first cancellation is absorbed, whether it
+        # lands while quoting or while cancelling, so the run still cancels its orders; a
+        # second one is let through and stops the run at once. The event loop handles
+        # Ctrl+C itself where it can (not on Windows), so a press never interrupts
+        # asyncio's own code part-way through.
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        assert task is not None
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signal.SIGINT, task.cancel)
+        interrupted = False
+
+        def absorb_first_interrupt() -> bool:
+            nonlocal interrupted
+            if interrupted:
+                return False
+            interrupted = True
+            # This cancellation is handled. If another is still pending, Ctrl+C was
+            # pressed twice before the first reached this point: stop at once.
+            return task.uncancel() == 0
+
         try:
             try:
                 why = await quote_until(quoter, view, queue, args.seconds)
             except asyncio.CancelledError:
-                # Ctrl+C: clean up as at the end of the run. A second Ctrl+C stops at once.
-                current = asyncio.current_task()
-                if current is not None:
-                    current.uncancel()
+                if not absorb_first_interrupt():
+                    raise
                 why = "interrupted"
 
             if why == "closed":
@@ -458,7 +496,18 @@ async def run(url: str, args: argparse.Namespace) -> int:
 
             reason = {"time": "time is up", "refused": "nothing to quote"}.get(why, why)
             print(f"{reason}: cancelling this example's orders")
-            outcome = await cancel_own_orders(quoter, view, queue, args.drain_seconds)
+            deadline = loop.time() + args.drain_seconds
+            while True:
+                try:
+                    outcome = await cancel_own_orders(quoter, view, queue, deadline)
+                    break
+                except asyncio.CancelledError:
+                    if not absorb_first_interrupt():
+                        raise
+                    print(
+                        "interrupted: still cancelling this example's orders; "
+                        "press Ctrl+C again to stop at once"
+                    )
             if outcome == "done":
                 print("all of this example's orders are cancelled")
                 return 0
@@ -471,6 +520,8 @@ async def run(url: str, args: argparse.Namespace) -> int:
             return 1
         finally:
             reader.cancel()
+            with contextlib.suppress(NotImplementedError):
+                loop.remove_signal_handler(signal.SIGINT)
 
 
 def fail(message: str) -> int:
@@ -500,7 +551,8 @@ def main(argv: list[str] | None = None) -> int:
             "the connection dropped; the SDK does not reconnect for you yet. Your orders may "
             "still rest: reconnect and cancel them"
         )
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # A second Ctrl+C, before the example's orders were confirmed cancelled.
         return fail("interrupted: this example's orders may still rest; check and cancel them")
 
 
