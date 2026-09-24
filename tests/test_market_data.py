@@ -39,6 +39,7 @@ from qte_sdk.market_data import (
     subscribe,
     unsubscribe,
 )
+from qte_sdk.session import Session, SessionInfo
 from qte_sdk.units import to_decimal
 
 ABOVE_2_53 = 2**53 + 1  # a float cannot hold this; the wire sends it as a decimal string
@@ -262,6 +263,41 @@ async def test_subscribe_and_unsubscribe_send_the_instrument_list():
         ("subscribe", {"instruments": ["AAPL", "MSFT"]}),
         ("unsubscribe", {"instruments": ["MSFT"]}),
     ]
+
+
+def session_on(conn: Connection, early: list[Any] | None = None) -> Session:
+    """A session on `conn` as `open_session` returns it, without the auth exchange."""
+    return Session(conn, SessionInfo("s-1", "team-a", 1, "0.x", True), early or [])
+
+
+async def test_subscribe_and_unsubscribe_send_on_a_session():
+    inbox: list[str] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        inbox.append(await ws.recv())
+        inbox.append(await ws.recv())
+        await ws.close()
+
+    async with serve_local(handler) as url, Connection(url) as conn:
+        session = session_on(conn)
+        await subscribe(session, ["AAPL"])
+        await unsubscribe(session, ["AAPL"])
+        assert [e async for e in session] == []
+
+    sent = [json.loads(m) for m in inbox]
+    assert [(m["type"], m["payload"]) for m in sent] == [
+        ("subscribe", {"instruments": ["AAPL"]}),
+        ("unsubscribe", {"instruments": ["AAPL"]}),
+    ]
+
+
+async def test_market_data_reads_a_session_from_before_its_acknowledgement():
+    # Held back by `open_session` while it waited for the acknowledgement.
+    early = Received("book", market_data_pb2.Book(instrument="AAPL"), None)
+    frames = [frame("book", book_payload("MSFT"), 1)]
+    async with exchange(frames) as url, Connection(url) as conn:
+        items = [item async for item in market_data(session_on(conn, [early]))]
+    assert [(type(m), m.instrument) for m in items] == [(Book, "AAPL"), (Book, "MSFT")]
 
 
 async def test_a_single_string_is_refused_rather_than_split_into_letters():

@@ -135,8 +135,8 @@ async def run(url: str, args: argparse.Namespace) -> int:
         last_state = None
         try:
             async with asyncio.timeout(args.seconds):
-                # Send on the session's connection; read from the session itself.
-                await subscribe(session.connection, [args.instrument])
+                # Send on the session and read from it.
+                await subscribe(session, [args.instrument])
                 async with aclosing(market_data(session)) as items:
                     async for item in items:
                         received += 1

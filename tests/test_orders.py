@@ -44,6 +44,7 @@ from qte_sdk.orders import (
     send_mass_cancel,
     send_new,
 )
+from qte_sdk.session import Session, SessionInfo
 
 PRICE = 199_970_000  # $199.97 in micro-dollars
 
@@ -198,6 +199,28 @@ async def test_every_send_gets_a_distinct_request_ref():
         "mass_cancel",
         "mass_cancel",
     ]
+
+
+@pytest.mark.parametrize(
+    "type_, send",
+    [
+        (
+            "new",
+            lambda s: send_new(
+                s, strat_id="s", instrument="AAPL", side=BUY, order_type=LIMIT, price=1, size=1
+            ),
+        ),
+        ("cancel", lambda s: send_cancel(s, instrument="AAPL", side=BUY, price=1)),
+        ("amend", lambda s: send_amend(s, instrument="AAPL", side=BUY, price=1, new_size=1)),
+        ("mass_cancel", lambda s: send_mass_cancel(s)),
+    ],
+    ids=["new", "cancel", "amend", "mass_cancel"],
+)
+async def test_every_send_takes_a_session(type_: str, send: Callable[[Any], Awaitable[str]]):
+    info = SessionInfo("s-1", "team-a", 1, "0.x", True)
+    ref, env = await sent_by(lambda conn: send(Session(conn, info, [])))
+    assert env["type"] == type_
+    assert env["payload"]["request_ref"] == ref
 
 
 @pytest.mark.parametrize(

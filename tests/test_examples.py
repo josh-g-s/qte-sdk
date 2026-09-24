@@ -68,6 +68,12 @@ def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path)
         assert parts.username is None and parts.password is None, url
 
 
+@pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART], ids=lambda p: p.name)
+def test_no_example_or_quickstart_reaches_past_the_session_to_its_connection(path: Path):
+    # A session sends and is iterated itself; its connection is an internal layer.
+    assert re.search(r"\bsession\.connection\b", path.read_text()) is None
+
+
 class FakeExchange:
     """A scripted exchange: acknowledges the session, publishes a book on every tick once
     subscribed, and answers order messages the way the contract describes."""
@@ -713,7 +719,7 @@ def load_example(name: str) -> Any:
 
 
 class StalledConnection:
-    """A connection whose every send writes its message and then never returns, as on a
+    """A session whose every send writes its message and then never returns, as on a
     connection that has stopped taking data. Records each message's request_ref."""
 
     def __init__(self, sent: list[str]) -> None:
@@ -739,7 +745,7 @@ async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short()
     example = load_example("quote_both_sides.py")
     sent: list[str] = []
     args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
-    quoter = example.Quoter(SimpleNamespace(connection=StalledConnection(sent)), None, args)
+    quoter = example.Quoter(StalledConnection(sent), None, args)
     quoter.resting = lambda quote: quote.price is not None  # reported resting
     buy = quoter.quotes[example.BUY]
     buy.price = BID + TICK
@@ -769,7 +775,7 @@ async def test_quote_both_sides_keeps_to_drain_seconds_when_a_cancel_send_stalls
     sent: list[str] = []
     args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
     view = RestingOrders()
-    quoter = example.Quoter(SimpleNamespace(connection=StalledConnection(sent)), view, args)
+    quoter = example.Quoter(StalledConnection(sent), view, args)
     quoter.resting = lambda quote: quote.price is not None  # reported resting
     quoter.quotes[example.BUY].price = BID + TICK
     loop = asyncio.get_running_loop()
@@ -786,7 +792,7 @@ async def test_quote_both_sides_keeps_to_seconds_when_a_send_stalls_while_quotin
     sent: list[str] = []
     args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
     view = RestingOrders()
-    quoter = example.Quoter(SimpleNamespace(connection=StalledConnection(sent)), view, args)
+    quoter = example.Quoter(StalledConnection(sent), view, args)
     queue: asyncio.Queue = asyncio.Queue()
     queue.put_nowait(book_event())
     loop = asyncio.get_running_loop()
@@ -830,7 +836,6 @@ class StalledSession:
 
     def __init__(self, *, stall_sends: bool) -> None:
         self.info = SimpleNamespace(team="team-a", unscored=True)
-        self.connection = self
         self.stall_sends = stall_sends
         self.sent: list[str] = []
         self.close_started = False

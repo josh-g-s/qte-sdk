@@ -49,6 +49,7 @@ only-include = [
     "scripts",
     "tests",
     "docs",
+    "examples",
     "README.md",
     "LICENSE",
     "pyproject.toml",
