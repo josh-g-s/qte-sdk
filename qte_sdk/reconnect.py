@@ -36,12 +36,13 @@ view stays incomplete after a reconnect: no event yet reports the orders already
 when a session starts.
 
 Which failures are retried (`is_retryable`): a dropped or closed connection, a connection
-that could not be opened (`OSError`, a timeout, a handshake the server failed with no HTTP
-status, a 5xx, 408 or 429), and a session that closed before it was acknowledged. Anything
-else stops the session and is raised from the iteration, because trying again would give
-the same answer: every `SessionRejected` (for example a token the exchange does not
-accept), including `ContractVersionMismatch`; a handshake refused with any other 4xx
-status, which usually means a wrong URL; and any error in the SDK or your own code.
+that could not be opened (`OSError` or a timeout), a handshake answered with a malformed
+response or with HTTP 5xx, 408 or 429, and a session that closed before it was
+acknowledged. Anything else stops the session and is raised from the iteration, because
+trying again would give the same answer: every `SessionRejected` (for example a token the
+exchange does not accept), including `ContractVersionMismatch`; a certificate that failed
+verification; a handshake refused with any other status, which usually means a wrong URL,
+or whose negotiation failed; and any error in the SDK or your own code.
 
 The token is resolved once, when the session is created, and kept for re-authentication in
 a wrapper that no repr, str or traceback shows. It is sent only in `auth` messages. An
@@ -50,6 +51,7 @@ error this module delivers or raises that would repeat the token has it replaced
 
 import asyncio
 import random
+import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -173,16 +175,19 @@ class NotConnected(RuntimeError):
 def is_retryable(error: BaseException) -> bool:
     """Whether a new connection attempt could succeed after `error`.
 
-    True for a dropped connection, a connection that could not be opened or timed out, a
-    handshake failed with no HTTP status or with 5xx, 408 or 429, and a session that closed
-    before it was acknowledged. False for everything else, including every
-    `SessionRejected`.
+    True for a dropped connection, a connection that could not be opened or timed out
+    (other than a certificate that failed verification), a handshake answered with a
+    malformed response or with HTTP 5xx, 408 or 429, and a session that closed before it
+    was acknowledged. False for everything else, including every `SessionRejected`.
     """
-    if isinstance(error, SessionRejected):
+    if isinstance(error, SessionRejected | ssl.SSLCertVerificationError):
         return False
     if isinstance(error, HandshakeFailed):
         status = error.status_code
-        return status is None or status >= 500 or status in (408, 429)
+        if status is None:
+            # A malformed or cut-off response; the other kinds are a failed negotiation.
+            return error.kind == "InvalidMessage"
+        return status >= 500 or status in (408, 429)
     return isinstance(error, ConnectionClosed | SessionNotAcknowledged | TimeoutError | OSError)
 
 
@@ -233,6 +238,7 @@ class ReconnectingSession:
         self._info: SessionInfo | None = None
         self._iterated = False
         self._closed = False
+        self._pending: asyncio.Future[Any] | None = None
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "connected" if self._up else "not connected"
@@ -268,7 +274,16 @@ class ReconnectingSession:
         elif isinstance(payload, Unsubscribe):
             for instrument in payload.instruments:
                 self._instruments.pop(instrument, None)
-        await session.connection.send(type_, payload)
+        failure: BaseException
+        try:
+            await session.connection.send(type_, payload)
+        except BaseException as error:
+            failure = error
+        else:
+            return
+        # Not this frame's copy of the message either: it may be `auth`.
+        del payload
+        raise failure
 
     def __aiter__(self) -> AsyncIterator[ReconnectEvent]:
         return self.events()
@@ -296,7 +311,8 @@ class ReconnectingSession:
                     if waits and self.backoff is not None:
                         delay = self.backoff.delay(waits, self._rng())
                         yield Retrying(failures + 1, delay, last)
-                        await self._sleep(delay)
+                        if await self._unless_closed(self._sleep(delay)) is _CLOSED:
+                            return
                     if self._closed:
                         return
                     session, failure = await self._attempt()
@@ -337,18 +353,31 @@ class ReconnectingSession:
                 if self.backoff is None:
                     return
         finally:
+            # However iteration ends (returned, raised, cancelled or closed early), no
+            # later event can reach the view, and the session cannot be iterated again.
+            self._closed = True
             self._up = False
             if self.resting is not None:
                 self.resting.mark_incomplete()
+            session = self._session
+            self._session = None
+            if session is not None:
+                with suppress(Exception):
+                    await session.close()
 
     async def close(self) -> None:
         """Close the current session, if any, and stop reconnecting; iteration then ends.
 
-        A backoff wait already in progress is not cut short: iteration ends when it is
-        over, without another attempt.
+        A backoff wait or a connection attempt in progress is cut short. The resting view,
+        if any, is marked incomplete, since no later event will reach it.
         """
         self._closed = True
         self._up = False
+        if self.resting is not None:
+            self.resting.mark_incomplete()
+        pending = self._pending
+        if pending is not None:
+            pending.cancel()
         session = self._session
         self._session = None
         if session is not None:
@@ -366,12 +395,17 @@ class ReconnectingSession:
         session: Session | None = None
         failure: Exception | None = None
         try:
-            session = await open_session(
-                self.url,
-                self._secret.value,
-                ack_timeout=self._ack_timeout,
-                **self._connection_options,
+            opened = await self._unless_closed(
+                open_session(
+                    self.url,
+                    self._secret.value,
+                    ack_timeout=self._ack_timeout,
+                    **self._connection_options,
+                )
             )
+            if opened is _CLOSED:
+                return None, None
+            session = opened
             # Held here at once, so close() reaches it even while it subscribes.
             self._session = session
             if self._instruments and not self._closed:
@@ -386,6 +420,23 @@ class ReconnectingSession:
             session = None
         return session, failure
 
+    async def _unless_closed(self, awaitable: Awaitable[Any]) -> Any:
+        """Await `awaitable`, or return `_CLOSED` if `close()` cuts it short.
+
+        Cancelling the task that iterates the session still raises `CancelledError`.
+        """
+        task = asyncio.ensure_future(awaitable)
+        self._pending = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if self._closed and task.cancelled() and (current is None or not current.cancelling()):
+                return _CLOSED
+            raise
+        finally:
+            self._pending = None
+
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):
             return True
@@ -399,6 +450,9 @@ class ReconnectingSession:
             return error
         assert isinstance(replacement, Exception)
         return replacement
+
+
+_CLOSED = object()
 
 
 def _instrument_list(instruments: Iterable[str]) -> list[str]:

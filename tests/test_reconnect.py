@@ -1,5 +1,6 @@
 import asyncio
 import json
+import ssl
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
@@ -7,6 +8,7 @@ from contextlib import aclosing
 import pytest
 from fake_exchange import frame, serve_local
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError
 
@@ -19,6 +21,7 @@ from qte_sdk.connection import (
     SessionRejected,
 )
 from qte_sdk.contract.v1.common_pb2 import BUY, ReasonCodes
+from qte_sdk.contract.v1.session_pb2 import Auth
 from qte_sdk.market_data import subscribe, unsubscribe
 from qte_sdk.reconnect import (
     Backoff,
@@ -496,9 +499,12 @@ async def test_a_session_rejected_while_open_is_flagged_then_raised():
     [
         (ConnectionClosedError(None, None), True),
         (ConnectionRefusedError(), True),
+        (ssl.SSLCertVerificationError(), False),
         (TimeoutError(), True),
         (SessionNotAcknowledged("closed"), True),
-        (HandshakeFailed("InvalidStatus", None), True),
+        (HandshakeFailed("InvalidMessage", None), True),
+        (HandshakeFailed("InvalidHeader", None), False),
+        (HandshakeFailed("NegotiationError", None), False),
         (HandshakeFailed("InvalidStatus", 503), True),
         (HandshakeFailed("InvalidStatus", 429), True),
         (HandshakeFailed("InvalidStatus", 404), False),
@@ -571,6 +577,90 @@ async def test_leaving_the_loop_early_and_closing_closes_the_socket():
     assert not rs.connected
 
 
+async def test_cancelling_the_consumer_mid_session_closes_the_socket():
+    view = RestingOrders()
+    up = asyncio.Event()
+    exchange = Exchange(session())
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resting=view)
+
+        async def consume() -> None:
+            async for event in rs:
+                if isinstance(event, Connected):
+                    up.set()
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(up.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(exchange.closed.wait(), 5)
+    assert view.incomplete
+    assert not rs.connected
+
+
+async def test_closing_the_iterator_early_closes_the_socket():
+    exchange = Exchange(session(book(2)))
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token())
+        async with aclosing(rs.events()) as events:
+            async for event in events:
+                if isinstance(event, Received):
+                    break
+        await asyncio.wait_for(exchange.closed.wait(), 5)
+
+
+async def test_closing_while_the_exchange_has_not_acknowledged_stops_the_attempt():
+    received_auth = asyncio.Event()
+
+    async def never_ack(ws: ServerConnection, exchange: Exchange) -> None:
+        await exchange.recv(ws)
+        received_auth.set()
+        await hold(ws, exchange)
+
+    exchange = Exchange(never_ack)
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), ack_timeout=None)
+        consumer = asyncio.create_task(asyncio.wait_for(anext(rs.events(), None), 5))
+        await asyncio.wait_for(received_auth.wait(), 5)
+        await rs.close()
+        assert await consumer is None  # iteration ended, with nothing delivered
+        await asyncio.wait_for(exchange.closed.wait(), 5)
+
+
+async def test_closing_cuts_a_backoff_wait_short():
+    view = RestingOrders()
+    exchange = Exchange(session(then=drop), session())
+    events: list[object] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url, synthetic_token(), resting=view, backoff=Backoff(initial=3600, maximum=3600)
+        )
+
+        async def consume() -> None:
+            async for event in rs:
+                events.append(event)
+                if isinstance(event, Retrying):
+                    asyncio.get_running_loop().call_soon(asyncio.ensure_future, rs.close())
+
+        await asyncio.wait_for(consume(), 5)
+    assert [type(e) for e in events] == [Connected, Disconnected, Retrying]
+    assert exchange.connections == 1
+
+
+async def test_closing_marks_the_view_incomplete_at_once():
+    view = RestingOrders()
+    exchange = Exchange(session(book(2)))
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resting=view)
+        events = rs.events()
+        assert isinstance(await anext(events), Connected)
+        assert not view.incomplete
+        await rs.close()  # the iterator is left suspended
+        assert view.incomplete
+        await events.aclose()
+
+
 async def test_a_session_is_iterated_only_once():
     exchange = Exchange(session())
     async with serve_local(exchange) as url:
@@ -617,6 +707,25 @@ async def test_the_session_object_never_shows_the_token():
                 break
             text = "\n".join([repr(rs), str(rs), repr(vars(rs)), str(vars(rs))])
     assert_token_absent(token, text)
+
+
+async def test_a_failed_send_does_not_show_what_was_sent(monkeypatch):
+    token = synthetic_token()
+
+    async def failing_send(self: ClientConnection, message: object) -> None:
+        raise RuntimeError("send failed")
+
+    exchange = Exchange(session())
+    async with serve_local(exchange) as url:
+        async with ReconnectingSession(url, synthetic_token()) as rs:
+            async for event in rs:
+                if isinstance(event, Connected):
+                    break
+            monkeypatch.setattr(ClientConnection, "send", failing_send)
+            with pytest.raises(RuntimeError) as caught:
+                await rs.send("auth", Auth(token=token))
+    assert "reconnect.py" in shown(caught.value)
+    assert_token_absent(token, shown(caught.value))
 
 
 async def test_a_token_echoed_on_a_reconnect_is_withheld_from_events_and_errors():
