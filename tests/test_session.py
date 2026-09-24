@@ -14,7 +14,7 @@ from websockets.asyncio.server import ServerConnection
 from qte_sdk.connection import Connection, ContractVersionMismatch, Received, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
-from qte_sdk.contract.v1.session_pb2 import Heartbeat, Subscribe
+from qte_sdk.contract.v1.session_pb2 import Auth, Heartbeat, Subscribe
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     MissingToken,
@@ -493,3 +493,13 @@ async def test_a_send_on_a_closed_session_fails_as_on_its_connection():
             await session.connection.send("subscribe", Subscribe(instruments=["AAPL"]))
         with pytest.raises(type(on_connection.value)):
             await session.send("subscribe", Subscribe(instruments=["AAPL"]))
+
+
+async def test_a_failed_send_on_the_session_keeps_the_message_out_of_the_traceback():
+    token = synthetic_token()
+    async with serve_local(Server(ack())) as url:
+        session = await open_session(url, synthetic_token())
+        await session.close()
+        with pytest.raises(Exception) as caught:
+            await session.send("auth", Auth(token=token))
+    assert_token_absent(token, shown(caught.value))

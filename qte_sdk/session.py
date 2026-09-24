@@ -105,7 +105,17 @@ class Session:
 
     async def send(self, type_: str, payload: Message) -> None:
         """Send one message on this session's connection, as `Connection.send` does."""
-        await self.connection.send(type_, payload)
+        failure: BaseException
+        try:
+            await self.connection.send(type_, payload)
+        except BaseException as error:
+            failure = error
+        else:
+            return
+        # The connection keeps the message out of its traceback; so does this frame, since
+        # the message may be `auth`. Raised outside the handler, so nothing is chained.
+        del payload
+        raise failure
 
     async def close(self) -> None:
         await self.connection.close()
