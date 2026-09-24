@@ -118,12 +118,13 @@ async def run(url: str, args: argparse.Namespace) -> int:
                 async with aclosing(market_data(session)) as items:
                     async for item in items:
                         received += 1
+                        # The session state is published on every interval; print it only
+                        # when it changes. Every message counts towards --max-messages.
+                        repeated = False
                         if isinstance(item, SessionState):
-                            # Published on every interval; print it only when it changes.
-                            if (item.state, item.outage_active) == last_state:
-                                continue
+                            repeated = (item.state, item.outage_active) == last_state
                             last_state = (item.state, item.outage_active)
-                        if not show(item):
+                        if not repeated and not show(item):
                             return 1
                         if received >= args.max_messages:
                             print(f"stopped after {received} messages")

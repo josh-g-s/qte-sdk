@@ -72,7 +72,7 @@ from qte_sdk.market_data import Book, subscribe, market_data
 from qte_sdk.units import to_decimal
 
 await subscribe(session.connection, ["AAPL"])
-async for item in market_data(session):
+async for item in market_data(session):  # runs until you stop it
     if isinstance(item, Book) and item.bid_levels and item.ask_levels:
         bid, ask = item.bid_levels[0], item.ask_levels[0]
         print(
@@ -117,11 +117,13 @@ from qte_sdk.orders import (
 )
 from qte_sdk.units import to_micros
 
+STRATEGY = "my-strategy"  # a strategy ID registered for your team
+INSTRUMENT = "AAPL"
 price = to_micros("199.97")
 new_ref = await send_new(
     session.connection,
-    strat_id="my-strategy",  # a strategy ID registered for your team
-    instrument="AAPL",
+    strat_id=STRATEGY,
+    instrument=INSTRUMENT,
     side=BUY,
     order_type=LIMIT,
     price=price,
@@ -129,26 +131,46 @@ new_ref = await send_new(
 )
 cancel_ref = None
 
-async for event in session:
-    if as_market_data(event) is not None:
-        continue  # market data: handle it here too in a real program
-    if not is_order_event(event):
-        continue
-    message = event.message
-    print(event.type, message)
-    if event.type == "reject":
-        print("rejected:", reason_code_name(message.reason_code))
-        break
-    if event.type == "order_state" and cancel_ref is None:
-        # The exchange reports the order resting: now cancel it by its level.
-        cancel_ref = await send_cancel(
-            session.connection,
-            instrument="AAPL",
-            side=BUY,
-            price=price,
-        )
-    if event.type == "order_cancelled" and request_ref_of(message) == cancel_ref:
-        break
+
+def is_this_order(message, price_field):
+    """Whether an order_state, execution or order_cancelled is about the order above.
+    Your teammates' orders arrive on the same stream, so check every field."""
+    return (
+        message.strat_id == STRATEGY
+        and message.instrument == INSTRUMENT
+        and message.side == BUY
+        and getattr(message, price_field) == price
+    )
+
+
+try:
+    async with asyncio.timeout(10):  # never wait for ever
+        async for event in session:
+            if as_market_data(event) is not None or not is_order_event(event):
+                continue  # a real program handles market data here too
+            message = event.message
+            ref = request_ref_of(message)
+            if event.type == "reject" and ref in (new_ref, cancel_ref):
+                print("rejected:", reason_code_name(message.reason_code))
+                break  # if it was the cancel, the order may still rest
+            if event.type == "accepted" and ref in (new_ref, cancel_ref):
+                print("accepted:", "new" if ref == new_ref else "cancel")
+            elif event.type == "order_state" and is_this_order(message, "price"):
+                print("resting:", message.remaining_size)
+                if cancel_ref is None:
+                    # Cancel it by naming its level: instrument, side and price.
+                    cancel_ref = await send_cancel(
+                        session.connection, instrument=INSTRUMENT, side=BUY, price=price
+                    )
+            elif event.type == "execution" and is_this_order(message, "order_price"):
+                print("filled", message.fill_size, "left", message.remaining_size)
+                if message.remaining_size == 0:
+                    break
+            elif event.type == "order_cancelled" and is_this_order(message, "price"):
+                print("cancelled:", reason_code_name(message.reason_code))
+                break
+except TimeoutError:
+    print("no final outcome within 10 seconds: check your orders")
 ```
 
 Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it, and so does each `order_cancelled` that your cancel, amend or mass cancel causes. Match on it with `request_ref_of`.

@@ -13,8 +13,11 @@ have passed:
 - when a fill leaves an order smaller than --size, it amends the order's size back up;
 - when an order fills completely or is cancelled, it enters a new one.
 
-It then cancels its own orders and waits at most --drain-seconds for the exchange to
-confirm. The exchange decides which prices are valid and where an order may rest: an
+It then cancels its own orders, and only those, and waits at most --drain-seconds for the
+exchange to confirm. Pressing Ctrl+C does the same; press it twice to stop at once. If
+messages from the exchange are missed, the example can no longer tell which orders are
+its own, so it stops sending, lists the orders it believes it has, and leaves them for
+you to check. The exchange decides which prices are valid and where an order may rest: an
 order it will not take comes back as a `reject`, and one it will not leave resting as an
 `order_cancelled`, each printed with its reason code. This is a teaching example, not a
 strategy: it makes no attempt to make money.
@@ -25,9 +28,10 @@ that long after the send; the example prints each round trip it measures. The de
 minimum time an order must rest before it may be cancelled or amended, the price collar
 and the message budgets are all set by the exchange and may change, so nothing here
 depends on their values. Instead the example reacts to what the exchange reports: it only
-cancels or amends an order once the exchange has reported it resting, and it sends at
-most one message per side per --requote-seconds, which keeps it well inside the budgets.
-If a message is rejected anyway (for example MIN_REST_VIOLATION or
+cancels or amends an order once the exchange has reported it resting. It also paces
+itself, sending at most one message per side per --requote-seconds; that is local
+pacing, not a promise to stay within your team's budgets, which count every message your
+team sends. If a message is rejected (for example MIN_REST_VIOLATION or
 MESSAGE_BUDGET_EXCEEDED), the reject is printed and the example tries again later.
 """
 
@@ -127,6 +131,8 @@ class Quote:
     pending_ref: str | None = None
     pending_kind: str = ""
     sent_at: float = float("-inf")
+    # True from an accepted cancel until the exchange reports the order gone.
+    cancelling: bool = False
 
 
 class Quoter:
@@ -164,7 +170,7 @@ class Quoter:
 
     async def manage(self, quote: Quote, best: int) -> None:
         """Move one side towards resting --size shares at `best`."""
-        if not self.ready(quote):
+        if not self.ready(quote) or quote.cancelling:
             return
         if quote.price is None:
             quote.price = best
@@ -207,7 +213,7 @@ class Quoter:
                 done = False
             elif quote.price is not None:
                 done = False
-                if self.ready(quote) and self.resting(quote) is not None:
+                if self.ready(quote) and not quote.cancelling and self.resting(quote):
                     ref = await send_cancel(
                         self.conn, instrument=self.instrument, side=quote.side, price=quote.price
                     )
@@ -239,6 +245,35 @@ class Quoter:
                 return quote
         return None
 
+    def own(self, message: Execution | OrderCancelled, price_field: str) -> Quote | None:
+        """The side's quote if this fill or cancellation is about this example's order:
+        its strategy, instrument, side and price. A teammate's order is not its own."""
+        quote = self.quotes.get(message.side)
+        if (
+            quote is None
+            or quote.price is None
+            or message.strat_id != self.strat_id
+            or message.instrument != self.instrument
+            or not message.HasField(price_field)
+            or getattr(message, price_field) != quote.price
+        ):
+            return None
+        return quote
+
+    def gone(self, quote: Quote) -> None:
+        """This side's order is no longer on the book."""
+        quote.price = None
+        quote.cancelling = False
+
+    def believed_resting(self) -> str:
+        """The orders this example believes it may have, for a message to the user."""
+        levels = [
+            f"{SIDE_NAMES[q.side]} {self.instrument} @ {price_text(q.price)}"
+            for q in self.quotes.values()
+            if q.price is not None
+        ]
+        return ", ".join(levels) or "none"
+
     def on_order_event(self, message: Message) -> None:
         ref = request_ref_of(message)
         quote = self.pending(ref)
@@ -246,8 +281,8 @@ class Quoter:
             case Accepted() if quote is not None:
                 elapsed_ms = (time.monotonic() - quote.sent_at) * 1000
                 print(f"accepted {quote.pending_kind} after a {elapsed_ms:.0f} ms round trip")
-                if quote.pending_kind == "cancel":
-                    quote.price = None
+                if quote.pending_kind == "cancel" and quote.price is not None:
+                    quote.cancelling = True  # the order_cancelled that follows clears it
                 quote.pending_ref = None
             case Reject():
                 detail = f" ({message.reason_detail})" if message.HasField("reason_detail") else ""
@@ -259,7 +294,7 @@ class Quoter:
                         quote.pending_kind == "cancel"
                         and message.reason_code == ReasonCodes.NO_ORDER_AT_LEVEL
                     ):
-                        quote.price = None
+                        self.gone(quote)
                     quote.pending_ref = None
             case OrderState() if message.instrument == self.instrument:
                 side = SIDE_NAMES.get(message.side, "?")
@@ -273,22 +308,17 @@ class Quoter:
                     f"FILL   {side} {message.fill_size} @ {price_text(message.fill_price)}, "
                     f"{message.remaining_size} left, fee {to_decimal(message.fee)}"
                 )
-                own = self.quotes.get(message.side)
-                if (
-                    own is not None
-                    and message.HasField("order_price")
-                    and message.order_price == own.price
-                    and message.remaining_size == 0
-                ):
-                    own.price = None  # filled completely: enter a new order next time
+                own = self.own(message, "order_price")
+                if own is not None and message.remaining_size == 0:
+                    self.gone(own)  # filled completely: enter a new order next time
             case OrderCancelled() if message.instrument == self.instrument:
                 side = SIDE_NAMES.get(message.side, "?")
                 price = price_text(message.price) if message.HasField("price") else "market"
                 reason = reason_code_name(message.reason_code)
                 print(f"cancelled {side} {message.cancelled_size} @ {price} ({reason})")
-                own = self.quotes.get(message.side)
-                if own is not None and message.HasField("price") and message.price == own.price:
-                    own.price = None
+                own = self.own(message, "price")
+                if own is not None:
+                    self.gone(own)
             case RiskNotice():
                 print(f"risk notice: {RiskNoticeKind.Name(message.kind)}")
 
@@ -326,10 +356,53 @@ async def handle(quoter: Quoter, view: RestingOrders, event: Event) -> bool:
         print(f"subscription refused: {reason_code_name(item.reason_code)}")
         return False
     elif isinstance(item, SeqGap | DecodeFailed):
-        # The view may now be wrong, and stays marked incomplete.
-        print("warning: messages were missed, so the resting view may be wrong")
+        print("warning: a message from the exchange was missed or could not be read")
     elif is_order_event(event):
         quoter.on_order_event(event.message)
+    return True
+
+
+async def quote_until(
+    quoter: Quoter, view: RestingOrders, queue: asyncio.Queue, seconds: float
+) -> str:
+    """Quote until `seconds` have passed. Returns why it stopped: "time", "refused",
+    "unreliable" (events were missed) or "closed" (the exchange closed the connection)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while True:
+        item = await next_event(queue, deadline - loop.time())
+        if item is None:
+            return "closed"
+        if isinstance(item, TimeoutError):
+            return "time"
+        if isinstance(item, Exception):
+            raise item  # the connection dropped
+        if not await handle(quoter, view, item):
+            return "refused"
+        if view.incomplete:
+            return "unreliable"
+
+
+async def cancel_own_orders(
+    quoter: Quoter, view: RestingOrders, queue: asyncio.Queue, seconds: float
+) -> bool:
+    """Cancel this example's orders. Returns True once the exchange has confirmed each is
+    gone, False if that is not known within `seconds`."""
+    quoter.quoting = False
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while not await quoter.cancel_own():
+        if loop.time() >= deadline or view.incomplete:
+            return False
+        # Wake at least every requote interval, to retry a rejected cancel.
+        item = await next_event(queue, min(deadline - loop.time(), quoter.requote_seconds))
+        if item is None:
+            return False
+        if isinstance(item, TimeoutError):
+            continue
+        if isinstance(item, Exception):
+            raise item
+        await handle(quoter, view, item)
     return True
 
 
@@ -344,48 +417,38 @@ async def run(url: str, args: argparse.Namespace) -> int:
         quoter = Quoter(session, view, args)
         queue: asyncio.Queue = asyncio.Queue()
         reader = asyncio.create_task(pump(session, queue))
-        loop = asyncio.get_running_loop()
         try:
-            # Quote until the time is up.
-            deadline = loop.time() + args.seconds
-            while True:
-                item = await next_event(queue, deadline - loop.time())
-                if item is None:
-                    print("the exchange closed the connection")
-                    return 1
-                if isinstance(item, TimeoutError):
-                    break
-                if isinstance(item, Exception):
-                    raise item  # the connection dropped
-                if not await handle(quoter, view, item):
-                    break
+            try:
+                why = await quote_until(quoter, view, queue, args.seconds)
+            except asyncio.CancelledError:
+                # Ctrl+C: clean up as at the end of the run. A second Ctrl+C stops at once.
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                why = "interrupted"
 
-            # Then cancel this example's own orders and wait, briefly, for confirmation.
-            print("time is up: cancelling")
-            quoter.quoting = False
-            deadline = loop.time() + args.drain_seconds
-            while not await quoter.cancel_own():
-                if loop.time() >= deadline:
-                    left = [
-                        f"{SIDE_NAMES[q.side]} @ {price_text(q.price)}"
-                        for q in quoter.quotes.values()
-                        if q.price is not None
-                    ]
-                    print(f"WARNING: may still be resting: {', '.join(left)}; cancel it yourself")
-                    return 1
-                # Wake at least every requote interval to retry a rejected cancel.
-                wait = min(deadline - loop.time(), args.requote_seconds)
-                item = await next_event(queue, wait)
-                if item is None:
-                    print("the exchange closed the connection")
-                    return 1
-                if isinstance(item, TimeoutError):
-                    continue
-                if isinstance(item, Exception):
-                    raise item
-                await handle(quoter, view, item)
-            print("all of this example's orders are cancelled")
-            return 0
+            if why == "closed":
+                print("the exchange closed the connection")
+                print(f"orders this example may still have: {quoter.believed_resting()}")
+                return 1
+            if why == "unreliable":
+                print(
+                    "messages were missed, so this example can no longer tell which orders "
+                    "are its own and sends nothing more. Check your team's orders; it "
+                    f"believes it may have: {quoter.believed_resting()}"
+                )
+                return 1
+
+            reason = {"time": "time is up", "refused": "nothing to quote"}.get(why, why)
+            print(f"{reason}: cancelling this example's orders")
+            if await cancel_own_orders(quoter, view, queue, args.drain_seconds):
+                print("all of this example's orders are cancelled")
+                return 0
+            print(
+                "WARNING: not confirmed cancelled, so these may still rest: "
+                f"{quoter.believed_resting()}; check and cancel them yourself"
+            )
+            return 1
         finally:
             reader.cancel()
 
@@ -418,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
             "still rest: reconnect and cancel them"
         )
     except KeyboardInterrupt:
-        return 130
+        return fail("interrupted: this example's orders may still rest; check and cancel them")
 
 
 if __name__ == "__main__":

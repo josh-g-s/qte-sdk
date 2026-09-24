@@ -32,7 +32,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 from qte_sdk.connection import Connection, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import BUY, MARKET, SELL, Liquidity
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, Reject
-from qte_sdk.market_data import Book, as_market_data, subscribe
+from qte_sdk.market_data import Book, DecodeFailed, SeqGap, as_market_data, subscribe
 from qte_sdk.orders import is_order_event, reason_code_name, request_ref_of, send_new
 from qte_sdk.session import MissingToken, SessionNotAcknowledged, open_session
 from qte_sdk.units import to_decimal
@@ -76,6 +76,7 @@ class Taker:
         self.filled = 0
         self.cost = 0  # micro-dollars
         self.done = False
+        self.missed = False  # whether any message from the exchange was missed
 
     async def on_book(self, book: Book) -> None:
         if self.ref is not None or book.instrument != self.instrument:
@@ -140,9 +141,13 @@ class Taker:
 
     def summary(self) -> str:
         if self.filled == 0:
-            return "nothing filled"
-        average = to_decimal(self.cost // self.filled)
-        return f"filled {self.filled} of {self.size} at an average of about {average}"
+            text = "nothing filled"
+        else:
+            average = to_decimal(self.cost // self.filled)
+            text = f"filled {self.filled} of {self.size} at an average of about {average}"
+        if self.missed:
+            text += " (messages were missed, so this may be incomplete: check your fills)"
+        return text
 
 
 async def run(url: str, args: argparse.Namespace) -> int:
@@ -161,6 +166,9 @@ async def run(url: str, args: argparse.Namespace) -> int:
                     elif isinstance(item, Reject):
                         print(f"subscription refused: {reason_code_name(item.reason_code)}")
                         return 1
+                    elif isinstance(item, SeqGap | DecodeFailed):
+                        print("warning: a message from the exchange was missed or unreadable")
+                        taker.missed = True
                     elif is_order_event(event):
                         taker.on_order_event(event.message)
                     if taker.done:

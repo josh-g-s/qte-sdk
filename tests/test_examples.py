@@ -12,9 +12,11 @@ import os
 import py_compile
 import re
 import secrets
+import signal
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from fake_exchange import CONTRACT_VERSION, serve_local
@@ -23,6 +25,7 @@ from websockets.exceptions import ConnectionClosed
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
+QUICKSTART = EXAMPLES_DIR.parent / "docs" / "quickstart.md"
 INSTRUMENT = "TEST"
 BID, ASK = 99_950_000, 100_050_000
 TICK = 10_000
@@ -47,10 +50,13 @@ def test_each_example_compiles_and_imports_without_running(path: Path, tmp_path:
     assert module.__doc__, "each example opens with a docstring saying what it does"
 
 
-@pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
-def test_no_example_names_a_hosted_exchange(path: Path):
-    urls = re.findall(r"\b(?:wss?|https?)://\S+", path.read_text())
-    assert all(url.startswith("ws://127.0.0.1") for url in urls), urls
+@pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART], ids=lambda p: p.name)
+def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path):
+    for url in re.findall(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\")]+", path.read_text()):
+        parts = urlsplit(url)
+        assert parts.scheme == "ws", url
+        assert parts.hostname == "127.0.0.1", url
+        assert parts.username is None and parts.password is None, url
 
 
 class FakeExchange:
@@ -63,10 +69,15 @@ class FakeExchange:
         reject_new: str | None = None,
         partial_fill: bool = False,
         move_bid_after: int | None = None,
+        teammate_fill_first: bool = False,
+        gap_after_resting: int | None = None,
     ) -> None:
         self.reject_new = reject_new
         self.partial_fill = partial_fill
         self.move_bid_after = move_bid_after
+        self.teammate_fill_first = teammate_fill_first
+        self.gap_after_resting = gap_after_resting
+        self.resting_reports = 0
         self.received: list[dict[str, Any]] = []
         self.resting: dict[tuple[str, str, int], tuple[str, int]] = {}
         self._seq = 0
@@ -111,12 +122,13 @@ class FakeExchange:
             "ask_levels": [{"price": str(ASK), "size": "200"}],
             "condition": "LIVE",
         }
-        with_state = {"state": "OPEN", "session_date": "2026-01-05", "grid_time": "1"}
-        await self.send(ws, "session_state", with_state)
+        state = {"state": "OPEN", "session_date": "2026-01-05", "grid_time": "1"}
         published = 0
         while True:
             if published == self.move_bid_after:
                 book["bid_levels"] = [{"price": str(BID - TICK), "size": "300"}]
+            # As on the exchange, the session state comes on every interval, unchanged.
+            await self.send(ws, "session_state", state)
             await self.send(ws, "book", book)
             published += 1
             await asyncio.sleep(0.05)
@@ -137,6 +149,25 @@ class FakeExchange:
                 }
                 await self.send(ws, "reject", reject)
                 return
+            if self.teammate_fill_first:
+                # While this order is delayed, a teammate's order at the same level fills
+                # completely and leaves it, which frees the level for this one.
+                self.teammate_fill_first = False
+                teammate = {
+                    "exec_id": "e-0",
+                    "origin": "TEAM",
+                    "strat_id": "teammate",
+                    "instrument": p["instrument"],
+                    "side": p["side"],
+                    "order_price": p["price"],
+                    "fill_price": p["price"],
+                    "fill_size": "4",
+                    "remaining_size": "0",
+                    "fill_kind": "STUDENT_TO_STUDENT",
+                    "liquidity": "MAKER",
+                    "fee": "5",
+                }
+                await self.send(ws, "execution", teammate)
             await self.send(ws, "accepted", accepted)
             size = int(p["size"])
             if p["order_type"] == "MARKET":
@@ -156,8 +187,20 @@ class FakeExchange:
                 await self.send(ws, "execution", fill)
                 return
             key = (p["instrument"], p["side"], int(p["price"]))
+            if key in self.resting:
+                reject = {
+                    "request_ref": ref,
+                    "request_type": "NEW",
+                    "reason_code": "DUPLICATE_ORDER_AT_LEVEL",
+                    "receipt_time": "1",
+                }
+                await self.send(ws, "reject", reject)
+                return
             self.resting[key] = (p["strat_id"], size)
             await self.send(ws, "order_state", self.order_state(key))
+            self.resting_reports += 1
+            if self.resting_reports == self.gap_after_resting:
+                self._seq += 1  # one message the client never receives
             if self.partial_fill and size > 1:
                 self.partial_fill = False
                 self.resting[key] = (p["strat_id"], size - 1)
@@ -269,6 +312,8 @@ async def test_print_book_stops_after_its_message_count():
     assert code == 0, err
     assert "stopped after 5 messages" in out
     assert "book   TEST  99.950000 x 300  |  100.050000 x 200" in out
+    # The unchanged session state counts as a message but is printed only once.
+    assert out.count("market session 2026-01-05: OPEN") == 1
     assert exchange.received[0] == {
         "version": CONTRACT_VERSION,
         "type": "auth",
@@ -346,6 +391,78 @@ async def test_quote_both_sides_prints_rejects_and_still_exits_cleanly():
     assert "REJECTED new: MARKET_CLOSED" in out
     # Rejected sides are retried no faster than --requote-seconds allows.
     assert 2 <= exchange.types().count("new") <= 12
+
+
+async def test_quote_both_sides_ignores_a_teammates_fill_at_its_level():
+    exchange = FakeExchange(teammate_fill_first=True)
+    # A teammate's order at another level, which the example must leave alone.
+    exchange.resting[(INSTRUMENT, "BUY", BID)] = ("teammate", 7)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "1", "--requote-seconds", "0.1", "--drain-seconds", "5"),
+        )
+    assert code == 0, out + err
+    cancels = [m["payload"] for m in exchange.received if m["type"] == "cancel"]
+    # It still cancels both of its own orders at the end, and nothing else.
+    assert sorted((c["side"], int(c["price"])) for c in cancels) == [
+        ("BUY", BID + TICK),
+        ("SELL", ASK - TICK),
+    ]
+    assert exchange.resting == {(INSTRUMENT, "BUY", BID): ("teammate", 7)}
+
+
+async def test_quote_both_sides_stops_sending_when_messages_are_missed():
+    exchange = FakeExchange(gap_after_resting=2)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "5", "--requote-seconds", "0.1"),
+        )
+    assert code == 1, out + err
+    assert "can no longer tell which orders are its own" in out
+    assert f"BUY {INSTRUMENT} @ 99.960000" in out
+    assert exchange.types().count("new") == 2
+    assert "cancel" not in exchange.types()  # it sends nothing more
+
+
+async def test_quote_both_sides_cancels_its_orders_on_ctrl_c():
+    exchange = FakeExchange()
+    async with serve_local(exchange) as url:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+        env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(EXAMPLES_DIR / "quote_both_sides.py"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--seconds", "60"),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert process.stdout is not None
+        seen = b""
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                while seen.count(b"resting ") < 2:
+                    line = await process.stdout.readline()
+                    assert line, seen.decode()
+                    seen += line
+                process.send_signal(signal.SIGINT)
+                out, err = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    assert process.returncode == 0, (seen + out + err).decode()
+    assert "all of this example's orders are cancelled" in out.decode()
+    assert exchange.types().count("cancel") == 2
+    assert exchange.resting == {}
 
 
 async def test_take_liquidity_sends_one_market_order_and_reports_the_fill():
