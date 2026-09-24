@@ -2,13 +2,14 @@ import asyncio
 import json
 import logging
 import secrets
+import socket
 import traceback
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from fake_exchange import exchange, frame, serve_local
+from fake_exchange import exchange, frame, serve_local, silent_server
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
@@ -583,24 +584,6 @@ async def test_log_records_expose_no_route_to_reflected_text(caplog):
         assert_no_token(reachable, token)
 
 
-@asynccontextmanager
-async def silent_server() -> AsyncIterator[str]:
-    """Accepts TCP connections and never answers the opening handshake."""
-    held: list[asyncio.StreamWriter] = []
-
-    async def hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        held.append(writer)
-
-    server = await asyncio.start_server(hold, "127.0.0.1", 0)
-    try:
-        yield f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
-    finally:
-        for writer in held:
-            writer.close()
-        server.close()
-        await server.wait_closed()
-
-
 async def test_a_handshake_timeout_keeps_request_headers_out_of_the_traceback():
     token = secrets.token_hex(16)
     async with silent_server() as url:
@@ -622,6 +605,61 @@ async def test_cancelling_the_handshake_keeps_request_headers_out_of_the_traceba
             await opening
     assert caught.value.__cause__ is None and caught.value.__context__ is None
     assert_no_token(shown_with_locals(caught.value), token)
+
+
+@asynccontextmanager
+async def deaf_server() -> AsyncIterator[str]:
+    """Completes the opening handshake, then stops reading, so the client's writes back up.
+
+    A small receive buffer makes them back up after a few hundred kilobytes.
+    """
+    released = asyncio.Event()
+
+    async def stop_reading(ws: ServerConnection) -> None:
+        ws.transport.pause_reading()
+        try:
+            await released.wait()
+        finally:
+            ws.transport.abort()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    sock.bind(("127.0.0.1", 0))
+    try:
+        async with serve(stop_reading, sock=sock) as server:
+            try:
+                yield f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            finally:
+                released.set()
+    finally:
+        sock.close()
+
+
+async def fill_until_stalled(conn: Connection) -> "asyncio.Task[None]":
+    """Send until a send cannot complete; returns that send, still waiting."""
+    message = Subscribe(instruments=["X" * 1000] * 16)
+    for _ in range(10_000):
+        sending = asyncio.create_task(conn.send("subscribe", message))
+        done, _ = await asyncio.wait({sending}, timeout=0.05)
+        if not done:
+            return sending
+        sending.result()
+    raise AssertionError("the writes never backed up")
+
+
+async def test_close_is_bounded_when_the_peer_stops_reading():
+    async with deaf_server() as url:
+        conn = Connection(url, close_timeout=0.2)
+        await conn.open()
+        stalled = await fill_until_stalled(conn)
+        started = asyncio.get_running_loop().time()
+        await asyncio.wait_for(conn.close(), 5)
+        elapsed = asyncio.get_running_loop().time() - started
+        # The stalled send ends too, rather than waiting on the dropped socket.
+        await asyncio.wait_for(asyncio.gather(stalled, return_exceptions=True), 5)
+        with pytest.raises(ConnectionClosedError):
+            await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
+    assert 0.2 <= elapsed < 2
 
 
 async def test_cancelling_iteration_keeps_the_type_and_drops_the_chain():

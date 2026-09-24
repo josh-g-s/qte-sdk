@@ -20,6 +20,7 @@ understand a failure; the QTE gateway never echoes credentials. A token placed i
 caller's own URL or headers is the caller's configuration.
 """
 
+import asyncio
 import logging
 import sys
 from collections.abc import AsyncIterator, Iterator, MutableMapping
@@ -309,8 +310,26 @@ class Connection:
         raise failure
 
     async def close(self) -> None:
-        if self._ws is not None:
-            await self._ws.close()
+        """Close the connection, waiting at most `close_timeout` seconds for the exchange to
+        complete the closing handshake.
+
+        `close_timeout` is the `websockets` connect option (default 10 seconds, None for no
+        limit), passed to `Connection` like any other. It also bounds sending the close
+        frame, which `websockets` alone does not: a peer that stops reading would otherwise
+        keep `close()` waiting for its buffer to drain. When the time is up the socket is
+        dropped without the handshake. Either way, `close()` returns normally.
+        """
+        ws = self._ws
+        if ws is None:
+            return
+        try:
+            async with asyncio.timeout(ws.close_timeout):
+                await ws.close()
+        except TimeoutError:
+            # Only our own deadline raises this: websockets handles its own close timeout.
+            ws.transport.abort()
+            # abort() makes the transport report the connection lost, so this is prompt.
+            await ws.wait_closed()
 
     async def send(self, type_: str, payload: Message) -> None:
         failure: BaseException

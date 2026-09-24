@@ -134,12 +134,17 @@ async def open_session(
     `connection_options` are passed to `Connection` (for example `contract_version`) and on
     to `websockets.asyncio.client.connect`.
 
+    `ack_timeout` bounds the whole opening sequence: connecting, sending `auth` and waiting
+    for `session_ack` must all finish within that many seconds of the call (None for no
+    limit). The `websockets` option `open_timeout` still bounds the opening handshake on its
+    own, and `close_timeout` bounds closing the connection (see `Connection.close`).
+
     Raises `MissingToken` before connecting if there is no token. If the exchange refuses
     the session, raises `SessionRejected` carrying the contract reason code, or
     `ContractVersionMismatch` when the exchange does not serve this contract version.
-    Raises `SessionNotAcknowledged` if the connection ends first, and `TimeoutError` if no
-    acknowledgement arrives within `ack_timeout` seconds. The connection is closed whenever
-    no session is returned.
+    Raises `SessionNotAcknowledged` if the connection ends first, and `TimeoutError` if the
+    session is not acknowledged within `ack_timeout` seconds. The connection is closed
+    whenever no session is returned, which can take up to `close_timeout` seconds more.
     """
     secret = _Secret(resolve_token(token))
     del token
@@ -147,13 +152,19 @@ async def open_session(
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)
     interrupted = False
+    deadline = asyncio.timeout(ack_timeout)
     try:
-        await conn.open()
-        await _send_auth(conn, secret)
-        ack, early = await _wait_for_ack(conn, ack_timeout)
+        async with deadline:
+            await conn.open()
+            await _send_auth(conn, secret)
+            ack, early = await _wait_for_ack(conn)
     except BaseException as error:
         interrupted = await _finish_closing(conn)
-        safe = _without_token(error, secret)
+        if isinstance(error, TimeoutError) and deadline.expired():
+            # A fresh error, not the one asyncio chained to the cancelled step.
+            safe = TimeoutError(f"the session was not acknowledged within {ack_timeout} s")
+        else:
+            safe = _without_token(error, secret)
         if safe is None and not interrupted:
             raise
     else:
@@ -205,29 +216,26 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
     raise replacement
 
 
-async def _wait_for_ack(conn: Connection, timeout: float | None) -> tuple[SessionAck, list[Event]]:
+async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
     early: list[Event] = []
     events = conn.events()
     close_code: int | None = None
     try:
-        async with asyncio.timeout(timeout):
-            async for event in events:
-                if isinstance(event, Received):
-                    if event.type == "session_ack":
-                        assert isinstance(event.message, SessionAck)
-                        return event.message, early
-                    if event.type == "reject":
-                        # Before the acknowledgement, the only request in flight is `auth`.
-                        message: Any = event.message
-                        detail = (
-                            message.reason_detail if message.HasField("reason_detail") else None
-                        )
-                        name = event.unknown_enum_names().get("reason_code")
-                        raise SessionRejected(message.reason_code, detail, reason_name=name)
-                elif isinstance(event, DecodeFailed) and event.type == "session_ack":
-                    # Not chained: the decoder's frames hold the raw payload in their locals.
-                    raise SessionNotAcknowledged(f"session_ack could not be decoded: {event.error}")
-                early.append(event)
+        async for event in events:
+            if isinstance(event, Received):
+                if event.type == "session_ack":
+                    assert isinstance(event.message, SessionAck)
+                    return event.message, early
+                if event.type == "reject":
+                    # Before the acknowledgement, the only request in flight is `auth`.
+                    message: Any = event.message
+                    detail = message.reason_detail if message.HasField("reason_detail") else None
+                    name = event.unknown_enum_names().get("reason_code")
+                    raise SessionRejected(message.reason_code, detail, reason_name=name)
+            elif isinstance(event, DecodeFailed) and event.type == "session_ack":
+                # Not chained: the decoder's frames hold the raw payload in their locals.
+                raise SessionNotAcknowledged(f"session_ack could not be decoded: {event.error}")
+            early.append(event)
     except ConnectionClosed as error:
         # Only the code is kept: the close reason is server text and could echo the token.
         close_code = error.rcvd.code if error.rcvd is not None else None
