@@ -18,14 +18,16 @@ import qte_sdk.reconnect
 from qte_sdk.connection import (
     Connection,
     ContractVersionMismatch,
+    DataUncertain,
     HandshakeFailed,
     Received,
     SeqGap,
     SessionRejected,
 )
 from qte_sdk.contract.v1.common_pb2 import BUY, ReasonCodes
+from qte_sdk.contract.v1.market_data_pb2 import Book
 from qte_sdk.contract.v1.session_pb2 import Auth
-from qte_sdk.market_data import subscribe, unsubscribe
+from qte_sdk.market_data import market_data, subscribe, unsubscribe
 from qte_sdk.reconnect import (
     Backoff,
     Connected,
@@ -244,6 +246,80 @@ async def test_a_drop_flags_uncertainty_then_reconnects_with_fresh_seq_auth_and_
     # The view saw the resting order and stays incomplete: no resume, no snapshot.
     assert view.get("AAPL", BUY, 199_970_000) is not None
     assert view.incomplete
+
+
+async def test_market_data_over_a_reconnecting_session_passes_the_disconnect_on():
+    exchange = Exchange(
+        session(book(2), subscribed=True, then=drop), session(book(2), subscribed=True)
+    )
+    items: list[object] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), instruments=["AAPL"], sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for item in market_data(rs):
+                items.append(item)
+                if len(items) == 3:
+                    break
+    assert [type(item) for item in items] == [Book, Disconnected, Book]
+    # No SeqGap, because each session numbers from 1: the Disconnected is the only sign.
+    assert isinstance(items[1], DataUncertain)
+
+
+async def test_following_a_reconnecting_session_marks_the_view_incomplete_on_a_drop():
+    view = RestingOrders()
+    exchange = Exchange(session(resting_order(2), then=drop), session())
+    at_disconnect: list[bool] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)  # no resting=
+        async with rs, aclosing(view.follow(rs)) as events:
+            async for event in events:
+                if isinstance(event, Disconnected):
+                    at_disconnect.append(view.incomplete)
+                if isinstance(event, Connected) and event.reconnected:
+                    break
+    assert at_disconnect == [True]
+    assert view.get("AAPL", BUY, 199_970_000) is not None
+
+
+async def test_a_session_lost_before_it_is_connected_is_reported_as_a_disconnect(monkeypatch):
+    real_send = Connection.send
+    failed: list[str] = []
+
+    async def subscribe_fails_once(self: Connection, type_: str, payload: object) -> None:
+        if type_ == "subscribe" and not failed:
+            failed.append(type_)
+            raise ConnectionClosedError(None, None)
+        await real_send(self, type_, payload)  # type: ignore[arg-type]
+
+    async def order_then_ack(ws: ServerConnection, exchange: Exchange) -> None:
+        await exchange.recv(ws)
+        await ws.send(resting_order(1))  # buffered before the ack, then lost with the session
+        acknowledged = json.loads(ack())
+        acknowledged["seq"] = 2
+        await ws.send(json.dumps(acknowledged))
+        await hold(ws, exchange)
+
+    monkeypatch.setattr(Connection, "send", subscribe_fails_once)
+    view = RestingOrders()
+    exchange = Exchange(order_then_ack, session(subscribed=True))
+    events: list[object] = []
+    at_disconnect: list[bool] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url, synthetic_token(), instruments=["AAPL"], resting=view, sleep=Clock().sleep
+        )
+        async with rs:
+            async for event in rs:
+                events.append(event)
+                if isinstance(event, Disconnected):
+                    at_disconnect.append(view.incomplete)
+                if isinstance(event, Connected):
+                    break
+    assert [type(e) for e in events] == [Disconnected, Retrying, Connected]
+    assert isinstance(events[0], Disconnected)
+    assert isinstance(events[0].error, ConnectionClosedError)
+    assert at_disconnect == [True]
+    assert view.incomplete and len(view) == 0
 
 
 async def test_a_normal_close_by_the_exchange_is_a_disconnect_too():

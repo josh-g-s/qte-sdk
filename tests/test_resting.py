@@ -5,7 +5,14 @@ from fake_exchange import frame, serve_local
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError
 
-from qte_sdk.connection import Connection, DecodeFailed, Received, SeqGap, Unknown
+from qte_sdk.connection import (
+    Connection,
+    DecodeFailed,
+    Disconnected,
+    Received,
+    SeqGap,
+    Unknown,
+)
 from qte_sdk.contract.v1.common_pb2 import (
     AMEND,
     BUY,
@@ -349,3 +356,16 @@ def _json_fill(remaining: str) -> dict:
         "fee": "1",
         "timestamp": "2",
     }
+
+
+def test_a_disconnect_marks_the_view_incomplete_and_keeps_its_entries():
+    view = view_of(rested())
+    view.apply(Disconnected(None))
+    assert view.incomplete
+    assert view.get("AAPL", BUY, PX) is not None
+
+
+def test_other_objects_leave_the_view_as_is():
+    view = view_of(rested())
+    view.apply(object())
+    assert not view.incomplete and len(view) == 1

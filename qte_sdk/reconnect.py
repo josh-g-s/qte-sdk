@@ -29,6 +29,14 @@ What happens on a disconnect, in this order:
    the session, subscribes again to every instrument this session is subscribed to.
 4. A `Connected` event is delivered, with `reconnected=True`.
 
+A session the exchange acknowledged but that failed before it could be delivered as
+`Connected` (for example because its subscription could not be sent) is reported with a
+`Disconnected` too, since anything it had received is lost.
+
+`Disconnected` is a `DataUncertain`, like `SeqGap`, so the other helpers understand it:
+`market_data(session)` passes it on, and `RestingOrders.follow(session)` marks its view
+incomplete on it.
+
 Nothing sent before a disconnect is sent again. An order in flight when the connection
 dropped may or may not have reached the exchange, and the SDK never repeats it. While no
 session is up, `send` raises `NotConnected` rather than queueing the message. The resting
@@ -60,7 +68,13 @@ from typing import Any
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
-from qte_sdk.connection import Event, HandshakeFailed, SessionRejected
+from qte_sdk.connection import (
+    DataUncertain,
+    Disconnected,
+    Event,
+    HandshakeFailed,
+    SessionRejected,
+)
 from qte_sdk.contract.v1.session_pb2 import Subscribe, Unsubscribe
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
@@ -81,6 +95,7 @@ __all__ = [
     "DEFAULT_BACKOFF",
     "Backoff",
     "Connected",
+    "DataUncertain",
     "Disconnected",
     "NotConnected",
     "ReconnectEvent",
@@ -141,17 +156,6 @@ class Connected:
     info: SessionInfo
     instruments: tuple[str, ...]
     reconnected: bool
-
-
-@dataclass(frozen=True)
-class Disconnected:
-    """The data-uncertainty event: the session ended and events may have been missed.
-
-    Fills, order events and market data sent while disconnected are not recovered. `error`
-    is why the connection ended, or None when the exchange closed it normally.
-    """
-
-    error: Exception | None
 
 
 @dataclass(frozen=True)
@@ -323,12 +327,20 @@ class ReconnectingSession:
                             return
                     if self._closed:
                         return
-                    session, failure = await self._attempt()
+                    session, failure, acknowledged = await self._attempt()
                     if self._closed:
                         return
                     if failure is not None:
                         failures += 1
                         last = failure
+                        if acknowledged:
+                            # The session was up, if only briefly: whatever it had received
+                            # is lost, so this is a disconnect like any other.
+                            if self.resting is not None:
+                                self.resting.mark_incomplete()
+                            yield Disconnected(failure)
+                            if self._closed:
+                                return
                         if self._gives_up(failure, failures):
                             raise failure
 
@@ -417,11 +429,13 @@ class ReconnectingSession:
     async def __aexit__(self, *exc_info: object) -> None:
         await self.close()
 
-    async def _attempt(self) -> tuple[Session | None, Exception | None]:
+    async def _attempt(self) -> tuple[Session | None, Exception | None, bool]:
         """One connection attempt: open a session, then subscribe again. Returns the session,
-        or the reason it failed; neither if the session was closed meanwhile."""
+        or the reason it failed (neither if the session was closed meanwhile), and whether
+        the exchange acknowledged a session, whose events are lost if it then failed."""
         session: Session | None = None
         failure: Exception | None = None
+        acknowledged = False
         try:
             opened = await self._unless_closed(
                 open_session(
@@ -432,8 +446,9 @@ class ReconnectingSession:
                 )
             )
             if opened is _CLOSED:
-                return None, None
+                return None, None, False
             session = opened
+            acknowledged = True
             # Held here at once, so close() reaches it even while it subscribes.
             self._session = session
             if self._instruments and not self._closed:
@@ -445,7 +460,7 @@ class ReconnectingSession:
             await _close(session)
             self._session = None
             session = None
-        return session, failure
+        return session, failure, acknowledged
 
     async def _unless_closed(self, awaitable: Awaitable[Any]) -> Any:
         """Await `awaitable`, or return `_CLOSED` if `close()` cuts it short.
