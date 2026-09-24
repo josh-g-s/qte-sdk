@@ -213,7 +213,7 @@ class ReconnectingSession:
     `backoff=None` turns reconnecting off: the first failure to connect is raised, and
     iteration ends after the first `Disconnected`. `sleep` and `rng` wait and draw the
     jitter; replace them in tests. `ack_timeout` and `connection_options` are passed to
-    `open_session` for every connection.
+    `open_session` for every connection, so `ack_timeout` bounds each attempt to open one.
 
     Raises `MissingToken` here, before any connection, if there is no token.
     """

@@ -1,5 +1,6 @@
 """A local in-process WebSocket server for tests. Never binds anything but 127.0.0.1."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -40,3 +41,21 @@ async def exchange(frames: list[str | bytes], inbox: list[str] | None = None) ->
 
     async with serve_local(handler) as url:
         yield url
+
+
+@asynccontextmanager
+async def silent_server() -> AsyncIterator[str]:
+    """Accepts TCP connections and never answers the opening handshake."""
+    held: list[asyncio.StreamWriter] = []
+
+    async def hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    server = await asyncio.start_server(hold, "127.0.0.1", 0)
+    try:
+        yield f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    finally:
+        for writer in held:
+            writer.close()
+        server.close()
+        await server.wait_closed()

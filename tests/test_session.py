@@ -7,7 +7,7 @@ import traceback
 from collections.abc import Iterator
 
 import pytest
-from fake_exchange import CONTRACT_VERSION, frame, serve_local
+from fake_exchange import CONTRACT_VERSION, frame, serve_local, silent_server
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
@@ -312,6 +312,53 @@ async def test_a_failed_connection_attempt_does_not_show_the_token(monkeypatch):
         pass  # the server is gone, so its port refuses connections
     with pytest.raises(OSError) as caught:
         await open_session(url)
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_stalled_auth_send_times_out_and_closes_the_connection(monkeypatch):
+    token = synthetic_token()
+
+    async def stalled_send(self: ClientConnection, message: object) -> None:
+        await asyncio.Event().wait()  # as if the socket never drains
+
+    closed = asyncio.Event()
+
+    async def idle(ws: ServerConnection) -> None:
+        await ws.wait_closed()
+        closed.set()
+
+    monkeypatch.setattr(ClientConnection, "send", stalled_send)
+    async with serve_local(idle) as url:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError) as caught:
+            await asyncio.wait_for(open_session(url, token, ack_timeout=0.2), 5)
+        elapsed = asyncio.get_running_loop().time() - started
+        await asyncio.wait_for(closed.wait(), 5)
+    assert elapsed < 2
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_the_timeout_also_bounds_the_opening_handshake():
+    token = synthetic_token()
+    async with silent_server() as url:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError) as caught:
+            # The handshake's own limit is longer, so only the session's limit can end it.
+            await asyncio.wait_for(open_session(url, token, ack_timeout=0.2, open_timeout=10), 5)
+        elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < 2
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_session_timeout_withholds_the_token_and_the_chain():
+    token = synthetic_token()
+    async with serve_local(Server()) as url:
+        with pytest.raises(TimeoutError) as caught:
+            await open_session(url, token, ack_timeout=0.2)
+    assert "0.2" in str(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
     assert_token_absent(token, shown(caught.value))
 
 
