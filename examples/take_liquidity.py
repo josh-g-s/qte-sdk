@@ -22,9 +22,11 @@ as here, every such fill is this order's.
 
 import argparse
 import asyncio
+import contextlib
 import os
 import sys
 import time
+from collections.abc import AsyncIterator
 
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
@@ -40,7 +42,7 @@ from qte_sdk.orders import (
     request_ref_of,
     send_new,
 )
-from qte_sdk.session import MissingToken, SessionNotAcknowledged, open_session
+from qte_sdk.session import MissingToken, Session, SessionNotAcknowledged, open_session
 from qte_sdk.units import to_decimal
 
 
@@ -164,15 +166,35 @@ class Taker:
         return text
 
 
+# The longest wait for the connection to close at the end. A local choice, not a value
+# the exchange sets. If the close does not finish, the connection is dropped anyway when
+# the example exits.
+CLOSE_SECONDS = 5.0
+
+
+@contextlib.asynccontextmanager
+async def closing(session: Session) -> AsyncIterator[Session]:
+    """Like `async with session:`, but waits at most CLOSE_SECONDS for the close, so a
+    connection that has stopped taking data cannot keep the example from exiting."""
+    try:
+        yield session
+    finally:
+        try:
+            async with asyncio.timeout(CLOSE_SECONDS):
+                await session.close()
+        except TimeoutError:
+            print("the connection did not close in time; it is dropped as the example exits")
+
+
 async def run(url: str, args: argparse.Namespace) -> int:
     # The token comes from the QTE_TOKEN environment variable.
     session = await open_session(url)
-    async with session:
+    async with closing(session):
         print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
-        await subscribe(session.connection, [args.instrument])
         taker = Taker(session.connection, args)
         try:
             async with asyncio.timeout(args.seconds):
+                await subscribe(session.connection, [args.instrument])
                 async for event in session:
                     item = as_market_data(event)
                     if isinstance(item, Book):

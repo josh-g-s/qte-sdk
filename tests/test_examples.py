@@ -821,3 +821,63 @@ async def test_take_liquidity_knows_it_may_have_sent_an_order_whose_send_stalled
     )
     taker.on_order_event(fill)
     assert taker.done and taker.filled == 1
+
+
+class StalledSession:
+    """A session whose close never finishes and on which no event ever arrives, as on a
+    connection that has stopped taking data. With `stall_sends`, sends never return
+    either. It stands in for `open_session`'s session, to run an example's own code."""
+
+    def __init__(self, *, stall_sends: bool) -> None:
+        self.info = SimpleNamespace(team="team-a", unscored=True)
+        self.connection = self
+        self.stall_sends = stall_sends
+        self.sent: list[str] = []
+        self.close_started = False
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append(type_)
+        if self.stall_sends:
+            await asyncio.Event().wait()
+
+    async def close(self) -> None:
+        self.close_started = True
+        await asyncio.Event().wait()
+
+    def __aiter__(self) -> Any:
+        return self.events()
+
+    async def events(self) -> Any:
+        await asyncio.Event().wait()
+        yield
+
+
+@pytest.mark.parametrize("stall_sends", [True, False], ids=["send-and-close", "close"])
+@pytest.mark.parametrize("name", ["print_book.py", "take_liquidity.py", "quote_both_sides.py"])
+async def test_each_example_stops_in_time_on_a_connection_that_stalls(
+    name: str, stall_sends: bool, capsys: pytest.CaptureFixture[str]
+):
+    example = load_example(name)
+    example.CLOSE_SECONDS = 0.2
+    session = StalledSession(stall_sends=stall_sends)
+    argv = ["--instrument", INSTRUMENT, "--seconds", "0.3"]
+    if name != "print_book.py":
+        argv += ["--strat-id", "x"]
+    args = example.parse_args(argv)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    async with asyncio.timeout(RUN_LIMIT):
+        if name == "quote_both_sides.py":
+            # Its own part, so this test process does not take over Ctrl+C.
+            await example.quote_and_clean_up(session, args, asyncio.current_task())
+        else:
+
+            async def stalled_open_session(url: str) -> StalledSession:
+                return session
+
+            example.open_session = stalled_open_session
+            await example.run("ws://127.0.0.1:1/ws", args)
+    assert loop.time() - started < 3  # --seconds plus the close bound, not forever
+    assert session.sent[0] == "subscribe"
+    assert session.close_started
+    assert "did not close in time" in capsys.readouterr().out

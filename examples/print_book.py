@@ -14,8 +14,10 @@ stream of individual changes, so you see the book as everyone else sees it.
 
 import argparse
 import asyncio
+import contextlib
 import os
 import sys
+from collections.abc import AsyncIterator
 from contextlib import aclosing
 
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
@@ -36,7 +38,7 @@ from qte_sdk.market_data import (
     subscribe,
 )
 from qte_sdk.orders import reason_code_name
-from qte_sdk.session import MissingToken, SessionNotAcknowledged, open_session
+from qte_sdk.session import MissingToken, Session, SessionNotAcknowledged, open_session
 from qte_sdk.units import to_decimal
 
 
@@ -103,18 +105,38 @@ def show(item: MarketDataEvent) -> bool:
     return True
 
 
+# The longest wait for the connection to close at the end. A local choice, not a value
+# the exchange sets. If the close does not finish, the connection is dropped anyway when
+# the example exits.
+CLOSE_SECONDS = 5.0
+
+
+@contextlib.asynccontextmanager
+async def closing(session: Session) -> AsyncIterator[Session]:
+    """Like `async with session:`, but waits at most CLOSE_SECONDS for the close, so a
+    connection that has stopped taking data cannot keep the example from exiting."""
+    try:
+        yield session
+    finally:
+        try:
+            async with asyncio.timeout(CLOSE_SECONDS):
+                await session.close()
+        except TimeoutError:
+            print("the connection did not close in time; it is dropped as the example exits")
+
+
 async def run(url: str, args: argparse.Namespace) -> int:
     # The token comes from the QTE_TOKEN environment variable.
     session = await open_session(url)
-    async with session:
+    async with closing(session):
         info = session.info
         print(f"connected: team {info.team}, unscored session: {info.unscored}")
-        # Send on the session's connection; read from the session itself.
-        await subscribe(session.connection, [args.instrument])
         received = 0
         last_state = None
         try:
             async with asyncio.timeout(args.seconds):
+                # Send on the session's connection; read from the session itself.
+                await subscribe(session.connection, [args.instrument])
                 async with aclosing(market_data(session)) as items:
                     async for item in items:
                         received += 1

@@ -57,6 +57,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from google.protobuf.message import Message
@@ -485,6 +486,26 @@ def unreliable(quoter: Quoter) -> int:
     return 1
 
 
+# The longest wait for the connection to close at the end. A local choice, not a value
+# the exchange sets. If the close does not finish, the connection is dropped anyway when
+# the example exits.
+CLOSE_SECONDS = 5.0
+
+
+@contextlib.asynccontextmanager
+async def closing(session: Session) -> AsyncIterator[Session]:
+    """Like `async with session:`, but waits at most CLOSE_SECONDS for the close, so a
+    connection that has stopped taking data cannot keep the example from exiting."""
+    try:
+        yield session
+    finally:
+        try:
+            async with asyncio.timeout(CLOSE_SECONDS):
+                await session.close()
+        except TimeoutError:
+            print("the connection did not close in time; it is dropped as the example exits")
+
+
 async def run(url: str, args: argparse.Namespace) -> int:
     # The token comes from the QTE_TOKEN environment variable.
     session = await open_session(url)
@@ -507,9 +528,14 @@ async def run(url: str, args: argparse.Namespace) -> int:
 
 async def quote_and_clean_up(session: Session, args: argparse.Namespace, task: asyncio.Task) -> int:
     loop = asyncio.get_running_loop()
-    async with session:
+    async with closing(session):
         print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
-        await subscribe(session.connection, [args.instrument])
+        try:
+            async with asyncio.timeout(args.seconds):
+                await subscribe(session.connection, [args.instrument])
+        except TimeoutError:
+            print("could not subscribe within --seconds; nothing was sent")
+            return 1
 
         view = RestingOrders()
         quoter = Quoter(session, view, args)
