@@ -17,6 +17,7 @@ import signal
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -24,6 +25,8 @@ import pytest
 from fake_exchange import CONTRACT_VERSION, serve_local
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
+
+from qte_sdk.contract.v1.order_events_pb2 import Accepted
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
@@ -694,3 +697,41 @@ async def test_quote_both_sides_refuses_an_inside_of_less_than_a_tick(inside: st
     )
     assert code == 2
     assert "--inside must be at least one price tick" in err
+
+
+async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short():
+    # A send can stall after its message is written, for example on a full send buffer. A
+    # Ctrl+C then must not make the example forget that message and send it again.
+    path = EXAMPLES_DIR / "quote_both_sides.py"
+    spec = importlib.util.spec_from_file_location("quote_example", path)
+    assert spec is not None and spec.loader is not None
+    example = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(example)
+
+    sent: list[str] = []
+
+    class StalledConnection:
+        async def send(self, type_: str, payload: Any) -> None:
+            sent.append(payload.request_ref)
+            await asyncio.Event().wait()  # written, then stalled
+
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    quoter = example.Quoter(SimpleNamespace(connection=StalledConnection()), None, args)
+    quoter.resting = lambda quote: quote.price is not None  # reported resting
+    buy = quoter.quotes[example.BUY]
+    buy.price = BID + TICK
+
+    cleanup = asyncio.create_task(quoter.cancel_own())
+    await until(lambda: len(sent) == 1)
+    cleanup.cancel()  # Ctrl+C during the send
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+
+    assert buy.pending_ref == sent[0]  # recorded before it was sent
+    buy.sent_at = float("-inf")  # however long cleanup waits, it does not send it again
+    quoter.view = []  # no order is reported gone yet
+    assert await quoter.cancel_own() is False
+    assert len(sent) == 1
+    # The exchange's reply to that cancel is still matched to it.
+    quoter.on_order_event(Accepted(request_ref=sent[0]))
+    assert buy.pending_ref is None and buy.cancelling

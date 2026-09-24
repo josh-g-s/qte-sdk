@@ -57,9 +57,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import Any
 
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
@@ -77,6 +75,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
 from qte_sdk.market_data import Book, DecodeFailed, SeqGap, as_market_data, subscribe
 from qte_sdk.orders import (
     is_order_event,
+    new_request_ref,
     reason_code_name,
     request_ref_of,
     send_amend,
@@ -88,9 +87,6 @@ from qte_sdk.session import MissingToken, Session, SessionNotAcknowledged, open_
 from qte_sdk.units import to_decimal, to_micros
 
 SIDE_NAMES = {BUY: "BUY", SELL: "SELL"}
-# pending_ref while a message is being sent. A request_ref is 1 to 32 bytes, so no reply
-# from the exchange matches it.
-SENDING = ""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -133,6 +129,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="longest wait for the final cancels to be confirmed (default 5)",
     )
     args = parser.parse_args(argv)
+    if args.requote_seconds <= 0:
+        parser.error("--requote-seconds must be more than 0")
     if args.inside <= 0:
         # The tick is not known here, so this only checks for at least something; a
         # price off the tick comes back as a reject with its reason code.
@@ -191,20 +189,18 @@ class Quoter:
             return None
         return order
 
-    async def send(self, quote: Quote, kind: str, sending: Coroutine[Any, Any, str]) -> None:
-        """Send one order message for this side and record its request_ref.
+    def record(self, quote: Quote, kind: str) -> str:
+        """Record a message for this side before sending it, and return its request_ref.
 
-        The side counts as busy from the start, so nothing else is sent for it meanwhile.
-        The send is shielded: a Ctrl+C part-way through lets it finish and be recorded,
-        rather than leave a message out that the example does not know it sent."""
-        quote.pending_ref, quote.pending_kind, quote.sent_at = SENDING, kind, time.monotonic()
+        Recording first means a reply is matched even if a Ctrl+C lands part-way through
+        the send, and nothing else is sent for this side until that reply comes."""
+        ref = new_request_ref()
+        quote.pending_ref, quote.pending_kind, quote.sent_at = ref, kind, time.monotonic()
+        return ref
+
+    def sent(self, quote: Quote) -> None:
         where = f"{SIDE_NAMES[quote.side]} {self.instrument} @ {price_text(quote.price or 0)}"
-
-        async def send_and_record() -> None:
-            quote.pending_ref = await sending
-            print(f"sent   {kind:<6} {where}")
-
-        await asyncio.shield(send_and_record())
+        print(f"sent   {quote.pending_kind:<6} {where}")
 
     async def manage(self, quote: Quote, best: int) -> None:
         """Move one side towards resting --size shares at `best`."""
@@ -212,7 +208,7 @@ class Quoter:
             return
         if quote.price is None:
             quote.price = best
-            new = send_new(
+            await send_new(
                 self.conn,
                 strat_id=self.strat_id,
                 instrument=self.instrument,
@@ -220,28 +216,34 @@ class Quoter:
                 order_type=LIMIT,
                 price=best,
                 size=self.size,
+                request_ref=self.record(quote, "new"),
             )
-            await self.send(quote, "new", new)
+            self.sent(quote)
             return
         order = self.resting(quote)
         if order is None:
             return  # not reported resting yet: wait rather than guess
         if quote.price != best:
             # Cancel and re-enter: the new order goes in once the cancel is confirmed.
-            cancel = send_cancel(
-                self.conn, instrument=self.instrument, side=quote.side, price=quote.price
+            await send_cancel(
+                self.conn,
+                instrument=self.instrument,
+                side=quote.side,
+                price=quote.price,
+                request_ref=self.record(quote, "cancel"),
             )
-            await self.send(quote, "cancel", cancel)
+            self.sent(quote)
         elif order.remaining_size < self.size:
             # new_size is the new total remaining size, not an amount to add.
-            amend = send_amend(
+            await send_amend(
                 self.conn,
                 instrument=self.instrument,
                 side=quote.side,
                 price=quote.price,
                 new_size=self.size,
+                request_ref=self.record(quote, "amend"),
             )
-            await self.send(quote, "amend", amend)
+            self.sent(quote)
 
     async def cancel_own(self) -> bool:
         """Cancel this example's orders. Returns True once none are left or in flight."""
@@ -252,10 +254,14 @@ class Quoter:
             elif quote.price is not None:
                 done = False
                 if self.ready(quote) and not quote.cancelling and self.resting(quote):
-                    cancel = send_cancel(
-                        self.conn, instrument=self.instrument, side=quote.side, price=quote.price
+                    await send_cancel(
+                        self.conn,
+                        instrument=self.instrument,
+                        side=quote.side,
+                        price=quote.price,
+                        request_ref=self.record(quote, "cancel"),
                     )
-                    await self.send(quote, "cancel", cancel)
+                    self.sent(quote)
         # Done once the exchange has also reported each order gone from the book.
         return done and not any(
             order.strat_id == self.strat_id and order.key.instrument == self.instrument
@@ -279,7 +285,7 @@ class Quoter:
 
     def pending(self, ref: str | None) -> Quote | None:
         for quote in self.quotes.values():
-            if ref and quote.pending_ref == ref:
+            if ref is not None and quote.pending_ref == ref:
                 return quote
         return None
 
@@ -377,7 +383,10 @@ async def pump(session: Session, queue: asyncio.Queue) -> None:
 async def next_event(queue: asyncio.Queue, timeout: float):
     """The next item from `pump`, or TimeoutError if none arrives within `timeout`."""
     if timeout <= 0:
-        return TimeoutError()  # even if events are waiting: the time is up
+        # The time is up, even if events are waiting. Yield once all the same, so a
+        # Ctrl+C and the reader still get their turn.
+        await asyncio.sleep(0)
+        return TimeoutError()
     # asyncio.timeout rather than asyncio.wait_for: on Python 3.11, wait_for can lose a
     # Ctrl+C that arrives just as an event does, and the example would not stop.
     try:
