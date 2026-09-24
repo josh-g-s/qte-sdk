@@ -26,9 +26,10 @@ time an order must rest before it may be cancelled or amended, the price collar 
 message budgets are all set by the exchange. This module assumes none of their values.
 
 Before sending, every send checks each `request_ref`, `strat_id` and `instrument` its
-message carries: each must be 1 to 32 bytes of UTF-8 (bytes, not characters, so a
-character outside ASCII counts two to four) with no NUL character. A send that breaks
-this raises `ValueError` and sends nothing.
+message carries: `request_ref` and `strat_id` must be 1 to 32 bytes of UTF-8, and
+`instrument` at most 32 bytes (0 to 32). Bytes are counted, not characters, so a
+character outside ASCII counts two to four, and none may contain the NUL character. A
+send that breaks this raises `ValueError` and sends nothing.
 """
 
 import uuid
