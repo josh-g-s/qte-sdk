@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.3
+**Version:** 0.4
 
 ## Requirements
 
@@ -29,7 +29,16 @@ pytest
 python -m build
 ```
 
-CI also installs the built wheel into a clean virtualenv and imports `qte_sdk`, to catch packaging mistakes that an editable install hides.
+CI also installs the built wheel into a clean virtualenv and imports `qte_sdk`, to catch packaging mistakes that an editable install hides. It then unpacks the built sdist, installs it with the dev extra in another clean virtualenv and runs the whole test suite from it, so a file missing from the sdist allowlist in `pyproject.toml` fails CI. To run the same check locally:
+
+```sh
+python -m build --sdist
+mkdir /tmp/sdist && tar -xzf dist/*.tar.gz -C /tmp/sdist
+python3 -m venv /tmp/sdist-venv
+cd /tmp/sdist/qte_sdk-*
+/tmp/sdist-venv/bin/pip install ".[dev]"
+/tmp/sdist-venv/bin/pytest
+```
 
 ## Contract types
 
