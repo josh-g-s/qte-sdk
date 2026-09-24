@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import ssl
 import traceback
@@ -11,9 +12,11 @@ from test_session import ack, assert_token_absent, session_reject, synthetic_tok
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError
+from websockets.protocol import State
 
 import qte_sdk.reconnect
 from qte_sdk.connection import (
+    Connection,
     ContractVersionMismatch,
     HandshakeFailed,
     Received,
@@ -786,6 +789,65 @@ async def test_an_auth_message_that_cannot_be_encoded_is_not_retried():
                 pass
     assert exchange.connections == 1
     assert clock.waits == []
+
+
+async def test_close_waits_for_a_socket_the_iterator_is_still_closing():
+    exchange = Exchange(session())
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token())
+        events = rs.events()
+        assert isinstance(await anext(events), Connected)
+        ws = rs._session.connection._ws  # type: ignore[union-attr]
+        closing = asyncio.create_task(events.aclose())
+        await asyncio.sleep(0)
+        closing.cancel()  # the iterator's own cleanup is interrupted
+        await rs.close()
+        assert ws.state is State.CLOSED
+        with contextlib.suppress(asyncio.CancelledError):
+            await closing
+
+
+async def test_close_does_not_interrupt_a_cancelled_attempt_that_is_closing(monkeypatch):
+    received_auth = asyncio.Event()
+    closes: list[str] = []
+    real_close = Connection.close
+
+    async def slow_close(self: Connection) -> None:
+        closes.append("started")
+        await asyncio.sleep(0.05)  # a close handshake that takes a moment
+        await real_close(self)
+        closes.append("finished")
+
+    async def never_ack(ws: ServerConnection, exchange: Exchange) -> None:
+        await exchange.recv(ws)
+        received_auth.set()
+        await hold(ws, exchange)
+
+    monkeypatch.setattr(Connection, "close", slow_close)
+    exchange = Exchange(never_ack)
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), ack_timeout=None)
+        consumer = asyncio.create_task(anext(rs.events()))
+        await asyncio.wait_for(received_auth.wait(), 5)
+        consumer.cancel()  # the attempt starts closing its connection
+        await asyncio.sleep(0.01)
+        await rs.close()  # must wait for that close, not cut it short
+        assert closes and closes.count("started") == closes.count("finished")
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+
+
+async def test_closing_while_handling_disconnected_delivers_nothing_more():
+    exchange = Exchange(session(then=drop), session())
+    events: list[object] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token())
+        async for event in rs:
+            events.append(event)
+            if isinstance(event, Disconnected):
+                await rs.close()
+    assert [type(e) for e in events] == [Connected, Disconnected]
+    assert exchange.connections == 1
 
 
 async def test_a_session_is_iterated_only_once():

@@ -351,12 +351,13 @@ class ReconnectingSession:
                 self._up = False
                 if self.resting is not None:
                     self.resting.mark_incomplete()
+                await _close(session)
                 self._session = None
-                with suppress(Exception):
-                    await session.close()
                 if self._closed:
                     return
                 yield Disconnected(failure)
+                if self._closed:
+                    return
                 if failure is not None and not is_retryable(failure):
                     raise failure
                 if self.backoff is None:
@@ -369,10 +370,9 @@ class ReconnectingSession:
             if self.resting is not None:
                 self.resting.mark_incomplete()
             session = self._session
-            self._session = None
             if session is not None:
-                with suppress(Exception):
-                    await session.close()
+                await _close(session)
+                self._session = None
 
     async def close(self) -> None:
         """Close the current session, if any, and stop reconnecting; iteration then ends.
@@ -394,13 +394,15 @@ class ReconnectingSession:
         pending = self._pending
         if pending is not None:
             # Wait for the attempt to wind down, so its socket is closed when this returns.
-            pending.cancel()
+            # An attempt already being cancelled is left to finish closing, not interrupted.
+            cancelling = getattr(pending, "cancelling", None)
+            if cancelling is None or not cancelling():
+                pending.cancel()
             await asyncio.wait({pending})
             await _close_result(pending)
         session = self._session
         if session is not None:
-            with suppress(Exception):
-                await session.close()
+            await _close(session)
             if self._session is session:
                 self._session = None
 
@@ -435,9 +437,8 @@ class ReconnectingSession:
         except Exception as error:
             failure = self._safe(error)
         if session is not None and (failure is not None or self._closed):
+            await _close(session)
             self._session = None
-            with suppress(Exception):
-                await session.close()
             session = None
         return session, failure
 
@@ -489,8 +490,17 @@ async def _close_result(task: "asyncio.Future[Any]") -> None:
     if task.done() and not task.cancelled() and task.exception() is None:
         result = task.result()
         if isinstance(result, Session):
-            with suppress(Exception):
-                await result.close()
+            await _close(result)
+
+
+async def _close(session: Session) -> None:
+    """Close `session`. The close runs to the end even if the caller is cancelled meanwhile,
+    so a socket is never left half closed."""
+    closing = asyncio.ensure_future(session.close())
+    # Retrieved here, so a failure after the caller stopped waiting is not reported unread.
+    closing.add_done_callback(lambda done: done.cancelled() or done.exception())
+    with suppress(Exception):
+        await asyncio.shield(closing)
 
 
 def _instrument_list(instruments: Iterable[str]) -> list[str]:
