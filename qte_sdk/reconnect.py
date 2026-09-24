@@ -71,6 +71,7 @@ from qte_sdk.session import (
     SessionNotAcknowledged,
     _finish_closing,
     _Secret,
+    _wait_out,
     _without_token,
     open_session,
     resolve_token,
@@ -388,7 +389,11 @@ class ReconnectingSession:
         # overlapping or cancelled close() cannot leave a socket half closed.
         if self._shutdown is None:
             self._shutdown = asyncio.ensure_future(self._shut_down())
-        await asyncio.shield(self._shutdown)
+        if asyncio.current_task() is self._pending:
+            return  # called from a backoff wait, which the shutdown cancels and awaits
+        # A cancellation (Ctrl-C, for example) is raised only once the shutdown is done.
+        if await _wait_out(self._shutdown):
+            raise asyncio.CancelledError
 
     async def _shut_down(self) -> None:
         pending = self._pending

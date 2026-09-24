@@ -169,17 +169,22 @@ async def open_session(
 async def _finish_closing(conn: Connection) -> bool:
     """Close `conn` and wait until it is closed, even if cancelled meanwhile, so no socket
     is left half closed. Returns True if a cancellation arrived, for the caller to raise."""
-    closing = asyncio.ensure_future(conn.close())
+    return await _wait_out(asyncio.ensure_future(conn.close()))
+
+
+async def _wait_out(task: "asyncio.Future[Any]") -> bool:
+    """Wait for `task` to finish, even through cancellation. Returns True if a cancellation
+    arrived meanwhile, for the caller to raise once the task is done."""
     interrupted = False
-    while not closing.done():
+    while not task.done():
         try:
-            await asyncio.shield(closing)
+            await asyncio.shield(task)
         except asyncio.CancelledError:
             interrupted = True
         except Exception:
             break
-    if not closing.cancelled():
-        closing.exception()  # retrieved, so a failed close is not reported as unread
+    if not task.cancelled():
+        task.exception()  # retrieved, so a failure is not reported as unread
     return interrupted
 
 

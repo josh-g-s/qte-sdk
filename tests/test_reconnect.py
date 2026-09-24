@@ -863,6 +863,32 @@ async def test_close_does_not_interrupt_an_attempt_closing_after_its_ack_timeout
         assert await asyncio.wait_for(consumer, 5) is None
 
 
+async def test_a_cancelled_close_still_finishes_closing_before_it_raises(monkeypatch):
+    closes: list[str] = []
+    real_close = Connection.close
+
+    async def slow_close(self: Connection) -> None:
+        closes.append("started")
+        await asyncio.sleep(0.1)  # a close handshake that takes a moment
+        await real_close(self)
+        closes.append("finished")
+
+    monkeypatch.setattr(Connection, "close", slow_close)
+    exchange = Exchange(session())
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token())
+        events = rs.events()
+        assert isinstance(await anext(events), Connected)
+        closer = asyncio.create_task(rs.close())
+        while not closes:
+            await asyncio.sleep(0.01)
+        closer.cancel()  # Ctrl-C while closing, for example
+        with pytest.raises(asyncio.CancelledError):
+            await closer
+        assert closes == ["started", "finished"]
+        await events.aclose()
+
+
 async def test_closing_while_handling_disconnected_delivers_nothing_more():
     exchange = Exchange(session(then=drop), session())
     events: list[object] = []
