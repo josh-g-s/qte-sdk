@@ -1,9 +1,8 @@
 """Subscribe to market data and consume it as typed messages.
 
-    # Subscribe once `conn` is authenticated and the exchange has acknowledged its
-    # session.
-    await subscribe(conn, ["AAPL", "MSFT"])
-    async for item in market_data(conn):
+    session = await open_session(url)  # see `qte_sdk.session`
+    await subscribe(session, ["AAPL", "MSFT"])
+    async for item in market_data(session):
         match item:
             case Book():
                 best_bid = item.bid_levels[0].price if item.bid_levels else None
@@ -28,7 +27,6 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from typing import Any, cast
 
 from qte_sdk.connection import (
-    Connection,
     DataUncertain,
     DecodeFailed,
     Disconnected,
@@ -49,6 +47,7 @@ from qte_sdk.contract.v1.market_data_pb2 import (
 )
 from qte_sdk.contract.v1.order_events_pb2 import Reject
 from qte_sdk.contract.v1.session_pb2 import Subscribe, Unsubscribe
+from qte_sdk.orders import Sender
 
 __all__ = [
     "MARKET_DATA_TYPES",
@@ -85,8 +84,11 @@ MARKET_DATA_TYPES: frozenset[str] = frozenset({"book", "trades", "mark", "sessio
 _SUBSCRIPTION_REQUESTS = frozenset({RequestType.SUBSCRIBE, RequestType.UNSUBSCRIBE})
 
 
-async def subscribe(conn: Connection, instruments: Iterable[str]) -> None:
+async def subscribe(conn: Sender, instruments: Iterable[str]) -> None:
     """Ask the exchange to start sending market data for `instruments`.
+
+    `conn` is a session (`Session` or `ReconnectingSession`) or a `Connection` that has
+    been authenticated and acknowledged.
 
     Returns once the request is sent, which does not mean the exchange has accepted it:
     no acknowledgement message is defined. An instrument the exchange does not know comes
@@ -96,7 +98,7 @@ async def subscribe(conn: Connection, instruments: Iterable[str]) -> None:
     await conn.send("subscribe", Subscribe(instruments=_instrument_list(instruments)))
 
 
-async def unsubscribe(conn: Connection, instruments: Iterable[str]) -> None:
+async def unsubscribe(conn: Sender, instruments: Iterable[str]) -> None:
     """Ask the exchange to stop sending market data for `instruments`.
 
     Returns once the request is sent, which does not mean the exchange has acted on it.
@@ -134,12 +136,12 @@ def as_market_data(event: Event | Disconnected | object) -> MarketDataEvent | No
 
 
 async def market_data(events: AsyncIterable[Any]) -> AsyncIterator[MarketDataEvent]:
-    """Iterate over the market-data events in `events`: a `Connection`, a session, or a
-    `ReconnectingSession`, whose `Disconnected` events are passed on.
+    """Iterate over the market-data events in `events`: a `Session`, a
+    `ReconnectingSession`, whose `Disconnected` events are passed on, or a `Connection`.
 
-    This consumes the connection: events that are not market data, such as order events,
-    are skipped. To handle both on one connection, loop over the connection yourself and
-    call `as_market_data` on each event.
+    This consumes the session: events that are not market data, such as order events,
+    are skipped. To handle both on one session, loop over the session yourself and call
+    `as_market_data` on each event.
     """
     async for event in events:
         item = as_market_data(event)

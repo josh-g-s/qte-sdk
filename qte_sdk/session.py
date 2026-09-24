@@ -26,6 +26,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import (
@@ -79,8 +80,10 @@ class SessionInfo:
 class Session:
     """An acknowledged session: the open connection and what the exchange said about it.
 
-    Iterate the session, not its connection, to receive every event: anything the exchange
-    sent before `session_ack` is delivered first, then the rest of the stream.
+    Send on the session and iterate it, rather than its connection. Iterating the session
+    delivers every event: anything the exchange sent before `session_ack` first, then the
+    rest of the stream. A session is a `qte_sdk.orders.Sender`, so the functions in
+    `qte_sdk.orders` and `qte_sdk.market_data` accept it.
     """
 
     def __init__(self, connection: Connection, info: SessionInfo, early: list[Event]) -> None:
@@ -99,6 +102,10 @@ class Session:
             yield self._early.popleft()
         async for event in self.connection:
             yield event
+
+    async def send(self, type_: str, payload: Message) -> None:
+        """Send one message on this session's connection, as `Connection.send` does."""
+        await self.connection.send(type_, payload)
 
     async def close(self) -> None:
         await self.connection.close()

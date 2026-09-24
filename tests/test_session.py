@@ -14,7 +14,7 @@ from websockets.asyncio.server import ServerConnection
 from qte_sdk.connection import Connection, ContractVersionMismatch, Received, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
-from qte_sdk.contract.v1.session_pb2 import Heartbeat
+from qte_sdk.contract.v1.session_pb2 import Heartbeat, Subscribe
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     MissingToken,
@@ -460,3 +460,36 @@ async def test_cancelling_while_a_failed_open_closes_waits_for_the_close(monkeyp
         with pytest.raises(asyncio.CancelledError):
             await task
     assert closes == ["started", "finished"]
+
+
+# Sending on the session
+
+
+async def test_the_session_sends_on_its_connection():
+    received: list[dict] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        received.append(json.loads(await ws.recv()))
+        await ws.send(ack())
+        received.append(json.loads(await ws.recv()))
+        await ws.close()
+
+    async with serve_local(handler) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            await session.send("subscribe", Subscribe(instruments=["AAPL"]))
+            assert [event async for event in session] == []
+    assert received[1] == {
+        "version": CONTRACT_VERSION,
+        "type": "subscribe",
+        "payload": {"instruments": ["AAPL"]},
+    }
+
+
+async def test_a_send_on_a_closed_session_fails_as_on_its_connection():
+    async with serve_local(Server(ack())) as url:
+        session = await open_session(url, synthetic_token())
+        await session.close()
+        with pytest.raises(Exception) as on_connection:
+            await session.connection.send("subscribe", Subscribe(instruments=["AAPL"]))
+        with pytest.raises(type(on_connection.value)):
+            await session.send("subscribe", Subscribe(instruments=["AAPL"]))

@@ -164,7 +164,7 @@ class Quote:
 
 class Quoter:
     def __init__(self, session: Session, view: RestingOrders, args: argparse.Namespace) -> None:
-        self.conn = session.connection
+        self.session = session
         self.view = view
         self.instrument: str = args.instrument
         self.strat_id: str = args.strat_id
@@ -210,7 +210,7 @@ class Quoter:
         if quote.price is None:
             quote.price = best
             await send_new(
-                self.conn,
+                self.session,
                 strat_id=self.strat_id,
                 instrument=self.instrument,
                 side=quote.side,
@@ -227,7 +227,7 @@ class Quoter:
         if quote.price != best:
             # Cancel and re-enter: the new order goes in once the cancel is confirmed.
             await send_cancel(
-                self.conn,
+                self.session,
                 instrument=self.instrument,
                 side=quote.side,
                 price=quote.price,
@@ -237,7 +237,7 @@ class Quoter:
         elif order.remaining_size < self.size:
             # new_size is the new total remaining size, not an amount to add.
             await send_amend(
-                self.conn,
+                self.session,
                 instrument=self.instrument,
                 side=quote.side,
                 price=quote.price,
@@ -256,7 +256,7 @@ class Quoter:
                 done = False
                 if self.ready(quote) and not quote.cancelling and self.resting(quote):
                     await send_cancel(
-                        self.conn,
+                        self.session,
                         instrument=self.instrument,
                         side=quote.side,
                         price=quote.price,
@@ -532,7 +532,7 @@ async def quote_and_clean_up(session: Session, args: argparse.Namespace, task: a
         print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
         try:
             async with asyncio.timeout(args.seconds):
-                await subscribe(session.connection, [args.instrument])
+                await subscribe(session, [args.instrument])
         except TimeoutError:
             print("could not subscribe within --seconds; no orders were sent")
             return 1

@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.1
+**Version:** 0.2
 
 This guide takes you from a fresh checkout to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -60,7 +60,7 @@ If the exchange refuses the session, `open_session` raises `SessionRejected` (fr
 
 Two rules about sessions:
 
-- **Send on `session.connection`, read from `session`.** Every send function takes the connection. Iterate the session itself, not its connection, so that you also receive anything the exchange sent before it acknowledged you.
+- **Send on the session and read from it.** Every send function takes the session. Iterate the session itself, not its connection, so that you also receive anything the exchange sent before it acknowledged you.
 - **Read from one place.** Have one loop read the session's events and do everything from there. Two loops reading the same session each get only some of the events.
 
 ## 4. Subscribe to market data
@@ -71,7 +71,7 @@ The snippets from here on run inside the `async with session:` block of step 3.
 from qte_sdk.market_data import Book, subscribe, market_data
 from qte_sdk.units import to_decimal
 
-await subscribe(session.connection, ["AAPL"])
+await subscribe(session, ["AAPL"])
 async for item in market_data(session):  # runs until you stop it
     if isinstance(item, Book) and item.bid_levels and item.ask_levels:
         bid, ask = item.bid_levels[0], item.ask_levels[0]
@@ -121,7 +121,7 @@ STRATEGY = "my-strategy"  # a strategy ID registered for your team
 INSTRUMENT = "AAPL"
 price = to_micros("199.97")
 new_ref = await send_new(
-    session.connection,
+    session,
     strat_id=STRATEGY,
     instrument=INSTRUMENT,
     side=BUY,
@@ -160,7 +160,7 @@ try:
                 if cancel_ref is None:
                     # Cancel it by naming its level: instrument, side and price.
                     cancel_ref = await send_cancel(
-                        session.connection, instrument=INSTRUMENT, side=BUY, price=price
+                        session, instrument=INSTRUMENT, side=BUY, price=price
                     )
             elif event.type == "execution" and is_this_order(message, "order_price"):
                 print("filled", message.fill_size, "left", message.remaining_size)
@@ -175,7 +175,7 @@ except TimeoutError:
 
 Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it, and so does each `order_cancelled` that your cancel, amend or mass cancel causes. Match on it with `request_ref_of`.
 
-An amend changes the orders at one level: `send_amend(conn, instrument=..., side=..., price=..., new_size=...)`. `new_size` is the new total remaining size, not an amount to add. `send_mass_cancel(conn)` cancels **every order your team has on the exchange**, including those of your teammates' strategies.
+An amend changes the orders at one level: `send_amend(session, instrument=..., side=..., price=..., new_size=...)`. `new_size` is the new total remaining size, not an amount to add. `send_mass_cancel(session)` cancels **every order your team has on the exchange**, including those of your teammates' strategies.
 
 Because a cancel or amend names a level, not an order, it acts on whichever of your team's orders rests at that level when the exchange applies it, after the order delay. If your order fills in the meantime and a teammate's strategy enters an order at the same price, your cancel removes theirs. Agree within your team who trades which instruments or prices.
 

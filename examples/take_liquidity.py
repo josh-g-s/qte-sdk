@@ -31,11 +31,12 @@ from collections.abc import AsyncIterator
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
-from qte_sdk.connection import Connection, SessionRejected
+from qte_sdk.connection import SessionRejected
 from qte_sdk.contract.v1.common_pb2 import BUY, MARKET, SELL, Liquidity
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, Reject
 from qte_sdk.market_data import Book, DecodeFailed, SeqGap, as_market_data, subscribe
 from qte_sdk.orders import (
+    Sender,
     is_order_event,
     new_request_ref,
     reason_code_name,
@@ -72,8 +73,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 class Taker:
-    def __init__(self, conn: Connection, args: argparse.Namespace) -> None:
-        self.conn = conn
+    def __init__(self, session: Sender, args: argparse.Namespace) -> None:
+        self.session = session
         self.instrument: str = args.instrument
         self.strat_id: str = args.strat_id
         self.side = BUY if args.side == "buy" else SELL
@@ -107,7 +108,7 @@ class Taker:
         self.ref = new_request_ref()
         self.sent_at = time.monotonic()
         await send_new(
-            self.conn,
+            self.session,
             strat_id=self.strat_id,
             instrument=self.instrument,
             side=self.side,
@@ -191,10 +192,10 @@ async def run(url: str, args: argparse.Namespace) -> int:
     session = await open_session(url)
     async with closing(session):
         print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
-        taker = Taker(session.connection, args)
+        taker = Taker(session, args)
         try:
             async with asyncio.timeout(args.seconds):
-                await subscribe(session.connection, [args.instrument])
+                await subscribe(session, [args.instrument])
                 async for event in session:
                     item = as_market_data(event)
                     if isinstance(item, Book):

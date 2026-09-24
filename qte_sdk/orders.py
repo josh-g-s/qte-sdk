@@ -4,9 +4,9 @@ Four messages enter orders: `new`, `cancel`, `amend` and `mass_cancel`. There is
 ID on the wire. A team's orders are addressed by instrument, side and price, so `cancel`
 and `amend` act on every order the team has at that price level.
 
-    ref = await send_new(conn, strat_id="mm-1", instrument="AAPL", side=BUY,
+    ref = await send_new(session, strat_id="mm-1", instrument="AAPL", side=BUY,
                          order_type=LIMIT, price=199_970_000, size=100)
-    async for event in conn:
+    async for event in session:
         if is_order_event(event) and request_ref_of(event.message) == ref:
             ...
 
@@ -80,7 +80,8 @@ OrderEvent = Accepted | Reject | Execution | OrderCancelled | OrderState | RiskN
 
 
 class Sender(Protocol):
-    """Anything that sends one message by its envelope type, such as a `Connection`."""
+    """Anything that sends one message by its envelope type: a `Session`, a
+    `ReconnectingSession` or a `Connection`. Every send function here takes one."""
 
     async def send(self, type_: str, payload: Message) -> None: ...
 
