@@ -33,7 +33,7 @@ from qte_sdk.reconnect import (
     is_retryable,
 )
 from qte_sdk.resting import RestingOrders
-from qte_sdk.session import TOKEN_ENV_VAR, MissingToken, SessionNotAcknowledged
+from qte_sdk.session import TOKEN_ENV_VAR, AuthNotSent, MissingToken, SessionNotAcknowledged
 
 # The fake exchange. Each connection runs the next script in turn; the last one repeats.
 
@@ -502,6 +502,7 @@ async def test_a_session_rejected_while_open_is_flagged_then_raised():
         (ssl.SSLCertVerificationError(), False),
         (TimeoutError(), True),
         (SessionNotAcknowledged("closed"), True),
+        (AuthNotSent("could not send auth"), False),
         (HandshakeFailed("InvalidMessage", None), True),
         (HandshakeFailed("InvalidHeader", None), False),
         (HandshakeFailed("NegotiationError", None), False),
@@ -728,6 +729,63 @@ async def test_closing_marks_the_view_incomplete_at_once():
         await rs.close()  # the iterator is left suspended
         assert view.incomplete
         await events.aclose()
+
+
+async def test_overlapping_closes_all_wait_for_one_shutdown_even_if_one_is_cancelled():
+    received_auth = asyncio.Event()
+
+    async def never_ack(ws: ServerConnection, exchange: Exchange) -> None:
+        await exchange.recv(ws)
+        received_auth.set()
+        await hold(ws, exchange)
+
+    exchange = Exchange(never_ack)
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), ack_timeout=None)
+        consumer = asyncio.create_task(anext(rs.events(), None))
+        await asyncio.wait_for(received_auth.wait(), 5)
+        first = asyncio.create_task(rs.close())
+        second = asyncio.create_task(rs.close())
+        await asyncio.sleep(0)
+        first.cancel()
+        await asyncio.wait_for(second, 5)
+        await asyncio.wait_for(exchange.closed.wait(), 5)
+        assert await consumer is None
+
+
+async def test_no_event_is_delivered_or_applied_after_close():
+    view = RestingOrders()
+    acknowledged = json.loads(ack())
+    acknowledged["seq"] = 2
+
+    async def order_then_ack(ws: ServerConnection, exchange: Exchange) -> None:
+        await exchange.recv(ws)
+        await ws.send(resting_order(1))  # arrives before the ack, so it is buffered
+        await ws.send(json.dumps(acknowledged))
+        await hold(ws, exchange)
+
+    exchange = Exchange(order_then_ack)
+    events: list[object] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resting=view)
+        async for event in rs:
+            events.append(event)
+            if isinstance(event, Connected):
+                await rs.close()
+    assert [type(e) for e in events] == [Connected]
+    assert len(view) == 0 and view.incomplete
+
+
+async def test_an_auth_message_that_cannot_be_encoded_is_not_retried():
+    clock = Clock()
+    exchange = Exchange(session())
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=clock.sleep, contract_version=123)
+        with pytest.raises(AuthNotSent):
+            async for _ in rs:
+                pass
+    assert exchange.connections == 1
+    assert clock.waits == []
 
 
 async def test_a_session_is_iterated_only_once():

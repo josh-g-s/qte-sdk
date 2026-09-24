@@ -40,7 +40,8 @@ that could not be opened (`OSError` or a timeout), a handshake answered with a m
 response or with HTTP 5xx, 408 or 429, and a session that closed before it was
 acknowledged. Anything else stops the session and is raised from the iteration, because
 trying again would give the same answer: every `SessionRejected` (for example a token the
-exchange does not accept), including `ContractVersionMismatch`; a certificate that failed
+exchange does not accept), including `ContractVersionMismatch`; `AuthNotSent`, when the
+`auth` message itself could not be encoded or sent; a certificate that failed
 verification; a handshake refused with any other status, which usually means a wrong URL,
 or whose negotiation failed; and any error in the SDK or your own code.
 
@@ -65,6 +66,7 @@ from qte_sdk.contract.v1.session_pb2 import Subscribe, Unsubscribe
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     DEFAULT_ACK_TIMEOUT,
+    AuthNotSent,
     Session,
     SessionInfo,
     SessionNotAcknowledged,
@@ -178,9 +180,10 @@ def is_retryable(error: BaseException) -> bool:
     True for a dropped connection, a connection that could not be opened or timed out
     (other than a certificate that failed verification), a handshake answered with a
     malformed response or with HTTP 5xx, 408 or 429, and a session that closed before it
-    was acknowledged. False for everything else, including every `SessionRejected`.
+    was acknowledged. False for everything else, including every `SessionRejected` and
+    `AuthNotSent`.
     """
-    if isinstance(error, SessionRejected | ssl.SSLCertVerificationError):
+    if isinstance(error, SessionRejected | AuthNotSent | ssl.SSLCertVerificationError):
         return False
     if isinstance(error, HandshakeFailed):
         status = error.status_code
@@ -239,6 +242,7 @@ class ReconnectingSession:
         self._iterated = False
         self._closed = False
         self._pending: asyncio.Future[Any] | None = None
+        self._shutdown: asyncio.Future[None] | None = None
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "connected" if self._up else "not connected"
@@ -336,6 +340,8 @@ class ReconnectingSession:
                 failure = None
                 try:
                     async for event in session:
+                        if self._closed:
+                            break  # closed while events were still buffered
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event
@@ -378,16 +384,25 @@ class ReconnectingSession:
         self._up = False
         if self.resting is not None:
             self.resting.mark_incomplete()
+        # One shutdown, shared by every call and not cancelled with any of them, so an
+        # overlapping or cancelled close() cannot leave a socket half closed.
+        if self._shutdown is None:
+            self._shutdown = asyncio.ensure_future(self._shut_down())
+        await asyncio.shield(self._shutdown)
+
+    async def _shut_down(self) -> None:
         pending = self._pending
-        if pending is not None and pending is not asyncio.current_task():
+        if pending is not None:
             # Wait for the attempt to wind down, so its socket is closed when this returns.
             pending.cancel()
             await asyncio.wait({pending})
             await _close_result(pending)
         session = self._session
-        self._session = None
         if session is not None:
-            await session.close()
+            with suppress(Exception):
+                await session.close()
+            if self._session is session:
+                self._session = None
 
     async def __aenter__(self) -> "ReconnectingSession":
         return self
