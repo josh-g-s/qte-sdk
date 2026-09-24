@@ -298,6 +298,8 @@ async def test_a_32_byte_multi_byte_identifier_is_sent_as_given(sender, field):
 @pytest.mark.parametrize("bad", BAD_IDS.values(), ids=BAD_IDS.keys())
 @pytest.mark.parametrize("sender, field", IDENTIFIERS)
 async def test_a_bad_identifier_is_refused_and_nothing_is_sent(sender, field, bad):
+    if field == "instrument" and bad == "":
+        pytest.skip("an empty instrument is only limited in length; see the test below")
     send, args = SENDERS[sender]
     errors: list[ValueError] = []
 
@@ -313,6 +315,15 @@ async def test_a_bad_identifier_is_refused_and_nothing_is_sent(sender, field, ba
     if bad:
         assert bad not in str(error)
         assert repr(bad)[1:-1] not in str(error)
+
+
+@pytest.mark.parametrize("sender", ["new", "cancel", "amend"])
+async def test_an_empty_instrument_is_sent_as_given(sender):
+    # The contract limits instrument to at most 32 bytes and does not require it to be
+    # non-empty, so the SDK leaves an empty one for the exchange to judge.
+    send, args = SENDERS[sender]
+    [env] = await messages_sent_by(lambda conn: send(conn, **{**args, "instrument": ""}))
+    assert env["payload"]["instrument"] == ""
 
 
 @pytest.mark.parametrize("sender", SENDERS)

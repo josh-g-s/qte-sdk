@@ -92,16 +92,21 @@ def new_request_ref() -> str:
 _ID_MAX_BYTES = 32
 
 
-def _id(name: str, value: str) -> str:
-    """Check one identifier against the contract's rule. Errors name the field, never `value`."""
+def _id(name: str, value: str, *, required: bool = True) -> str:
+    """Check one identifier against the contract's rule. Errors name the field, never `value`.
+
+    A required identifier is 1 to 32 bytes of UTF-8; one that is not required may also be
+    empty, and the exchange decides what an empty one means.
+    """
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str")
     try:
         size = len(value.encode("utf-8"))
     except UnicodeEncodeError:
         raise ValueError(f"{name} must be valid UTF-8 text") from None
-    if not 1 <= size <= _ID_MAX_BYTES:
-        raise ValueError(f"{name} must be 1 to {_ID_MAX_BYTES} bytes of UTF-8, got {size}")
+    if size > _ID_MAX_BYTES or (required and size == 0):
+        least = 1 if required else 0
+        raise ValueError(f"{name} must be {least} to {_ID_MAX_BYTES} bytes of UTF-8, got {size}")
     if "\0" in value:
         raise ValueError(f"{name} must not contain the NUL character")
     return value
@@ -136,7 +141,7 @@ async def send_new(
     """
     ref = _ref(request_ref)
     _id("strat_id", strat_id)
-    _id("instrument", instrument)
+    _id("instrument", instrument, required=False)
     if order_type == LIMIT:
         if price is None:
             raise ValueError("a LIMIT order needs a price")
@@ -170,7 +175,7 @@ async def send_cancel(
     """Send `cancel`: clear every order the team has at one price level. Returns its
     `request_ref`, which each resulting `order_cancelled` echoes."""
     ref = _ref(request_ref)
-    _id("instrument", instrument)
+    _id("instrument", instrument, required=False)
     msg = CancelOrder(request_ref=ref, instrument=instrument, side=_side(side), price=price)
     await conn.send("cancel", msg)
     return ref
@@ -194,7 +199,7 @@ async def send_amend(
     amend.
     """
     ref = _ref(request_ref)
-    _id("instrument", instrument)
+    _id("instrument", instrument, required=False)
     msg = AmendOrder(
         request_ref=ref,
         instrument=instrument,
