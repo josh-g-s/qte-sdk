@@ -1,0 +1,395 @@
+"""Smoke tests for the worked examples in `examples/`.
+
+Every example must compile and import without side effects, and must exit cleanly within
+its bounded run against a local fake exchange. Each run is a real subprocess, as a
+student would start it, with the exchange URL and a synthetic token in its environment.
+"""
+
+import asyncio
+import importlib.util
+import json
+import os
+import py_compile
+import re
+import secrets
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fake_exchange import CONTRACT_VERSION, serve_local
+from websockets.asyncio.server import ServerConnection
+from websockets.exceptions import ConnectionClosed
+
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
+EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
+INSTRUMENT = "TEST"
+BID, ASK = 99_950_000, 100_050_000
+TICK = 10_000
+
+# The longest any run may take, well beyond each example's own bound.
+RUN_LIMIT = 30.0
+
+
+def test_the_examples_directory_has_the_three_worked_examples():
+    names = {path.name for path in EXAMPLES}
+    assert {"print_book.py", "quote_both_sides.py", "take_liquidity.py"} <= names
+
+
+@pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
+def test_each_example_compiles_and_imports_without_running(path: Path, tmp_path: Path):
+    py_compile.compile(str(path), cfile=str(tmp_path / "compiled.pyc"), doraise=True)
+    spec = importlib.util.spec_from_file_location(f"example_{path.stem}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert callable(module.main)
+    assert module.__doc__, "each example opens with a docstring saying what it does"
+
+
+@pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
+def test_no_example_names_a_hosted_exchange(path: Path):
+    urls = re.findall(r"\b(?:wss?|https?)://\S+", path.read_text())
+    assert all(url.startswith("ws://127.0.0.1") for url in urls), urls
+
+
+class FakeExchange:
+    """A scripted exchange: acknowledges the session, publishes a book on every tick once
+    subscribed, and answers order messages the way the contract describes."""
+
+    def __init__(
+        self,
+        *,
+        reject_new: str | None = None,
+        partial_fill: bool = False,
+        move_bid_after: int | None = None,
+    ) -> None:
+        self.reject_new = reject_new
+        self.partial_fill = partial_fill
+        self.move_bid_after = move_bid_after
+        self.received: list[dict[str, Any]] = []
+        self.resting: dict[tuple[str, str, int], tuple[str, int]] = {}
+        self._seq = 0
+        self._lock = asyncio.Lock()
+
+    async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+        async with self._lock:  # seq numbers must reach the client in order
+            self._seq += 1
+            env = {"version": CONTRACT_VERSION, "type": type_, "payload": payload, "seq": self._seq}
+            await ws.send(json.dumps(env))
+
+    async def __call__(self, ws: ServerConnection) -> None:
+        self.received.append(json.loads(await ws.recv()))
+        ack = {
+            "session_id": "s-1",
+            "team": "team-a",
+            "server_time": "1",
+            "contract_version": CONTRACT_VERSION,
+            "unscored": True,
+        }
+        await self.send(ws, "session_ack", ack)
+        ticker: asyncio.Task | None = None
+        try:
+            async for raw in ws:
+                message = json.loads(raw)
+                self.received.append(message)
+                if message["type"] == "subscribe" and ticker is None:
+                    ticker = asyncio.create_task(self.publish(ws))
+                else:
+                    await self.on_order(ws, message["type"], message["payload"])
+        except ConnectionClosed:
+            pass
+        finally:
+            if ticker is not None:
+                ticker.cancel()
+
+    async def publish(self, ws: ServerConnection) -> None:
+        book = {
+            "instrument": INSTRUMENT,
+            "grid_time": "1",
+            "bid_levels": [{"price": str(BID), "size": "300"}],
+            "ask_levels": [{"price": str(ASK), "size": "200"}],
+            "condition": "LIVE",
+        }
+        with_state = {"state": "OPEN", "session_date": "2026-01-05", "grid_time": "1"}
+        await self.send(ws, "session_state", with_state)
+        published = 0
+        while True:
+            if published == self.move_bid_after:
+                book["bid_levels"] = [{"price": str(BID - TICK), "size": "300"}]
+            await self.send(ws, "book", book)
+            published += 1
+            await asyncio.sleep(0.05)
+
+    def types(self) -> list[str]:
+        return [message["type"] for message in self.received]
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        ref = p.get("request_ref")
+        accepted = {"request_ref": ref, "request_type": type_.upper(), "receipt_time": "1"}
+        if type_ == "new":
+            if self.reject_new is not None:
+                reject = {
+                    "request_ref": ref,
+                    "request_type": "NEW",
+                    "reason_code": self.reject_new,
+                    "receipt_time": "1",
+                }
+                await self.send(ws, "reject", reject)
+                return
+            await self.send(ws, "accepted", accepted)
+            size = int(p["size"])
+            if p["order_type"] == "MARKET":
+                fill = {
+                    "exec_id": "e-1",
+                    "origin": "TEAM",
+                    "strat_id": p["strat_id"],
+                    "instrument": p["instrument"],
+                    "side": p["side"],
+                    "fill_price": str(ASK if p["side"] == "BUY" else BID),
+                    "fill_size": str(size),
+                    "remaining_size": "0",
+                    "fill_kind": "STUDENT_TO_WALL",
+                    "liquidity": "TAKER",
+                    "fee": "-10",
+                }
+                await self.send(ws, "execution", fill)
+                return
+            key = (p["instrument"], p["side"], int(p["price"]))
+            self.resting[key] = (p["strat_id"], size)
+            await self.send(ws, "order_state", self.order_state(key))
+            if self.partial_fill and size > 1:
+                self.partial_fill = False
+                self.resting[key] = (p["strat_id"], size - 1)
+                fill = {
+                    "exec_id": "e-2",
+                    "origin": "TEAM",
+                    "strat_id": p["strat_id"],
+                    "instrument": p["instrument"],
+                    "side": p["side"],
+                    "order_price": p["price"],
+                    "fill_price": p["price"],
+                    "fill_size": "1",
+                    "remaining_size": str(size - 1),
+                    "fill_kind": "STUDENT_TO_STUDENT",
+                    "liquidity": "MAKER",
+                    "fee": "5",
+                }
+                await self.send(ws, "execution", fill)
+        elif type_ == "amend":
+            key = (p["instrument"], p["side"], int(p["price"]))
+            await self.send(ws, "accepted", accepted)
+            self.resting[key] = (self.resting[key][0], int(p["new_size"]))
+            await self.send(ws, "order_state", self.order_state(key))
+        elif type_ == "cancel":
+            key = (p["instrument"], p["side"], int(p["price"]))
+            if key not in self.resting:
+                reject = {
+                    "request_ref": ref,
+                    "request_type": "CANCEL",
+                    "reason_code": "NO_ORDER_AT_LEVEL",
+                    "receipt_time": "1",
+                }
+                await self.send(ws, "reject", reject)
+                return
+            await self.send(ws, "accepted", accepted)
+            await self.send(ws, "order_cancelled", self.cancelled(key, ref, "CANCEL_REQUEST"))
+        elif type_ == "mass_cancel":
+            await self.send(ws, "accepted", accepted)
+            for key in list(self.resting):
+                await self.send(ws, "order_cancelled", self.cancelled(key, ref, "MASS_CANCEL"))
+
+    def order_state(self, key: tuple[str, str, int]) -> dict[str, Any]:
+        strat_id, size = self.resting[key]
+        instrument, side, price = key
+        return {
+            "strat_id": strat_id,
+            "instrument": instrument,
+            "side": side,
+            "price": str(price),
+            "state": "RESTING",
+            "remaining_size": str(size),
+            "timestamp": "1",
+        }
+
+    def cancelled(self, key: tuple[str, str, int], ref: str, reason: str) -> dict[str, Any]:
+        strat_id, size = self.resting.pop(key)
+        instrument, side, price = key
+        return {
+            "origin": "TEAM",
+            "strat_id": strat_id,
+            "instrument": instrument,
+            "side": side,
+            "price": str(price),
+            "cancelled_size": str(size),
+            "reason_code": reason,
+            "request_ref": ref,
+            "timestamp": "1",
+        }
+
+
+async def run_example(
+    name: str, url: str | None, token: str | None, *args: str, **extra_env: str
+) -> tuple[int, str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env.update(extra_env)
+    if url is not None:
+        env["QTE_URL"] = url
+    if token is not None:
+        env["QTE_TOKEN"] = token
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(EXAMPLES_DIR / name),
+        *args,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(process.communicate(), RUN_LIMIT)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise
+    assert process.returncode is not None
+    return process.returncode, out.decode(), err.decode()
+
+
+def synthetic_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+async def test_print_book_stops_after_its_message_count():
+    exchange = FakeExchange()
+    token = synthetic_token()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "print_book.py", url, token, "--instrument", INSTRUMENT, "--max-messages", "5"
+        )
+    assert code == 0, err
+    assert "stopped after 5 messages" in out
+    assert "book   TEST  99.950000 x 300  |  100.050000 x 200" in out
+    assert exchange.received[0] == {
+        "version": CONTRACT_VERSION,
+        "type": "auth",
+        "payload": {"token": token},
+    }
+    assert exchange.types() == ["auth", "subscribe"]
+    assert token not in out + err
+
+
+async def test_print_book_stops_after_its_duration():
+    async with serve_local(FakeExchange()) as url:
+        code, out, err = await run_example(
+            "print_book.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "0.5"
+        )
+    assert code == 0, err
+    assert "stopped after 0.5 seconds" in out
+
+
+async def test_quote_both_sides_rests_amends_and_cancels_its_own_orders():
+    exchange = FakeExchange(partial_fill=True)
+    token = synthetic_token()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            token,
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "2"),
+            *("--seconds", "1.5", "--requote-seconds", "0.1", "--drain-seconds", "5"),
+        )
+    assert code == 0, out + err
+    types = exchange.types()
+    assert types.count("new") == 2  # one per side
+    assert "amend" in types  # the partly filled side was topped back up
+    assert types.count("cancel") == 2  # each side cancelled at the end
+    assert "mass_cancel" not in types  # it only cancels its own orders
+    assert exchange.resting == {}
+    assert "all of this example's orders are cancelled" in out
+    assert token not in out + err
+
+
+async def test_quote_both_sides_cancels_and_re_enters_when_the_wall_moves():
+    exchange = FakeExchange(move_bid_after=10)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "1.5", "--requote-seconds", "0.1", "--drain-seconds", "5"),
+        )
+    assert code == 0, out + err
+    buys = [
+        (m["type"], int(m["payload"]["price"]))
+        for m in exchange.received
+        if m["type"] in ("new", "cancel") and m["payload"]["side"] == "BUY"
+    ]
+    first, moved = BID + TICK, BID  # one tick inside the first and the moved best bid
+    # Quoted one tick inside the wall, then cancelled and re-entered when the bid moved.
+    assert buys == [("new", first), ("cancel", first), ("new", moved), ("cancel", moved)]
+    assert "amend" not in exchange.types()  # a price move never amends
+    assert exchange.resting == {}
+
+
+async def test_quote_both_sides_prints_rejects_and_still_exits_cleanly():
+    exchange = FakeExchange(reject_new="MARKET_CLOSED")
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "1", "--requote-seconds", "0.2", "--drain-seconds", "1"),
+        )
+    assert code == 0, out + err
+    assert "REJECTED new: MARKET_CLOSED" in out
+    # Rejected sides are retried no faster than --requote-seconds allows.
+    assert 2 <= exchange.types().count("new") <= 12
+
+
+async def test_take_liquidity_sends_one_market_order_and_reports_the_fill():
+    exchange = FakeExchange()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "take_liquidity.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "take-test", "--size", "3"),
+            *("--seconds", "10"),
+        )
+    assert code == 0, out + err
+    news = [m["payload"] for m in exchange.received if m["type"] == "new"]
+    assert len(news) == 1
+    assert news[0]["order_type"] == "MARKET" and "price" not in news[0]
+    assert "FILL 3 @ 100.050000" in out
+    assert "filled 3 of 3" in out
+
+
+async def test_take_liquidity_prints_a_reject_and_exits_cleanly():
+    exchange = FakeExchange(reject_new="NO_WALL_ON_SIDE")
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "take_liquidity.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "take-test", "--seconds", "10"),
+        )
+    assert code == 0, out + err
+    assert "REJECTED: NO_WALL_ON_SIDE" in out
+    assert exchange.types().count("new") == 1
+
+
+@pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
+async def test_each_example_refuses_to_start_without_an_exchange_url(path: Path):
+    code, out, err = await run_example(path.name, None, synthetic_token(), QTE_STRAT_ID="x")
+    assert code == 2
+    assert "QTE_URL" in err
+
+
+@pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
+async def test_each_example_refuses_to_start_without_a_token(path: Path):
+    async with serve_local(FakeExchange()) as url:
+        code, out, err = await run_example(path.name, url, None, QTE_STRAT_ID="x")
+    assert code == 2
+    assert "QTE_TOKEN" in err
