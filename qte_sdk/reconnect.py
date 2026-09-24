@@ -54,7 +54,6 @@ import asyncio
 import random
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -70,6 +69,7 @@ from qte_sdk.session import (
     Session,
     SessionInfo,
     SessionNotAcknowledged,
+    _finish_closing,
     _Secret,
     _without_token,
     open_session,
@@ -494,13 +494,10 @@ async def _close_result(task: "asyncio.Future[Any]") -> None:
 
 
 async def _close(session: Session) -> None:
-    """Close `session`. The close runs to the end even if the caller is cancelled meanwhile,
-    so a socket is never left half closed."""
-    closing = asyncio.ensure_future(session.close())
-    # Retrieved here, so a failure after the caller stopped waiting is not reported unread.
-    closing.add_done_callback(lambda done: done.cancelled() or done.exception())
-    with suppress(Exception):
-        await asyncio.shield(closing)
+    """Close `session` and wait until it is closed. A cancellation meanwhile is raised only
+    once the socket is closed, so it is never left half closed."""
+    if await _finish_closing(session.connection):
+        raise asyncio.CancelledError
 
 
 def _instrument_list(instruments: Iterable[str]) -> list[str]:

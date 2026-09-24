@@ -23,7 +23,6 @@ import asyncio
 import os
 from collections import deque
 from collections.abc import AsyncIterator
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -147,21 +146,41 @@ async def open_session(
 
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)
+    interrupted = False
     try:
         await conn.open()
         await _send_auth(conn, secret)
         ack, early = await _wait_for_ack(conn, ack_timeout)
     except BaseException as error:
-        with suppress(Exception):
-            await conn.close()
+        interrupted = await _finish_closing(conn)
         safe = _without_token(error, secret)
-        if safe is None:
+        if safe is None and not interrupted:
             raise
     else:
         return Session(conn, SessionInfo.from_ack(ack), early)
-    # Raised outside the handler, so the original error, which mentions the token, is not
-    # chained to it.
+    # Raised outside the handler, so the original error, which may mention the token, is
+    # not chained to it.
+    if interrupted:
+        raise asyncio.CancelledError
+    assert safe is not None
     raise safe
+
+
+async def _finish_closing(conn: Connection) -> bool:
+    """Close `conn` and wait until it is closed, even if cancelled meanwhile, so no socket
+    is left half closed. Returns True if a cancellation arrived, for the caller to raise."""
+    closing = asyncio.ensure_future(conn.close())
+    interrupted = False
+    while not closing.done():
+        try:
+            await asyncio.shield(closing)
+        except asyncio.CancelledError:
+            interrupted = True
+        except Exception:
+            break
+    if not closing.cancelled():
+        closing.exception()  # retrieved, so a failed close is not reported as unread
+    return interrupted
 
 
 async def _send_auth(conn: Connection, secret: "_Secret") -> None:

@@ -11,7 +11,7 @@ from fake_exchange import CONTRACT_VERSION, frame, serve_local
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
-from qte_sdk.connection import ContractVersionMismatch, Received, SessionRejected
+from qte_sdk.connection import Connection, ContractVersionMismatch, Received, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
 from qte_sdk.contract.v1.session_pb2 import Heartbeat
@@ -439,3 +439,24 @@ async def test_a_token_echoed_as_the_reason_name_is_withheld():
             await open_session(url, token)
     assert caught.value.reason_name == "<token withheld>"
     assert_token_absent(token, shown(caught.value))
+
+
+async def test_cancelling_while_a_failed_open_closes_waits_for_the_close(monkeypatch):
+    closes: list[str] = []
+    real_close = Connection.close
+
+    async def slow_close(self: Connection) -> None:
+        closes.append("started")
+        await asyncio.sleep(0.1)
+        await real_close(self)
+        closes.append("finished")
+
+    monkeypatch.setattr(Connection, "close", slow_close)
+    async with serve_local(Server()) as url:
+        task = asyncio.create_task(open_session(url, synthetic_token(), ack_timeout=0.05))
+        while not closes:  # the ack timed out and the connection is closing
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert closes == ["started", "finished"]
