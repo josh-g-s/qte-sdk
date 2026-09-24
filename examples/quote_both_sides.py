@@ -429,7 +429,14 @@ async def quote_until(
             return "time"
         if isinstance(item, Exception):
             raise item  # the connection dropped
-        if not await handle(quoter, view, item):
+        try:
+            # A send can stall (for example on a connection that stopped taking data), so
+            # it too is bounded by the time left. Its request_ref is already recorded.
+            async with asyncio.timeout(max(deadline - loop.time(), 0)):
+                keep_quoting = await handle(quoter, view, item)
+        except TimeoutError:
+            return "time"
+        if not keep_quoting:
             return "refused"
         if view.incomplete:
             return "unreliable"
@@ -448,7 +455,13 @@ async def cancel_own_orders(
         # Checked before every send: after missed events, ownership is no longer known.
         if view.incomplete:
             return "unreliable"
-        if await quoter.cancel_own():
+        try:
+            # Bounded by the time left, so a stalled send cannot outlast --drain-seconds.
+            async with asyncio.timeout(max(deadline - loop.time(), 0)):
+                done = await quoter.cancel_own()
+        except TimeoutError:
+            return "unconfirmed"
+        if done:
             return "done"
         if loop.time() >= deadline:
             return "unconfirmed"
@@ -580,7 +593,7 @@ def main(argv: list[str] | None = None) -> int:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosedError:
         return fail(
-            "the connection dropped; the SDK does not reconnect for you yet. Your orders may "
+            "the connection dropped, and this example does not reconnect. Your orders may "
             "still rest: reconnect and cancel them"
         )
     except (KeyboardInterrupt, asyncio.CancelledError):

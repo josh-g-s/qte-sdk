@@ -26,7 +26,11 @@ from fake_exchange import CONTRACT_VERSION, serve_local
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
-from qte_sdk.contract.v1.order_events_pb2 import Accepted
+from qte_sdk.connection import Received
+from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
+from qte_sdk.contract.v1.market_data_pb2 import WallLevel
+from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
+from qte_sdk.resting import RestingOrders
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
@@ -699,24 +703,43 @@ async def test_quote_both_sides_refuses_an_inside_of_less_than_a_tick(inside: st
     assert "--inside must be at least one price tick" in err
 
 
-async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short():
-    # A send can stall after its message is written, for example on a full send buffer. A
-    # Ctrl+C then must not make the example forget that message and send it again.
-    path = EXAMPLES_DIR / "quote_both_sides.py"
-    spec = importlib.util.spec_from_file_location("quote_example", path)
+def load_example(name: str) -> Any:
+    """Import an example as a module, to test its parts in this process."""
+    spec = importlib.util.spec_from_file_location(f"example_{Path(name).stem}", EXAMPLES_DIR / name)
     assert spec is not None and spec.loader is not None
     example = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(example)
+    return example
 
+
+class StalledConnection:
+    """A connection whose every send writes its message and then never returns, as on a
+    connection that has stopped taking data. Records each message's request_ref."""
+
+    def __init__(self, sent: list[str]) -> None:
+        self.sent = sent
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append(payload.request_ref)
+        await asyncio.Event().wait()
+
+
+def book_event() -> Received:
+    book = BookMessage(
+        instrument=INSTRUMENT,
+        bid_levels=[WallLevel(price=BID, size=300)],
+        ask_levels=[WallLevel(price=ASK, size=200)],
+    )
+    return Received("book", book, 1)
+
+
+async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short():
+    # A send can stall after its message is written, for example on a full send buffer. A
+    # Ctrl+C then must not make the example forget that message and send it again.
+    example = load_example("quote_both_sides.py")
     sent: list[str] = []
-
-    class StalledConnection:
-        async def send(self, type_: str, payload: Any) -> None:
-            sent.append(payload.request_ref)
-            await asyncio.Event().wait()  # written, then stalled
-
     args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
-    quoter = example.Quoter(SimpleNamespace(connection=StalledConnection()), None, args)
+    quoter = example.Quoter(SimpleNamespace(connection=StalledConnection(sent)), None, args)
     quoter.resting = lambda quote: quote.price is not None  # reported resting
     buy = quoter.quotes[example.BUY]
     buy.price = BID + TICK
@@ -739,3 +762,62 @@ async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short()
     # The exchange's reply to that cancel is still matched to it.
     quoter.on_order_event(Accepted(request_ref=sent[0]))
     assert buy.pending_ref is None and buy.cancelling
+
+
+async def test_quote_both_sides_keeps_to_drain_seconds_when_a_cancel_send_stalls():
+    example = load_example("quote_both_sides.py")
+    sent: list[str] = []
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    view = RestingOrders()
+    quoter = example.Quoter(SimpleNamespace(connection=StalledConnection(sent)), view, args)
+    quoter.resting = lambda quote: quote.price is not None  # reported resting
+    quoter.quotes[example.BUY].price = BID + TICK
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    async with asyncio.timeout(RUN_LIMIT):
+        outcome = await example.cancel_own_orders(quoter, view, asyncio.Queue(), started + 0.3)
+    assert outcome == "unconfirmed"
+    assert loop.time() - started < 2  # the drain deadline, not the stalled send, ended it
+    assert len(sent) == 1
+
+
+async def test_quote_both_sides_keeps_to_seconds_when_a_send_stalls_while_quoting():
+    example = load_example("quote_both_sides.py")
+    sent: list[str] = []
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    view = RestingOrders()
+    quoter = example.Quoter(SimpleNamespace(connection=StalledConnection(sent)), view, args)
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(book_event())
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    async with asyncio.timeout(RUN_LIMIT):
+        why = await example.quote_until(quoter, view, queue, 0.3)
+    assert why == "time"
+    assert loop.time() - started < 2  # --seconds, not the stalled send, ended it
+    assert len(sent) == 1  # the first new order, which stalled
+    assert quoter.quotes[example.BUY].pending_ref == sent[0]  # recorded all the same
+
+
+async def test_take_liquidity_knows_it_may_have_sent_an_order_whose_send_stalled():
+    example = load_example("take_liquidity.py")
+    sent: list[str] = []
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "take-test"])
+    taker = example.Taker(StalledConnection(sent), args)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.3):  # as --seconds running out mid-send
+            await taker.on_book(book_event().message)
+    assert len(sent) == 1
+    assert taker.ref == sent[0]  # so the example reports the outcome as not known yet
+    # A reply to the order still counts as this example's.
+    taker.on_order_event(Accepted(request_ref=sent[0]))
+    fill = Execution(
+        strat_id="take-test",
+        instrument=INSTRUMENT,
+        side=example.BUY,
+        fill_price=ASK,
+        fill_size=1,
+        remaining_size=0,
+    )
+    taker.on_order_event(fill)
+    assert taker.done and taker.filled == 1

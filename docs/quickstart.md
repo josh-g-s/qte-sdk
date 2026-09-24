@@ -219,7 +219,9 @@ A reason from a newer contract than your SDK knows decodes as `REASON_CODE_UNSPE
 
 ## 9. If the connection drops
 
-Iterating a session ends normally when the exchange closes the connection, and raises `websockets.exceptions.ConnectionClosedError` if it drops. The SDK does not reconnect for you yet: open a new session yourself. Your orders may still be resting after a drop, so check before you trade again.
+Iterating a session ends normally when the exchange closes the connection, and raises `websockets.exceptions.ConnectionClosedError` if it drops. A session from `open_session` does not reconnect, and neither do the worked examples: open a new session yourself. Your orders may still be resting after a drop, so check before you trade again.
+
+`qte_sdk.reconnect.ReconnectingSession` does reconnect for you: it opens a new session, authenticates and subscribes again, and delivers a `Disconnected` event first. It cannot recover what you missed. The exchange does not yet resume a session, so fills, order events and market data sent while you were disconnected are not recovered. An order in flight when the connection dropped may or may not have reached the exchange, and the SDK never sends it again. A `RestingOrders` view you pass it, or that follows it, is marked incomplete and stays incomplete after the reconnect, because no event reports the orders already resting when a session starts. Treat `Disconnected` as the moment your positions, resting orders and book became uncertain.
 
 ## 10. Worked examples
 
