@@ -72,7 +72,9 @@ class FakeExchange:
         teammate_fill_first: bool = False,
         gap_after_resting: int | None = None,
         reject_first_cancel_then_gap: bool = False,
+        stray_reject: bool = False,
     ) -> None:
+        self.stray_reject = stray_reject
         self.reject_first_cancel_then_gap = reject_first_cancel_then_gap
         self.reject_new = reject_new
         self.partial_fill = partial_fill
@@ -107,6 +109,10 @@ class FakeExchange:
                 message = json.loads(raw)
                 self.received.append(message)
                 if message["type"] == "subscribe" and ticker is None:
+                    if self.stray_reject:
+                        # A reject of something the exchange could not read: no request_ref.
+                        stray = {"reason_code": "MALFORMED_MESSAGE", "receipt_time": "1"}
+                        await self.send(ws, "reject", stray)
                     ticker = asyncio.create_task(self.publish(ws))
                 else:
                     await self.on_order(ws, message["type"], message["payload"])
@@ -530,6 +536,21 @@ async def test_take_liquidity_sends_one_market_order_and_reports_the_fill():
     assert news[0]["order_type"] == "MARKET" and "price" not in news[0]
     assert "FILL 3 @ 100.050000" in out
     assert "filled 3 of 3" in out
+
+
+async def test_take_liquidity_ignores_a_reject_that_is_not_its_own():
+    exchange = FakeExchange(stray_reject=True)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "take_liquidity.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "take-test", "--seconds", "10"),
+        )
+    assert code == 0, out + err
+    assert "REJECTED" not in out
+    assert exchange.types().count("new") == 1
+    assert "filled 1 of 1" in out
 
 
 async def test_take_liquidity_prints_a_reject_and_exits_cleanly():

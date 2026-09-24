@@ -116,11 +116,14 @@ class Taker:
         )
 
     def on_order_event(self, message: Message) -> None:
+        # A reject the exchange could not tie to a message carries no request_ref.
+        ref = request_ref_of(message)
+        answers_ours = ref is not None and ref == self.ref
         match message:
-            case Accepted() if request_ref_of(message) == self.ref:
+            case Accepted() if answers_ours:
                 elapsed_ms = (time.monotonic() - self.sent_at) * 1000
                 print(f"accepted after a {elapsed_ms:.0f} ms round trip")
-            case Reject() if request_ref_of(message) == self.ref:
+            case Reject() if answers_ours:
                 detail = f" ({message.reason_detail})" if message.HasField("reason_detail") else ""
                 print(f"REJECTED: {reason_code_name(message.reason_code)}{detail}")
                 self.done = True
