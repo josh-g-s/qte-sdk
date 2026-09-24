@@ -34,15 +34,17 @@ What the view cannot know:
   `mark_incomplete()`: nothing yet reports the orders already on the book.
 - Events missed on a sequence gap, a frame that could not be decoded, or a disconnect can
   leave the view wrong. It is then marked `incomplete` and stays so, since there is no
-  resume yet.
+  resume yet. Following a `ReconnectingSession`, its `Disconnected` event marks the view
+  incomplete too.
 """
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from google.protobuf.message import Message
 
-from qte_sdk.connection import DecodeFailed, Event, Received, SeqGap
+from qte_sdk.connection import DataUncertain, DecodeFailed, Disconnected, Event, Received
 from qte_sdk.contract.v1.common_pb2 import RESTING, STALE
 from qte_sdk.contract.v1.order_events_pb2 import Execution, OrderCancelled, OrderState
 
@@ -108,9 +110,13 @@ class RestingOrders:
     def __len__(self) -> int:
         return len(self._orders)
 
-    def apply(self, event: Event | Message) -> None:
-        """Update the view from one connection event or one decoded exchange message."""
-        if isinstance(event, SeqGap):
+    def apply(self, event: Event | Disconnected | Message | object) -> None:
+        """Update the view from one connection event or one decoded exchange message.
+
+        A `SeqGap` or `Disconnected` (any `DataUncertain`) marks the view incomplete. Events
+        the view has no use for, such as a reconnecting session's `Connected`, are ignored.
+        """
+        if isinstance(event, DataUncertain):
             self.mark_incomplete()
         elif isinstance(event, DecodeFailed):
             if event.type is None or event.type in _ORDER_EVENT_TYPES:
@@ -125,8 +131,8 @@ class RestingOrders:
             self._on_order_cancelled(event)
         # Anything else (accepted, reject, market data, unknown types) leaves the view as is.
 
-    async def follow(self, events: AsyncIterable[Event]) -> AsyncIterator[Event]:
-        """Apply every event from a connection and pass it on.
+    async def follow(self, events: AsyncIterable[Any]) -> AsyncIterator[Any]:
+        """Apply every event from a connection, or a reconnecting session, and pass it on.
 
         When the connection closes or drops, the view is marked incomplete, since later
         events will not reach it. A caller that stops iterating early should close the

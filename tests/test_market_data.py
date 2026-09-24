@@ -7,7 +7,15 @@ from fake_exchange import exchange, frame, serve_local
 from websockets.asyncio.server import ServerConnection
 
 from qte_sdk import market_data as md
-from qte_sdk.connection import Connection, DecodeFailed, Received, SeqGap, Unknown
+from qte_sdk.connection import (
+    Connection,
+    DataUncertain,
+    DecodeFailed,
+    Disconnected,
+    Received,
+    SeqGap,
+    Unknown,
+)
 from qte_sdk.contract.v1 import market_data_pb2
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
@@ -357,3 +365,13 @@ def test_no_option_chain_types_are_exposed():
     messages = market_data_pb2.DESCRIPTOR.message_types_by_name
     assert not [name for name in messages if "option" in name.lower()]
     assert md.MARKET_DATA_TYPES == {"book", "trades", "mark", "session_state"}
+
+
+def test_a_disconnect_is_passed_on_as_a_sign_that_messages_were_lost():
+    disconnected = Disconnected(None)
+    assert md.as_market_data(disconnected) is disconnected
+    assert isinstance(disconnected, DataUncertain) and isinstance(SeqGap(1, 3), DataUncertain)
+
+
+def test_events_that_are_neither_market_data_nor_uncertainty_are_skipped():
+    assert md.as_market_data(object()) is None

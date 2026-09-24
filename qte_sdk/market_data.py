@@ -9,7 +9,7 @@
                 best_bid = item.bid_levels[0].price if item.bid_levels else None
             case Trades() | Mark() | SessionState():
                 ...
-            case SeqGap() | DecodeFailed():
+            case SeqGap() | Disconnected() | DecodeFailed():
                 ...  # messages were lost: treat what you hold as uncertain
             case Reject():
                 ...  # a subscribe or unsubscribe was refused
@@ -25,9 +25,17 @@ dollars. Each instrument's condition is the `condition` field of `Book` and of `
 """
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
-from typing import cast
+from typing import Any, cast
 
-from qte_sdk.connection import Connection, DecodeFailed, Event, Received, SeqGap
+from qte_sdk.connection import (
+    Connection,
+    DataUncertain,
+    DecodeFailed,
+    Disconnected,
+    Event,
+    Received,
+    SeqGap,
+)
 from qte_sdk.contract.v1.common_pb2 import RequestType
 from qte_sdk.contract.v1.market_data_pb2 import (
     Book,
@@ -46,6 +54,7 @@ __all__ = [
     "MARKET_DATA_TYPES",
     "Book",
     "DecodeFailed",
+    "Disconnected",
     "InstrumentCondition",
     "Mark",
     "MarketData",
@@ -66,9 +75,9 @@ __all__ = [
 MarketData = Book | Trades | Mark | SessionState
 """One market-data message."""
 
-MarketDataEvent = MarketData | Reject | SeqGap | DecodeFailed
+MarketDataEvent = MarketData | Reject | SeqGap | Disconnected | DecodeFailed
 """What `market_data` yields: a message, a refused subscription change, or a sign that
-messages were lost."""
+messages were lost (`SeqGap`, `Disconnected` from a reconnecting session, `DecodeFailed`)."""
 
 MARKET_DATA_TYPES: frozenset[str] = frozenset({"book", "trades", "mark", "session_state"})
 """The envelope `type` tokens of market-data messages."""
@@ -97,12 +106,13 @@ async def unsubscribe(conn: Connection, instruments: Iterable[str]) -> None:
     await conn.send("unsubscribe", Unsubscribe(instruments=_instrument_list(instruments)))
 
 
-def as_market_data(event: Event) -> MarketDataEvent | None:
+def as_market_data(event: Event | Disconnected | object) -> MarketDataEvent | None:
     """The market-data meaning of one connection event, or None if it has none.
 
     Use this in your own loop over a connection when you also handle order events there.
     Returns the message for `book`, `trades`, `mark` and `session_state`; a `Reject` of a
-    `subscribe` or `unsubscribe`; and every `SeqGap` and `DecodeFailed`, since a message
+    `subscribe` or `unsubscribe`; every `SeqGap` and `Disconnected` (any `DataUncertain`),
+    since messages may have been missed; and every `DecodeFailed`, since a message
     that could not be decoded may have been market data or a refused subscription, and
     sequence tracking has already counted it, so no later gap will report it.
     """
@@ -116,13 +126,16 @@ def as_market_data(event: Event) -> MarketDataEvent | None:
         ):
             return event.message
         return None
-    if isinstance(event, SeqGap | DecodeFailed):
+    if isinstance(event, SeqGap | Disconnected | DecodeFailed):
         return event
+    if isinstance(event, DataUncertain):
+        return cast(MarketDataEvent, event)  # a kind added later, passed on all the same
     return None
 
 
-async def market_data(events: AsyncIterable[Event]) -> AsyncIterator[MarketDataEvent]:
-    """Iterate over the market-data events in `events`, usually a `Connection`.
+async def market_data(events: AsyncIterable[Any]) -> AsyncIterator[MarketDataEvent]:
+    """Iterate over the market-data events in `events`: a `Connection`, a session, or a
+    `ReconnectingSession`, whose `Disconnected` events are passed on.
 
     This consumes the connection: events that are not market data, such as order events,
     are skipped. To handle both on one connection, loop over the connection yourself and

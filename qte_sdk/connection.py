@@ -179,12 +179,34 @@ class DecodeFailed:
     error: Exception
 
 
+class DataUncertain:
+    """Base of the events that mean messages may have been missed, so any state built from
+    earlier messages is uncertain: `SeqGap` and `Disconnected`.
+
+    Test for this class to handle every such event, including ones added later.
+    """
+
+    __slots__ = ()
+
+
 @dataclass(frozen=True)
-class SeqGap:
+class SeqGap(DataUncertain):
     """Server messages were missed or reordered, so any state built from them is uncertain."""
 
     expected: int
     received: int
+
+
+@dataclass(frozen=True)
+class Disconnected(DataUncertain):
+    """The data-uncertainty event: the session ended and events may have been missed.
+
+    Fills, order events and market data sent while disconnected are not recovered. `error`
+    is why the connection ended, or None when the exchange closed it normally. A
+    `Connection` never yields this itself; `qte_sdk.reconnect.ReconnectingSession` does.
+    """
+
+    error: Exception | None
 
 
 Event = Received | Unknown | DecodeFailed | SeqGap
