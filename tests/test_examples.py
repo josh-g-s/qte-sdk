@@ -410,6 +410,24 @@ async def test_print_book_prints_the_official_close_outside_a_session():
     assert "stopped after 0.5 seconds (2 messages)" in out
 
 
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("quote_both_sides.py", ("--strat-id", "closed-test", "--seconds", "0.5")),
+        ("take_liquidity.py", ("--strat-id", "closed-test", "--side", "buy", "--seconds", "0.5")),
+    ],
+)
+async def test_the_trading_examples_send_no_orders_outside_a_session(name: str, args: tuple):
+    # With no book to act on, each waits out its time and sends nothing.
+    exchange = FakeExchange(closed=True)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            name, url, synthetic_token(), "--instrument", INSTRUMENT, *args
+        )
+    assert code == 0, out + err
+    assert exchange.types() == ["auth", "subscribe"]
+
+
 async def test_quote_both_sides_rests_amends_and_cancels_its_own_orders():
     exchange = FakeExchange(partial_fill=True)
     token = synthetic_token()
