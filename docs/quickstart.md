@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.3
+**Version:** 0.4
 
 This guide takes you from a fresh checkout to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -62,6 +62,34 @@ Two rules about sessions:
 
 - **Send on the session and read from it.** Every send function takes the session. Iterate the session itself, not its connection, so that you also receive anything the exchange sent before it acknowledged you.
 - **Read from one place.** Have one loop read the session's events and do everything from there. Two loops reading the same session each get only some of the events.
+
+### Reading the calendar
+
+Right after it acknowledges your session, at any hour, the exchange sends a `calendar` message: every session of the term with its `open_time` and `close_time` (`early_close` marks the day that closes early), the named holidays inside the term, and the term's first and last dates. It is the only place to learn when the market trades. Never hard-code trading days, holidays or hours.
+
+`open_session` does not wait for the calendar. `session.calendar` is `None` until it arrives, and is set as you iterate the session. To wait for it first:
+
+```python
+from qte_sdk.calendar import next_close, next_open
+
+calendar = await session.wait_for_calendar(timeout=5)
+if calendar is None:
+    print("no calendar from this exchange")
+else:
+    now = session.info.server_time
+    opens, closes = next_open(calendar, now), next_close(calendar, now)
+    if opens is not None:
+        print("next open in", opens - now, "exchange time units")
+    if closes is not None:
+        print("next close in", closes - now, "exchange time units")
+```
+
+- `wait_for_calendar` keeps every event it reads while it waits, so iterating the session afterwards still delivers all of them, the calendar included. Call it from the loop that reads the session, not from a second task.
+- It returns `None` if no calendar arrives in time. An older exchange never sends one, so your program must still work without it.
+- The times are the exchange's own timestamps, like `session.info.server_time`. Compare them only with timestamps from the exchange, never with your computer's clock, and do not convert them with time zone rules of your own.
+- `next_open` skips days with no session. It returns `None` once the term's last session has opened, and `next_close` returns `None` once it has closed.
+- The calendar is the schedule. Whether the market is open right now is what `SessionState` reports (step 4).
+- A `ReconnectingSession` (step 9) keeps the latest calendar in its `calendar` attribute.
 
 ## 4. Subscribe to market data
 

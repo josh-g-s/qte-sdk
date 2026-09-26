@@ -73,9 +73,10 @@ from qte_sdk.connection import (
     Disconnected,
     Event,
     HandshakeFailed,
+    Received,
     SessionRejected,
 )
-from qte_sdk.contract.v1.session_pb2 import Subscribe, Unsubscribe
+from qte_sdk.contract.v1.session_pb2 import Calendar, Subscribe, Unsubscribe
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     DEFAULT_ACK_TIMEOUT,
@@ -215,6 +216,9 @@ class ReconnectingSession:
     jitter; replace them in tests. `ack_timeout` and `connection_options` are passed to
     `open_session` for every connection, so `ack_timeout` bounds each attempt to open one.
 
+    `calendar` is the latest session calendar the exchange sent, on this session or an
+    earlier one; see `qte_sdk.calendar`.
+
     Raises `MissingToken` here, before any connection, if there is no token.
     """
 
@@ -244,6 +248,7 @@ class ReconnectingSession:
         self._session: Session | None = None
         self._up = False
         self._info: SessionInfo | None = None
+        self._calendar: Calendar | None = None
         self._iterated = False
         self._closed = False
         self._pending: asyncio.Future[Any] | None = None
@@ -262,6 +267,18 @@ class ReconnectingSession:
     def info(self) -> SessionInfo | None:
         """The acknowledgement of the latest session, or None before the first."""
         return self._info
+
+    @property
+    def calendar(self) -> Calendar | None:
+        """The latest `calendar` message the exchange sent, or None if none has arrived yet.
+
+        The exchange sends one right after it acknowledges each session, so it usually
+        arrives just after each `Connected`, as an ordinary event too, and replaces the one
+        before. The calendar is the same for the whole term, so a session whose calendar
+        has not arrived, or an exchange that predates the calendar message and never sends
+        one, keeps the previous calendar here rather than clearing it.
+        """
+        return self._calendar
 
     @property
     def instruments(self) -> tuple[str, ...]:
@@ -355,6 +372,9 @@ class ReconnectingSession:
                     async for event in session:
                         if self._closed:
                             break  # closed while events were still buffered
+                        if isinstance(event, Received) and event.type == "calendar":
+                            assert isinstance(event.message, Calendar)
+                            self._calendar = event.message
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event
