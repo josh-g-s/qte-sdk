@@ -799,7 +799,7 @@ def _parse_manifest(line: bytes, retry_after: float | None) -> Manifest:
     try:
         data = json.loads(line)
         entries = tuple(_manifest_entry(raw) for raw in data["manifest"])
-    except (ValueError, TypeError, KeyError) as error:
+    except (ValueError, TypeError, KeyError, RecursionError) as error:
         failure = HistoryError(f"the range response's manifest could not be read: {error}")
     else:
         return Manifest(entries, retry_after)
@@ -828,7 +828,8 @@ def _decode_line(line: bytes) -> HistoryItem:
     """One NDJSON line as the live connection would deliver it."""
     try:
         decoded = codec.decode(line)
-    except (ValueError, ParseError) as error:
+    except (ValueError, ParseError, RecursionError) as error:
+        # RecursionError: JSON nested too deeply to parse, which is malformed here too.
         return DecodeFailed(None, error)
     env = decoded.envelope
     cls = INBOUND.get(env.type)
@@ -836,7 +837,7 @@ def _decode_line(line: bytes) -> HistoryItem:
         return Unknown(env.type, decoded.payload, env.seq if env.HasField("seq") else None)
     try:
         return cast(MarketData, codec.unpack(decoded.payload, cls))
-    except ParseError as error:
+    except (ParseError, RecursionError) as error:
         return DecodeFailed(env.type, error)
 
 
@@ -855,7 +856,8 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
     message: str | None = None
     try:
         body = json.loads(reply.body or b"")
-    except ValueError:
+    except (ValueError, RecursionError):
+        # Discarded here, with its traceback: the parser's frames hold the raw body.
         body = None
     if isinstance(body, dict):
         # Server text: an echoed token is redacted, and text that still shares a run of

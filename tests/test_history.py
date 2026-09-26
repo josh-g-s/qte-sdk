@@ -105,6 +105,7 @@ class FakeHistory:
     etag_override: dict[str, str | None] = field(default_factory=dict)
     replace_after_drop: dict[tuple[str, str | None, str], bytes] = field(default_factory=dict)
     error_message: str = "not served"
+    raw_error_body: bytes | None = None  # replaces the whole JSON error body
     # Header overrides for a whole response and for a resumed one; None leaves a header
     # out, and "{auth}" echoes the token the request presented.
     first_headers: dict[str, str | None] = field(default_factory=dict)
@@ -243,6 +244,8 @@ class FakeHistory:
         message = self.error_message.replace("{auth}", presented)
         message = message.replace("{auth_part}", presented[:12])
         body = json.dumps({"status": status, "message": message}).encode()
+        if self.raw_error_body is not None:
+            body = self.raw_error_body.replace(b"{auth}", presented.encode())
         handler.send_response(code)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(body)))
@@ -739,6 +742,27 @@ async def test_an_error_message_echoing_part_of_the_token_is_withheld():
     assert caught.value.message is None
     assert caught.value.status == "unavailable"
     assert_token_absent(token, shown(caught.value))
+
+
+async def test_an_error_body_nested_too_deeply_to_parse_is_ignored_safely():
+    token = synthetic_token()
+    nested = b"[" * 5000 + b"]" * 5000
+    body = b'{"status": "unavailable", "message": "{auth}", "extra": ' + nested + b"}"
+    fake = FakeHistory(token, raw_error_body=body)
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryUnavailable) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "NOPE", "book"))
+    assert caught.value.message is None
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_line_nested_too_deeply_to_parse_is_a_decode_failure():
+    token = synthetic_token()
+    body = book(1) + b'{"payload": ' + b"[" * 5000 + b"]" * 5000 + b"}\n" + book(2)
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert [type(item) for item in items] == [Book, DecodeFailed, Book]
 
 
 def free_port() -> int:
