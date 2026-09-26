@@ -628,8 +628,8 @@ def _header(response: http.client.HTTPResponse, name: str, secret: _Secret) -> s
     if value is None:
         return None
     token = secret.value
-    runs = range(len(value) - _REFLECTED_RUN + 1)
-    if any(value[i : i + _REFLECTED_RUN] in token for i in runs):
+    run = min(_REFLECTED_RUN, len(token))  # a shorter token is matched whole
+    if any(value[i : i + run] in token for i in range(len(value) - run + 1)):
         return None
     return value
 

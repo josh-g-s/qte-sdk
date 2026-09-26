@@ -970,8 +970,8 @@ async def test_a_content_length_reflecting_part_of_the_token_never_reaches_an_er
     assert_token_absent(token, shown(caught.value))
 
 
-async def test_a_retry_after_reflecting_part_of_the_token_is_not_kept(waits):
-    token = numeric_token()
+@pytest.mark.parametrize("token", [numeric_token(), "73918"], ids=["prefix", "short-whole"])
+async def test_a_retry_after_reflecting_the_token_is_not_kept(token, waits):
     key = (DAY, "TEST", "book")
     fake = FakeHistory(token, {key: book(1)}, pending={key: Pending(1, token[:10])})
     with serve_history(fake) as url:
@@ -979,4 +979,5 @@ async def test_a_retry_after_reflecting_part_of_the_token_is_not_kept(waits):
             await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
     assert caught.value.retry_after is None
     assert waits == []
+    assert token[:10] not in shown(caught.value)
     assert_token_absent(token, shown(caught.value))
