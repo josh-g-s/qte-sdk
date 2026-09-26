@@ -89,7 +89,7 @@ else:
 - The times are the exchange's own timestamps, like `session.info.server_time`. Compare them only with timestamps from the exchange, never with your computer's clock, and do not convert them with time zone rules of your own.
 - `next_open` skips days with no session. It returns `None` once the term's last session has opened, and `next_close` returns `None` once it has closed.
 - The calendar is the schedule. Whether the market is open right now is what `SessionState` reports (step 4).
-- A `ReconnectingSession` (step 9) keeps the latest calendar in its `calendar` attribute.
+- A `ReconnectingSession` (step 9) keeps the calendar of its current session in its `calendar` attribute, which is `None` again after each reconnect until the new session's calendar arrives.
 
 ## 4. Subscribe to market data
 

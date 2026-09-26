@@ -174,6 +174,30 @@ async def test_without_a_calendar_the_session_works_and_waiting_times_out_with_n
     assert not any(isinstance(event, SeqGap) for event in events)
 
 
+async def test_an_interrupted_wait_keeps_read_events_and_iteration_resumes_without_loss():
+    # Two frames and a gap are read while waiting, then the calendar comes later.
+    handler = scripted(ack(), book(2), book(4), 0.4, calendar_frame(5), book(6))
+    async with serve_local(handler) as url:
+        async with await open_session(url, synthetic_token()) as sess:
+            assert await sess.wait_for_calendar(timeout=0.1) is None
+            waiting = asyncio.create_task(sess.wait_for_calendar(timeout=None))
+            await asyncio.sleep(0.05)
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            assert sess.calendar is None
+            async with asyncio.timeout(5):
+                events = [event async for event in sess]
+    assert events == [
+        Received("book", events[0].message, 2),
+        SeqGap(3, 4),
+        Received("book", events[2].message, 4),
+        Received("calendar", CALENDAR, 5),
+        Received("book", events[4].message, 6),
+    ]
+    assert sess.calendar == CALENDAR
+
+
 async def test_waiting_returns_none_when_the_connection_ends_first_and_iteration_ends_normally():
     handler = scripted(ack(), book(2))
     async with serve_local(handler) as url:
@@ -317,18 +341,21 @@ async def test_a_reconnecting_session_refreshes_the_calendar_from_each_new_sessi
                     calendars.append(rs.calendar)
                     if event.seq == 3 and len(calendars) == 4:
                         await rs.close()
-    # None before the first calendar; the first session's; still the first when the
-    # second session comes up; then the second session's.
-    assert calendars == [None, CALENDAR, CALENDAR, codec.from_dict(second, Calendar)]
+    # None before the first calendar; the first session's; None again once the second
+    # session comes up, since the first one's is not carried over; then the second's.
+    assert calendars == [None, CALENDAR, None, codec.from_dict(second, Calendar)]
     assert any(isinstance(event, Disconnected) for event in seen)
 
 
-async def test_a_reconnect_to_an_exchange_without_a_calendar_keeps_the_last_one():
+async def test_a_reconnect_to_an_exchange_without_a_calendar_has_none():
     exchange = Exchange(session(calendar_frame(2), then=drop), session(book(2)))
+    calendars: list[Calendar | None] = []
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
         async with rs, asyncio.timeout(5):
             async for event in rs:
-                if isinstance(event, Received) and event.type == "book":
-                    break
-        assert rs.calendar == CALENDAR
+                if isinstance(event, Received):
+                    calendars.append(rs.calendar)
+                    if event.type == "book":
+                        break
+    assert calendars == [CALENDAR, None]

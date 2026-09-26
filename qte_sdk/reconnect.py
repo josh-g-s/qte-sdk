@@ -216,8 +216,8 @@ class ReconnectingSession:
     jitter; replace them in tests. `ack_timeout` and `connection_options` are passed to
     `open_session` for every connection, so `ack_timeout` bounds each attempt to open one.
 
-    `calendar` is the latest session calendar the exchange sent, on this session or an
-    earlier one; see `qte_sdk.calendar`.
+    `calendar` is the session calendar the exchange sent on the current session; see
+    `qte_sdk.calendar`.
 
     Raises `MissingToken` here, before any connection, if there is no token.
     """
@@ -270,13 +270,15 @@ class ReconnectingSession:
 
     @property
     def calendar(self) -> Calendar | None:
-        """The latest `calendar` message the exchange sent, or None if none has arrived yet.
+        """The latest `calendar` message the exchange sent on the current session, or None
+        if none has arrived on it yet.
 
         The exchange sends one right after it acknowledges each session, so it usually
-        arrives just after each `Connected`, as an ordinary event too, and replaces the one
-        before. The calendar is the same for the whole term, so a session whose calendar
-        has not arrived, or an exchange that predates the calendar message and never sends
-        one, keeps the previous calendar here rather than clearing it.
+        arrives, as an ordinary event too, just after each `Connected`. Each new session
+        starts with None here: the calendar's `next_open` was worked out from the
+        exchange's clock when the earlier session opened, so it is not carried over. An
+        exchange that predates the calendar message never sends one, and then this stays
+        None.
         """
         return self._calendar
 
@@ -363,6 +365,7 @@ class ReconnectingSession:
 
                 assert session is not None
                 self._info = session.info
+                self._calendar = session.calendar
                 self._up = True
                 yield Connected(session.info, self.instruments, reconnected)
                 reconnected = True
