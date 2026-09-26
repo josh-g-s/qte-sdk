@@ -73,9 +73,10 @@ from qte_sdk.connection import (
     Disconnected,
     Event,
     HandshakeFailed,
+    Received,
     SessionRejected,
 )
-from qte_sdk.contract.v1.session_pb2 import Subscribe, Unsubscribe
+from qte_sdk.contract.v1.session_pb2 import Calendar, Subscribe, Unsubscribe
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     DEFAULT_ACK_TIMEOUT,
@@ -215,6 +216,9 @@ class ReconnectingSession:
     jitter; replace them in tests. `ack_timeout` and `connection_options` are passed to
     `open_session` for every connection, so `ack_timeout` bounds each attempt to open one.
 
+    `calendar` is the session calendar the exchange sent on the current session; see
+    `qte_sdk.calendar`.
+
     Raises `MissingToken` here, before any connection, if there is no token.
     """
 
@@ -244,6 +248,7 @@ class ReconnectingSession:
         self._session: Session | None = None
         self._up = False
         self._info: SessionInfo | None = None
+        self._calendar: Calendar | None = None
         self._iterated = False
         self._closed = False
         self._pending: asyncio.Future[Any] | None = None
@@ -262,6 +267,20 @@ class ReconnectingSession:
     def info(self) -> SessionInfo | None:
         """The acknowledgement of the latest session, or None before the first."""
         return self._info
+
+    @property
+    def calendar(self) -> Calendar | None:
+        """The latest `calendar` message the exchange sent on the current session, or None
+        if none has arrived on it yet.
+
+        The exchange sends one right after it acknowledges each session, so it usually
+        arrives, as an ordinary event too, just after each `Connected`. Each new session
+        starts with None here: the calendar's `next_open` was worked out from the
+        exchange's clock when the earlier session opened, so it is not carried over. An
+        exchange that predates the calendar message never sends one, and then this stays
+        None.
+        """
+        return self._calendar
 
     @property
     def instruments(self) -> tuple[str, ...]:
@@ -346,6 +365,7 @@ class ReconnectingSession:
 
                 assert session is not None
                 self._info = session.info
+                self._calendar = session.calendar
                 self._up = True
                 yield Connected(session.info, self.instruments, reconnected)
                 reconnected = True
@@ -355,6 +375,9 @@ class ReconnectingSession:
                     async for event in session:
                         if self._closed:
                             break  # closed while events were still buffered
+                        if isinstance(event, Received) and event.type == "calendar":
+                            assert isinstance(event.message, Calendar)
+                            self._calendar = event.message
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event
