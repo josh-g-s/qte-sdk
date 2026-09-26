@@ -60,6 +60,7 @@ import os
 import re
 import socket
 import ssl
+import threading
 from collections.abc import AsyncIterator, Iterable
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -350,13 +351,13 @@ class HistoryClient:
         first, as a `Manifest`."""
         reply = await self._first_reply(target)
         try:
-            etag = cast(str, reply.etag)
+            etag = cast(_Validator, reply.etag)
             total = reply.length
             if framed:
                 progress: _Progress = _FramedProgress(reply.retry_after)
             else:
                 # A single stream's identity ETag is the SHA-256 digest of its bytes.
-                progress = _StreamProgress(etag.strip('"').lower())
+                progress = _StreamProgress(etag.value.strip('"').lower())
             resumes = 0
             while True:
                 dropped: str | None = None
@@ -430,7 +431,9 @@ class HistoryClient:
                 continue
             raise _error_for(reply, self._secret)
 
-    async def _resume(self, target: str, offset: int, etag: str, total: int | None) -> "_Reply":
+    async def _resume(
+        self, target: str, offset: int, etag: "_Validator", total: int | None
+    ) -> "_Reply":
         """The rest of the data from `offset`, checked to be the rest of the same data."""
         reply = await self._call(target, (offset, etag))
         if reply.status == 200:
@@ -464,23 +467,31 @@ class HistoryClient:
             )
         return reply
 
-    async def _call(self, target: str, resume: tuple[int, str] | None) -> "_Reply":
-        failure: BaseException
-        # Shielded, so that if this is cancelled the request still finishes in its worker
-        # thread and its connection is then closed rather than left open.
-        request = asyncio.ensure_future(asyncio.to_thread(self._request, target, resume))
+    async def _call(self, target: str, resume: "tuple[int, _Validator] | None") -> "_Reply":
+        handoff = _Handoff()
         try:
-            return await asyncio.shield(request)
-        except asyncio.CancelledError:
-            request.add_done_callback(_close_abandoned)
+            return await asyncio.to_thread(self._request_safely, target, resume, handoff)
+        except BaseException:
+            # Cancelled, most likely: the worker thread carries on, and closes the
+            # response itself if it arrives after this. The error was already made safe.
+            handoff.abandon()
             raise
+
+    def _request_safely(
+        self, target: str, resume: "tuple[int, _Validator] | None", handoff: "_Handoff"
+    ) -> "_Reply":
+        """`_request`, with any error made safe here in the worker thread, before anything
+        (such as the awaiting task) can keep a reference to the original."""
+        failure: BaseException
+        try:
+            return handoff.deliver(self._request(target, resume))
         except BaseException as error:
             failure = _sanitised(error, self._secret)
         # Raised outside the handler, so the original error, whose traceback holds the
         # HTTP library's frames and their copy of the request headers, is not chained.
         raise failure
 
-    def _request(self, target: str, resume: tuple[int, str] | None) -> "_Reply":
+    def _request(self, target: str, resume: "tuple[int, _Validator] | None") -> "_Reply":
         """Send one GET and read the response status and headers. Runs in a worker thread."""
         conn: http.client.HTTPConnection
         if self._https:
@@ -497,7 +508,7 @@ class HistoryClient:
             conn.putheader("Authorization", "Bearer " + self._secret.value)
             if resume is not None:
                 conn.putheader("Range", f"bytes={resume[0]}-")
-                conn.putheader("If-Range", resume[1])
+                conn.putheader("If-Range", resume[1].value)
             conn.endheaders()
             # Kept, since the connection lets go of its socket once a response ends it.
             sock = conn.sock
@@ -513,11 +524,48 @@ class HistoryClient:
             raise
 
 
-def _close_abandoned(request: "asyncio.Future[_Reply]") -> None:
-    if request.cancelled():
-        return
-    if request.exception() is None:  # also marks a failure as retrieved
-        request.result().close()
+class _Handoff:
+    """Passes a response from the worker thread to the task awaiting it, or, once that
+    task has given up on it, has the worker close it instead. This works without the event
+    loop, which may already have stopped by the time the worker finishes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._reply: _Reply | None = None
+
+    def deliver(self, reply: "_Reply") -> "_Reply":
+        with self._lock:
+            if not self._abandoned:
+                self._reply = reply
+                return reply
+        reply.close()
+        return reply
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._abandoned = True
+            reply, self._reply = self._reply, None
+        if reply is not None:
+            reply.close()
+
+
+class _Validator:
+    """An identity ETag as the service sent it. Held here so no repr, and so no traceback
+    that shows locals, reveals it: it is server text, which could reflect the token."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Validator) and other.value == self.value
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return "<ETag withheld>"
 
 
 class _Reply:
@@ -567,12 +615,12 @@ class _Reply:
         self.conn.close()
 
 
-def _identity_etag(value: str | None, secret: _Secret) -> str | None:
+def _identity_etag(value: str | None, secret: _Secret) -> _Validator | None:
     """`value` if it is an identity ETag, `"<hex sha256>"`, else None: a weak, gzip or
     malformed validator cannot be checked against, nor resumed from."""
     if value is None or not _IDENTITY_ETAG.fullmatch(value) or secret.value in value:
         return None
-    return value
+    return _Validator(value)
 
 
 def _count(value: str | None) -> int | None:

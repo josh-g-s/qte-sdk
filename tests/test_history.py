@@ -894,3 +894,60 @@ async def test_a_range_manifest_whose_entries_leave_a_gap_is_refused():
         client = HistoryClient(url, token)
         with pytest.raises(HistoryCorrupt):
             await collect(client.fetch_range(DAY, DAY, ["AAA"], ["book", "trades"]))
+
+
+async def test_cancelling_then_stopping_the_event_loop_still_closes_the_response(closes):
+    token = synthetic_token()
+    answer = threading.Event()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)}, answer=answer)
+
+    async def start_and_leave(url: str) -> None:
+        client = HistoryClient(url, token)
+        asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
+        await eventually(lambda: fake.requests)
+        # Returning now leaves the fetch running: asyncio.run cancels it, then waits for
+        # the worker thread, which the server answers only once the loop is shutting down.
+        threading.Timer(0.2, answer.set).start()
+
+    with serve_history(fake) as url:
+        await asyncio.to_thread(asyncio.run, start_and_leave(url))
+    assert closes == [200]
+
+
+class ReflectingStatusLine:
+    """Answers one request with a malformed status line that repeats its token."""
+
+    def __enter__(self) -> str:
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        threading.Thread(target=self.answer, daemon=True).start()
+        return f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+
+    def answer(self) -> None:
+        conn, _ = self.sock.accept()
+        with conn:
+            request = conn.recv(65536).decode()
+            token = request.split("Authorization: Bearer ", 1)[1].split("\r\n", 1)[0]
+            conn.sendall(f"HTTP/1.1 {token} reflected\r\n\r\n".encode())
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.sock.close()
+
+
+async def test_a_status_line_reflecting_the_token_never_reaches_an_error():
+    token = synthetic_token()
+    with ReflectingStatusLine() as url:
+        with pytest.raises(HistoryError, match="details withheld") as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_an_etag_carrying_part_of_a_hex_token_never_reaches_an_error():
+    token = secrets.token_hex(32)
+    etag = f'"{token[:32]}{"0" * 32}"'  # a well-formed identity ETag, but the wrong digest
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)}, first_headers={"ETag": etag})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert_token_absent(token, shown(caught.value))
