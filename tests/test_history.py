@@ -744,15 +744,26 @@ async def test_an_error_message_echoing_part_of_the_token_is_withheld():
     assert_token_absent(token, shown(caught.value))
 
 
-async def test_an_error_body_nested_too_deeply_to_parse_is_ignored_safely():
+@pytest.mark.parametrize("parser_gives_up", [False, True], ids=["as-parsed", "recursion"])
+async def test_an_error_body_nested_deeply_never_carries_the_token(parser_gives_up, monkeypatch):
     token = synthetic_token()
     nested = b"[" * 5000 + b"]" * 5000
     body = b'{"status": "unavailable", "message": "{auth}", "extra": ' + nested + b"}"
+    if parser_gives_up:
+        # Whether this depth exhausts the parser depends on the Python version, so the
+        # failure is forced here, raised from a frame that holds the body, as the real
+        # parser's frames do.
+        def loads(text: Any) -> Any:
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(history.json, "loads", loads)
     fake = FakeHistory(token, raw_error_body=body)
     with serve_history(fake) as url:
         with pytest.raises(HistoryUnavailable) as caught:
             await collect(HistoryClient(url, token).fetch(DAY, "NOPE", "book"))
-    assert caught.value.message is None
+    # Parsed, the echoed token is redacted; unparsed, the body is ignored.
+    expected = {None} if parser_gives_up else {None, "<token withheld>"}
+    assert caught.value.message in expected
     assert_token_absent(token, shown(caught.value))
 
 
