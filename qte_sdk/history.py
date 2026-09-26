@@ -594,7 +594,12 @@ class _Reply:
         self.status = response.status
         self.body: bytes | None = None
         self.has_etag = response.getheader("ETag") is not None
-        self.etag = _identity_etag(_header(response, "ETag", secret))
+        # Screened for the whole token only: a hex token would often share a run of six
+        # characters with a genuine hex digest, and the ETag is kept only in a
+        # `_Validator`, which never shows it.
+        etag = response.getheader("ETag")
+        self.etag = None if etag is None or secret.value in etag else _identity_etag(etag)
+        del etag
         self.length = _count(_header(response, "Content-Length", secret))
         self.retry_after = _seconds(_header(response, "Retry-After", secret))
         self.ndjson_identity = _is_ndjson_identity(

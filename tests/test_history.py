@@ -964,14 +964,24 @@ async def test_a_status_line_reflecting_the_token_never_reaches_an_error():
     assert_token_absent(token, shown(caught.value))
 
 
-async def test_an_etag_carrying_part_of_a_hex_token_is_treated_as_absent():
+async def test_an_etag_carrying_part_of_a_hex_token_never_reaches_an_error():
     token = secrets.token_hex(32)
-    etag = f'"{token[:32]}{"0" * 32}"'  # a well-formed identity ETag, reflecting the token
+    etag = f'"{token[:32]}{"0" * 32}"'  # a well-formed identity ETag, but the wrong digest
     fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)}, first_headers={"ETag": etag})
     with serve_history(fake) as url:
-        with pytest.raises(HistoryError, match="no identity ETag") as caught:
+        with pytest.raises(HistoryCorrupt) as caught:
             await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
     assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_genuine_etag_sharing_characters_with_a_hex_token_is_accepted():
+    body = book(1)
+    digest = hashlib.sha256(body).hexdigest()
+    token = digest[10:16] + secrets.token_hex(29)  # shares a six-character run with it
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert [type(item) for item in items] == [Book]
 
 
 def numeric_token() -> str:
