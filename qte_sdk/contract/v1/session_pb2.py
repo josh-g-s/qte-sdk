@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from qte_sdk.contract.v1 import common_pb2 as qte_dot_contract_dot_v1_dot_common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dqte/contract/v1/session.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"\x15\n\x04\x41uth\x12\r\n\x05token\x18\x01 \x01(\t\"o\n\nSessionAck\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04team\x18\x02 \x01(\t\x12\x13\n\x0bserver_time\x18\x03 \x01(\x03\x12\x18\n\x10\x63ontract_version\x18\x04 \x01(\t\x12\x10\n\x08unscored\x18\x05 \x01(\x08\"{\n\rSessionReject\x12<\n\x0breason_code\x18\x01 \x01(\x0e\x32\'.qte.contract.v1.ReasonCodes.ReasonCode\x12\x1a\n\rreason_detail\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\x10\n\x0e_reason_detail\"\x0b\n\tHeartbeat\"7\n\x06Resume\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x19\n\x11last_seq_received\x18\x02 \x01(\x05\"\xf3\x01\n\rOrderSnapshot\x12\x10\n\x08strat_id\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x33\n\x05state\x18\x05 \x01(\x0e\x32$.qte.contract.v1.OrderLifecycleState\x12\x16\n\x0eremaining_size\x18\x06 \x01(\x03\x12\x18\n\x0bstale_since\x18\x07 \x01(\x03H\x00\x88\x01\x01\x12\x11\n\ttimestamp\x18\x08 \x01(\x03\x42\x0e\n\x0c_stale_since\" \n\tSubscribe\x12\x13\n\x0binstruments\x18\x01 \x03(\t\"\"\n\x0bUnsubscribe\x12\x13\n\x0binstruments\x18\x01 \x03(\tB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dqte/contract/v1/session.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"\x15\n\x04\x41uth\x12\r\n\x05token\x18\x01 \x01(\t\"o\n\nSessionAck\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04team\x18\x02 \x01(\t\x12\x13\n\x0bserver_time\x18\x03 \x01(\x03\x12\x18\n\x10\x63ontract_version\x18\x04 \x01(\t\x12\x10\n\x08unscored\x18\x05 \x01(\x08\"c\n\x0f\x43\x61lendarSession\x12\x14\n\x0csession_date\x18\x01 \x01(\t\x12\x11\n\topen_time\x18\x02 \x01(\x03\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x13\n\x0b\x65\x61rly_close\x18\x04 \x01(\x08\"%\n\x07Holiday\x12\x0c\n\x04\x64\x61te\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\"\xed\x01\n\x08\x43\x61lendar\x12\x1a\n\x12term_first_session\x18\x01 \x01(\t\x12\x19\n\x11term_last_session\x18\x02 \x01(\t\x12\x32\n\x08sessions\x18\x03 \x03(\x0b\x32 .qte.contract.v1.CalendarSession\x12*\n\x08holidays\x18\x04 \x03(\x0b\x32\x18.qte.contract.v1.Holiday\x12\x16\n\tnext_open\x18\x05 \x01(\x03H\x00\x88\x01\x01\x12\x12\n\nterm_start\x18\x06 \x01(\t\x12\x10\n\x08term_end\x18\x07 \x01(\tB\x0c\n\n_next_open\"{\n\rSessionReject\x12<\n\x0breason_code\x18\x01 \x01(\x0e\x32\'.qte.contract.v1.ReasonCodes.ReasonCode\x12\x1a\n\rreason_detail\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\x10\n\x0e_reason_detail\"\x0b\n\tHeartbeat\"7\n\x06Resume\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x19\n\x11last_seq_received\x18\x02 \x01(\x05\"\xf3\x01\n\rOrderSnapshot\x12\x10\n\x08strat_id\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x33\n\x05state\x18\x05 \x01(\x0e\x32$.qte.contract.v1.OrderLifecycleState\x12\x16\n\x0eremaining_size\x18\x06 \x01(\x03\x12\x18\n\x0bstale_since\x18\x07 \x01(\x03H\x00\x88\x01\x01\x12\x11\n\ttimestamp\x18\x08 \x01(\x03\x42\x0e\n\x0c_stale_since\" \n\tSubscribe\x12\x13\n\x0binstruments\x18\x01 \x03(\t\"\"\n\x0bUnsubscribe\x12\x13\n\x0binstruments\x18\x01 \x03(\tB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -37,16 +37,22 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_AUTH']._serialized_end=101
   _globals['_SESSIONACK']._serialized_start=103
   _globals['_SESSIONACK']._serialized_end=214
-  _globals['_SESSIONREJECT']._serialized_start=216
-  _globals['_SESSIONREJECT']._serialized_end=339
-  _globals['_HEARTBEAT']._serialized_start=341
-  _globals['_HEARTBEAT']._serialized_end=352
-  _globals['_RESUME']._serialized_start=354
-  _globals['_RESUME']._serialized_end=409
-  _globals['_ORDERSNAPSHOT']._serialized_start=412
-  _globals['_ORDERSNAPSHOT']._serialized_end=655
-  _globals['_SUBSCRIBE']._serialized_start=657
-  _globals['_SUBSCRIBE']._serialized_end=689
-  _globals['_UNSUBSCRIBE']._serialized_start=691
-  _globals['_UNSUBSCRIBE']._serialized_end=725
+  _globals['_CALENDARSESSION']._serialized_start=216
+  _globals['_CALENDARSESSION']._serialized_end=315
+  _globals['_HOLIDAY']._serialized_start=317
+  _globals['_HOLIDAY']._serialized_end=354
+  _globals['_CALENDAR']._serialized_start=357
+  _globals['_CALENDAR']._serialized_end=594
+  _globals['_SESSIONREJECT']._serialized_start=596
+  _globals['_SESSIONREJECT']._serialized_end=719
+  _globals['_HEARTBEAT']._serialized_start=721
+  _globals['_HEARTBEAT']._serialized_end=732
+  _globals['_RESUME']._serialized_start=734
+  _globals['_RESUME']._serialized_end=789
+  _globals['_ORDERSNAPSHOT']._serialized_start=792
+  _globals['_ORDERSNAPSHOT']._serialized_end=1035
+  _globals['_SUBSCRIBE']._serialized_start=1037
+  _globals['_SUBSCRIBE']._serialized_end=1069
+  _globals['_UNSUBSCRIBE']._serialized_start=1071
+  _globals['_UNSUBSCRIBE']._serialized_end=1105
 # @@protoc_insertion_point(module_scope)
