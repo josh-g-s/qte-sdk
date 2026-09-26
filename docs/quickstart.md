@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.4
+**Version:** 0.5
 
 This guide takes you from a fresh checkout to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -254,7 +254,39 @@ Iterating a session ends normally when the exchange closes the connection, and r
 
 `qte_sdk.reconnect.ReconnectingSession` does reconnect for you: it opens a new session, authenticates and subscribes again, and delivers a `Disconnected` event first. It cannot recover what you missed. The exchange does not yet resume a session, so fills, order events and market data sent while you were disconnected are not recovered. An order in flight when the connection dropped may or may not have reached the exchange, and the SDK never sends it again. A `RestingOrders` view you pass it, or that follows it, is marked incomplete and stays incomplete after the reconnect, because no event reports the orders already resting when a session starts. Treat `Disconnected` as the moment your positions, resting orders and book became uncertain.
 
-## 10. Worked examples
+## 10. Past market data (history)
+
+The exchange's history service serves the market data of sessions that have closed, going back to the first session held, at any hour. It serves exactly what the live feed published to everyone, message for message, so you get the same `Book`, `Trades`, `Mark` and `SessionState` classes as from `market_data` and the same handling code works on both. It holds nothing else: no raw feed, and nothing about other teams.
+
+It is a separate service with its own address, which the course team gives you. Set it as `QTE_HISTORY_URL`; the SDK has no default. Your token comes from `QTE_TOKEN` as before. No session is needed: this runs in any `async` function.
+
+```python
+from qte_sdk.connection import DecodeFailed, Unknown
+from qte_sdk.history import HistoryClient, HistoryPending, HistoryUnavailable
+from qte_sdk.market_data import Book
+from qte_sdk.units import to_decimal
+
+client = HistoryClient()  # address from QTE_HISTORY_URL, token from QTE_TOKEN
+try:
+    async for item in client.fetch("2026-01-05", "AAPL", "book"):
+        if isinstance(item, Book) and item.bid_levels:
+            print(item.grid_time, to_decimal(item.bid_levels[0].price))
+        elif isinstance(item, (Unknown, DecodeFailed)):
+            print("could not use a message:", item)
+except HistoryUnavailable:
+    print("there is no such data: not a session day, or an unknown instrument")
+except HistoryPending as error:
+    print("not ready yet; ask again in", error.retry_after, "seconds")
+```
+
+- `fetch(date, instrument, channel)` takes a session date, one instrument and one of `book`, `trades` or `mark`. `fetch_session_state(date)` gives the market session state. Messages arrive in the order they were published, as they download, so a whole day never has to fit in memory.
+- A session that has closed is not ready straight away. The client waits and asks again after as long as the service says, spending at most a minute waiting in all (`max_wait`), then raises `HistoryPending`. A session still in progress is not served until it closes.
+- `HistoryUnavailable` means the data will never exist: a weekend or holiday, a date before the service began, or an instrument or channel it does not know. Other answers from the service raise the other `HistoryError` classes in `qte_sdk.history`, such as `HistoryUnauthenticated` for a bad token. If the service cannot be reached, you get the usual Python error, such as `ConnectionRefusedError`, or `TimeoutError` when one network step (connecting, or one read) takes longer than `timeout` seconds (30 by default). A download whose connection drops part way is resumed where it stopped, up to `max_resumes` times (3 by default); once those are used up you get `HistoryInterrupted`, and if the service cannot be reached to resume, the network error.
+- `fetch_range(from_date, to_date, instruments, channels)` fetches several instruments and channels over a span of dates in one download. It yields a `Manifest` first, listing every entry you asked for as `ready`, `pending` or `unavailable`; only the ready ones follow, in the manifest's order. It never waits, so ask again later for the pending ones.
+- If the connection drops, the client resumes the download where it stopped, and checks what arrived against the digest the service states for it.
+- History tells you what the market published, not how your own orders would have filled against it.
+
+## 11. Worked examples
 
 Each example reads `QTE_URL` and `QTE_TOKEN` from the environment, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
 
