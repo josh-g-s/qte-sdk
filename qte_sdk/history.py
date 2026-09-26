@@ -36,7 +36,9 @@ Downloads are uncompressed so that a dropped connection can be resumed: the clie
 for the rest of the same data with an HTTP `Range` request, up to `max_resumes` times.
 The client checks what it received against the SHA-256 digest the service states for it
 (the `ETag` of a single stream, the manifest's `sha256` of each range entry) and raises
-`HistoryCorrupt` on a mismatch, after the messages have been yielded.
+`HistoryCorrupt` on a mismatch, after the messages have been yielded. A response without
+the identity `ETag` the service sends is refused before any message, since it could be
+neither checked nor resumed.
 
 Credentials: the token is sent only in the `Authorization` header and is kept to the same
 standard as `qte_sdk.connection`: it never appears in a log record, an exception message,
@@ -56,8 +58,10 @@ import json
 import logging
 import os
 import re
+import socket
 import ssl
 from collections.abc import AsyncIterator, Iterable
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, cast
@@ -103,8 +107,9 @@ DEFAULT_MAX_RESUMES = 3
 _CHUNK = 64 * 1024
 _ERROR_BODY_LIMIT = 64 * 1024
 _NDJSON = "application/x-ndjson"
-_IDENTITY_ETAG = re.compile(r'"([0-9a-f]{64})"')
-_CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+|\*)")
+_HEX_DIGEST = re.compile(r"[0-9a-fA-F]{64}")
+_IDENTITY_ETAG = re.compile(r'"[0-9a-fA-F]{64}"')
+_CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 
 _log = logging.getLogger(__name__)
 _sleep = asyncio.sleep  # a module attribute, so tests can observe the waits
@@ -183,7 +188,8 @@ class HistoryRequestRejected(HistoryError):
 
 class HistoryInterrupted(HistoryError):
     """The connection dropped during a download and could not be resumed. The messages
-    yielded before it are genuine but incomplete. `bytes_received` counts what arrived."""
+    yielded before it are incomplete, and were not checked against the stated digest.
+    `bytes_received` counts what arrived."""
 
     def __init__(self, text: str, *, bytes_received: int) -> None:
         super().__init__(text)
@@ -246,10 +252,11 @@ class HistoryClient:
     `token` is your team token, or None to read `QTE_TOKEN`. Raises `MissingHistoryURL` or
     `qte_sdk.session.MissingToken` if either is missing.
 
-    `timeout` bounds each network operation, in seconds. `max_wait` bounds the total time
-    spent waiting on `pending` or rate-limited answers before one request raises, and
-    `max_retries` the number of times it asks again; set `max_retries` to 0 to never ask
-    again.
+    `timeout` bounds each network operation (connecting, or one read), in seconds; a
+    network failure raises the usual Python error, such as `TimeoutError`. `max_wait`
+    bounds the total of the waits the service asks for, with `pending` or rate-limited
+    answers, before one request raises instead of waiting again, and `max_retries` the
+    number of times it asks again; set `max_retries` to 0 to never ask again.
     `max_resumes` bounds how many times one download resumes after its connection drops.
     `ssl_context` replaces the default certificate checks, for example to trust a test
     certificate authority.
@@ -295,16 +302,18 @@ class HistoryClient:
         data will never exist, and `HistoryPending` if it is still not ready after waiting.
         """
         target = self._target(_date_text(session_date), instrument, channel)
-        async for line in self._download(target, framed=False):
-            assert isinstance(line, bytes)
-            yield _decode_line(line)
+        async with aclosing(self._download(target, framed=False)) as lines:
+            async for line in lines:
+                assert isinstance(line, bytes)
+                yield _decode_line(line)
 
     async def fetch_session_state(self, session_date: date | str) -> AsyncIterator[HistoryItem]:
         """Yield one session's `session_state` messages, in the order they were published."""
         target = self._target(_date_text(session_date), "session_state")
-        async for line in self._download(target, framed=False):
-            assert isinstance(line, bytes)
-            yield _decode_line(line)
+        async with aclosing(self._download(target, framed=False)) as lines:
+            async for line in lines:
+                assert isinstance(line, bytes)
+                yield _decode_line(line)
 
     async def fetch_range(
         self,
@@ -328,8 +337,9 @@ class HistoryClient:
             f"&channels={_list_param(channels, 'channels')}"
         )
         target = f"{self._target('range')}?{query}"
-        async for item in self._download(target, framed=True):
-            yield item if isinstance(item, Manifest) else _decode_line(item)
+        async with aclosing(self._download(target, framed=True)) as items:
+            async for item in items:
+                yield item if isinstance(item, Manifest) else _decode_line(item)
 
     def _target(self, *segments: str) -> str:
         return self._prefix + "/v1/history/" + "/".join(quote(s, safe="") for s in segments)
@@ -340,14 +350,13 @@ class HistoryClient:
         first, as a `Manifest`."""
         reply = await self._first_reply(target)
         try:
-            etag = reply.header("ETag")
-            resumable = etag is not None and not etag.startswith("W/") and etag.startswith('"')
-            total = _content_length(reply)
+            etag = cast(str, reply.etag)
+            total = reply.length
             if framed:
-                progress: _Progress = _FramedProgress(_retry_after(reply))
+                progress: _Progress = _FramedProgress(reply.retry_after)
             else:
-                match = _IDENTITY_ETAG.fullmatch(etag or "")
-                progress = _StreamProgress(match.group(1) if match else None)
+                # A single stream's identity ETag is the SHA-256 digest of its bytes.
+                progress = _StreamProgress(etag.strip('"').lower())
             resumes = 0
             while True:
                 dropped: str | None = None
@@ -356,25 +365,27 @@ class HistoryClient:
                 except (OSError, http.client.HTTPException) as error:
                     chunk, dropped = b"", type(error).__name__
                 if chunk:
+                    if total is not None and progress.received + len(chunk) > total:
+                        raise HistoryCorrupt("the response is longer than the service stated")
                     for item in progress.feed(chunk):
                         yield item
                     continue
-                if dropped is None and (total is None or progress.received >= total):
+                if dropped is None and (total is None or progress.received == total):
                     break
                 reply.close()
                 if dropped is None:
                     dropped = f"closed after {progress.received} of {total} bytes"
-                if not resumable or resumes >= self.max_resumes:
-                    why = "it cannot be resumed" if not resumable else "resumes are used up"
+                if resumes >= self.max_resumes:
                     raise HistoryInterrupted(
-                        f"the download was interrupted ({dropped}) and {why}",
+                        f"the download was interrupted ({dropped}) and resumes are used up",
                         bytes_received=progress.received,
                     )
                 resumes += 1
                 _log.debug(
                     "history download dropped (%s); resuming at byte %d", dropped, progress.received
                 )
-                reply, total = await self._resume(target, progress.received, cast(str, etag))
+                reply = await self._resume(target, progress.received, etag, total)
+                total = reply.complete_length
             for item in progress.finish(total):
                 yield item
         finally:
@@ -386,8 +397,21 @@ class HistoryClient:
         while True:
             reply = await self._call(target, None)
             if reply.status == 200:
-                _check_body(reply)
+                if not reply.ndjson_identity:
+                    reply.close()
+                    raise HistoryError(
+                        "the response is not uncompressed NDJSON as the history service sends",
+                        http_status=200,
+                    )
+                if reply.etag is None:
+                    # Without it the data can be neither checked nor resumed.
+                    reply.close()
+                    raise HistoryError(
+                        "the response carries no identity ETag as the history service sends",
+                        http_status=200,
+                    )
                 return reply
+            reply.close()
             if reply.status in (202, 429):
                 error = _error_for(reply, self._secret)
                 assert isinstance(error, HistoryPending | HistoryRateLimited)
@@ -404,10 +428,10 @@ class HistoryClient:
                 waited += wait
                 retries += 1
                 continue
-            reply.close()
             raise _error_for(reply, self._secret)
 
-    async def _resume(self, target: str, offset: int, etag: str) -> "tuple[_Reply, int | None]":
+    async def _resume(self, target: str, offset: int, etag: str, total: int | None) -> "_Reply":
+        """The rest of the data from `offset`, checked to be the rest of the same data."""
         reply = await self._call(target, (offset, etag))
         if reply.status == 200:
             reply.close()
@@ -419,21 +443,37 @@ class HistoryClient:
         if reply.status != 206:
             reply.close()
             raise _error_for(reply, self._secret)
-        _check_body(reply)
-        match = _CONTENT_RANGE.fullmatch(reply.header("Content-Range") or "")
-        if match is None or int(match.group(1)) != offset:
+        if not reply.ndjson_identity or reply.continues_from is None:
             reply.close()
             raise HistoryError(
-                "the resumed response does not continue where the download stopped",
+                "the resumed response is not a well-formed slice of uncompressed NDJSON",
                 http_status=206,
             )
-        complete = match.group(3)
-        return reply, int(complete) if complete != "*" else int(match.group(2)) + 1
+        changed = total is not None and reply.complete_length != total
+        if changed or (reply.has_etag and reply.etag != etag):
+            reply.close()
+            raise HistoryChanged(
+                "the service now serves different data; start the download again",
+                http_status=206,
+            )
+        if reply.continues_from != offset:
+            reply.close()
+            raise HistoryError(
+                "the resumed response does not continue from where the download stopped",
+                http_status=206,
+            )
+        return reply
 
     async def _call(self, target: str, resume: tuple[int, str] | None) -> "_Reply":
         failure: BaseException
+        # Shielded, so that if this is cancelled the request still finishes in its worker
+        # thread and its connection is then closed rather than left open.
+        request = asyncio.ensure_future(asyncio.to_thread(self._request, target, resume))
         try:
-            return await asyncio.to_thread(self._request, target, resume)
+            return await asyncio.shield(request)
+        except asyncio.CancelledError:
+            request.add_done_callback(_close_abandoned)
+            raise
         except BaseException as error:
             failure = _sanitised(error, self._secret)
         # Raised outside the handler, so the original error, whose traceback holds the
@@ -459,9 +499,11 @@ class HistoryClient:
                 conn.putheader("Range", f"bytes={resume[0]}-")
                 conn.putheader("If-Range", resume[1])
             conn.endheaders()
+            # Kept, since the connection lets go of its socket once a response ends it.
+            sock = conn.sock
             response = conn.getresponse()
             _log.debug("history GET %s: HTTP %d", target, response.status)
-            reply = _Reply(conn, response)
+            reply = _Reply(conn, sock, response, self._secret)
             if response.status not in (200, 206):
                 reply.body = response.read(_ERROR_BODY_LIMIT)
                 reply.close()
@@ -471,21 +513,90 @@ class HistoryClient:
             raise
 
 
-class _Reply:
-    """One response: its status, the headers the client uses, and the open body."""
+def _close_abandoned(request: "asyncio.Future[_Reply]") -> None:
+    if request.cancelled():
+        return
+    if request.exception() is None:  # also marks a failure as retrieved
+        request.result().close()
 
-    def __init__(self, conn: http.client.HTTPConnection, response: http.client.HTTPResponse):
+
+class _Reply:
+    """One response: its status, the parsed headers the client uses, and the open body.
+
+    Header values are server text, which could in principle reflect the token, so only
+    what the client parsed from them is kept here, never the raw text.
+    """
+
+    def __init__(
+        self,
+        conn: http.client.HTTPConnection,
+        sock: socket.socket | None,
+        response: http.client.HTTPResponse,
+        secret: _Secret,
+    ) -> None:
         self.conn = conn
+        self.sock = sock
         self.response = response
         self.status = response.status
         self.body: bytes | None = None
-
-    def header(self, name: str) -> str | None:
-        return self.response.getheader(name)
+        self.has_etag = response.getheader("ETag") is not None
+        self.etag = _identity_etag(response.getheader("ETag"), secret)
+        self.length = _count(response.getheader("Content-Length"))
+        self.retry_after = _seconds(response.getheader("Retry-After"))
+        self.ndjson_identity = _is_ndjson_identity(
+            response.getheader("Content-Encoding"), response.getheader("Content-Type")
+        )
+        # For a 206: where the slice starts, and the length of the whole data. Both are
+        # None unless the Content-Range is a well-formed slice running to the end, whose
+        # own length matches Content-Length where that is given.
+        self.continues_from, self.complete_length = _slice_to_end(
+            response.getheader("Content-Range"), self.length
+        )
+        if self.status == 200:
+            self.continues_from, self.complete_length = 0, self.length
 
     def close(self) -> None:
+        # Shut down first: it wakes a worker thread still blocked reading this socket,
+        # which closing alone does not do everywhere.
+        if self.sock is not None:
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         self.response.close()
         self.conn.close()
+
+
+def _identity_etag(value: str | None, secret: _Secret) -> str | None:
+    """`value` if it is an identity ETag, `"<hex sha256>"`, else None: a weak, gzip or
+    malformed validator cannot be checked against, nor resumed from."""
+    if value is None or not _IDENTITY_ETAG.fullmatch(value) or secret.value in value:
+        return None
+    return value
+
+
+def _count(value: str | None) -> int | None:
+    return int(value) if value is not None and value.isascii() and value.isdigit() else None
+
+
+def _seconds(value: str | None) -> float | None:
+    value = (value or "").strip()
+    return float(value) if value.isascii() and value.isdigit() else None
+
+
+def _is_ndjson_identity(encoding: str | None, content_type: str | None) -> bool:
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    return (encoding or "identity").strip().lower() == "identity" and media_type == _NDJSON
+
+
+def _slice_to_end(value: str | None, length: int | None) -> tuple[int | None, int | None]:
+    match = _CONTENT_RANGE.fullmatch(value or "")
+    if match is None:
+        return None, None
+    first, last, complete = (int(group) for group in match.groups())
+    if not first <= last == complete - 1 or length not in (None, last - first + 1):
+        return None, None
+    return first, complete
 
 
 class _Progress:
@@ -557,12 +668,16 @@ class _FramedProgress(_Progress):
             return [line]
         self._manifest = _parse_manifest(line, self._retry_after)
         self._start = len(line) + 1
+        # Ready entries follow the manifest back to back, in its order, with no gaps.
+        position = self._start
         for entry in self._manifest.entries:
-            if entry.status == "ready":
-                start = self._start + cast(int, entry.byte_offset)
-                end = start + cast(int, entry.length)
-                self._slices.append((start, end, cast(str, entry.sha256), hashlib.sha256()))
-        self._slices.sort(key=lambda s: s[0])
+            if entry.status != "ready":
+                continue
+            if self._start + cast(int, entry.byte_offset) != position:
+                raise HistoryCorrupt("the manifest's entries are not laid out back to back")
+            end = position + cast(int, entry.length)
+            self._slices.append((position, end, cast(str, entry.sha256), hashlib.sha256()))
+            position = end
         return [self._manifest]
 
     def _digest(self, position: int, chunk: bytes) -> None:
@@ -593,7 +708,7 @@ class _FramedProgress(_Progress):
 
     def _verify(self) -> None:
         for _, _, expected, digest in self._slices:
-            if digest.hexdigest() != expected:
+            if digest.hexdigest() != expected.lower():
                 raise HistoryCorrupt("an entry does not match the digest its manifest states")
 
 
@@ -621,7 +736,7 @@ def _manifest_entry(raw: dict[str, Any]) -> ManifestEntry:
     if entry.status == "ready":
         if not all(isinstance(v, int) and v >= 0 for v in (entry.byte_offset, entry.length)):
             raise ValueError("a ready entry needs a byte_offset and a length")
-        if not isinstance(entry.sha256, str):
+        if not isinstance(entry.sha256, str) or not _HEX_DIGEST.fullmatch(entry.sha256):
             raise ValueError("a ready entry needs a sha256")
     return entry
 
@@ -640,28 +755,6 @@ def _decode_line(line: bytes) -> HistoryItem:
         return cast(MarketData, codec.unpack(decoded.payload, cls))
     except ParseError as error:
         return DecodeFailed(env.type, error)
-
-
-def _check_body(reply: _Reply) -> None:
-    encoding = (reply.header("Content-Encoding") or "identity").strip().lower()
-    media_type = (reply.header("Content-Type") or "").split(";", 1)[0].strip().lower()
-    if encoding == "identity" and media_type == _NDJSON:
-        return
-    reply.close()
-    raise HistoryError(
-        "the response is not uncompressed NDJSON as the history service sends",
-        http_status=reply.status,
-    )
-
-
-def _content_length(reply: _Reply) -> int | None:
-    value = reply.header("Content-Length")
-    return int(value) if value is not None and value.isdigit() else None
-
-
-def _retry_after(reply: _Reply) -> float | None:
-    value = (reply.header("Retry-After") or "").strip()
-    return float(value) if value.isdigit() else None
 
 
 _ERRORS: dict[int, tuple[type[HistoryError], str]] = {
@@ -690,7 +783,7 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
     text = f"{meaning} (HTTP {reply.status})" + (f": {message}" if message else "")
     details: dict[str, Any] = {"http_status": reply.status, "status": status, "message": message}
     if cls is HistoryPending or cls is HistoryRateLimited:
-        return cls(text, retry_after=_retry_after(reply), **details)
+        return cls(text, retry_after=reply.retry_after, **details)
     return cls(text, **details)
 
 

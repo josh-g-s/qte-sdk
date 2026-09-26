@@ -26,6 +26,7 @@ from qte_sdk.history import (
     HistoryChanged,
     HistoryClient,
     HistoryCorrupt,
+    HistoryError,
     HistoryInterrupted,
     HistoryPending,
     HistoryRateLimited,
@@ -104,11 +105,23 @@ class FakeHistory:
     etag_override: dict[str, str | None] = field(default_factory=dict)
     replace_after_drop: dict[tuple[str, str | None, str], bytes] = field(default_factory=dict)
     error_message: str = "not served"
+    # Header overrides for a whole response and for a resumed one; None leaves a header
+    # out, and "{auth}" echoes the token the request presented.
+    first_headers: dict[str, str | None] = field(default_factory=dict)
+    resume_headers: dict[str, str | None] = field(default_factory=dict)
+    # Per path: send this many bytes, then wait for the event before sending the rest.
+    hold_after: dict[str, tuple[int, threading.Event]] = field(default_factory=dict)
+    # Set before any response is sent; the server waits for it.
+    answer: threading.Event | None = None
+    # Added to every ready entry's byte_offset in a range manifest, to break its layout.
+    shift_offsets: int = 0
     requests: list[tuple[str, dict[str, str]]] = field(default_factory=list)
 
     def respond(self, handler: BaseHTTPRequestHandler) -> None:
         headers = {name.lower(): value for name, value in handler.headers.items()}
         self.requests.append((handler.path, headers))
+        if self.answer is not None:
+            self.answer.wait(10)
         if headers.get("authorization") != f"Bearer {self.token}":
             return self.json(handler, 401, "unauthenticated")
         parts = urlsplit(handler.path)
@@ -164,7 +177,8 @@ class FakeHistory:
                     entry["sha256"] = None
                     if status == "ready":
                         blob = self.objects[key]
-                        entry |= {"byte_offset": offset, "length": len(blob)}
+                        entry |= {"byte_offset": offset + self.shift_offsets}
+                        entry["length"] = len(blob)
                         entry["sha256"] = hashlib.sha256(blob).hexdigest()
                         blobs.append(blob)
                         offset += len(blob)
@@ -187,21 +201,30 @@ class FakeHistory:
         extra: dict[str, str] | None = None,
     ) -> None:
         start = 0
+        out: dict[str, str | None] = {"Content-Type": "application/x-ndjson", "ETag": etag}
         requested = headers.get("range", "")
         if requested.startswith("bytes=") and etag and headers.get("if-range") == etag:
             start = int(requested[len("bytes=") : -1])
-            handler.send_response(206)
-            handler.send_header("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}")
+            code = 206
+            out["Content-Range"] = f"bytes {start}-{len(body) - 1}/{len(body)}"
+            out |= self.resume_headers
         else:
-            handler.send_response(200)
-        handler.send_header("Content-Type", "application/x-ndjson")
-        handler.send_header("Content-Length", str(len(body) - start))
-        if etag is not None:
-            handler.send_header("ETag", etag)
-        for name, value in (extra or {}).items():
-            handler.send_header(name, value)
+            code = 200
+            out |= self.first_headers
+        out = {"Content-Length": str(len(body) - start), **out, **(extra or {})}
+        handler.send_response(code)
+        presented = headers.get("authorization", "").removeprefix("Bearer ")
+        for name, value in out.items():
+            if value is not None:
+                handler.send_header(name, value.replace("{auth}", presented))
         handler.end_headers()
         drop = self.drop_after.pop(handler.path, None) if start == 0 else None
+        hold = self.hold_after.pop(handler.path, None) if start == 0 else None
+        if hold is not None:
+            handler.wfile.write(body[: hold[0]])
+            handler.wfile.flush()
+            hold[1].wait(10)
+            body = body[hold[0] :]
         handler.wfile.write(body[start:] if drop is None else body[:drop])
         handler.wfile.flush()
         if drop is not None:
@@ -459,20 +482,21 @@ async def test_a_resume_answered_with_different_data_raises_changed():
     assert fake.requests[1][1]["if-range"] == etag_of(body)
 
 
-async def test_without_an_etag_a_drop_is_not_resumed():
+@pytest.mark.parametrize(
+    "etag",
+    [None, "W/" + etag_of(book(1)), etag_of(book(1))[:-1] + '-gzip"', '"not-a-digest"'],
+    ids=["missing", "weak", "gzip", "malformed"],
+)
+async def test_a_response_without_an_identity_etag_is_refused_before_any_message(etag):
     token = synthetic_token()
     path = f"/v1/history/{DAY}/TEST/book"
-    fake = FakeHistory(
-        token,
-        {(DAY, "TEST", "book"): many_books(10)},
-        drop_after={path: 100},
-        etag_override={path: None},
-    )
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)}, etag_override={path: etag})
+    items: list[Any] = []
     with serve_history(fake) as url:
-        with pytest.raises(HistoryInterrupted) as caught:
-            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
-    assert caught.value.bytes_received == 100
-    assert len(fake.requests) == 1
+        with pytest.raises(HistoryError, match="ETag"):
+            async for item in HistoryClient(url, token).fetch(DAY, "TEST", "book"):
+                items.append(item)
+    assert items == []
 
 
 async def test_max_resumes_zero_never_resumes():
@@ -480,9 +504,49 @@ async def test_max_resumes_zero_never_resumes():
     path = f"/v1/history/{DAY}/TEST/book"
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(10)}, drop_after={path: 100})
     with serve_history(fake) as url:
-        with pytest.raises(HistoryInterrupted):
+        with pytest.raises(HistoryInterrupted) as caught:
             await collect(HistoryClient(url, token, max_resumes=0).fetch(DAY, "TEST", "book"))
+    assert caught.value.bytes_received == 100
     assert len(fake.requests) == 1
+
+
+def dropped_once(token: str, **options: Any) -> FakeHistory:
+    path = f"/v1/history/{DAY}/TEST/book"
+    return FakeHistory(
+        token, {(DAY, "TEST", "book"): many_books(10)}, drop_after={path: 100}, **options
+    )
+
+
+@pytest.mark.parametrize(
+    ("resume_headers", "error"),
+    [
+        ({"Content-Range": "bytes 99-{last}/{total}"}, HistoryError),
+        ({"Content-Range": "bytes 100-50/{total}"}, HistoryError),
+        ({"Content-Range": "bytes 100-{last}/*"}, HistoryError),
+        ({"Content-Range": None}, HistoryError),
+        ({"Content-Encoding": "gzip"}, HistoryError),
+        (
+            {"Content-Range": "bytes 100-{total}/{bigger_total}", "Content-Length": "{longer}"},
+            HistoryChanged,
+        ),
+        ({"ETag": etag_of(b"other data")}, HistoryChanged),
+    ],
+    ids=["wrong-start", "backwards", "unknown-length", "no-range", "gzip", "longer", "new-etag"],
+)
+async def test_a_resume_that_is_not_the_rest_of_the_same_data_is_refused(resume_headers, error):
+    token = synthetic_token()
+    total = len(many_books(10))
+    sizes = {"last": total - 1, "total": total, "bigger_total": total + 1, "longer": total - 99}
+    headers = {
+        name: None if value is None else value.format(**sizes)
+        for name, value in resume_headers.items()
+    }
+    fake = dropped_once(token, resume_headers=headers)
+    with serve_history(fake) as url:
+        with pytest.raises(error) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert type(caught.value) is error
+    assert len(fake.requests) == 2
 
 
 async def test_data_that_does_not_match_its_digest_is_reported_corrupt():
@@ -682,14 +746,31 @@ async def test_a_network_failure_keeps_its_type_but_not_the_request():
 async def test_an_interrupted_download_never_carries_the_token():
     token = synthetic_token()
     path = f"/v1/history/{DAY}/TEST/book"
-    fake = FakeHistory(
-        token,
-        {(DAY, "TEST", "book"): many_books(10)},
-        drop_after={path: 100},
-        etag_override={path: None},
-    )
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(10)}, drop_after={path: 100})
     with serve_history(fake) as url:
         with pytest.raises(HistoryInterrupted) as caught:
+            await collect(HistoryClient(url, token, max_resumes=0).fetch(DAY, "TEST", "book"))
+    assert_token_absent(token, shown(caught.value))
+
+
+@pytest.mark.parametrize(
+    ("first_headers", "resume_headers"),
+    [
+        ({"ETag": "{auth}"}, {}),
+        ({"ETag": '"{auth}"'}, {}),
+        ({"Content-Type": "{auth}"}, {}),
+        ({"Content-Encoding": "{auth}"}, {}),
+        ({"Content-Length": "{auth}"}, {}),
+        ({}, {"Content-Range": "bytes 100-{auth}/1"}),
+        ({}, {"ETag": "{auth}"}),
+        ({}, {"Content-Type": "{auth}"}),
+    ],
+)
+async def test_a_header_reflecting_the_token_never_reaches_an_error(first_headers, resume_headers):
+    token = synthetic_token()
+    fake = dropped_once(token, first_headers=first_headers, resume_headers=resume_headers)
+    with serve_history(fake) as url:
+        with pytest.raises(Exception) as caught:
             await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
     assert_token_absent(token, shown(caught.value))
 
@@ -722,12 +803,94 @@ def test_the_client_repr_holds_no_token():
     assert_token_absent(token, repr(client) + repr(vars(client)))
 
 
-async def test_cancelling_a_fetch_closes_it(waits):
+@pytest.fixture
+def closes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The status of every response the client closes, in order."""
+    closed: list[int] = []
+    original = history._Reply.close
+
+    def recording_close(reply: Any) -> None:
+        closed.append(reply.status)
+        original(reply)
+
+    monkeypatch.setattr(history._Reply, "close", recording_close)
+    return closed
+
+
+async def eventually(condition: Any) -> None:
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+async def test_messages_arrive_while_the_rest_is_still_downloading():
+    token = synthetic_token()
+    path = f"/v1/history/{DAY}/TEST/book"
+    release = threading.Event()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
+    fake.hold_after[path] = (len(book(1)), release)
+    with serve_history(fake) as url:
+        stream = HistoryClient(url, token).fetch(DAY, "TEST", "book")
+        async with asyncio.timeout(5):
+            first = await anext(stream)
+        assert isinstance(first, Book) and first.grid_time == 1000
+        assert not release.is_set()
+        release.set()
+        rest = await collect(stream)
+    assert [item.grid_time for item in rest] == [2000, 3000, 4000, 5000]
+
+
+async def test_closing_a_fetch_part_way_closes_its_connection(closes):
     token = synthetic_token()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
     with serve_history(fake) as url:
         stream = HistoryClient(url, token).fetch(DAY, "TEST", "book")
         first = await anext(stream)
+        assert closes == []
         await stream.aclose()
     assert isinstance(first, Book)
-    await asyncio.sleep(0)
+    assert closes == [200]
+
+
+async def test_cancelling_during_a_download_closes_its_connection(closes):
+    token = synthetic_token()
+    path = f"/v1/history/{DAY}/TEST/book"
+    release = threading.Event()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
+    fake.hold_after[path] = (len(book(1)), release)
+    with serve_history(fake) as url:
+        stream = HistoryClient(url, token).fetch(DAY, "TEST", "book")
+        await anext(stream)
+        reading = asyncio.ensure_future(anext(stream))
+        await asyncio.sleep(0.1)
+        reading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        assert closes == [200]
+        release.set()
+
+
+async def test_cancelling_before_the_response_closes_it_once_it_arrives(closes):
+    token = synthetic_token()
+    answer = threading.Event()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)}, answer=answer)
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
+        await eventually(lambda: fake.requests)
+        fetching.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fetching
+        assert closes == []
+        answer.set()
+        await eventually(lambda: closes == [200])
+
+
+async def test_a_range_manifest_whose_entries_leave_a_gap_is_refused():
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): book(1, "AAA"), (DAY, "AAA", "trades"): trades(1, "AAA")}
+    fake = FakeHistory(token, objects, shift_offsets=5)
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        with pytest.raises(HistoryCorrupt):
+            await collect(client.fetch_range(DAY, DAY, ["AAA"], ["book", "trades"]))
