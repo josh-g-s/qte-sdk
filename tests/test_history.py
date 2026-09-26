@@ -800,6 +800,24 @@ async def test_a_timeout_keeps_its_type_but_not_the_request():
     assert_token_absent(token, shown(caught.value))
 
 
+@pytest.mark.parametrize("suffix", ["\n", "​", "\r\nX-Other: 1"])
+def test_a_token_a_header_cannot_carry_is_refused_without_quoting_it(suffix):
+    token = synthetic_token()
+    with pytest.raises(ValueError) as caught:
+        HistoryClient("https://history.example.test", token + suffix)
+    assert_token_absent(token, shown(caught.value))
+
+
+def test_an_error_quoting_the_token_escaped_is_withheld():
+    token = synthetic_token()
+    secret = history._Secret(token)
+    header = b"Bearer " + token.encode() + b"\n"
+    quoting = ValueError(f"Invalid header value {header!r}")  # escaped, not the plain token
+    safe = history._sanitised(quoting, secret)
+    assert isinstance(safe, HistoryError)
+    assert_token_absent(token, shown(safe))
+
+
 def test_the_client_repr_holds_no_token():
     token = synthetic_token()
     client = HistoryClient("https://history.example.test", token)

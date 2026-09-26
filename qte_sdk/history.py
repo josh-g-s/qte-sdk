@@ -276,6 +276,12 @@ class HistoryClient:
     ) -> None:
         self._secret = _Secret(resolve_token(token))
         del token
+        if not (self._secret.value.isascii() and self._secret.value.isprintable()):
+            # Checked here, since the HTTP library's own error would quote the header.
+            raise ValueError(
+                "the token has a character an HTTP header cannot carry, such as a newline "
+                "or a non-ASCII character; check how it was copied"
+            )
         if url is None:
             url = os.environ.get(HISTORY_URL_ENV_VAR)
         if not url:
@@ -291,7 +297,7 @@ class HistoryClient:
         self._ssl_context = ssl_context
 
     def __repr__(self) -> str:
-        return f"HistoryClient({self.url!r})"
+        return f"HistoryClient({getattr(self, 'url', None)!r})"
 
     async def fetch(
         self, session_date: date | str, instrument: str, channel: str
@@ -855,12 +861,17 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
 
 
 def _sanitised(error: BaseException, secret: _Secret) -> BaseException:
-    """`error` without its traceback or chain, or a replacement if its text is server text
-    or mentions the token."""
-    if isinstance(error, http.client.HTTPException) and not isinstance(error, OSError):
-        # A malformed status line or header is quoted in the message: server text.
-        return HistoryError(f"invalid HTTP response ({type(error).__name__}); details withheld")
-    if isinstance(error, Exception) and (secret.value in str(error) or secret.value in repr(error)):
+    """`error` without its traceback or chain, or a replacement if it could carry server
+    text or the token.
+
+    Only network errors (`OSError` and its subclasses, such as `TimeoutError`) keep their
+    type. Anything else raised while sending the request or reading the response can quote
+    the request headers (an invalid header value, in escaped form) or the server's status
+    line and headers, so it is replaced by a `HistoryError` naming only its type.
+    """
+    if isinstance(error, Exception) and not isinstance(error, OSError):
+        return HistoryError(f"the request failed ({type(error).__name__}); details withheld")
+    if isinstance(error, OSError) and (secret.value in str(error) or secret.value in repr(error)):
         return HistoryError(f"{type(error).__name__}; details withheld")
     error = error.with_traceback(None)
     error.__cause__ = error.__context__ = None
