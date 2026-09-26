@@ -756,9 +756,17 @@ async def test_an_error_body_nested_too_deeply_to_parse_is_ignored_safely():
     assert_token_absent(token, shown(caught.value))
 
 
-async def test_a_line_nested_too_deeply_to_parse_is_a_decode_failure():
+@pytest.mark.parametrize(
+    "bad",
+    [
+        b'{"payload": ' + b"[" * 5000 + b"]" * 5000 + b"}\n",
+        b'{"version":"0.x","type":"book","seq":2,"payload":{"condition":1e309}}\n',
+    ],
+    ids=["nested-too-deeply", "number-out-of-range"],
+)
+async def test_a_line_the_parsers_cannot_handle_is_a_decode_failure(bad):
     token = synthetic_token()
-    body = book(1) + b'{"payload": ' + b"[" * 5000 + b"]" * 5000 + b"}\n" + book(2)
+    body = book(1) + bad + book(2)
     fake = FakeHistory(token, {(DAY, "TEST", "book"): body})
     with serve_history(fake) as url:
         items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))

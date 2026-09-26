@@ -69,8 +69,6 @@ from datetime import date, datetime
 from typing import Any, cast
 from urllib.parse import quote, urlsplit
 
-from google.protobuf.json_format import ParseError
-
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import INBOUND
@@ -826,10 +824,12 @@ def _manifest_entry(raw: dict[str, Any]) -> ManifestEntry:
 
 def _decode_line(line: bytes) -> HistoryItem:
     """One NDJSON line as the live connection would deliver it."""
+    # Any failure to decode one line is reported for that line, and the download goes on:
+    # besides ParseError and ValueError, the parsers raise RecursionError for JSON nested
+    # too deeply and OverflowError for an out-of-range number.
     try:
         decoded = codec.decode(line)
-    except (ValueError, ParseError, RecursionError) as error:
-        # RecursionError: JSON nested too deeply to parse, which is malformed here too.
+    except Exception as error:
         return DecodeFailed(None, error)
     env = decoded.envelope
     cls = INBOUND.get(env.type)
@@ -837,7 +837,7 @@ def _decode_line(line: bytes) -> HistoryItem:
         return Unknown(env.type, decoded.payload, env.seq if env.HasField("seq") else None)
     try:
         return cast(MarketData, codec.unpack(decoded.payload, cls))
-    except (ParseError, RecursionError) as error:
+    except Exception as error:
         return DecodeFailed(env.type, error)
 
 
