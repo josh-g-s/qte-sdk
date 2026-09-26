@@ -770,9 +770,12 @@ async def test_a_header_reflecting_the_token_never_reaches_an_error(first_header
     token = synthetic_token()
     fake = dropped_once(token, first_headers=first_headers, resume_headers=resume_headers)
     with serve_history(fake) as url:
-        with pytest.raises(Exception) as caught:
-            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
-    assert_token_absent(token, shown(caught.value))
+        try:
+            # A reflecting header is treated as absent, which may or may not end in an error
+            # (a missing Content-Encoding simply means an uncompressed body).
+            await collect(HistoryClient(url, token, timeout=2).fetch(DAY, "TEST", "book"))
+        except Exception as error:
+            assert_token_absent(token, shown(error))
 
 
 class SilentServer:
@@ -943,11 +946,37 @@ async def test_a_status_line_reflecting_the_token_never_reaches_an_error():
     assert_token_absent(token, shown(caught.value))
 
 
-async def test_an_etag_carrying_part_of_a_hex_token_never_reaches_an_error():
+async def test_an_etag_carrying_part_of_a_hex_token_is_treated_as_absent():
     token = secrets.token_hex(32)
-    etag = f'"{token[:32]}{"0" * 32}"'  # a well-formed identity ETag, but the wrong digest
+    etag = f'"{token[:32]}{"0" * 32}"'  # a well-formed identity ETag, reflecting the token
     fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)}, first_headers={"ETag": etag})
     with serve_history(fake) as url:
-        with pytest.raises(HistoryCorrupt) as caught:
+        with pytest.raises(HistoryError, match="no identity ETag") as caught:
             await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert_token_absent(token, shown(caught.value))
+
+
+def numeric_token() -> str:
+    """A token that starts with digits, so a header could reflect part of it as a number."""
+    return "7391846205" + synthetic_token()
+
+
+async def test_a_content_length_reflecting_part_of_the_token_never_reaches_an_error():
+    token = numeric_token()
+    fake = dropped_once(token, first_headers={"Content-Length": token[:10]})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError) as caught:
+            await collect(HistoryClient(url, token, timeout=2).fetch(DAY, "TEST", "book"))
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_retry_after_reflecting_part_of_the_token_is_not_kept(waits):
+    token = numeric_token()
+    key = (DAY, "TEST", "book")
+    fake = FakeHistory(token, {key: book(1)}, pending={key: Pending(1, token[:10])})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryPending) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert caught.value.retry_after is None
+    assert waits == []
     assert_token_absent(token, shown(caught.value))

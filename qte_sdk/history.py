@@ -588,17 +588,18 @@ class _Reply:
         self.status = response.status
         self.body: bytes | None = None
         self.has_etag = response.getheader("ETag") is not None
-        self.etag = _identity_etag(response.getheader("ETag"), secret)
-        self.length = _count(response.getheader("Content-Length"))
-        self.retry_after = _seconds(response.getheader("Retry-After"))
+        self.etag = _identity_etag(_header(response, "ETag", secret))
+        self.length = _count(_header(response, "Content-Length", secret))
+        self.retry_after = _seconds(_header(response, "Retry-After", secret))
         self.ndjson_identity = _is_ndjson_identity(
-            response.getheader("Content-Encoding"), response.getheader("Content-Type")
+            _header(response, "Content-Encoding", secret),
+            _header(response, "Content-Type", secret),
         )
         # For a 206: where the slice starts, and the length of the whole data. Both are
         # None unless the Content-Range is a well-formed slice running to the end, whose
         # own length matches Content-Length where that is given.
         self.continues_from, self.complete_length = _slice_to_end(
-            response.getheader("Content-Range"), self.length
+            _header(response, "Content-Range", secret), self.length
         )
         if self.status == 200:
             self.continues_from, self.complete_length = 0, self.length
@@ -615,10 +616,28 @@ class _Reply:
         self.conn.close()
 
 
-def _identity_etag(value: str | None, secret: _Secret) -> _Validator | None:
+_REFLECTED_RUN = 6
+
+
+def _header(response: http.client.HTTPResponse, name: str, secret: _Secret) -> str | None:
+    """The header's value, or None if it is absent or shares a run of six or more
+    characters with the token: a value that may reflect the token is treated as if the
+    service had not sent it, so no part of it reaches anything the client keeps, even as
+    a number."""
+    value = response.getheader(name)
+    if value is None:
+        return None
+    token = secret.value
+    runs = range(len(value) - _REFLECTED_RUN + 1)
+    if any(value[i : i + _REFLECTED_RUN] in token for i in runs):
+        return None
+    return value
+
+
+def _identity_etag(value: str | None) -> _Validator | None:
     """`value` if it is an identity ETag, `"<hex sha256>"`, else None: a weak, gzip or
     malformed validator cannot be checked against, nor resumed from."""
-    if value is None or not _IDENTITY_ETAG.fullmatch(value) or secret.value in value:
+    if value is None or not _IDENTITY_ETAG.fullmatch(value):
         return None
     return _Validator(value)
 
