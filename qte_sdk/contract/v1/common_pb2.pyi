@@ -158,6 +158,7 @@ class ReasonCodes(_message.Message):
         KILL_SWITCH: _ClassVar[ReasonCodes.ReasonCode]
         AMEND_CUT: _ClassVar[ReasonCodes.ReasonCode]
         HEDGE_RECHECK_FAILED: _ClassVar[ReasonCodes.ReasonCode]
+        PARTICIPATION_LIMIT: _ClassVar[ReasonCodes.ReasonCode]
     REASON_CODE_UNSPECIFIED: ReasonCodes.ReasonCode
     NOT_AUTHENTICATED: ReasonCodes.ReasonCode
     VERSION_MISMATCH: ReasonCodes.ReasonCode
@@ -208,4 +209,5 @@ class ReasonCodes(_message.Message):
     KILL_SWITCH: ReasonCodes.ReasonCode
     AMEND_CUT: ReasonCodes.ReasonCode
     HEDGE_RECHECK_FAILED: ReasonCodes.ReasonCode
+    PARTICIPATION_LIMIT: ReasonCodes.ReasonCode
     def __init__(self) -> None: ...

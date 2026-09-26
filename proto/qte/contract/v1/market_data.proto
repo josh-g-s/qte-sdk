@@ -1,15 +1,20 @@
 // Outbound market data.
 //
-// **Version:** 1.8
+// **Version:** 1.9
 //
 // Message types on the envelope `type` field: `book`, `trades`, `mark`,
-// `session_state`. One feed for everyone (SPEC 4.3): the same publisher, the
-// same timestamp, the same 100 ms conflation grid for `book`, `trades` and
-// `session_state`; `mark` is published on its own one-second grid (SPEC 4.3,
-// SPEC 7.1). Engine state (the flow accumulators, the impact offset, the
-// carry, the Tier-M state) is not published and has no field here (SPEC 6.1,
-// SPEC 9.3.3, SPEC 9.3.5). Every `timestamp` field's wire resolution and
-// representation is not yet specified.
+// `session_state`, `official_close`. One feed for everyone (SPEC 4.3): the
+// same publisher, the same timestamp, the same 100 ms conflation grid for
+// `book`, `trades` and `session_state`; `mark` is published on its own
+// one-second grid (SPEC 4.3, SPEC 7.1). Engine state (the flow accumulators,
+// the impact offset, the carry, the Tier-M state) is not published and has
+// no field here (SPEC 6.1, SPEC 9.3.3, SPEC 9.3.5). Every `timestamp`
+// field's wire resolution and representation is not yet specified.
+//
+// Outside a session, everything but order entry is served: a `subscribe`
+// gets a `session_state` with `state = CLOSED` and, per instrument, an
+// `official_close` if one exists yet, in place of `book`, `trades` and
+// `mark`, which are never sent outside a session (SPEC 4.3, SPEC 8.1).
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -175,14 +180,19 @@ message Mark {
 }
 
 // SPEC 8.1, SPEC 13.1. No order entry before the open; every order is
-// cancelled at the close.
+// cancelled at the close. Published at every grid point from the open to
+// the close; outside a session, sent once as part of a subscribe's reply
+// instead, off any grid (SPEC 4.3).
 message SessionState {
   MarketSessionPhase state = 1; // OPEN or CLOSED. SPEC 8.1, SPEC 13.1
   string session_date = 2;      // string. The US session date, ISO 8601. SPEC 13.1
   int64 open_time = 3;          // timestamp. 09:30 America/New_York. SPEC 13.1
   // 16:00 America/New_York, or 13:00 on an early-close day.
   int64 close_time = 4;         // timestamp. SPEC 13.1, SPEC 13.2
-  int64 grid_time = 5;          // timestamp. The grid boundary this message is published at. SPEC 4.3
+  // timestamp. The grid boundary this message is published at. Outside a
+  // session, where there is no grid point, carries the same instant as
+  // close_time instead. SPEC 4.3
+  int64 grid_time = 5;
   // Whether a Director-declared exchange outage is in force. Orthogonal to
   // `state`: a cancel and a mass-cancel still apply during an outage, unlike
   // during CLOSED, so this is not a third session-phase value (SPEC 4.3). A
@@ -190,4 +200,17 @@ message SessionState {
   // and carries no field here: it is that instrument's `Book.condition`
   // (ONE_SIDED or EMPTY) instead (SPEC 5.2, InstrumentCondition above).
   bool outage_active = 6;
+}
+
+// The last official close of one instrument: the time-weighted average of
+// the mark over the session's final five minutes before the actual close
+// (SPEC 7.1, SPEC 9.4.4). Sent only as part of a `subscribe`'s reply outside
+// a session, never on a grid and never while a session is open.
+message OfficialClose {
+  string instrument = 1;   // id. SPEC 3.1
+  string session_date = 2; // string. The US session date (ISO 8601) this close belongs to. SPEC 13.1
+  int64 value = 3;         // int64-micro. The official close itself, the TWAP described above. SPEC 7.1, SPEC 9.4.4
+  // bool. Set when any of the window's one-second marks was frozen, the
+  // same data-quality flag the fallback ladder raises. SPEC 7.2
+  bool frozen = 4;
 }

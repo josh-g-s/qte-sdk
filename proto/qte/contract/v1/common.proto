@@ -200,6 +200,9 @@ message ReasonCodes {
     // (SPEC 8.2).
     AMEND_CUT = 1810;
     HEDGE_RECHECK_FAILED = 1811;
-    // 1812-1899 reserved for band 1800 growth.
+    // An Execution desk's order cancelled because the participation cap
+    // bound: what its permitted fills leave of it (SPEC 24.3).
+    PARTICIPATION_LIMIT = 1812;
+    // 1813-1899 reserved for band 1800 growth.
   }
 }
