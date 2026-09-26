@@ -110,3 +110,15 @@ class SessionState(_message.Message):
     grid_time: int
     outage_active: bool
     def __init__(self, state: _Optional[_Union[_common_pb2.MarketSessionPhase, str]] = ..., session_date: _Optional[str] = ..., open_time: _Optional[int] = ..., close_time: _Optional[int] = ..., grid_time: _Optional[int] = ..., outage_active: bool = ...) -> None: ...
+
+class OfficialClose(_message.Message):
+    __slots__ = ("instrument", "session_date", "value", "frozen")
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    FROZEN_FIELD_NUMBER: _ClassVar[int]
+    instrument: str
+    session_date: str
+    value: int
+    frozen: bool
+    def __init__(self, instrument: _Optional[str] = ..., session_date: _Optional[str] = ..., value: _Optional[int] = ..., frozen: bool = ...) -> None: ...

@@ -8,6 +8,8 @@
                 best_bid = item.bid_levels[0].price if item.bid_levels else None
             case Trades() | Mark() | SessionState():
                 ...
+            case OfficialClose():
+                last_close = to_decimal(item.value)  # outside a session only
             case SeqGap() | Disconnected() | DecodeFailed():
                 ...  # messages were lost: treat what you hold as uncertain
             case Reject():
@@ -15,6 +17,12 @@
 
 There is one conflated market-data feed, the same for every participant. Messages are
 delivered as they arrive; nothing here waits for, fills in or assumes a grid time.
+
+Outside a session the exchange still answers a subscribe, once: a `SessionState` whose
+`state` is `CLOSED`, then an `OfficialClose` for each subscribed instrument that has one,
+carrying that instrument's last official close: the time-weighted average of the mark
+over the final five minutes of its session. No `Book`, `Trades` or `Mark` arrives until a
+session opens.
 
 Messages are the generated contract classes. Prices are `int` micro-dollars and sizes are
 `int` shares, exact at any size; use `qte_sdk.units.to_decimal` for exact `Decimal`
@@ -39,6 +47,7 @@ from qte_sdk.contract.v1.market_data_pb2 import (
     Book,
     InstrumentCondition,
     Mark,
+    OfficialClose,
     SessionState,
     StudentLevel,
     TapePrint,
@@ -58,6 +67,7 @@ __all__ = [
     "Mark",
     "MarketData",
     "MarketDataEvent",
+    "OfficialClose",
     "Reject",
     "SeqGap",
     "SessionState",
@@ -71,14 +81,16 @@ __all__ = [
     "unsubscribe",
 ]
 
-MarketData = Book | Trades | Mark | SessionState
+MarketData = Book | Trades | Mark | SessionState | OfficialClose
 """One market-data message."""
 
 MarketDataEvent = MarketData | Reject | SeqGap | Disconnected | DecodeFailed
 """What `market_data` yields: a message, a refused subscription change, or a sign that
 messages were lost (`SeqGap`, `Disconnected` from a reconnecting session, `DecodeFailed`)."""
 
-MARKET_DATA_TYPES: frozenset[str] = frozenset({"book", "trades", "mark", "session_state"})
+MARKET_DATA_TYPES: frozenset[str] = frozenset(
+    {"book", "trades", "mark", "session_state", "official_close"}
+)
 """The envelope `type` tokens of market-data messages."""
 
 _SUBSCRIPTION_REQUESTS = frozenset({RequestType.SUBSCRIBE, RequestType.UNSUBSCRIBE})
@@ -112,11 +124,12 @@ def as_market_data(event: Event | Disconnected | object) -> MarketDataEvent | No
     """The market-data meaning of one connection event, or None if it has none.
 
     Use this in your own loop over a connection when you also handle order events there.
-    Returns the message for `book`, `trades`, `mark` and `session_state`; a `Reject` of a
-    `subscribe` or `unsubscribe`; every `SeqGap` and `Disconnected` (any `DataUncertain`),
-    since messages may have been missed; and every `DecodeFailed`, since a message
-    that could not be decoded may have been market data or a refused subscription, and
-    sequence tracking has already counted it, so no later gap will report it.
+    Returns the message for `book`, `trades`, `mark`, `session_state` and
+    `official_close`; a `Reject` of a `subscribe` or `unsubscribe`; every `SeqGap` and
+    `Disconnected` (any `DataUncertain`), since messages may have been missed; and every
+    `DecodeFailed`, since a message that could not be decoded may have been market data
+    or a refused subscription, and sequence tracking has already counted it, so no later
+    gap will report it.
     """
     if isinstance(event, Received):
         if event.type in MARKET_DATA_TYPES:
