@@ -45,9 +45,10 @@ standard as `qte_sdk.connection`: it never appears in a log record, an exception
 attribute or chain, or a traceback local variable that this module creates or lets escape.
 Errors from the network keep their type but lose their traceback and chain, because the
 HTTP library's frames hold the request headers. Response headers and status lines are not
-put in errors; the `message` of an error body is server text, passed on with the token
-removed should it ever appear. Redirects are not followed, and a plain `http://` address
-is refused unless it is this machine's own (a local test server).
+put in errors, and a header that may reflect the token is treated as absent. The `message`
+of an error body is server text, passed on with the token removed should it ever appear,
+or withheld if part of the token remains. Redirects are not followed, and a plain
+`http://` address is refused unless it is this machine's own (a local test server).
 """
 
 import asyncio
@@ -636,13 +637,17 @@ def _header(response: http.client.HTTPResponse, name: str, secret: _Secret) -> s
     service had not sent it, so no part of it reaches anything the client keeps, even as
     a number."""
     value = response.getheader(name)
-    if value is None:
-        return None
+    return None if value is None else _screened(value, secret)
+
+
+def _screened(text: str, secret: _Secret) -> str | None:
+    """`text`, or None if it shares a run of six or more characters with the token (the
+    whole token, if it is shorter)."""
     token = secret.value
-    run = min(_REFLECTED_RUN, len(token))  # a shorter token is matched whole
-    if any(value[i : i + run] in token for i in range(len(value) - run + 1)):
+    run = min(_REFLECTED_RUN, len(token))
+    if any(text[i : i + run] in token for i in range(len(text) - run + 1)):
         return None
-    return value
+    return text
 
 
 def _identity_etag(value: str | None) -> _Validator | None:
@@ -853,10 +858,12 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
     except ValueError:
         body = None
     if isinstance(body, dict):
+        # Server text: an echoed token is redacted, and text that still shares a run of
+        # characters with it (a fragment, say from an echoed header) is withheld.
         if isinstance(body.get("status"), str):
-            status = body["status"].replace(secret.value, repr(secret))
+            status = _screened(body["status"].replace(secret.value, repr(secret)), secret)
         if isinstance(body.get("message"), str):
-            message = body["message"].replace(secret.value, repr(secret))
+            message = _screened(body["message"].replace(secret.value, repr(secret)), secret)
     cls, meaning = _ERRORS.get(reply.status, (HistoryError, "unexpected response"))
     text = f"{meaning} (HTTP {reply.status})" + (f": {message}" if message else "")
     details: dict[str, Any] = {"http_status": reply.status, "status": status, "message": message}

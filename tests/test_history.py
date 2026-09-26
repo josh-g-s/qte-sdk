@@ -237,9 +237,11 @@ class FakeHistory:
         status: str,
         retry_after: str | None = None,
     ) -> None:
-        # "{auth}" in the message echoes whatever token the request presented.
+        # "{auth}" in the message echoes whatever token the request presented, and
+        # "{auth_part}" its first twelve characters.
         presented = handler.headers.get("Authorization", "").removeprefix("Bearer ")
         message = self.error_message.replace("{auth}", presented)
+        message = message.replace("{auth_part}", presented[:12])
         body = json.dumps({"status": status, "message": message}).encode()
         handler.send_response(code)
         handler.send_header("Content-Type", "application/json")
@@ -726,6 +728,17 @@ async def test_an_error_response_never_carries_the_token(status, waits):
     assert caught.value.http_status == status
     assert caught.value.message == "echo <token withheld>"
     assert_token_absent(presented, shown(caught.value))
+
+
+async def test_an_error_message_echoing_part_of_the_token_is_withheld():
+    token = synthetic_token()
+    fake = FakeHistory(token, error_message="you sent {auth_part}")
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryUnavailable) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "NOPE", "book"))
+    assert caught.value.message is None
+    assert caught.value.status == "unavailable"
+    assert_token_absent(token, shown(caught.value))
 
 
 def free_port() -> int:
