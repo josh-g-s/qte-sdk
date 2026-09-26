@@ -89,7 +89,11 @@ class FakeExchange:
         reject_first_cancel_then_gap: bool = False,
         stray_reject: bool = False,
         confirm_cancels: asyncio.Event | None = None,
+        closed: bool = False,
     ) -> None:
+        # With `closed`, the exchange is outside a session: it answers a subscribe once,
+        # with the closed state and each instrument's official close, and publishes nothing.
+        self.closed = closed
         # With `confirm_cancels`, a cancel is accepted at once but its order_cancelled is
         # sent only once the test sets that event (never, if it does not).
         self.confirm_cancels = confirm_cancels
@@ -128,7 +132,9 @@ class FakeExchange:
             async for raw in ws:
                 message = json.loads(raw)
                 self.received.append(message)
-                if message["type"] == "subscribe" and ticker is None:
+                if message["type"] == "subscribe" and self.closed:
+                    await self.answer_closed(ws, message["payload"]["instruments"])
+                elif message["type"] == "subscribe" and ticker is None:
                     if self.stray_reject:
                         # A reject of something the exchange could not read: no request_ref.
                         stray = {"reason_code": "MALFORMED_MESSAGE", "receipt_time": "1"}
@@ -162,6 +168,13 @@ class FakeExchange:
             await self.send(ws, "book", book)
             published += 1
             await asyncio.sleep(0.05)
+
+    async def answer_closed(self, ws: ServerConnection, instruments: list[str]) -> None:
+        state = {"state": "CLOSED", "session_date": "2026-01-05", "close_time": "2"}
+        await self.send(ws, "session_state", {**state, "grid_time": "2"})
+        for instrument in instruments:
+            close = {"instrument": instrument, "session_date": "2026-01-05", "value": "100011000"}
+            await self.send(ws, "official_close", close)
 
     def types(self) -> list[str]:
         return [message["type"] for message in self.received]
@@ -383,6 +396,18 @@ async def test_print_book_stops_after_its_duration():
         )
     assert code == 0, err
     assert "stopped after 0.5 seconds" in out
+
+
+async def test_print_book_prints_the_official_close_outside_a_session():
+    async with serve_local(FakeExchange(closed=True)) as url:
+        code, out, err = await run_example(
+            "print_book.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "0.5"
+        )
+    assert code == 0, err
+    assert "market session 2026-01-05: CLOSED" in out
+    assert "close  TEST  100.011000 on 2026-01-05" in out
+    assert "book " not in out
+    assert "stopped after 0.5 seconds (2 messages)" in out
 
 
 async def test_quote_both_sides_rests_amends_and_cancels_its_own_orders():

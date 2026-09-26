@@ -2,7 +2,7 @@
 
 from google.protobuf.message import Message
 
-from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, SessionState, Trades
+from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, OfficialClose, SessionState, Trades
 from qte_sdk.contract.v1.order_events_pb2 import (
     Accepted,
     Execution,
@@ -33,4 +33,5 @@ INBOUND: dict[str, type[Message]] = {
     "trades": Trades,
     "mark": Mark,
     "session_state": SessionState,
+    "official_close": OfficialClose,
 }

@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.2
+**Version:** 0.3
 
 This guide takes you from a fresh checkout to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -83,10 +83,12 @@ async for item in market_data(session):  # runs until you stop it
 
 There is **one conflated market-data feed, the same for every participant**. Book, trades and the market session state are published on a fixed 100 ms grid; the mark is published on its own, slower grid. A `Book` is the state of one instrument at the end of an interval, not a stream of individual changes. It shows two kinds of depth: `bid_levels` and `ask_levels` are the wall ladder, best price first, and `student_bid_levels` and `student_ask_levels` are the orders participants have resting, one entry per price, with no identity attached.
 
-`market_data` yields `Book`, `Trades`, `Mark` and `SessionState` messages, a `Reject` if a subscription is refused (an unknown instrument, for example), and two warnings:
+`market_data` yields `Book`, `Trades`, `Mark`, `SessionState` and `OfficialClose` messages, a `Reject` if a subscription is refused (an unknown instrument, for example), and two warnings:
 
 - `SeqGap`: messages were missed, so anything you built from them may be wrong.
 - `DecodeFailed`: a message could not be decoded.
+
+**Outside a session** you can still connect and subscribe, but there is no live market. A subscribe is answered once, not on the grid: a `SessionState` whose `state` is `CLOSED`, then an `OfficialClose` for each subscribed instrument that has one. `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. No `Book`, `Trades` or `Mark` arrives until a session opens, so a loop that waits for a book waits until then.
 
 `market_data` skips everything that is not market data, including your order events. When you also trade, loop over the session yourself and sort each event with `as_market_data(event)` and `is_order_event(event)`, as in the next step.
 
@@ -209,7 +211,8 @@ Some rejects you are likely to meet while learning (the exchange's rules decide 
 
 | Reason | What happened |
 |---|---|
-| `MARKET_CLOSED` | The market session is not open. `SessionState` says when it is. |
+| `MARKET_CLOSED` | You sent an order message before the open, or on a day with no session at all (a weekend or an exchange holiday, for example). Check that `SessionState.state` is `OPEN` before you trade. |
+| `RELEASE_AFTER_CLOSE` | On a day that had a session, your order message would have been applied after the close, once its order delay had passed. This includes anything sent after the close. |
 | `MIN_REST_VIOLATION` | You cancelled or amended an order too soon after sending it. |
 | `PRICE_COLLAR` | The price is outside the price collar. |
 | `DUPLICATE_ORDER_AT_LEVEL` | Your team already has an order at that instrument, side and price. |
@@ -229,7 +232,7 @@ Each example reads `QTE_URL` and `QTE_TOKEN` from the environment, runs for a bo
 
 | Example | What it shows |
 |---|---|
-| `examples/print_book.py` | Connect, subscribe and print the book, trades, mark and market session state. Sends no orders. Stops after `--seconds` or `--max-messages`. |
+| `examples/print_book.py` | Connect, subscribe and print the book, trades, mark and market session state, or the official close outside a session. Sends no orders. Stops after `--seconds` or `--max-messages`. |
 | `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Cancels its own orders when `--seconds` are up. |
 | `examples/take_liquidity.py` | Send one market order once the book shows the side it trades against, and report its fills. Stops when the order is finished or after `--seconds`. |
 

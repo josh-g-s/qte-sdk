@@ -19,6 +19,7 @@ from qte_sdk.connection import (
 from qte_sdk.contract.v1 import market_data_pb2
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
+    CLOSED,
     OPEN,
     SELL,
     STUDENT_TO_WALL,
@@ -32,6 +33,7 @@ from qte_sdk.market_data import (
     Book,
     InstrumentCondition,
     Mark,
+    OfficialClose,
     SessionState,
     Trades,
     as_market_data,
@@ -186,6 +188,29 @@ async def test_session_state_decodes_typed():
     assert state.outage_active is True
 
 
+async def test_an_official_close_decodes_its_value_exactly_and_its_frozen_flag():
+    payload = {
+        "instrument": "AAPL",
+        "session_date": "2026-09-18",
+        "value": str(ABOVE_2_53),
+        "frozen": True,
+    }
+    [close] = await received([frame("official_close", payload, 1)])
+
+    assert isinstance(close, OfficialClose)
+    assert (close.instrument, close.session_date) == ("AAPL", "2026-09-18")
+    assert close.value == ABOVE_2_53
+    assert to_decimal(close.value) == Decimal("9007199254.740993")
+    assert close.frozen is True
+
+
+async def test_an_official_close_with_no_frozen_mark_leaves_the_flag_unset():
+    payload = {"instrument": "AAPL", "session_date": "2026-09-18", "value": "200011000"}
+    [close] = await received([frame("official_close", payload, 1)])
+    assert to_decimal(close.value) == Decimal("200.011")
+    assert close.frozen is False
+
+
 @pytest.mark.parametrize(
     "condition", ["LIVE", "ONE_SIDED", "EMPTY", "FROZEN", "REFERENCE_UNAVAILABLE", "DISABLED"]
 )
@@ -335,6 +360,68 @@ async def test_unsubscribing_stops_delivery_for_that_instrument():
     assert [(type(m), m.instrument) for m in after] == [(Book, "MSFT"), (Mark, "MSFT")]
 
 
+def closed_market(closes: dict[str, str]) -> Any:
+    """A scripted exchange outside a session. It answers a subscribe once, with the closed
+    state and, for each named instrument in `closes`, its last official close (micro-dollars
+    as the wire's decimal string), and sends nothing else: no book, trades or mark."""
+
+    async def handler(ws: ServerConnection) -> None:
+        subscribed = json.loads(await ws.recv())
+        assert subscribed["type"] == "subscribe"
+        state = {
+            "state": "CLOSED",
+            "session_date": "2026-09-18",
+            "open_time": "100",
+            "close_time": "200",
+            "grid_time": "200",
+            "outage_active": False,
+        }
+        seq = 1
+        await ws.send(frame("session_state", state, seq))
+        for instrument in subscribed["payload"]["instruments"]:
+            if instrument in closes:
+                seq += 1
+                close = {
+                    "instrument": instrument,
+                    "session_date": "2026-09-18",
+                    "value": closes[instrument],
+                    "frozen": False,
+                }
+                await ws.send(frame("official_close", close, seq))
+        await ws.close()
+
+    return handler
+
+
+async def closed_market_reply(closes: dict[str, str], instruments: list[str]) -> list[Any]:
+    async with serve_local(closed_market(closes)) as url, Connection(url) as conn:
+        session = session_on(conn)
+        await subscribe(session, instruments)
+        return [item async for item in market_data(session)]
+
+
+async def test_outside_a_session_a_subscribe_gets_the_closed_state_and_official_closes():
+    closes = {"AAPL": "200011000", "MSFT": "415250000"}
+    items = await closed_market_reply(closes, ["AAPL", "MSFT"])
+
+    assert [type(item) for item in items] == [SessionState, OfficialClose, OfficialClose]
+    assert not any(isinstance(item, Book | Trades | Mark) for item in items)
+    state, *official = items
+    assert state.state == CLOSED
+    assert state.grid_time == state.close_time
+    assert [(c.instrument, c.session_date) for c in official] == [
+        ("AAPL", "2026-09-18"),
+        ("MSFT", "2026-09-18"),
+    ]
+    assert [to_decimal(c.value) for c in official] == [Decimal("200.011"), Decimal("415.25")]
+
+
+async def test_outside_a_session_an_instrument_with_no_official_close_yet_gets_none():
+    items = await closed_market_reply({"AAPL": "200011000"}, ["AAPL", "QTEZ"])
+    assert [type(item) for item in items] == [SessionState, OfficialClose]
+    assert items[1].instrument == "AAPL"
+
+
 # What the market-data view passes on and what it leaves out.
 
 
@@ -389,6 +476,8 @@ def test_as_market_data_classifies_single_events():
     assert as_market_data(Received("reject", unsub_reject, 1)) is unsub_reject
     assert as_market_data(Received("reject", Reject(), 1)) is None
     assert as_market_data(Unknown("book_v2", {}, 1)) is None
+    close = OfficialClose(instrument="AAPL", value=200_011_000)
+    assert as_market_data(Received("official_close", close, 1)) is close
     gap = SeqGap(1, 3)
     assert as_market_data(gap) is gap
     failed = DecodeFailed("execution", ValueError())
@@ -400,7 +489,7 @@ def test_no_option_chain_types_are_exposed():
     assert not [name for name in public if "option" in name.lower()]
     messages = market_data_pb2.DESCRIPTOR.message_types_by_name
     assert not [name for name in messages if "option" in name.lower()]
-    assert md.MARKET_DATA_TYPES == {"book", "trades", "mark", "session_state"}
+    assert md.MARKET_DATA_TYPES == {"book", "trades", "mark", "session_state", "official_close"}
 
 
 def test_a_disconnect_is_passed_on_as_a_sign_that_messages_were_lost():
