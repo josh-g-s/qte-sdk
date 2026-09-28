@@ -189,7 +189,9 @@ class Halt(BaseException):
     """Not an Exception, so decoding must let it through."""
 
 
-@pytest.mark.parametrize("stop", [asyncio.CancelledError, KeyboardInterrupt, SystemExit, Halt])
+@pytest.mark.parametrize(
+    "stop", [asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit, Halt]
+)
 @pytest.mark.parametrize("step", ["decode", "unpack"])
 def test_a_base_exception_while_decoding_is_never_reported_as_a_failure(stop, step, monkeypatch):
     def interrupted(*args: Any) -> Any:
