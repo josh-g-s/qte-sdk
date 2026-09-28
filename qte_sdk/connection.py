@@ -27,7 +27,6 @@ from collections.abc import AsyncIterator, Iterator, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from google.protobuf.json_format import ParseError
 from google.protobuf.message import Message
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
@@ -138,6 +137,14 @@ def _exception_name(exc_info: Any) -> str:
     return current.__name__ if current is not None else "error"
 
 
+def _detached(error: Exception) -> Exception:
+    """`error` without its traceback or chain: the decoder's frames, and those of any error
+    chained to it, hold the frame text as local variables."""
+    error = error.with_traceback(None)
+    error.__cause__ = error.__context__ = None
+    return error
+
+
 @dataclass(frozen=True)
 class Received:
     """A message of a type this SDK knows, decoded into its generated class.
@@ -174,7 +181,13 @@ class Unknown:
 
 @dataclass(frozen=True)
 class DecodeFailed:
-    """A frame that could not be decoded. It is reported and never delivered as a message."""
+    """A frame that could not be decoded. It is reported and never delivered as a message.
+
+    `error` is what decoding raised, for example a `ValueError` for text that is not a JSON
+    envelope, a `ParseError` for a payload of the wrong shape, a `RecursionError` for JSON
+    nested too deeply or an `OverflowError` for a number out of range. It keeps its type
+    and message but carries no traceback or chain.
+    """
 
     type: str | None
     error: Exception
@@ -379,13 +392,20 @@ class Connection:
         return self._ws
 
     def _handle(self, frame: str | bytes) -> Iterator[Event]:
+        # Any failure to decode one frame is reported for that frame, and delivery goes on:
+        # besides ValueError and ParseError, the parsers raise RecursionError for JSON nested
+        # too deeply and OverflowError for a number out of range. Only Exception is caught,
+        # so KeyboardInterrupt, SystemExit, cancellation and GeneratorExit still propagate.
         if isinstance(frame, bytes):
             yield DecodeFailed(None, ValueError("binary frame; the wire is JSON text"))
             return
+        failure: Exception | None = None
         try:
             decoded = codec.decode(frame)
-        except (ValueError, ParseError) as error:
-            yield DecodeFailed(None, error)
+        except Exception as error:
+            failure = _detached(error)
+        if failure is not None:
+            yield DecodeFailed(None, failure)
             return
 
         env = decoded.envelope
@@ -402,8 +422,10 @@ class Connection:
             return
         try:
             message = codec.unpack(decoded.payload, cls)
-        except ParseError as error:
-            yield DecodeFailed(env.type, error)
+        except Exception as error:
+            failure = _detached(error)
+        if failure is not None:
+            yield DecodeFailed(env.type, failure)
             return
 
         event = Received(env.type, message, seq, decoded.payload)

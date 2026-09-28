@@ -23,6 +23,7 @@ from qte_sdk.connection import (
     SessionRejected,
     Unknown,
 )
+from qte_sdk.contract import codec
 from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
 from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
@@ -105,6 +106,98 @@ async def test_a_malformed_frame_is_reported_and_never_delivered(bad_frame):
         events = await collect(url)
     assert isinstance(events[0], DecodeFailed)
     assert [type(e) for e in events[1:]] == [Received]
+
+
+def nested_too_deeply(token: str) -> str:
+    # Built by hand: json.dumps gives up on nesting this deep.
+    head = f'{{"version": "0.x", "type": "book", "seq": 2, "note": "{token}", "payload": '
+    return head + "[" * 5000 + "]" * 5000 + "}"
+
+
+def number_out_of_range(token: str) -> str:
+    payload = {"instrument": "AAPL", "grid_time": "1", "condition": "@"}
+    return frame("book", payload, 2, note=token).replace('"@"', "1e309")
+
+
+def force_recursion_error(monkeypatch: pytest.MonkeyPatch, marker: str) -> None:
+    """Make decoding the frame holding `marker` fail as the parser does on JSON nested past
+    its limit. Whether a given depth does that depends on the Python version."""
+    real_decode = codec.decode
+
+    def decode(text: str | bytes) -> Any:
+        if marker in str(text):
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+        return real_decode(text)
+
+    monkeypatch.setattr(codec, "decode", decode)
+
+
+@pytest.mark.parametrize("parser_gives_up", [False, True], ids=["as-parsed", "recursion"])
+async def test_a_frame_nested_too_deeply_is_reported_and_delivery_continues(
+    parser_gives_up, monkeypatch
+):
+    token = secrets.token_hex(16)
+    if parser_gives_up:
+        force_recursion_error(monkeypatch, token)
+    async with exchange([book(1), nested_too_deeply(token), book(3)]) as url:
+        events = await collect(url)
+    # Its seq could not be read, so the next frame shows the gap it leaves.
+    assert [type(e) for e in events] == [Received, DecodeFailed, SeqGap, Received]
+    assert events[1].type is None
+    assert events[2] == SeqGap(expected=2, received=3)
+    if parser_gives_up:
+        assert isinstance(events[1].error, RecursionError)
+
+
+async def test_a_number_out_of_range_is_reported_and_still_advances_seq():
+    token = secrets.token_hex(16)
+    async with exchange([book(1), number_out_of_range(token), book(3)]) as url:
+        events = await collect(url)
+    assert [type(e) for e in events] == [Received, DecodeFailed, Received]
+    assert events[1].type == "book"
+    assert isinstance(events[1].error, OverflowError)
+
+
+@pytest.mark.parametrize("kind", ["nested", "nested-recursion", "out-of-range", "not-json"])
+async def test_a_decode_failure_keeps_the_frame_text_out_of_logs_and_tracebacks(
+    kind, monkeypatch, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    token = secrets.token_hex(16)
+    bad = {
+        "nested": nested_too_deeply,
+        "nested-recursion": nested_too_deeply,
+        "out-of-range": number_out_of_range,
+        "not-json": lambda t: f'{{"note": "{t}", "payload": ',
+    }[kind](token)
+    if kind == "nested-recursion":
+        force_recursion_error(monkeypatch, token)
+    async with exchange([bad, book(1)]) as url:
+        events = await collect(url)
+    [failed] = [e for e in events if isinstance(e, DecodeFailed)]
+    assert isinstance(events[-1], Received)
+    assert failed.error.__traceback__ is None
+    assert failed.error.__cause__ is None and failed.error.__context__ is None
+    assert_no_token(shown_with_locals(failed.error), token)
+    # The test server's own trace is not the SDK's, and logs the frame it sends.
+    client = [r for r in caplog.records if not r.name.startswith("websockets.server")]
+    assert_no_token([logging.Formatter("%(message)s").format(r) for r in client], token)
+    assert all(record.exc_info is None for record in client)
+
+
+class Halt(BaseException):
+    """Not an Exception, so decoding must let it through."""
+
+
+@pytest.mark.parametrize("stop", [asyncio.CancelledError, KeyboardInterrupt, SystemExit, Halt])
+@pytest.mark.parametrize("step", ["decode", "unpack"])
+def test_a_base_exception_while_decoding_is_never_reported_as_a_failure(stop, step, monkeypatch):
+    def interrupted(*args: Any) -> Any:
+        raise stop()
+
+    monkeypatch.setattr(codec, step, interrupted)
+    with pytest.raises(stop):
+        list(Connection("ws://127.0.0.1:1")._handle(book(1)))
 
 
 @pytest.mark.parametrize("type_", ["session_reject", "reject"])
