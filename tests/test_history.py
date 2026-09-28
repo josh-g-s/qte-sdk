@@ -41,6 +41,8 @@ from qte_sdk.session import MissingToken
 
 DAY = "2026-01-05"
 CHANNELS = ("book", "trades", "mark")
+# The fake service's instrument universe: anything else is unavailable, whatever the date.
+UNIVERSE = frozenset({"TEST", "AAA", "BBB"})
 
 
 def synthetic_token() -> str:
@@ -159,6 +161,13 @@ class FakeHistory:
         self.objects[key] = self.replace_after_drop.pop(key)
 
     def status(self, key: tuple[str, str | None, str]) -> str:
+        _, instrument, channel = key
+        if instrument is None:
+            known = channel == "session_state"
+        else:
+            known = instrument in UNIVERSE and channel in CHANNELS
+        if not known:
+            return "unavailable"  # never not_closed: the session will never hold it
         if key[0] in self.open_dates:
             return "not_closed"
         pending = self.pending.get(key)
@@ -403,6 +412,19 @@ async def test_a_session_not_closed_raises_at_once_and_is_never_retried(endpoint
     assert waits == []
 
 
+@pytest.mark.parametrize(
+    ("instrument", "channel"),
+    [("NOPE", "book"), ("TEST", "unknown")],
+    ids=["instrument", "channel"],
+)
+async def test_an_unknown_object_is_unavailable_even_before_the_close(instrument, channel):
+    token = synthetic_token()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)}, open_dates={DAY})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryUnavailable):
+            await collect(HistoryClient(url, token).fetch(DAY, instrument, channel))
+
+
 async def test_a_rejected_token_raises_a_typed_error():
     token = synthetic_token()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)})
@@ -643,12 +665,14 @@ async def test_a_range_marks_a_session_not_closed_and_includes_only_ready_entrie
     fake = FakeHistory(token, {(DAY, "AAA", "book"): book(1, "AAA")}, open_dates={today})
     with serve_history(fake) as url:
         client = HistoryClient(url, token)
-        items = await collect(client.fetch_range(DAY, today, ["AAA"], ["book"]))
+        items = await collect(client.fetch_range(DAY, today, ["AAA", "NOPE"], ["book"]))
     manifest = items[0]
     assert isinstance(manifest, Manifest)
-    assert [(e.session_date, e.status) for e in manifest.entries] == [
-        (DAY, "ready"),
-        (today, "not_closed"),
+    assert [(e.session_date, e.instrument, e.status) for e in manifest.entries] == [
+        (DAY, "AAA", "ready"),
+        (DAY, "NOPE", "unavailable"),
+        (today, "AAA", "not_closed"),
+        (today, "NOPE", "unavailable"),
     ]
     assert [e.session_date for e in manifest.not_closed] == [today]
     assert manifest.pending == ()
