@@ -28,6 +28,7 @@ from qte_sdk.history import (
     HistoryCorrupt,
     HistoryError,
     HistoryInterrupted,
+    HistoryNotClosed,
     HistoryPending,
     HistoryRateLimited,
     HistoryRequestRejected,
@@ -101,6 +102,8 @@ class FakeHistory:
     token: str
     objects: dict[tuple[str, str | None, str], bytes] = field(default_factory=dict)
     pending: dict[tuple[str, str | None, str], Pending] = field(default_factory=dict)
+    # Session dates that have not closed yet: answered not_closed before any cache lookup.
+    open_dates: set[str] = field(default_factory=set)
     drop_after: dict[str, int] = field(default_factory=dict)
     etag_override: dict[str, str | None] = field(default_factory=dict)
     replace_after_drop: dict[tuple[str, str | None, str], bytes] = field(default_factory=dict)
@@ -146,6 +149,8 @@ class FakeHistory:
             return self.json(handler, 202, "pending", pending.retry_after)
         if state == "unavailable":
             return self.json(handler, 404, "unavailable")
+        if state == "not_closed":
+            return self.json(handler, 409, "not_closed")
         body = self.objects[key]
         etag = self.etag_override.get(handler.path, etag_of(body))
         self.serve(handler, body, etag, headers)
@@ -154,6 +159,8 @@ class FakeHistory:
         self.objects[key] = self.replace_after_drop.pop(key)
 
     def status(self, key: tuple[str, str | None, str]) -> str:
+        if key[0] in self.open_dates:
+            return "not_closed"
         pending = self.pending.get(key)
         if pending is not None and pending.times > 0:
             return "pending"
@@ -164,7 +171,8 @@ class FakeHistory:
     ) -> None:
         if not {"from", "to", "instruments", "channels"} <= query.keys():
             return self.json(handler, 400, "malformed_request")
-        dates = sorted(d for d, _, _ in self.objects if query["from"][0] <= d <= query["to"][0])
+        held = {d for d, _, _ in self.objects} | self.open_dates
+        dates = sorted(d for d in held if query["from"][0] <= d <= query["to"][0])
         entries, blobs, offset = [], [], 0
         for day in dict.fromkeys(dates):
             for instrument in query["instruments"][0].split(","):
@@ -371,6 +379,26 @@ async def test_an_unknown_instrument_is_unavailable_and_not_retried(waits):
     assert caught.value.http_status == 404
     assert caught.value.status == "unavailable"
     assert caught.value.message == "not served"
+    assert len(fake.requests) == 1
+    assert waits == []
+
+
+@pytest.mark.parametrize("endpoint", ["fetch", "fetch_session_state"])
+async def test_a_session_not_closed_raises_at_once_and_is_never_retried(endpoint, waits):
+    token = synthetic_token()
+    key: tuple[str, str | None, str] = (DAY, "TEST", "book")
+    if endpoint == "fetch_session_state":
+        key = (DAY, None, "session_state")
+    # Even with a cache for the session and a pending count set, not_closed comes first.
+    fake = FakeHistory(token, {key: book(1)}, pending={key: Pending(3, "1")}, open_dates={DAY})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        stream = client.fetch(DAY, "TEST", "book") if key[1] else client.fetch_session_state(DAY)
+        with pytest.raises(HistoryNotClosed) as caught:
+            await collect(stream)
+    assert not isinstance(caught.value, HistoryPending)
+    assert caught.value.http_status == 409
+    assert caught.value.status == "not_closed"
     assert len(fake.requests) == 1
     assert waits == []
 
@@ -607,6 +635,27 @@ async def test_a_range_yields_the_manifest_then_each_ready_entry_in_order():
     assert path == (
         f"/v1/history/range?from={DAY}&to={later}&instruments=AAA,BBB&channels=book,trades"
     )
+
+
+async def test_a_range_marks_a_session_not_closed_and_includes_only_ready_entries():
+    token = synthetic_token()
+    today = "2026-01-06"
+    fake = FakeHistory(token, {(DAY, "AAA", "book"): book(1, "AAA")}, open_dates={today})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch_range(DAY, today, ["AAA"], ["book"]))
+    manifest = items[0]
+    assert isinstance(manifest, Manifest)
+    assert [(e.session_date, e.status) for e in manifest.entries] == [
+        (DAY, "ready"),
+        (today, "not_closed"),
+    ]
+    assert [e.session_date for e in manifest.not_closed] == [today]
+    assert manifest.pending == ()
+    assert manifest.retry_after is None  # a not_closed entry alone does not set it
+    closed = manifest.not_closed[0]
+    assert (closed.byte_offset, closed.length, closed.sha256) == (None, None, None)
+    assert [type(item) for item in items[1:]] == [Book]
 
 
 async def test_a_dropped_range_download_resumes_inside_an_entry():

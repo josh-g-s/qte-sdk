@@ -29,8 +29,11 @@ A session that has closed but is not ready yet is `pending`: `fetch` waits and a
 as the service's `Retry-After` header says, up to `max_wait` seconds in all, then raises
 `HistoryPending`. Data that will never exist (a date before the service's coverage, a day
 with no session, an instrument or channel it does not know) raises `HistoryUnavailable`
-at once. `fetch_range` never waits: its manifest marks each entry `ready`, `pending` or
-`unavailable`, and a pending entry is simply left out of that response.
+at once. A session that has not closed yet (one running now, or one in the future) is
+`not_closed`: nothing is served for it before its close, and `fetch` raises
+`HistoryNotClosed` at once, without waiting, since nothing is being built for it yet.
+`fetch_range` never waits: its manifest marks each entry `ready`, `pending`,
+`not_closed` or `unavailable`, and only `ready` entries are included in that response.
 
 Downloads are uncompressed so that a dropped connection can be resumed: the client asks
 for the rest of the same data with an HTTP `Range` request, up to `max_resumes` times.
@@ -88,6 +91,7 @@ __all__ = [
     "HistoryForbidden",
     "HistoryInterrupted",
     "HistoryItem",
+    "HistoryNotClosed",
     "HistoryPending",
     "HistoryRateLimited",
     "HistoryRequestRejected",
@@ -151,6 +155,12 @@ class HistoryUnavailable(HistoryError):
     session, or an instrument or channel the service does not know. Do not retry."""
 
 
+class HistoryNotClosed(HistoryError):
+    """The session has not closed yet: it is running now, or it lies in the future.
+    Nothing is served for a session before its close, and nothing is being built for it
+    yet, so the client does not wait. Ask again after the session's close."""
+
+
 class HistoryPending(HistoryError):
     """The session has closed but its data is not ready yet, and waiting for it would have
     gone past `max_wait` or `max_retries`. It will become ready: ask again later.
@@ -212,9 +222,11 @@ class HistoryCorrupt(HistoryError):
 class ManifestEntry:
     """One requested (session date, instrument, channel) of a `fetch_range` response.
 
-    `status` is `ready`, `pending` or `unavailable`. Only a `ready` entry's messages are
-    in the response; for it, `byte_offset` and `length` locate its bytes after the
-    manifest line and `sha256` is their digest, and all three are None otherwise.
+    `status` is `ready`, `pending` (closed, still being built), `not_closed` (the
+    session has not closed yet; ask again after its close) or `unavailable` (will never
+    exist). Only a `ready` entry's messages are in the response; for it, `byte_offset`
+    and `length` locate its bytes after the manifest line and `sha256` is their digest,
+    and all three are None otherwise.
     """
 
     session_date: str
@@ -232,8 +244,9 @@ class Manifest:
     messages follow, whether or not it is included.
 
     `retry_after` is set when at least one entry is `pending`: the service's suggested
-    wait in seconds before asking again for the range, or None if it gave none. Read each
-    entry's `status` to tell which entries are missing and whether they ever will arrive.
+    wait in seconds before asking again for the range, or None if it gave none. A
+    `not_closed` entry does not set it. Read each entry's `status` to tell which entries
+    are missing and whether they ever will arrive.
     """
 
     entries: tuple[ManifestEntry, ...]
@@ -243,6 +256,11 @@ class Manifest:
     def pending(self) -> tuple[ManifestEntry, ...]:
         """The entries that are not ready yet but will be."""
         return tuple(entry for entry in self.entries if entry.status == "pending")
+
+    @property
+    def not_closed(self) -> tuple[ManifestEntry, ...]:
+        """The entries whose session has not closed yet."""
+        return tuple(entry for entry in self.entries if entry.status == "not_closed")
 
 
 class HistoryClient:
@@ -847,6 +865,7 @@ _ERRORS: dict[int, tuple[type[HistoryError], str]] = {
     401: (HistoryUnauthenticated, "the token is missing or not recognised"),
     403: (HistoryForbidden, "the token may not read this data"),
     404: (HistoryUnavailable, "the data is unavailable and will never exist"),
+    409: (HistoryNotClosed, "the session has not closed yet"),
     429: (HistoryRateLimited, "too many requests"),
 }
 
