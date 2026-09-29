@@ -30,16 +30,26 @@ What it relies on:
             async for item in items:
                 if isinstance(item, Book) and item.grid_time > t:
                     break
+                if isinstance(item, Unknown | DecodeFailed):
+                    ...  # a line that may have been a book is lost: book_at_t may be wrong
                 books.update(item)
         book_at_t = books.get("AAPL")
 
 Missed messages: after a `SeqGap` or `Disconnected` (any `DataUncertain`), or a
 `DecodeFailed` that may have been a book, a changed book may have been lost, so every
-book held is kept but listed in `stale`. An instrument leaves `stale` when a book for it
-arrives with a `grid_time` at or after the one held: any book received is the last one
-published for that instrument up to its `grid_time`, whether it was sent because it
-changed or as the answer to a subscribe (which `ReconnectingSession` sends again after it
-reconnects). Until then, treat that instrument's book as possibly out of date.
+book held is kept but listed in `stale`. Until an instrument leaves `stale`, treat its
+book as possibly out of date:
+
+- A book for it with a later `grid_time` than the one held clears it: that book was
+  published because it changed, after the one held.
+- After a `Disconnected`, a book at the same `grid_time` as the one held clears it too.
+  `ReconnectingSession` subscribes again on the new connection, and the answer is the
+  last book published this session, so a book the same age as the one held shows that
+  it has not changed. After a `SeqGap` or `DecodeFailed` on the same connection, a book
+  at the same `grid_time` may be a late copy and clears nothing.
+
+An instrument with no book held is never listed in `stale`, so also watch for the
+events themselves if you need to know that a first book may have been missed.
 
 The helper only keeps what it is given. It does not clear books when a session closes:
 a book held keeps the `grid_time` it was published at, so you can tell which session it
@@ -49,7 +59,7 @@ came from. Every other message (`Trades`, `Mark`, `SessionState`, `OfficialClose
 
 from collections.abc import Iterator
 
-from qte_sdk.connection import DataUncertain, DecodeFailed
+from qte_sdk.connection import DataUncertain, DecodeFailed, Disconnected
 from qte_sdk.contract.v1.market_data_pb2 import Book
 
 __all__ = ["LatestBooks"]
@@ -60,7 +70,8 @@ class LatestBooks:
 
     def __init__(self) -> None:
         self._books: dict[str, Book] = {}
-        self._stale: set[str] = set()
+        # Instrument -> whether a book at the grid_time held clears it (after a reconnect).
+        self._stale: dict[str, bool] = {}
 
     def update(self, item: object) -> bool:
         """Apply one market-data item. Returns True if it is a `Book` that replaced the book
@@ -70,10 +81,12 @@ class LatestBooks:
         """
         if isinstance(item, Book):
             return self._on_book(item)
-        if isinstance(item, DataUncertain) or (
+        if isinstance(item, Disconnected):
+            self._stale.update(dict.fromkeys(self._books, True))
+        elif isinstance(item, DataUncertain) or (
             isinstance(item, DecodeFailed) and item.type in (None, "book")
         ):
-            self._stale.update(self._books)
+            self._stale.update(dict.fromkeys(self._books, False))
         return False
 
     def get(self, instrument: str) -> Book | None:
@@ -98,10 +111,10 @@ class LatestBooks:
 
     def _on_book(self, book: Book) -> bool:
         held = self._books.get(book.instrument)
-        if held is not None and book.grid_time < held.grid_time:
+        if held is not None and book.grid_time <= held.grid_time:
+            if book.grid_time == held.grid_time and self._stale.get(book.instrument):
+                del self._stale[book.instrument]
             return False
-        self._stale.discard(book.instrument)
-        if held is not None and book.grid_time == held.grid_time:
-            return False
+        self._stale.pop(book.instrument, None)
         self._books[book.instrument] = book
         return True

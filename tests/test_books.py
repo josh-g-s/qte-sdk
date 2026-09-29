@@ -128,19 +128,41 @@ def test_missed_messages_keep_every_book_but_mark_it_stale():
         assert books.get("AAPL").grid_time == 1000
 
 
-def test_a_book_at_or_after_the_one_held_clears_its_instrument_from_stale():
+def test_after_a_reconnect_a_book_at_or_after_the_one_held_clears_its_instrument():
     books = LatestBooks()
     books.update(book("AAPL", 1000))
     books.update(book("MSFT", 1000))
     books.update(book("TSLA", 1000))
     books.update(Disconnected(error=ConnectionResetError()))
-    # After reconnecting, the subscribe snapshot repeats a book that has not changed.
+    # The subscribe answer on the new connection repeats a book that has not changed.
     assert books.update(book("AAPL", 1000)) is False
     # And carries a newer one for an instrument that changed while disconnected.
     assert books.update(book("MSFT", 1200)) is True
     # An older book confirms nothing.
     assert books.update(book("TSLA", 900)) is False
     assert books.stale == {"TSLA"}
+
+
+def test_after_a_gap_only_a_later_book_clears_its_instrument():
+    # On the same connection a book at the grid_time held may be a late copy, and the
+    # book missed may have been newer, so it proves nothing.
+    for missed in (SeqGap(expected=2, received=3), DecodeFailed(type="book", error=ValueError())):
+        books = LatestBooks()
+        books.update(book("AAPL", 1000))
+        books.update(missed)
+        assert books.update(book("AAPL", 1000)) is False
+        assert books.stale == {"AAPL"}
+        assert books.update(book("AAPL", 1100)) is True
+        assert books.stale == frozenset()
+
+
+def test_a_gap_after_a_reconnect_needs_a_later_book():
+    books = LatestBooks()
+    books.update(book("AAPL", 1000))
+    books.update(Disconnected(error=None))
+    books.update(SeqGap(expected=2, received=4))
+    assert books.update(book("AAPL", 1000)) is False
+    assert books.stale == {"AAPL"}
 
 
 def test_a_book_first_received_after_missed_messages_is_not_stale():

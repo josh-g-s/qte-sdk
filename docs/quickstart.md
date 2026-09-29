@@ -127,7 +127,7 @@ async for item in market_data(session):
     aapl = books.get("AAPL")  # the latest book held, or None before the first one
 ```
 
-It ignores a book whose `grid_time` is the same as or older than the one it holds, and every message that is not a book. After a `SeqGap` or `Disconnected` it keeps the books but lists them in `books.stale`, since a change may have been missed; an instrument leaves `stale` when a book for it arrives again (after a reconnect, the subscribe answer brings the last book published this session for each instrument at once).
+It ignores a book whose `grid_time` is the same as or older than the one it holds, and every message that is not a book. After a `SeqGap` or `Disconnected` it keeps the books but lists them in `books.stale`, since a change may have been missed. An instrument leaves `stale` when a newer book for it arrives or, after a reconnect, when the subscribe answer brings its last published book again at the same `grid_time`.
 
 A `Book` is the state of one instrument at the end of an interval, not a stream of individual changes. It shows two kinds of depth: `bid_levels` and `ask_levels` are the wall ladder, best price first, and `student_bid_levels` and `student_ask_levels` are the orders participants have resting, one entry per price, with no identity attached.
 
@@ -316,6 +316,8 @@ except HistoryPending as error:
       async for item in items:
           if isinstance(item, Book) and item.grid_time > t:
               break
+          if isinstance(item, (Unknown, DecodeFailed)):
+              raise RuntimeError(f"a message could not be used, so the book may be wrong: {item}")
           books.update(item)
   book_at_t = books.get("AAPL")  # None if t is before the session's first book
   ```
