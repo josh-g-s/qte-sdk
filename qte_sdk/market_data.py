@@ -18,6 +18,12 @@
 There is one conflated market-data feed, the same for every participant. Messages are
 delivered as they arrive; nothing here waits for, fills in or assumes a grid time.
 
+An instrument's `Book` is published only when it has changed, so a grid point with no
+`Book` means that instrument's book is unchanged; `SessionState` is the message sent at
+every grid point of a session. A subscribe during a session is answered with the last
+book published for each instrument, which can be older than the latest `SessionState`
+and can arrive again. `qte_sdk.books.LatestBooks` keeps the latest book per instrument.
+
 Outside a session the exchange still answers a subscribe, once: a `SessionState` whose
 `state` is `CLOSED`, then an `OfficialClose` for each subscribed instrument that has one,
 carrying that instrument's last official close: the time-weighted average of the mark

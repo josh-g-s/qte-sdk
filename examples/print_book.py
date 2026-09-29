@@ -10,8 +10,13 @@ Outside a session there is no book: the exchange sends the closed state and, if 
 instrument has one, its last official close instead.
 
 Every participant receives the same market data: one conflated feed, published on a
-fixed grid. A `book` is a snapshot of one instrument at the end of an interval, not a
-stream of individual changes, so you see the book as everyone else sees it.
+100 ms grid. A `book` is a snapshot of one instrument at the end of an interval, not a
+stream of individual changes, so you see the book as everyone else sees it. It is
+published only when it has changed: a grid point with no book means the book is the same
+as the last one printed. Subscribing during a session brings the last book published at
+once, with the grid time it was published at, and that same book can then arrive again.
+The example keeps the latest book with `qte_sdk.books.LatestBooks` and prints a book only
+when it is newer than the one held.
 """
 
 import argparse
@@ -24,6 +29,7 @@ from contextlib import aclosing
 
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
+from qte_sdk.books import LatestBooks
 from qte_sdk.connection import SessionRejected
 from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
 from qte_sdk.market_data import (
@@ -141,6 +147,7 @@ async def run(url: str, args: argparse.Namespace) -> int:
         print(f"connected: team {info.team}, unscored session: {info.unscored}")
         received = 0
         last_state = None
+        books = LatestBooks()
         try:
             async with asyncio.timeout(args.seconds):
                 # Send on the session and read from it.
@@ -149,11 +156,16 @@ async def run(url: str, args: argparse.Namespace) -> int:
                     async for item in items:
                         received += 1
                         # The session state is published on every interval; print it only
-                        # when it changes. Every message counts towards --max-messages.
+                        # when it changes. A book repeated at the grid time already held,
+                        # or older, is not printed either. Every message counts towards
+                        # --max-messages.
+                        newer_book = books.update(item)
                         repeated = False
                         if isinstance(item, SessionState):
                             repeated = (item.state, item.outage_active) == last_state
                             last_state = (item.state, item.outage_active)
+                        elif isinstance(item, Book):
+                            repeated = not newer_book
                         if not repeated and not show(item):
                             return 1
                         if received >= args.max_messages:

@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.5
+**Version:** 0.6
 
 This guide takes you from a fresh checkout to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -109,7 +109,27 @@ async for item in market_data(session):  # runs until you stop it
         )
 ```
 
-There is **one conflated market-data feed, the same for every participant**. Book, trades and the market session state are published on a fixed 100 ms grid; the mark is published on its own, slower grid. A `Book` is the state of one instrument at the end of an interval, not a stream of individual changes. It shows two kinds of depth: `bid_levels` and `ask_levels` are the wall ladder, best price first, and `student_bid_levels` and `student_ask_levels` are the orders participants have resting, one entry per price, with no identity attached.
+There is **one conflated market-data feed, the same for every participant**. Book, trades and the market session state are published on one 100 ms grid, and each carries the `grid_time` of the grid point it belongs to; the mark is published on its own, slower grid. During a session, the market session state is the one message sent at every grid point. Trades come only when there are prints, and a book only when it has changed:
+
+- A `Book` for an instrument is published at a grid point only if it differs from the last one published for that instrument this session. No `Book` at a grid point means that instrument's book is unchanged, so keep the last one you received.
+- The first grid point of each session publishes the book of every instrument that has one.
+- A subscribe during a session is answered at once with the last book published this session for each instrument you named, carrying the `grid_time` it was published at. That can be older than the latest `SessionState`, and the same book can then arrive again at the same `grid_time`. Keep, per instrument, the book with the latest `grid_time`.
+
+`qte_sdk.books.LatestBooks` keeps the latest book of each instrument for you:
+
+```python
+from qte_sdk.books import LatestBooks
+
+books = LatestBooks()
+async for item in market_data(session):
+    if books.update(item):  # True only when item is a newer book for its instrument
+        print("new book for", item.instrument)
+    aapl = books.get("AAPL")  # the latest book held, or None before the first one
+```
+
+It ignores a book whose `grid_time` is the same as or older than the one it holds, and every message that is not a book. After a `SeqGap` or `Disconnected` it keeps the books but lists them in `books.stale`, since a change may have been missed; an instrument leaves `stale` when a book for it arrives again (after a reconnect, the subscribe answer brings the last book published this session for each instrument at once).
+
+A `Book` is the state of one instrument at the end of an interval, not a stream of individual changes. It shows two kinds of depth: `bid_levels` and `ask_levels` are the wall ladder, best price first, and `student_bid_levels` and `student_ask_levels` are the orders participants have resting, one entry per price, with no identity attached.
 
 `market_data` yields `Book`, `Trades`, `Mark`, `SessionState` and `OfficialClose` messages, a `Reject` if a subscription is refused (an unknown instrument, for example), and two warnings:
 
@@ -284,6 +304,22 @@ except HistoryPending as error:
 - `HistoryUnavailable` means the data will never exist: a weekend or holiday, a date before the service began, or an instrument or channel it does not know. Other answers from the service raise the other `HistoryError` classes in `qte_sdk.history`, such as `HistoryUnauthenticated` for a bad token. If the service cannot be reached, you get the usual Python error, such as `ConnectionRefusedError`, or `TimeoutError` when one network step (connecting, or one read) takes longer than `timeout` seconds (30 by default). A download whose connection drops part way is resumed where it stopped, up to `max_resumes` times (3 by default); once those are used up you get `HistoryInterrupted`, and if the service cannot be reached to resume, the network error.
 - `fetch_range(from_date, to_date, instruments, channels)` fetches several instruments and channels over a span of dates in one download. It yields a `Manifest` first, listing every entry you asked for as `ready`, `pending` (still being built), `not_closed` (its session has not closed yet) or `unavailable` (will never exist); only the ready ones follow, in the manifest's order. It never waits: ask again later for the pending ones (`Manifest.pending`), and after the close for the `not_closed` ones (`Manifest.not_closed`).
 - If the connection drops, the client resumes the download where it stopped, and checks what arrived against the digest the service states for it.
+- A `book` stream is sparse, like the live feed: it starts with the session's first book of the instrument and then holds only the books that changed. The book in force at time `t` is the last one with `grid_time` at or before `t`. To get it, feed the stream to a `LatestBooks` and stop at the first book later than `t`; `aclosing` closes the download when you stop early:
+
+  ```python
+  from contextlib import aclosing
+  from qte_sdk.books import LatestBooks
+
+  t = ...  # a grid_time in the session, as an int like the wire carries
+  books = LatestBooks()
+  async with aclosing(client.fetch("2026-01-05", "AAPL", "book")) as items:
+      async for item in items:
+          if isinstance(item, Book) and item.grid_time > t:
+              break
+          books.update(item)
+  book_at_t = books.get("AAPL")  # None if t is before the session's first book
+  ```
+
 - History tells you what the market published, not how your own orders would have filled against it.
 
 ## 11. Worked examples
