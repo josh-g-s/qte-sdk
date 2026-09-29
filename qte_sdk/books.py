@@ -31,7 +31,8 @@ What it relies on:
                 if isinstance(item, Book) and item.grid_time > t:
                     break
                 if isinstance(item, Unknown | DecodeFailed):
-                    ...  # a line that may have been a book is lost: book_at_t may be wrong
+                    # A line that may have been a book is lost, so book_at_t may be wrong.
+                    raise RuntimeError(f"could not use a history message: {item}")
                 books.update(item)
         book_at_t = books.get("AAPL")
 
@@ -40,13 +41,14 @@ Missed messages: after a `SeqGap` or `Disconnected` (any `DataUncertain`), or a
 book held is kept but listed in `stale`. Until an instrument leaves `stale`, treat its
 book as possibly out of date:
 
-- A book for it with a later `grid_time` than the one held clears it: that book was
-  published because it changed, after the one held.
+- A book for it with a later `grid_time` than the one held clears it. Messages on one
+  connection arrive in the order they were sent, so that book was sent after any book
+  that was missed, and is the last one published for the instrument.
 - After a `Disconnected`, a book at the same `grid_time` as the one held clears it too.
   `ReconnectingSession` subscribes again on the new connection, and the answer is the
   last book published this session, so a book the same age as the one held shows that
   it has not changed. After a `SeqGap` or `DecodeFailed` on the same connection, a book
-  at the same `grid_time` may be a late copy and clears nothing.
+  at the same `grid_time` is not taken as proof, and clears nothing.
 
 An instrument with no book held is never listed in `stale`, so also watch for the
 events themselves if you need to know that a first book may have been missed.
