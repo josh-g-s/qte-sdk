@@ -1,9 +1,9 @@
 """Keep the latest book of each instrument from live or past market data.
 
 The exchange publishes an instrument's `Book` only when it has changed. `SessionState`
-still comes at every grid point, but a grid point with no `Book` for an instrument means
-that instrument's book is unchanged, so to know the book at any moment you keep the last
-one you received. `LatestBooks` does that:
+still comes at every grid point of a session, but a grid point with no `Book` for an
+instrument means that instrument's book is unchanged, so to know the book at any moment
+you keep the last one you received. `LatestBooks` does that:
 
     books = LatestBooks()
     async for item in market_data(session):
