@@ -34,11 +34,21 @@ at once. A session that has not closed yet (one running now, or one in the futur
 `HistoryNotClosed` at once, without waiting, since nothing is being built for it yet.
 `fetch_range` never waits: its manifest marks each entry `ready`, `pending`,
 `not_closed` or `unavailable`, and only `ready` entries are included in that response.
+An endpoint the service does not serve yet raises `HistoryNotImplemented`, which, unlike
+`HistoryUnavailable`, is not permanent.
+
+The service may add new status words. The HTTP status code decides which error is raised,
+and the service's own word is kept in `HistoryError.status`; a manifest entry with a
+status this SDK does not know is passed on in the `Manifest` as it is, and its data is not
+included.
 
 Downloads are uncompressed so that a dropped connection can be resumed: the client asks
 for the rest of the same data with an HTTP `Range` request, up to `max_resumes` times.
-The client checks what it received against the SHA-256 digest the service states for it
-(the `ETag` of a single stream, the manifest's `sha256` of each range entry) and raises
+The service may answer with the whole data again instead of the rest. If its `ETag` shows
+the data is unchanged, the bytes already delivered are read and discarded, so nothing is
+yielded twice; if the data changed, `HistoryChanged` is raised. The client checks what
+it received against the SHA-256 digest the service states for it (the `ETag` of a single
+stream, the manifest's `sha256` of each range entry) and raises
 `HistoryCorrupt` on a mismatch, after the messages have been yielded. A response without
 the identity `ETag` the service sends is refused before any message, since it could be
 neither checked nor resumed.
