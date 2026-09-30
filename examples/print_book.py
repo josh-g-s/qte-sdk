@@ -6,6 +6,8 @@ Set QTE_URL and QTE_TOKEN first (see docs/quickstart.md), then:
 
 The run stops after --seconds or after --max-messages market-data messages, whichever
 comes first. It sends no orders. The market session's state is printed when it changes.
+Outside a session there is no book: the exchange sends the closed state and, if the
+instrument has one, its last official close instead.
 
 Every participant receives the same market data: one conflated feed, published on a
 fixed grid. A `book` is a snapshot of one instrument at the end of an interval, not a
@@ -30,6 +32,7 @@ from qte_sdk.market_data import (
     InstrumentCondition,
     Mark,
     MarketDataEvent,
+    OfficialClose,
     Reject,
     SeqGap,
     SessionState,
@@ -93,6 +96,11 @@ def show(item: MarketDataEvent) -> bool:
             phase = MarketSessionPhase.Name(item.state)
             outage = ", outage in force" if item.outage_active else ""
             print(f"market session {item.session_date}: {phase}{outage}")
+        case OfficialClose():
+            # Sent only outside a session, in place of a book.
+            frozen = " (frozen)" if item.frozen else ""
+            close = to_decimal(item.value)
+            print(f"close  {item.instrument}  {close} on {item.session_date}{frozen}")
         case Reject():
             # The exchange refused the subscription, for example an unknown instrument.
             detail = f" ({item.reason_detail})" if item.HasField("reason_detail") else ""
