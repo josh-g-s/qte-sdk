@@ -60,11 +60,12 @@ Errors from the network keep their type but lose their traceback and chain, beca
 HTTP library's frames hold the request headers. Response headers and status lines are not
 put in errors, and a header that may reflect the token is treated as absent. The `message`
 of an error body is server text, passed on with the token removed should it ever appear,
-or withheld if part of the token remains. A line that fails to decode is reported as a
-`DecodeFailed` whose error is a new `ValueError` naming only the type of the parser's
-error, since that error keeps the line, which could reflect the token. Redirects are not
-followed, and a plain `http://` address is refused unless it is this machine's own (a
-local test server).
+or withheld if part of the token remains. An error raised by the fetch methods leaves
+without its chain or the traceback it gathered inside the download, whose frames hold
+the response's bytes. A line that fails to decode is reported as a `DecodeFailed` whose
+error is a new `ValueError` naming only the type of the parser's error, since that error
+keeps the line, which could reflect the token. Redirects are not followed, and a plain
+`http://` address is refused unless it is this machine's own (a local test server).
 """
 
 import asyncio
@@ -78,11 +79,11 @@ import re
 import socket
 import ssl
 import threading
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, Iterable
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 from urllib.parse import quote, urlsplit
 
 from qte_sdk.connection import DecodeFailed, Unknown
@@ -132,6 +133,8 @@ _ETAG = re.compile(r'"([0-9a-f]{64})(-gzip)?"')
 _CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 
 _log = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 _sleep = asyncio.sleep  # a module attribute, so tests can observe the waits
 
 
@@ -338,36 +341,46 @@ class HistoryClient:
     def __repr__(self) -> str:
         return f"HistoryClient({getattr(self, 'url', None)!r})"
 
-    async def fetch(
+    def fetch(
         self, session_date: date | str, instrument: str, channel: str
-    ) -> AsyncIterator[HistoryItem]:
+    ) -> AsyncGenerator[HistoryItem, None]:
         """Yield one session's `book`, `trades` or `mark` messages for one instrument, in
         the order they were published.
 
         A day with nothing published yields nothing. Raises `HistoryUnavailable` if the
         data will never exist, and `HistoryPending` if it is still not ready after waiting.
         """
+        return _Guarded(self._fetch(session_date, instrument, channel))
+
+    async def _fetch(
+        self, session_date: date | str, instrument: str, channel: str
+    ) -> AsyncGenerator[HistoryItem, None]:
         target = self._target(_date_text(session_date), instrument, channel)
         async with aclosing(self._download(target, framed=False)) as lines:
             async for line in lines:
                 assert isinstance(line, bytes)
                 yield _decode_line(line)
 
-    async def fetch_session_state(self, session_date: date | str) -> AsyncIterator[HistoryItem]:
+    def fetch_session_state(self, session_date: date | str) -> AsyncGenerator[HistoryItem, None]:
         """Yield one session's `session_state` messages, in the order they were published."""
+        return _Guarded(self._fetch_session_state(session_date))
+
+    async def _fetch_session_state(
+        self, session_date: date | str
+    ) -> AsyncGenerator[HistoryItem, None]:
         target = self._target(_date_text(session_date), "session_state")
         async with aclosing(self._download(target, framed=False)) as lines:
             async for line in lines:
                 assert isinstance(line, bytes)
                 yield _decode_line(line)
 
-    async def fetch_range(
+    def fetch_range(
         self,
         from_date: date | str,
         to_date: date | str,
         instruments: Iterable[str],
         channels: Iterable[str],
-    ) -> AsyncIterator[Manifest | HistoryItem]:
+    ) -> AsyncGenerator[Manifest | HistoryItem, None]:
         """Yield a `Manifest`, then the messages of each included entry in its order.
 
         `from_date` and `to_date` are session dates, both included. `channels` are drawn
@@ -376,6 +389,15 @@ class HistoryClient:
         channel. A message's own `seq` restarts at 1 for each entry. This does not wait
         for pending entries: check `Manifest.pending` and ask again later for those.
         """
+        return _Guarded(self._fetch_range(from_date, to_date, instruments, channels))
+
+    async def _fetch_range(
+        self,
+        from_date: date | str,
+        to_date: date | str,
+        instruments: Iterable[str],
+        channels: Iterable[str],
+    ) -> AsyncGenerator[Manifest | HistoryItem, None]:
         query = (
             f"from={quote(_date_text(from_date), safe='')}"
             f"&to={quote(_date_text(to_date), safe='')}"
@@ -390,7 +412,9 @@ class HistoryClient:
     def _target(self, *segments: str) -> str:
         return self._prefix + "/v1/history/" + "/".join(quote(s, safe="") for s in segments)
 
-    async def _download(self, target: str, *, framed: bool) -> AsyncIterator[bytes | Manifest]:
+    async def _download(
+        self, target: str, *, framed: bool
+    ) -> AsyncGenerator[bytes | Manifest, None]:
         """The response's lines, fetched incrementally, resumed after a drop and checked
         against the stated digests once complete. A range response's manifest line comes
         first, as a `Manifest`."""
@@ -431,7 +455,7 @@ class HistoryClient:
                     break
                 reply.close()
                 if dropped is None:
-                    dropped = f"closed after {progress.received} of {total} bytes"
+                    dropped = f"closed after {progress.received} bytes"
                 if resumes >= self.max_resumes:
                     raise HistoryInterrupted(
                         f"the download was interrupted ({dropped}) and resumes are used up",
@@ -785,7 +809,9 @@ class _Progress:
 
     def finish(self, total: int | None) -> list[Any]:
         if total is not None and self.received != total:
-            raise HistoryCorrupt(f"received {self.received} bytes; the service stated {total}")
+            raise HistoryCorrupt(
+                f"received {self.received} bytes, not the length the service stated"
+            )
         # A last line without its newline is still delivered, so nothing is dropped.
         items = [*self._line(bytes(self._buffer))] if self._buffer else []
         self._buffer = bytearray()
@@ -868,7 +894,7 @@ class _FramedProgress(_Progress):
         expected = max((stop for _, stop, _, _ in self._slices), default=self._start)
         if self.received != expected:
             raise HistoryCorrupt(
-                f"received {self.received} bytes; the manifest describes {expected}"
+                f"received {self.received} bytes, not the length the manifest describes"
             )
         return items
 
@@ -883,7 +909,9 @@ def _parse_manifest(line: bytes, retry_after: float | None) -> Manifest:
         data = json.loads(line)
         entries = tuple(_manifest_entry(raw) for raw in data["manifest"])
     except (ValueError, TypeError, KeyError, RecursionError) as error:
-        failure = HistoryError(f"the range response's manifest could not be read: {error}")
+        failure = HistoryError(
+            f"the range response's manifest could not be read ({type(error).__name__})"
+        )
     else:
         return Manifest(entries, retry_after)
     raise failure
@@ -905,6 +933,53 @@ def _manifest_entry(raw: dict[str, Any]) -> ManifestEntry:
         if not isinstance(entry.sha256, str) or not _HEX_DIGEST.fullmatch(entry.sha256):
             raise ValueError("a ready entry needs a sha256")
     return entry
+
+
+class _Guarded(AsyncGenerator[_T, None]):
+    """What the fetch methods return: their download, with every error it raises detached
+    from its traceback and chain on the way out, whether raised while fetching, decoding
+    or closing. The download's frames hold the response's bytes, which could reflect the
+    token, and this wrapper keeps no message of its own."""
+
+    __slots__ = ("_items",)
+
+    def __init__(self, items: AsyncGenerator[_T, None]) -> None:
+        self._items = items
+
+    async def asend(self, value: None) -> _T:
+        failure: BaseException
+        try:
+            return await self._items.asend(value)
+        except StopAsyncIteration:
+            raise
+        except BaseException as error:
+            failure = _stripped(error)
+        # Raised outside the handler, so the original is not chained to it.
+        raise failure
+
+    async def athrow(self, *args: Any) -> _T:
+        failure: BaseException
+        try:
+            return await self._items.athrow(*args)
+        except StopAsyncIteration:
+            raise
+        except BaseException as error:
+            failure = _stripped(error)
+        raise failure
+
+    async def aclose(self) -> None:
+        failure: BaseException
+        try:
+            return await self._items.aclose()
+        except BaseException as error:
+            failure = _stripped(error)
+        raise failure
+
+
+def _stripped(error: BaseException) -> BaseException:
+    error = error.with_traceback(None)
+    error.__cause__ = error.__context__ = None
+    return error
 
 
 def _decode_line(line: bytes) -> HistoryItem:

@@ -120,6 +120,7 @@ class FakeHistory:
     replace_after_drop: dict[tuple[str, str | None, str], bytes] = field(default_factory=dict)
     error_message: str = "not served"
     raw_error_body: bytes | None = None  # replaces the whole JSON error body
+    raw_manifest: bytes | None = None  # replaces a range response's manifest line
     # Header overrides for a whole response and for a resumed one; None leaves a header
     # out, and "{auth}" echoes the token the request presented.
     first_headers: dict[str, str | None] = field(default_factory=dict)
@@ -215,6 +216,8 @@ class FakeHistory:
                         offset += len(blob)
                     entries.append(entry)
         manifest = json.dumps({"manifest": entries}, separators=(",", ":")).encode() + b"\n"
+        if self.raw_manifest is not None:
+            manifest = self.raw_manifest
         digest_input = [
             {k: e[k] for k in ("session_date", "instrument", "channel", "status", "sha256")}
             for e in entries
@@ -905,6 +908,63 @@ async def test_a_decode_failure_carries_nothing_of_the_line(bad):
     assert error.__traceback__ is None
     assert error.__cause__ is None and error.__context__ is None
     assert_token_absent(token, shown(error))
+
+
+async def test_corrupt_data_reflecting_the_token_never_reaches_a_traceback():
+    token = synthetic_token()
+    path = f"/v1/history/{DAY}/TEST/book"
+    body = book(1, instrument=token) + b'{"note":"' + token.encode() + b'"\n'
+    wrong = etag_of(b"something else")
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body}, etag_override={path: wrong})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_manifest_reflecting_the_token_never_reaches_a_traceback():
+    token = synthetic_token()
+    manifest = json.dumps({"manifest": token}).encode() + b"\n"
+    fake = FakeHistory(token, {(DAY, "AAA", "book"): book(1)}, raw_manifest=manifest)
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        with pytest.raises(HistoryError, match="manifest could not be read") as caught:
+            await collect(client.fetch_range(DAY, DAY, ["AAA"], ["book"]))
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_an_error_raised_while_decoding_never_carries_the_line(monkeypatch):
+    token = synthetic_token()
+    decode = history.codec.decode
+
+    def failing(line: bytes) -> Any:
+        if token.encode() in line:
+            raise KeyboardInterrupt
+        return decode(line)
+
+    monkeypatch.setattr(history.codec, "decode", failing)
+    body = book(1) + book(2, instrument=token)
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body})
+    with serve_history(fake) as url:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_length_the_manifest_states_never_reaches_an_error():
+    token = str(secrets.randbelow(10**18) + 10**18)  # a token a stated length could echo
+    entry = {"session_date": DAY, "instrument": "AAA", "channel": "book", "status": "ready"}
+    entry |= {"byte_offset": 0, "length": int(token), "sha256": "0" * 64}
+    manifest = json.dumps({"manifest": [entry]}).encode() + b"\n"
+    fake = FakeHistory(token, {(DAY, "AAA", "book"): book(1)}, raw_manifest=manifest)
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        with pytest.raises(HistoryCorrupt) as caught:
+            await collect(client.fetch_range(DAY, DAY, ["AAA"], ["book"]))
+    assert_token_absent(token, shown(caught.value))
 
 
 def free_port() -> int:
