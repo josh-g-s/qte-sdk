@@ -2,7 +2,7 @@ from qte_sdk.contract.v1 import common_pb2 as _common_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
 from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
@@ -26,6 +26,44 @@ class SessionAck(_message.Message):
     contract_version: str
     unscored: bool
     def __init__(self, session_id: _Optional[str] = ..., team: _Optional[str] = ..., server_time: _Optional[int] = ..., contract_version: _Optional[str] = ..., unscored: bool = ...) -> None: ...
+
+class CalendarSession(_message.Message):
+    __slots__ = ("session_date", "open_time", "close_time", "early_close")
+    SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
+    OPEN_TIME_FIELD_NUMBER: _ClassVar[int]
+    CLOSE_TIME_FIELD_NUMBER: _ClassVar[int]
+    EARLY_CLOSE_FIELD_NUMBER: _ClassVar[int]
+    session_date: str
+    open_time: int
+    close_time: int
+    early_close: bool
+    def __init__(self, session_date: _Optional[str] = ..., open_time: _Optional[int] = ..., close_time: _Optional[int] = ..., early_close: bool = ...) -> None: ...
+
+class Holiday(_message.Message):
+    __slots__ = ("date", "name")
+    DATE_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    date: str
+    name: str
+    def __init__(self, date: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
+
+class Calendar(_message.Message):
+    __slots__ = ("term_first_session", "term_last_session", "sessions", "holidays", "next_open", "term_start", "term_end")
+    TERM_FIRST_SESSION_FIELD_NUMBER: _ClassVar[int]
+    TERM_LAST_SESSION_FIELD_NUMBER: _ClassVar[int]
+    SESSIONS_FIELD_NUMBER: _ClassVar[int]
+    HOLIDAYS_FIELD_NUMBER: _ClassVar[int]
+    NEXT_OPEN_FIELD_NUMBER: _ClassVar[int]
+    TERM_START_FIELD_NUMBER: _ClassVar[int]
+    TERM_END_FIELD_NUMBER: _ClassVar[int]
+    term_first_session: str
+    term_last_session: str
+    sessions: _containers.RepeatedCompositeFieldContainer[CalendarSession]
+    holidays: _containers.RepeatedCompositeFieldContainer[Holiday]
+    next_open: int
+    term_start: str
+    term_end: str
+    def __init__(self, term_first_session: _Optional[str] = ..., term_last_session: _Optional[str] = ..., sessions: _Optional[_Iterable[_Union[CalendarSession, _Mapping]]] = ..., holidays: _Optional[_Iterable[_Union[Holiday, _Mapping]]] = ..., next_open: _Optional[int] = ..., term_start: _Optional[str] = ..., term_end: _Optional[str] = ...) -> None: ...
 
 class SessionReject(_message.Message):
     __slots__ = ("reason_code", "reason_detail")

@@ -36,10 +36,11 @@ from qte_sdk.connection import (
     Received,
     SessionRejected,
 )
-from qte_sdk.contract.v1.session_pb2 import Auth, SessionAck
+from qte_sdk.contract.v1.session_pb2 import Auth, Calendar, SessionAck
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
 DEFAULT_ACK_TIMEOUT = 10.0
+DEFAULT_CALENDAR_TIMEOUT = 5.0
 
 
 class MissingToken(ValueError):
@@ -84,24 +85,118 @@ class Session:
     delivers every event: anything the exchange sent before `session_ack` first, then the
     rest of the stream. A session is a `qte_sdk.orders.Sender`, so the functions in
     `qte_sdk.orders` and `qte_sdk.market_data` accept it.
+
+    `calendar` is the exchange's session calendar, once it has arrived; see
+    `wait_for_calendar` and `qte_sdk.calendar`.
     """
 
     def __init__(self, connection: Connection, info: SessionInfo, early: list[Event]) -> None:
         self.connection = connection
         self.info = info
-        self._early = deque(early)
+        # Events read from the connection but not yet delivered: those that arrived before
+        # the ack, and any that `wait_for_calendar` read ahead.
+        self._buffer: deque[Event] = deque()
+        self._calendar: Calendar | None = None
+        self._calendar_unreadable = False
+        self._source: AsyncIterator[Event] | None = None
+        self._reading = False
+        self._ended = False
+        self._failure: Exception | None = None
+        for event in early:
+            self._keep(event)
 
     def __repr__(self) -> str:
         return f"Session({self.connection.url!r}, {self.info!r})"
+
+    @property
+    def calendar(self) -> Calendar | None:
+        """The latest `calendar` message the exchange sent on this session, or None if none
+        has been read yet.
+
+        The exchange sends it right after it acknowledges the session, so it is usually
+        None when `open_session` returns, and is set once iterating the session (or
+        `wait_for_calendar`) reads it. An exchange that predates the calendar message never
+        sends one, so it can stay None for the whole session.
+        """
+        return self._calendar
+
+    async def wait_for_calendar(
+        self, timeout: float | None = DEFAULT_CALENDAR_TIMEOUT
+    ) -> Calendar | None:
+        """Wait up to `timeout` seconds (None for no limit) for the exchange's calendar.
+
+        Returns the calendar, at once if it has already arrived, or None if it does not
+        arrive in time, as with an exchange that predates the calendar message, or if the
+        connection ends or the calendar cannot be decoded first. It never raises for any
+        of these.
+
+        While it waits it reads the session's events ahead of you and keeps them, the
+        calendar included: iterating the session afterwards still delivers every event, in
+        order. If the connection failed meanwhile, iterating raises that error once the
+        kept events are delivered. Call it from the task that iterates the session, not
+        alongside a loop in another task: only one task can read a session at a time.
+        """
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                while self._calendar is None and not self._calendar_unreadable:
+                    if self._ended:
+                        break
+                    await self._read_one()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+        return self._calendar
 
     def __aiter__(self) -> AsyncIterator[Event]:
         return self.events()
 
     async def events(self) -> AsyncIterator[Event]:
-        while self._early:
-            yield self._early.popleft()
-        async for event in self.connection:
-            yield event
+        while True:
+            if self._buffer:
+                yield self._buffer.popleft()
+            elif self._ended:
+                if self._failure is not None:
+                    raise self._failure
+                return
+            else:
+                await self._read_one()
+
+    async def _read_one(self) -> None:
+        """Read the next event from the connection into the buffer. At its end, or on an
+        error, mark the session ended, keeping the error for iteration to raise."""
+        if self._reading:
+            raise RuntimeError(
+                "another task is already reading this session; read it from one place"
+            )
+        if self._source is None:
+            self._source = self.connection.events()
+        self._reading = True
+        try:
+            event = await anext(self._source)
+        except StopAsyncIteration:
+            self._ended = True
+        except Exception as error:
+            self._ended = True
+            self._failure = error
+        except BaseException:
+            # Cancelled or interrupted mid-read: that iterator is finished, but receiving is
+            # cancel-safe and the connection keeps its sequence tracking, so nothing was
+            # lost and the next read starts a fresh one.
+            self._source = None
+            raise
+        else:
+            self._keep(event)
+        finally:
+            self._reading = False
+
+    def _keep(self, event: Event) -> None:
+        self._buffer.append(event)
+        if isinstance(event, Received) and event.type == "calendar":
+            assert isinstance(event.message, Calendar)
+            self._calendar = event.message
+        elif isinstance(event, DecodeFailed) and event.type == "calendar":
+            self._calendar_unreadable = True
 
     async def send(self, type_: str, payload: Message) -> None:
         """Send one message on this session's connection, as `Connection.send` does."""

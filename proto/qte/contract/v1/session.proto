@@ -1,15 +1,15 @@
 // Session and subscription messages.
 //
-// **Version:** 1.2
+// **Version:** 1.4
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
-// `session_reject`, `heartbeat`, `resume`, `order_snapshot`, `subscribe`,
-// `unsubscribe`.
+// `calendar`, `session_reject`, `heartbeat`, `resume`, `order_snapshot`,
+// `subscribe`, `unsubscribe`.
 //
 // Status: PROVISIONAL. The session layer is not yet specified; SPEC.md does
 // not define it. These messages are a working proposal, so clients have
 // something to build against; they are not in force and their shape may
-// change. The one exception is Auth.token, which is decided.
+// change. The exceptions are Auth.token and Calendar, which are decided.
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -40,6 +40,54 @@ message SessionAck {
   // what a team is told and what is scored cannot differ. SPEC 4.2. The
   // field's name and number are provisional.
   bool unscored = 5;
+}
+
+// One trading session's date and hours (SPEC 13.1, 13.2), an entry of
+// Calendar.sessions.
+message CalendarSession {
+  string session_date = 1; // string. The US session date, ISO 8601, America/New_York. SPEC 13.1
+  int64 open_time = 2;     // timestamp. 09:30 America/New_York. SPEC 13.1
+  // timestamp. 16:00 America/New_York, or 13:00 on an early-close day.
+  // SPEC 13.1, SPEC 13.2
+  int64 close_time = 3;
+  // bool. True on the one day of the term whose close_time is not the
+  // regular session close. SPEC 13.2
+  bool early_close = 4;
+}
+
+// One named US holiday inside the term (SPEC 13.2), an entry of
+// Calendar.holidays.
+message Holiday {
+  string date = 1; // string. ISO 8601, America/New_York. SPEC 13.2
+  string name = 2; // string. SPEC 13.2
+}
+
+// Outbound. Sent on the connection immediately after every SessionAck, at
+// any hour, whether inside a session or not: teams are notified of the
+// exchange calendar in advance (SPEC 13.1). Read from the term configuration
+// the exchange runs; a client never hard-codes the NYSE calendar.
+message Calendar {
+  string term_first_session = 1; // string. The term's own first session date, ISO 8601. SPEC 13.2
+  string term_last_session = 2;  // string. The term's own last session date, ISO 8601. SPEC 13.2
+  // Every session of the term, in date order. SPEC 13.1, SPEC 13.2
+  repeated CalendarSession sessions = 3;
+  // Every named holiday whose date falls between term_start and term_end
+  // inclusive, in date order. SPEC 13.2
+  repeated Holiday holidays = 4;
+  // timestamp, optional. The open_time of the first session whose open is
+  // after the server's clock. Absent once the term's last session has
+  // opened. SPEC 13.1, SPEC 13.2
+  optional int64 next_open = 5;
+  // string. The term's own configured start date, ISO 8601, from the term
+  // configuration the exchange runs. Can precede term_first_session when
+  // the range's first day is not a trading day. SPEC 13.2
+  string term_start = 6;
+  // string. The term's own configured end date, ISO 8601, from the term
+  // configuration the exchange runs. Can follow term_last_session when the
+  // range's last day is not a trading day, as for the Summer term, whose
+  // configured range ends 18 June 2027, Juneteenth observed, the day after
+  // its last actual session on 17 June 2027. SPEC 13.2
+  string term_end = 7;
 }
 
 // Outbound.
