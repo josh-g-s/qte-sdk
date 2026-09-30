@@ -60,8 +60,11 @@ Errors from the network keep their type but lose their traceback and chain, beca
 HTTP library's frames hold the request headers. Response headers and status lines are not
 put in errors, and a header that may reflect the token is treated as absent. The `message`
 of an error body is server text, passed on with the token removed should it ever appear,
-or withheld if part of the token remains. Redirects are not followed, and a plain
-`http://` address is refused unless it is this machine's own (a local test server).
+or withheld if part of the token remains. A line that fails to decode is reported as a
+`DecodeFailed` whose error is a new `ValueError` naming only the type of the parser's
+error, since that error keeps the line, which could reflect the token. Redirects are not
+followed, and a plain `http://` address is refused unless it is this machine's own (a
+local test server).
 """
 
 import asyncio
@@ -912,7 +915,7 @@ def _decode_line(line: bytes) -> HistoryItem:
     try:
         decoded = codec.decode(line)
     except Exception as error:
-        return DecodeFailed(None, error)
+        return DecodeFailed(None, _decode_error(error))
     env = decoded.envelope
     cls = INBOUND.get(env.type)
     if cls is None:
@@ -920,7 +923,15 @@ def _decode_line(line: bytes) -> HistoryItem:
     try:
         return cast(MarketData, codec.unpack(decoded.payload, cls))
     except Exception as error:
-        return DecodeFailed(env.type, error)
+        return DecodeFailed(env.type, _decode_error(error))
+
+
+def _decode_error(error: Exception) -> ValueError:
+    """A replacement for `error` naming only its type. The parsers keep the input they
+    rejected, in the message, in attributes such as a `JSONDecodeError`'s `doc` or a
+    `UnicodeDecodeError`'s `object`, and in their frames, and a line may reflect the token
+    in a form no text search would find (escaped, or in another encoding)."""
+    return ValueError(f"{type(error).__name__}; details withheld")
 
 
 _ERRORS: dict[int, tuple[type[HistoryError], str]] = {

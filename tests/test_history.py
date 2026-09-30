@@ -874,6 +874,37 @@ async def test_a_line_the_parsers_cannot_handle_is_a_decode_failure(bad):
     with serve_history(fake) as url:
         items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
     assert [type(item) for item in items] == [Book, DecodeFailed, Book]
+    assert str(items[1].error).endswith("; details withheld")
+
+
+def escaped(text: str) -> str:
+    return "".join(f"\\u{ord(c):04x}" for c in text)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        lambda t: b'{"version":"0.x","note":"' + t.encode() + b'"\n',
+        lambda t: b'{"version":"0.x","note":"' + escaped(t).encode() + b'"\n',
+        lambda t: ('{"note":"' + t + '"}').encode("utf-16-le") + b"\n",
+        lambda t: line("book", 2, {"instrument": "TEST", "grid_time": t, "note": t}),
+    ],
+    ids=["plain", "escaped", "utf-16", "payload"],
+)
+async def test_a_decode_failure_carries_nothing_of_the_line(bad):
+    token = synthetic_token()
+    body = book(1) + bad(token) + book(3)
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert [type(item) for item in items] == [Book, DecodeFailed, Book]
+    error = items[1].error
+    # A fresh error: nothing of the parser's, so nothing of the line, in any form.
+    assert type(error) is ValueError and str(error).endswith("; details withheld")
+    assert error.args == (str(error),) and vars(error) == {}
+    assert error.__traceback__ is None
+    assert error.__cause__ is None and error.__context__ is None
+    assert_token_absent(token, shown(error))
 
 
 def free_port() -> int:
