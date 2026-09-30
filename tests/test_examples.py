@@ -380,6 +380,8 @@ async def test_print_book_stops_after_its_message_count():
     assert "book   TEST  99.950000 x 300  |  100.050000 x 200" in out
     # The unchanged session state counts as a message but is printed only once.
     assert out.count("market session 2026-01-05: OPEN") == 1
+    # The fake sends the same book again at the same grid time: it is printed once.
+    assert out.count("book   TEST") == 1
     assert exchange.received[0] == {
         "version": CONTRACT_VERSION,
         "type": "auth",
