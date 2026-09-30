@@ -38,6 +38,19 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest
 
+  test-websockets-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install with the oldest websockets that pyproject.toml allows
+        run: pip install -e ".[dev]" "websockets==15.0"
+      - name: Confirm the floor version is the one installed
+        run: python -c "import websockets; print(websockets.__version__); assert websockets.__version__ == '15.0', websockets.__version__"
+      - run: pytest
+
   wheel:
     runs-on: ubuntu-latest
     steps:
