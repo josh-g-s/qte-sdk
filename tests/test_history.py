@@ -29,6 +29,7 @@ from qte_sdk.history import (
     HistoryError,
     HistoryInterrupted,
     HistoryNotClosed,
+    HistoryNotImplemented,
     HistoryPending,
     HistoryRateLimited,
     HistoryRequestRejected,
@@ -106,6 +107,12 @@ class FakeHistory:
     pending: dict[tuple[str, str | None, str], Pending] = field(default_factory=dict)
     # Session dates that have not closed yet: answered not_closed before any cache lookup.
     open_dates: set[str] = field(default_factory=set)
+    # Answer a resume with the whole object (200), as for a Range the service does not
+    # support, with these header overrides on that 200.
+    whole_on_resume: bool = False
+    whole_resume_headers: dict[str, str | None] = field(default_factory=dict)
+    # Per (date, instrument, channel): the status a range manifest states instead.
+    status_override: dict[tuple[str, str | None, str], str] = field(default_factory=dict)
     drop_after: dict[str, int] = field(default_factory=dict)
     etag_override: dict[str, str | None] = field(default_factory=dict)
     replace_after_drop: dict[tuple[str, str | None, str], bytes] = field(default_factory=dict)
@@ -134,6 +141,8 @@ class FakeHistory:
         segments = [unquote(s) for s in parts.path.split("/")[3:]]
         if segments == ["range"]:
             return self.range(handler, parse_qs(parts.query), headers)
+        if segments[-1] == "reports":
+            return self.json(handler, 501, "not_implemented")
         try:
             date.fromisoformat(segments[0])
         except ValueError:
@@ -161,6 +170,8 @@ class FakeHistory:
         self.objects[key] = self.replace_after_drop.pop(key)
 
     def status(self, key: tuple[str, str | None, str]) -> str:
+        if key in self.status_override:
+            return self.status_override[key]
         _, instrument, channel = key
         if instrument is None:
             known = channel == "session_state"
@@ -221,11 +232,15 @@ class FakeHistory:
         start = 0
         out: dict[str, str | None] = {"Content-Type": "application/x-ndjson", "ETag": etag}
         requested = headers.get("range", "")
-        if requested.startswith("bytes=") and etag and headers.get("if-range") == etag:
+        matches = etag and headers.get("if-range") == etag
+        if requested.startswith("bytes=") and matches and not self.whole_on_resume:
             start = int(requested[len("bytes=") : -1])
             code = 206
             out["Content-Range"] = f"bytes {start}-{len(body) - 1}/{len(body)}"
             out |= self.resume_headers
+        elif requested:
+            code = 200  # the whole object again, from byte 0
+            out |= self.whole_resume_headers
         else:
             code = 200
             out |= self.first_headers
@@ -1138,3 +1153,203 @@ async def test_a_retry_after_reflecting_the_token_is_not_kept(token, waits):
     assert waits == []
     assert token[:10] not in shown(caught.value)
     assert_token_absent(token, shown(caught.value))
+
+
+# Rules the service states for resumes, digests and statuses.
+
+
+def whole_body() -> bytes:
+    return many_books(40) + trades(41)
+
+
+async def uninterrupted(token: str) -> list[Any]:
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): whole_body()})
+    with serve_history(fake) as url:
+        return await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+
+
+@pytest.mark.parametrize("gzip_etag", [False, True], ids=["identity-etag", "gzip-etag"])
+async def test_a_whole_object_answer_to_a_resume_with_the_same_etag_continues(gzip_etag):
+    token = synthetic_token()
+    body = whole_body()
+    path = f"/v1/history/{DAY}/TEST/book"
+    cut = len(body) // 2 + 11  # mid-line
+    assert body[cut - 1 : cut] != b"\n"
+    fake = FakeHistory(
+        token, {(DAY, "TEST", "book"): body}, drop_after={path: cut}, whole_on_resume=True
+    )
+    if gzip_etag:
+        fake.whole_resume_headers = {"ETag": etag_of(body)[:-1] + '-gzip"'}
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    # The 200 restarted at byte 0; nothing is repeated or missing.
+    assert items == await uninterrupted(token)
+    assert len(items) == 41
+    assert fake.requests[1][1]["range"] == f"bytes={cut}-"
+
+
+@pytest.mark.parametrize(
+    "etag",
+    [etag_of(b"other"), etag_of(b"other")[:-1] + '-gzip"', None],
+    ids=["identity", "gzip", "missing"],
+)
+async def test_a_whole_object_answer_to_a_resume_with_another_etag_is_a_change(etag):
+    token = synthetic_token()
+    path = f"/v1/history/{DAY}/TEST/book"
+    fake = FakeHistory(
+        token,
+        {(DAY, "TEST", "book"): whole_body()},
+        drop_after={path: 500},
+        whole_on_resume=True,
+        whole_resume_headers={"ETag": etag},
+    )
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryChanged):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+
+
+async def test_etags_are_compared_exactly_so_uppercase_hex_is_another_etag():
+    token = synthetic_token()
+    body = whole_body()
+    path = f"/v1/history/{DAY}/TEST/book"
+    upper = '"' + hashlib.sha256(body).hexdigest().upper() + '"'
+    fake = FakeHistory(
+        token,
+        {(DAY, "TEST", "book"): body},
+        drop_after={path: 500},
+        whole_on_resume=True,
+        whole_resume_headers={"ETag": upper},
+    )
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryChanged):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+
+
+async def test_a_first_response_with_an_uppercase_etag_is_refused():
+    token = synthetic_token()
+    body = book(1)
+    upper = '"' + hashlib.sha256(body).hexdigest().upper() + '"'
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body}, first_headers={"ETag": upper})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError, match="no identity ETag"):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+
+
+class UppercaseManifest(FakeHistory):
+    """States each manifest sha256 in uppercase hex, which the service never does."""
+
+    def serve(self, handler, body, etag, headers, extra=None):  # type: ignore[override]
+        first, rest = body.split(b"\n", 1)
+        manifest = json.loads(first)
+        for entry in manifest["manifest"]:
+            if entry["sha256"]:
+                entry["sha256"] = entry["sha256"].upper()
+        first = json.dumps(manifest, separators=(",", ":")).encode()
+        super().serve(handler, first + b"\n" + rest, etag, headers, extra)
+
+
+async def test_a_manifest_digest_is_compared_exactly_with_the_lowercase_computed_one():
+    token = synthetic_token()
+    fake = UppercaseManifest(token, {(DAY, "AAA", "book"): book(1, "AAA")})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt):
+            await collect(HistoryClient(url, token).fetch_range(DAY, DAY, ["AAA"], ["book"]))
+
+
+async def test_an_endpoint_not_built_yet_is_not_implemented_not_unavailable(waits):
+    token = synthetic_token()
+    fake = FakeHistory(token)
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryNotImplemented) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "team-a", "reports"))
+    assert not isinstance(caught.value, HistoryUnavailable)
+    assert (caught.value.http_status, caught.value.status) == (501, "not_implemented")
+    assert len(fake.requests) == 1 and waits == []
+
+
+async def test_an_unknown_manifest_entry_status_is_surfaced_not_fatal():
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): book(1, "AAA"), (DAY, "AAA", "trades"): trades(1, "AAA")}
+    fake = FakeHistory(token, objects, status_override={(DAY, "AAA", "book"): "archived"})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch_range(DAY, DAY, ["AAA"], ["book", "trades"]))
+    manifest = items[0]
+    assert [(e.channel, e.status) for e in manifest.entries] == [
+        ("book", "archived"),
+        ("trades", "ready"),
+    ]
+    assert [type(item) for item in items[1:]] == [Trades]
+
+
+@dataclass
+class Scripted(FakeHistory):
+    """Answers every request with one JSON error response."""
+
+    code: int = 500
+    token_name: str = "internal_error"
+    retry_after: str | None = None
+
+    def respond(self, handler: BaseHTTPRequestHandler) -> None:
+        self.requests.append((handler.path, {}))
+        self.json(handler, self.code, self.token_name, self.retry_after)
+
+
+@pytest.mark.parametrize(
+    ("code", "token_name", "error"),
+    [
+        (404, "some_new_reason", HistoryUnavailable),
+        (409, "some_new_reason", HistoryNotClosed),
+        (501, "some_new_reason", HistoryNotImplemented),
+        (500, "internal_error", HistoryError),
+        (418, "some_new_reason", HistoryError),
+    ],
+)
+async def test_the_http_status_decides_the_error_whatever_the_status_token(
+    code, token_name, error, waits
+):
+    token = synthetic_token()
+    with serve_history(Scripted(token, code=code, token_name=token_name)) as url:
+        with pytest.raises(HistoryError) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert type(caught.value) is error
+    assert caught.value.status == token_name
+    assert waits == []
+
+
+async def test_a_not_closed_answer_is_not_retried_even_with_a_retry_after(waits):
+    token = synthetic_token()
+    fake = Scripted(token, code=409, token_name="not_closed", retry_after="1")
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryNotClosed):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert len(fake.requests) == 1 and waits == []
+
+
+async def test_rate_limiting_without_retry_after_raises_at_once(waits):
+    token = synthetic_token()
+    fake = Scripted(token, code=429, token_name="rate_limited")
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryRateLimited) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert caught.value.retry_after is None
+    assert len(fake.requests) == 1 and waits == []
+
+
+async def test_a_416_answer_to_a_resume_is_an_error_not_a_change():
+    token = synthetic_token()
+
+    class RefusesRanges(FakeHistory):
+        def respond(self, handler: BaseHTTPRequestHandler) -> None:
+            if "Range" in handler.headers:
+                self.requests.append((handler.path, {}))
+                return self.json(handler, 416, "range_not_satisfiable")
+            super().respond(handler)
+
+    path = f"/v1/history/{DAY}/TEST/book"
+    fake = RefusesRanges(token, {(DAY, "TEST", "book"): whole_body()}, drop_after={path: 500})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert type(caught.value) is HistoryError
+    assert caught.value.http_status == 416

@@ -92,6 +92,7 @@ __all__ = [
     "HistoryInterrupted",
     "HistoryItem",
     "HistoryNotClosed",
+    "HistoryNotImplemented",
     "HistoryPending",
     "HistoryRateLimited",
     "HistoryRequestRejected",
@@ -111,8 +112,10 @@ DEFAULT_MAX_RESUMES = 3
 _CHUNK = 64 * 1024
 _ERROR_BODY_LIMIT = 64 * 1024
 _NDJSON = "application/x-ndjson"
-_HEX_DIGEST = re.compile(r"[0-9a-fA-F]{64}")
-_IDENTITY_ETAG = re.compile(r'"[0-9a-fA-F]{64}"')
+_HEX_DIGEST = re.compile(r"[0-9a-fA-F]{64}")  # the shape; compared exactly, as sent
+# An ETag: the lowercase hex SHA-256 digest, quoted, with "-gzip" inside the quotes on the
+# compressed form of the same data.
+_ETAG = re.compile(r'"([0-9a-f]{64})(-gzip)?"')
 _CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 
 _log = logging.getLogger(__name__)
@@ -153,6 +156,12 @@ class HistoryError(Exception):
 class HistoryUnavailable(HistoryError):
     """The data will never exist: a date before the service's coverage, a day with no
     session, or an instrument or channel the service does not know. Do not retry."""
+
+
+class HistoryNotImplemented(HistoryError):
+    """The service does not serve this endpoint yet. It is not a statement that the data
+    will never exist (that is `HistoryUnavailable`): ask again after a later release of
+    the service."""
 
 
 class HistoryNotClosed(HistoryError):
@@ -380,14 +389,22 @@ class HistoryClient:
                 progress: _Progress = _FramedProgress(reply.retry_after)
             else:
                 # A single stream's identity ETag is the SHA-256 digest of its bytes.
-                progress = _StreamProgress(etag.value.strip('"').lower())
+                progress = _StreamProgress(etag.value.strip('"'))
             resumes = 0
+            # Bytes at the start of a whole-object answer to a resume that were already
+            # delivered, to be read and discarded before anything is parsed again.
+            skip = 0
             while True:
                 dropped: str | None = None
                 try:
                     chunk = await asyncio.to_thread(reply.response.read1, _CHUNK)
                 except (OSError, http.client.HTTPException) as error:
                     chunk, dropped = b"", type(error).__name__
+                if chunk and skip:
+                    discarded = min(skip, len(chunk))
+                    chunk, skip = chunk[discarded:], skip - discarded
+                    if not chunk:
+                        continue
                 if chunk:
                     if total is not None and progress.received + len(chunk) > total:
                         raise HistoryCorrupt("the response is longer than the service stated")
@@ -408,7 +425,7 @@ class HistoryClient:
                 _log.debug(
                     "history download dropped (%s); resuming at byte %d", dropped, progress.received
                 )
-                reply = await self._resume(target, progress.received, etag, total)
+                reply, skip = await self._resume(target, progress.received, etag, total)
                 total = reply.complete_length
             for item in progress.finish(total):
                 yield item
@@ -456,16 +473,36 @@ class HistoryClient:
 
     async def _resume(
         self, target: str, offset: int, etag: "_Validator", total: int | None
-    ) -> "_Reply":
-        """The rest of the data from `offset`, checked to be the rest of the same data."""
+    ) -> "tuple[_Reply, int]":
+        """The rest of the data from `offset`, checked to be the rest of the same data,
+        and how many bytes at its start to discard as already delivered.
+
+        The service may answer with the whole object (200) rather than the rest (206), for
+        example when it does not support the range asked for. If its ETag, with any
+        `-gzip` suffix set aside, is the one held, the data is unchanged: the body starts
+        at byte 0, so the first `offset` bytes are discarded. Otherwise the data changed.
+        """
         reply = await self._call(target, (offset, etag))
         if reply.status == 200:
-            reply.close()
-            raise HistoryChanged(
-                "the service answered the resume with the whole of different data; "
-                "start the download again",
-                http_status=200,
-            )
+            if reply.etag_digest is None or reply.etag_digest != etag:
+                reply.close()
+                raise HistoryChanged(
+                    "the service now serves different data; start the download again",
+                    http_status=200,
+                )
+            if not reply.ndjson_identity:
+                reply.close()
+                raise HistoryError(
+                    "the response is not uncompressed NDJSON as the history service sends",
+                    http_status=200,
+                )
+            if total is not None and reply.complete_length not in (None, total):
+                reply.close()
+                raise HistoryChanged(
+                    "the service now serves different data; start the download again",
+                    http_status=200,
+                )
+            return reply, offset
         if reply.status != 206:
             reply.close()
             raise _error_for(reply, self._secret)
@@ -488,7 +525,7 @@ class HistoryClient:
                 "the resumed response does not continue from where the download stopped",
                 http_status=206,
             )
-        return reply
+        return reply, 0
 
     async def _call(self, target: str, resume: "tuple[int, _Validator] | None") -> "_Reply":
         handoff = _Handoff()
@@ -615,7 +652,12 @@ class _Reply:
         # characters with a genuine hex digest, and the ETag is kept only in a
         # `_Validator`, which never shows it.
         etag = response.getheader("ETag")
-        self.etag = None if etag is None or secret.value in etag else _identity_etag(etag)
+        if etag is not None and secret.value in etag:
+            etag = None
+        # The identity ETag, and the ETag with any "-gzip" suffix set aside, both held
+        # only as a `_Validator`.
+        self.etag = _identity_etag(etag)
+        self.etag_digest = _etag_digest(etag)
         del etag
         self.length = _count(_header(response, "Content-Length", secret))
         self.retry_after = _seconds(_header(response, "Retry-After", secret))
@@ -669,9 +711,16 @@ def _screened(text: str, secret: _Secret) -> str | None:
 def _identity_etag(value: str | None) -> _Validator | None:
     """`value` if it is an identity ETag, `"<hex sha256>"`, else None: a weak, gzip or
     malformed validator cannot be checked against, nor resumed from."""
-    if value is None or not _IDENTITY_ETAG.fullmatch(value):
+    match = _ETAG.fullmatch(value or "")
+    if match is None or match.group(2):
         return None
-    return _Validator(value)
+    return _Validator(match.group(0))
+
+
+def _etag_digest(value: str | None) -> _Validator | None:
+    """The identity form of an identity or gzip ETag, `"<hex sha256>"`, else None."""
+    match = _ETAG.fullmatch(value or "")
+    return None if match is None else _Validator(f'"{match.group(1)}"')
 
 
 def _count(value: str | None) -> int | None:
@@ -807,7 +856,7 @@ class _FramedProgress(_Progress):
 
     def _verify(self) -> None:
         for _, _, expected, digest in self._slices:
-            if digest.hexdigest() != expected.lower():
+            if digest.hexdigest().lower() != expected:
                 raise HistoryCorrupt("an entry does not match the digest its manifest states")
 
 
@@ -866,6 +915,7 @@ _ERRORS: dict[int, tuple[type[HistoryError], str]] = {
     403: (HistoryForbidden, "the token may not read this data"),
     404: (HistoryUnavailable, "the data is unavailable and will never exist"),
     409: (HistoryNotClosed, "the session has not closed yet"),
+    501: (HistoryNotImplemented, "the service does not serve this yet"),
     429: (HistoryRateLimited, "too many requests"),
 }
 
