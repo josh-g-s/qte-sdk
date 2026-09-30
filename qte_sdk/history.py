@@ -86,7 +86,7 @@ from datetime import date, datetime
 from typing import Any, TypeVar, cast
 from urllib.parse import quote, urlsplit
 
-from qte_sdk.connection import DecodeFailed, Unknown
+from qte_sdk.connection import DecodeFailed, Unknown, _decode_error
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import INBOUND
 from qte_sdk.market_data import MarketData
@@ -999,14 +999,6 @@ def _decode_line(line: bytes) -> HistoryItem:
         return cast(MarketData, codec.unpack(decoded.payload, cls))
     except Exception as error:
         return DecodeFailed(env.type, _decode_error(error))
-
-
-def _decode_error(error: Exception) -> ValueError:
-    """A replacement for `error` naming only its type. The parsers keep the input they
-    rejected, in the message, in attributes such as a `JSONDecodeError`'s `doc` or a
-    `UnicodeDecodeError`'s `object`, and in their frames, and a line may reflect the token
-    in a form no text search would find (escaped, or in another encoding)."""
-    return ValueError(f"{type(error).__name__}; details withheld")
 
 
 _ERRORS: dict[int, tuple[type[HistoryError], str]] = {
