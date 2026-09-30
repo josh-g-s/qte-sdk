@@ -110,6 +110,8 @@ class FakeHistory:
     # Answer a resume with the whole object (200), as for a Range the service does not
     # support, with these header overrides on that 200.
     whole_on_resume: bool = False
+    # Cut that whole-object answer to a resume short, once, after this many bytes.
+    drop_whole_resume_after: int | None = None
     whole_resume_headers: dict[str, str | None] = field(default_factory=dict)
     # Per (date, instrument, channel): the status a range manifest states instead.
     status_override: dict[tuple[str, str | None, str], str] = field(default_factory=dict)
@@ -252,6 +254,8 @@ class FakeHistory:
                 handler.send_header(name, value.replace("{auth}", presented))
         handler.end_headers()
         drop = self.drop_after.pop(handler.path, None) if start == 0 else None
+        if drop is None and code == 200 and requested:
+            drop, self.drop_whole_resume_after = self.drop_whole_resume_after, None
         hold = self.hold_after.pop(handler.path, None) if start == 0 else None
         if hold is not None:
             handler.wfile.write(body[: hold[0]])
@@ -260,8 +264,8 @@ class FakeHistory:
             body = body[hold[0] :]
         handler.wfile.write(body[start:] if drop is None else body[:drop])
         handler.wfile.flush()
-        if drop is not None:
-            handler.close_connection = True
+        if drop is not None or out.get("Content-Length") is None:
+            handler.close_connection = True  # the end of an unstated length is the close
 
     def json(
         self,
@@ -1353,3 +1357,25 @@ async def test_a_416_answer_to_a_resume_is_an_error_not_a_change():
             await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
     assert type(caught.value) is HistoryError
     assert caught.value.http_status == 416
+
+
+@pytest.mark.parametrize("states_length", [True, False], ids=["length", "no-length"])
+async def test_a_drop_while_discarding_the_repeated_prefix_resumes_again(states_length):
+    token = synthetic_token()
+    body = whole_body()
+    path = f"/v1/history/{DAY}/TEST/book"
+    cut = len(body) // 2 + 11
+    fake = FakeHistory(
+        token,
+        {(DAY, "TEST", "book"): body},
+        drop_after={path: cut},
+        whole_on_resume=True,
+        drop_whole_resume_after=cut // 3,  # inside the bytes already delivered
+    )
+    if not states_length:
+        fake.whole_resume_headers = {"Content-Length": None}
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert items == await uninterrupted(token)
+    assert len(fake.requests) == 3
+    assert fake.requests[2][1]["range"] == f"bytes={cut}-"

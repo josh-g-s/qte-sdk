@@ -421,7 +421,10 @@ class HistoryClient:
                     for item in progress.feed(chunk):
                         yield item
                     continue
-                if dropped is None and (total is None or progress.received == total):
+                # Ending while bytes already delivered are still being discarded is a
+                # drop too, whether or not the length was stated.
+                finished = skip == 0 and (total is None or progress.received == total)
+                if dropped is None and finished:
                     break
                 reply.close()
                 if dropped is None:
@@ -436,7 +439,9 @@ class HistoryClient:
                     "history download dropped (%s); resuming at byte %d", dropped, progress.received
                 )
                 reply, skip = await self._resume(target, progress.received, etag, total)
-                total = reply.complete_length
+                # A length stated earlier still holds if this answer states none.
+                if reply.complete_length is not None:
+                    total = reply.complete_length
             for item in progress.finish(total):
                 yield item
         finally:
