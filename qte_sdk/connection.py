@@ -14,10 +14,11 @@ exception message, attribute or chain, or a traceback local variable that it cre
 lets escape. Text a server reflects back is withheld on these paths: close reasons, the
 opening handshake and response headers, and redirects, which are not followed. Frame
 traces are not logged, and log records carry only a snapshot of the connection's id and
-address. Server-supplied protocol content (a rejection's reason_detail, the text of a
-frame that fails to decode) is passed through as-is, because it is what a caller needs to
-understand a failure; the QTE gateway never echoes credentials. A token placed in the
-caller's own URL or headers is the caller's configuration.
+address. A frame that fails to decode is reported without its text, since the parser's
+error keeps it. Server-supplied protocol content (a rejection's reason_detail) is passed
+through as-is, because it is what a caller needs to understand a failure; the QTE gateway
+never echoes credentials. A token placed in the caller's own URL or headers is the
+caller's configuration.
 """
 
 import asyncio
@@ -137,12 +138,12 @@ def _exception_name(exc_info: Any) -> str:
     return current.__name__ if current is not None else "error"
 
 
-def _detached(error: Exception) -> Exception:
-    """`error` without its traceback or chain: the decoder's frames, and those of any error
-    chained to it, hold the frame text as local variables."""
-    error = error.with_traceback(None)
-    error.__cause__ = error.__context__ = None
-    return error
+def _decode_error(error: Exception) -> ValueError:
+    """A replacement for `error` naming only its type. The parsers keep the input they
+    rejected, in the message, in attributes such as a `JSONDecodeError`'s `doc` or a
+    `UnicodeDecodeError`'s `object`, and in their frames, and that input may hold the token
+    in a form no text search would find (escaped, or in another encoding)."""
+    return ValueError(f"{type(error).__name__}; details withheld")
 
 
 @dataclass(frozen=True)
@@ -183,10 +184,12 @@ class Unknown:
 class DecodeFailed:
     """A frame that could not be decoded. It is reported and never delivered as a message.
 
-    `error` is what decoding raised, for example a `ValueError` for text that is not a JSON
-    envelope, a `ParseError` for a payload of the wrong shape, a `RecursionError` for JSON
-    nested too deeply or an `OverflowError` for a number out of range. It keeps its type
-    and message but carries no traceback or chain.
+    `error` is a `ValueError`. For a binary frame it says the wire is JSON text. Otherwise
+    its message names the type of what decoding raised, for example `JSONDecodeError` for
+    text that is not JSON, `ParseError` for a payload of the wrong shape, `RecursionError`
+    for JSON nested too deeply or `OverflowError` for a number out of range, followed by
+    "; details withheld". The parser's own error is not kept, since it holds the frame,
+    which could hold the token.
     """
 
     type: str | None
@@ -403,7 +406,7 @@ class Connection:
         try:
             decoded = codec.decode(frame)
         except Exception as error:
-            failure = _detached(error)
+            failure = _decode_error(error)
         if failure is not None:
             yield DecodeFailed(None, failure)
             return
@@ -423,7 +426,7 @@ class Connection:
         try:
             message = codec.unpack(decoded.payload, cls)
         except Exception as error:
-            failure = _detached(error)
+            failure = _decode_error(error)
         if failure is not None:
             yield DecodeFailed(env.type, failure)
             return

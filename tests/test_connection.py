@@ -146,7 +146,7 @@ async def test_a_frame_nested_too_deeply_is_reported_and_delivery_continues(
     assert events[1].type is None
     assert events[2] == SeqGap(expected=2, received=3)
     if parser_gives_up:
-        assert isinstance(events[1].error, RecursionError)
+        assert str(events[1].error) == "RecursionError; details withheld"
 
 
 async def test_a_number_out_of_range_is_reported_and_still_advances_seq():
@@ -155,10 +155,13 @@ async def test_a_number_out_of_range_is_reported_and_still_advances_seq():
         events = await collect(url)
     assert [type(e) for e in events] == [Received, DecodeFailed, Received]
     assert events[1].type == "book"
-    assert isinstance(events[1].error, OverflowError)
+    assert str(events[1].error) == "OverflowError; details withheld"
 
 
-@pytest.mark.parametrize("kind", ["nested", "nested-recursion", "out-of-range", "not-json"])
+@pytest.mark.parametrize(
+    "kind",
+    ["nested", "nested-recursion", "out-of-range", "not-json", "escaped", "payload"],
+)
 async def test_a_decode_failure_keeps_the_frame_text_out_of_logs_and_tracebacks(
     kind, monkeypatch, caplog
 ):
@@ -169,6 +172,8 @@ async def test_a_decode_failure_keeps_the_frame_text_out_of_logs_and_tracebacks(
         "nested-recursion": nested_too_deeply,
         "out-of-range": number_out_of_range,
         "not-json": lambda t: f'{{"note": "{t}", "payload": ',
+        "escaped": lambda t: '{"note": "' + "".join(f"\\u{ord(c):04x}" for c in t) + '", ',
+        "payload": lambda t: frame("book", {"instrument": "AAPL", "grid_time": t}, 2),
     }[kind](token)
     if kind == "nested-recursion":
         force_recursion_error(monkeypatch, token)
@@ -176,6 +181,10 @@ async def test_a_decode_failure_keeps_the_frame_text_out_of_logs_and_tracebacks(
         events = await collect(url)
     [failed] = [e for e in events if isinstance(e, DecodeFailed)]
     assert isinstance(events[-1], Received)
+    # A fresh error: nothing of the parser's, so nothing of the frame, in any form.
+    assert type(failed.error) is ValueError
+    assert str(failed.error).endswith("; details withheld")
+    assert failed.error.args == (str(failed.error),) and vars(failed.error) == {}
     assert failed.error.__traceback__ is None
     assert failed.error.__cause__ is None and failed.error.__context__ is None
     assert_no_token(shown_with_locals(failed.error), token)
