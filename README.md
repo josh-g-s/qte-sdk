@@ -26,7 +26,7 @@ export QTE_URL="<the exchange address from the course team>"
 read -rs QTE_TOKEN && export QTE_TOKEN   # paste the token, then press Enter
 ```
 
-Then run this. It opens a session, subscribes to one instrument and prints the best bid and ask as the book updates, for ten seconds.
+Then run this. It opens a session, subscribes to one instrument and prints the best bid and ask as the book updates, for ten seconds. A book shows two kinds of depth: the wall (`bid_levels`, `ask_levels`) and participants' resting orders (`student_bid_levels`, `student_ask_levels`), each best price first, so the best bid and ask are taken across both.
 
 ```python
 import asyncio
@@ -37,6 +37,13 @@ from qte_sdk.session import open_session
 from qte_sdk.units import to_decimal
 
 
+def best(book: Book) -> tuple[int | None, int | None]:
+    """The best bid and ask across the wall and participants' resting orders."""
+    bids = [levels[0].price for levels in (book.bid_levels, book.student_bid_levels) if levels]
+    asks = [levels[0].price for levels in (book.ask_levels, book.student_ask_levels) if levels]
+    return (max(bids) if bids else None, min(asks) if asks else None)
+
+
 async def main() -> None:
     # The token comes from QTE_TOKEN; pass token=... to supply it another way.
     async with await open_session(os.environ["QTE_URL"]) as session:
@@ -45,9 +52,10 @@ async def main() -> None:
         try:
             async with asyncio.timeout(10):
                 async for item in market_data(session):
-                    if isinstance(item, Book) and item.bid_levels and item.ask_levels:
-                        bid, ask = item.bid_levels[0].price, item.ask_levels[0].price
-                        print(to_decimal(bid), to_decimal(ask))
+                    if isinstance(item, Book):
+                        bid, ask = best(item)
+                        if bid is not None and ask is not None:
+                            print(item.instrument, to_decimal(bid), to_decimal(ask))
         except TimeoutError:
             pass
 
