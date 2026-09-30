@@ -1,10 +1,19 @@
 # Developing qte-sdk
 
-**Version:** 0.5
+**Version:** 0.6
 
 ## Requirements
 
 Python 3.11 or later. CI tests 3.11, 3.12, 3.13 and 3.14.
+
+The connection code depends on behaviour that differs between websockets releases, so the supported websockets range is tested at both ends. `pyproject.toml` allows `websockets>=15,<18`. The `test` job installs the newest websockets release inside the range on every Python version, and the `test-websockets-floor` job installs exactly websockets 15.0, the oldest release the range allows, and runs the whole test suite on Python 3.11. Raising the lower bound in `pyproject.toml` means updating the pin in that job and this paragraph together. To run the floor check locally:
+
+```sh
+pip install -e ".[dev]" "websockets==15.0"
+pytest
+```
+
+Run `pip install --upgrade "websockets>=15,<18"` afterwards to go back to the newest release.
 
 ## Layout
 
