@@ -704,8 +704,8 @@ escaping = pytest.mark.parametrize(
 
 def assert_no_form_of(token: str, text: str) -> None:
     assert_token_absent(token, text)
-    for form in qte_sdk.session._token_forms(token):
-        assert form not in text
+    for form in qte_sdk.session._token_forms(qte_sdk.session._Secret(token)):
+        assert form.value not in text
 
 
 @escaping
