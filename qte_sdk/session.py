@@ -40,7 +40,7 @@ from qte_sdk.connection import (
     SeqGap,
     SessionRejected,
 )
-from qte_sdk.contract.v1.common_pb2 import RESUME
+from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import Reject
 from qte_sdk.contract.v1.session_pb2 import Auth, Calendar, Resume, ResumeAck, SessionAck
 
@@ -108,14 +108,21 @@ def _report_seq(event: Event) -> int | None:
 
 def _rejects_resume(event: Event) -> bool:
     """Whether `event` refuses a `resume`: a `reject` naming RESUME, or, from an exchange
-    that does not know the message, a `reject` naming no request type and no request_ref,
-    and that is not one of the team's order reports."""
+    that does not know the message, a MALFORMED_MESSAGE `reject` that names no request type
+    (not even one this SDK does not know) and no request_ref, and is not one of the team's
+    order reports."""
     if not isinstance(event, Received) or not isinstance(event.message, Reject):
         return False
     message = event.message
     if message.HasField("request_type"):
         return message.request_type == RESUME
-    return event.report_seq is None and not message.HasField("request_ref")
+    return (
+        "request_type" not in (event.payload or {})
+        and "requestType" not in (event.payload or {})
+        and event.report_seq is None
+        and not message.HasField("request_ref")
+        and message.reason_code == ReasonCodes.MALFORMED_MESSAGE
+    )
 
 
 class _Resume:
@@ -242,9 +249,10 @@ class _Reports:
         if not ack.replayed:
             # The snapshot describes the team's orders as of this report, and sets the
             # cursor to exactly it, lower if report numbers restarted with a new term.
+            # Nothing delivered beyond an old cursor counts any more: as_of is the newest
+            # report the exchange had, and after a new term the old numbers mean nothing.
             self.cursor = ack.as_of_report_seq
-            self.above = {n for n in self.above if n > self.cursor}
-            self._advance()
+            self.above = set()
         done = ResumeComplete(ack.replayed, ack.as_of_report_seq, ack.snapshot_count)
         return self._finish(done)
 
@@ -459,6 +467,25 @@ class Session:
             raise ResumeRejected(message.reason_code, detail, reason_name=name)
         assert isinstance(answer.message, ResumeAck)
         return answer.message
+
+    def _withhold_in_answer(self, secret: "_Secret") -> None:
+        """Replace the `reject` that refused the resume, if it repeats the token, with a
+        copy that does not. Used by a `ReconnectingSession`, which holds the token and goes
+        on to deliver that reject as an event."""
+        answer = self._reports.answer
+        if not isinstance(answer, Received) or not isinstance(answer.message, Reject):
+            return
+        if secret.value not in str(answer.message) and secret.value not in str(answer.payload):
+            return
+        message = Reject()
+        message.CopyFrom(answer.message)
+        if message.HasField("reason_detail"):
+            message.reason_detail = _redact(message.reason_detail, secret)
+        if secret.value in str(message):
+            message = Reject(reason_code=message.reason_code)
+        safe = Received(answer.type, message, answer.seq, None, answer.report_seq)
+        self._buffer = deque(safe if e is answer else e for e in self._buffer)
+        self._reports.answer = safe
 
     def __aiter__(self) -> AsyncIterator[Event]:
         return self.events()

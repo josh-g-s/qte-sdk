@@ -6,7 +6,7 @@ import json
 import pytest
 from fake_exchange import frame, serve_local
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
-from test_session import ack, session_reject, synthetic_token
+from test_session import ack, assert_token_absent, session_reject, synthetic_token
 from websockets.asyncio.server import ServerConnection
 
 import qte_sdk.connection
@@ -21,8 +21,8 @@ from qte_sdk.connection import (
     SeqGap,
     SessionRejected,
 )
-from qte_sdk.contract.v1.common_pb2 import BUY, RESTING, SELL
-from qte_sdk.contract.v1.order_events_pb2 import OrderState
+from qte_sdk.contract.v1.common_pb2 import BUY, RESTING, SELL, ReasonCodes
+from qte_sdk.contract.v1.order_events_pb2 import OrderState, Reject
 from qte_sdk.contract.v1.session_pb2 import OrderSnapshot, ResumeAck
 from qte_sdk.market_data import as_market_data
 from qte_sdk.reconnect import Connected, Disconnected, ReconnectingSession, is_retryable
@@ -579,6 +579,9 @@ async def test_a_refused_resume_leaves_the_session_up_without_it():
     assert exchange.received == [auth(token), resume(0)]
     assert kinds(events) == ["Connected", "reject:None", "order_state:4"]
     assert isinstance(events[0], Connected) and events[0].resume is None
+    # The reject repeated the token; the delivered copy does not.
+    assert_token_absent(token, repr(events) + str(events[1].message))  # type: ignore[attr-defined]
+    assert "<token withheld>" in events[1].message.reason_detail  # type: ignore[attr-defined]
 
 
 async def test_an_exchange_that_serves_neither_heartbeats_nor_resume_keeps_working():
@@ -706,3 +709,46 @@ def test_a_snapshot_sets_the_cursor_exactly_even_lower_at_a_new_term():
     ]
     assert [getattr(e, "report_seq", None) for e in routed[2:]] == [4, 5]
     assert reports.cursor == 5
+
+
+def test_a_snapshot_forgets_reports_counted_beyond_the_old_cursor():
+    reports = _Reports()
+    for n in (10, 12):  # 12 is counted beyond a gap at 11, in the old term
+        reports.route(Received("order_state", OrderState(), None, report_seq=n))
+    reports.begin(10)
+    ack_event = Received(
+        "resume_ack", ResumeAck(replayed=False, as_of_report_seq=3, snapshot_count=0), None
+    )
+    reports.route(ack_event)
+    delivered = [
+        reports.route(Received("order_state", OrderState(), None, report_seq=n))
+        for n in range(4, 14)
+    ]
+    # Every report of the new term is delivered, 12 included.
+    assert all(len(d) == 1 for d in delivered)
+    assert reports.cursor == 13
+
+
+def test_only_an_untyped_malformed_reject_answers_a_resume():
+    reports = _Reports()
+    reports.begin(0)
+    newer_type = Received(
+        "reject",
+        Reject(reason_code=ReasonCodes.MALFORMED_MESSAGE),
+        None,
+        {"request_type": "A_NEWER_REQUEST", "reason_code": "MALFORMED_MESSAGE"},
+    )
+    other_reason = Received(
+        "reject", Reject(reason_code=ReasonCodes.NOT_AUTHENTICATED), None, {"reason_code": "X"}
+    )
+    for event in (newer_type, other_reason):
+        assert reports.route(event) == [event]
+        assert reports.answer is None
+    untyped = Received(
+        "reject",
+        Reject(reason_code=ReasonCodes.MALFORMED_MESSAGE),
+        None,
+        {"reason_code": "MALFORMED_MESSAGE"},
+    )
+    reports.route(untyped)
+    assert reports.answer is untyped and reports.resume is None

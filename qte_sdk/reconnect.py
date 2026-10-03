@@ -563,6 +563,7 @@ class ReconnectingSession:
                         self._reports.cursor or 0, timeout=self._ack_timeout
                     )
                 except ResumeRejected:
+                    session._withhold_in_answer(self._secret)
                     # An exchange that does not serve resume (yet): the session goes on
                     # without it, and the reject is delivered as an event. The next session
                     # asks again.
