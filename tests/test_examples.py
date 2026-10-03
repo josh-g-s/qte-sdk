@@ -1118,31 +1118,49 @@ async def test_quote_both_sides_stops_quoting_after_an_unreadable_session_state(
     assert session.sent == ["new"]
 
 
-def session_state_on(day: str, phase: int = MarketSessionPhase.OPEN) -> Received:
-    return Received("session_state", SessionStateMessage(state=phase, session_date=day), 1)
+def book_at(grid_time: int) -> Received:
+    event = book_event()
+    event.message.grid_time = grid_time
+    return event
 
 
-@pytest.mark.parametrize("close_seen", [True, False], ids=["close-seen", "close-missed"])
-async def test_quote_both_sides_never_quotes_a_book_from_an_earlier_session(close_seen: bool):
+def state_at(open_time: int, phase: int = MarketSessionPhase.OPEN) -> Received:
+    state = SessionStateMessage(state=phase, open_time=open_time)
+    return Received("session_state", state, 1)
+
+
+CLOSED = MarketSessionPhase.CLOSED
+UNREADABLE_STATE = DecodeFailed("session_state", ValueError("unreadable"))
+# Events across two sessions, the second opening at time 100, and whether a quote may be
+# sent from the book held at the end. In the second session, only a book published at or
+# after 100 may be quoted.
+SESSIONS = {
+    # As on subscribing during a session: the last book first, then the session state.
+    "subscribed-mid-session": ([book_at(50), state_at(10)], True),
+    "reopened-before-new-book": (
+        [book_at(50), state_at(10), state_at(10, CLOSED), state_at(100)],
+        False,
+    ),
+    "close-missed": ([book_at(50), state_at(10), state_at(100)], False),
+    "close-unreadable": ([book_at(50), UNREADABLE_STATE, state_at(100)], False),
+    "new-book-before-open-state": (
+        [state_at(10), state_at(10, CLOSED), book_at(150), state_at(100)],
+        True,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", SESSIONS)
+async def test_quote_both_sides_quotes_only_a_book_of_the_session_in_progress(name: str):
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
     args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
     quoter = example.Quoter(session, RestingOrders(), args)
-    # As on subscribing during a session: the last book first, then the session state.
-    example.handle(quoter, quoter.view, book_event())
-    example.handle(quoter, quoter.view, session_state_on("2026-01-05"))
-    assert quoter.books.get(INSTRUMENT) is not None  # kept: it is this session's
-    if close_seen:
-        closed = session_state_on("2026-01-05", MarketSessionPhase.CLOSED)
-        example.handle(quoter, quoter.view, closed)
-    example.handle(quoter, quoter.view, session_state_on("2026-01-06"))
+    events, quotes = SESSIONS[name]
+    for event in events:
+        example.handle(quoter, quoter.view, event)
     await quoter.act()
-    assert session.sent == []  # the next session's first book has not come yet
-    newer = book_event().message
-    newer.grid_time = 5
-    example.handle(quoter, quoter.view, Received("book", newer, 2))
-    await quoter.act()
-    assert session.sent == ["new"]
+    assert session.sent == (["new"] if quotes else [])
 
 
 async def test_quote_both_sides_sends_nothing_while_the_market_is_closed():

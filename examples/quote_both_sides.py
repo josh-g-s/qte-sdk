@@ -59,8 +59,8 @@ every event it has already received, so a sign that messages were missed is seen
 If a message that may have been a newer book is missed or cannot be read, the book held
 may be out of date, so the example sends nothing from it until a newer book arrives. It
 also quotes only while the latest session state says the market is open, and only from
-a book of the session in progress, never one kept from an earlier session. It sends one message at a time and applies
-what has come in since before sending the next.
+a book published since that session opened, never one kept from an earlier session. It
+sends one message at a time, and applies what has come in since before sending the next.
 """
 
 import argparse
@@ -201,22 +201,15 @@ class Quoter:
         self.next_act = float("-inf")
         # Whether the last session state said the market is open; none is known yet.
         self.market_open = False
-        self.session_date = ""
+        self.open_time = 0  # when the session in progress opened, from its session state
         # How many order messages it has sent, so a caller can tell whether a step sent one.
         self.messages = 0
         self.last_side: Side = SELL  # so BUY goes first
 
     def on_session_state(self, state: SessionState) -> None:
-        """Quote only while the market is open, and only from a book of the session in
-        progress, never one kept from an earlier session."""
-        if state.state != MarketSessionPhase.OPEN:
-            self.market_open = False
-            self.books = LatestBooks()  # the session is over: its book is no use
-        else:
-            if self.session_date and state.session_date != self.session_date:
-                self.books = LatestBooks()  # a new session, with the close not seen
-            self.market_open = True
-        self.session_date = state.session_date
+        self.market_open = state.state == MarketSessionPhase.OPEN
+        # A book published before this session opened is from an earlier session.
+        self.open_time = state.open_time
 
     def in_turn(self) -> list[Quote]:
         """Both sides, starting with the one that did not send last, so that with one
@@ -351,6 +344,8 @@ class Quoter:
         book = self.books.get(self.instrument)
         if not self.quoting or not self.market_open or book is None:
             return  # outside a session the exchange takes no orders
+        if book.grid_time < self.open_time:
+            return  # kept from an earlier session: wait for this session's first book
         if self.instrument in self.books.stale:
             # A message that may have been a newer book was missed or unreadable, so this
             # book may be out of date. Send nothing until a newer book arrives.
