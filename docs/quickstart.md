@@ -46,13 +46,13 @@ ls -l "$HOME/.qte/token"
 
 The parentheses run it in a subshell, so the `umask` and the variable `T` end with it.
 
-Then add this line to your shell profile, which is `~/.zshrc` for zsh (the macOS default) or `~/.bashrc` for bash (`~/.bash_profile` on macOS), and open a new terminal:
+Then add this line to your shell profile, which is `~/.zshrc` for zsh (the macOS default) or `~/.bashrc` for bash (`~/.bash_profile` on macOS):
 
 ```sh
 export QTE_TOKEN_FILE="$HOME/.qte/token"
 ```
 
-The line holds a path, not the token. `QTE_TOKEN` takes precedence over the file, so run `unset QTE_TOKEN` in any terminal where you exported it, and remove any line that sets it from your shell profile.
+Run the same line in your current terminal too, so you can carry on there. Every new terminal then has it, but not `QTE_URL` or your virtual environment: set `QTE_URL` again (or add its `export` line to your profile as well) and run `source .venv/bin/activate` from your project. The line holds a path, not the token. `QTE_TOKEN` takes precedence over the file, so run `unset QTE_TOKEN` in any terminal where you exported it, and remove any line that sets it from your shell profile.
 
 The SDK reads the file each time it needs the token, removing one trailing newline. If the file is missing, unreadable, empty or not UTF-8 text, it raises `MissingToken` with a message that says which, and never shows the file's contents.
 
