@@ -398,7 +398,31 @@ except TimeoutError:
 
 The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session, at each instrument's latest official close, a break day's close included. An option is named by its 21-character OCC option symbol. `session_date` is the date of the current session inside one. Outside a session it is the date of the last session with an official close, whose profit and loss `daily_pnl` then shows, even between terms, when positions carried over from the term before are returned too. It names a session, not the close the values use. It is always there inside a session, and outside one it is absent while no session has an official close yet. `summary` is absent for an Execution desk and the house, and `cash` is absent only for an Execution desk, so check `HasField("summary")` and `HasField("cash")` first. A refused query is a `reject` with `request_type` `ACCOUNT_QUERY` that echoes your `request_ref` whenever the exchange could read it. Read the `qte_sdk.account` docstring for every field.
 
-The reply also carries `as_of_report_seq`: the newest of your private order reports it already reflects. Each private report (`accepted`, a delayed `reject`, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a `report_seq` on its envelope. The cut is for your account only: an `execution` or `risk_notice` at or below `as_of_report_seq` is already in the reply's cash, positions and summary, so do not add its effect again, while `accepted`, `reject`, `order_cancelled` and `order_state` still apply to your view of your resting orders whatever their `report_seq`. `as_of_report_seq` is absent when your team has had no private report this term, and then every report applies. Every event this SDK delivers for such a report carries it as `event.report_seq` (None on other messages), so you can compare it with `as_of_report_seq` yourself: skip the effect of an `execution` or `risk_notice` whose `report_seq` is at or below it. The SDK does not yet apply this cut for you.
+The reply also carries `as_of_report_seq`: the newest of your private order reports it already reflects. Each private report (`accepted`, a delayed `reject`, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a report number, `event.report_seq` (None on other messages). The cut is for your account only: an `execution` or `risk_notice` at or below `as_of_report_seq` is already in the reply's cash, positions and summary, while `accepted`, `reject`, `order_cancelled` and `order_state` still apply to your view of your resting orders whatever their `report_seq`. `as_of_report_seq` is absent when your team has had no private report this term, and then every report applies.
+
+Where a fill arrives in the stream does not tell you whether the reply counts it; only its number does. A fill the reply already counts can arrive after the reply, and would be counted twice if you added it to the reply's positions. A fill the reply does not count can arrive between your query and the reply, and would be lost when you replace your positions with the reply's. `qte_sdk.account.AccountReports` applies the cut for you and handles both. Send the query with it, pass it every event, and apply what it returns, in order:
+
+```python
+from qte_sdk.account import AccountReports, is_account_state
+from qte_sdk.contract.v1.common_pb2 import BUY
+
+account = AccountReports()
+positions: dict[str, int] = {}
+await account.query(session)
+async for event in session:
+    for item in account.update(event):  # every event, before you act on it
+        if is_account_state(item):
+            positions = {p.instrument: p.quantity for p in item.message.positions}
+        elif item.type == "execution":
+            fill = item.message
+            change = fill.fill_size if fill.side == BUY else -fill.fill_size
+            positions[fill.instrument] = positions.get(fill.instrument, 0) + change
+    # a real program handles market data and order events here too
+```
+
+For the reply to your query, `update` returns the reply itself, then the reports that arrived while you waited and that the reply does not include: replace your positions with the reply's, then apply those again on top, as above. For an `execution` or `risk_notice`, it returns the event unless the latest reply already includes it. It returns nothing for anything else, so apply `accepted`, `reject`, `order_cancelled` and `order_state` to your resting orders as usual. That includes a reply to a query sent with `send_account_query`, or to an earlier query that a later one replaced: only the latest query sent with `account.query` is waited for, so wait for its answer before you query again, and take a reply as your positions only when `update` returns it. If you keep the reply yourself, `qte_sdk.account.covers(state, event)` says whether it already includes an event.
+
+Report numbers start again each term, so a reply from the term before would take a new term's first reports for ones it already includes: before you trade in a new term, query again and wait for the reply, or start a new `AccountReports`. An exchange that does not number its reports sends no `as_of_report_seq`, and then every report applies; a reply can then be ordered against your fills only by when they arrive, which that exchange does not promise, so a fill close to a reply can be counted twice or missed.
 
 The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
 
