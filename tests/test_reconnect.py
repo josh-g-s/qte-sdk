@@ -864,7 +864,7 @@ async def test_closing_marks_the_view_incomplete_at_once():
     view = RestingOrders()
     exchange = Exchange(session(book(2)))
     async with serve_local(exchange) as url:
-        rs = ReconnectingSession(url, synthetic_token(), resting=view)
+        rs = ReconnectingSession(url, synthetic_token(), resting=view, resume=False)
         events = rs.events()
         assert isinstance(await anext(events), Connected)
         assert not view.incomplete

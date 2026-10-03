@@ -5,7 +5,7 @@ import json
 
 import pytest
 from fake_exchange import frame, serve_local
-from test_calendar import CALENDAR, calendar_frame
+from test_calendar import CALENDAR, CALENDAR_PAYLOAD, calendar_frame
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
 from websockets.asyncio.server import ServerConnection
@@ -38,6 +38,9 @@ from qte_sdk.session import (
 )
 
 PRICE = 199_970_000
+# A term, as the calendar's term_start and term_end name it.
+TERM = ("2027-06-14", "2027-06-18")
+NEXT_TERM = ("2027-09-06", "2027-12-10")
 
 # Report frames. None of them carries a seq, so the scripts need not number their frames.
 
@@ -115,7 +118,8 @@ def resume_reject(detail: str = "a second resume") -> str:
 
 
 class Scripted:
-    """Answers auth with an ack and sends `before_resume`; then, if `answer` is given,
+    """Answers auth with an ack, then the calendar of `term` (start, end) if given, and
+    sends `before_resume`; then, if `answer` is given,
     receives `resume` and sends `answer`; then sends `after` and holds the connection
     open. Each connection runs the next script in `scripts`, the last one repeating."""
 
@@ -129,6 +133,12 @@ class Scripted:
         self.connections += 1
         self.received.append(json.loads(await ws.recv()))
         await ws.send(ack())
+        if script.get("term") is not None:
+            # The calendar the exchange sends straight after the ack, naming the term.
+            start, end = script["term"]
+            await ws.send(
+                calendar_frame(None, {**CALENDAR_PAYLOAD, "term_start": start, "term_end": end})
+            )
         for f in script.get("before_resume", ()):
             await ws.send(f)
         if script.get("answer") is not None:
@@ -226,7 +236,8 @@ def test_the_liveness_timeout_is_a_documented_choice_and_can_be_turned_off():
 
 async def test_a_dead_link_reconnects_and_resumes():
     exchange = Scripted(
-        {"answer": [EMPTY], "after": [heartbeat(), order_state(1)]}, {"answer": [EMPTY]}
+        {"term": TERM, "answer": [EMPTY], "after": [heartbeat(), order_state(1)]},
+        {"term": TERM, "answer": [EMPTY]},
     )
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep, liveness_timeout=0.1)
@@ -234,18 +245,18 @@ async def test_a_dead_link_reconnects_and_resumes():
             events = await take(rs, 9)
     assert kinds(events) == [
         "Connected",
+        "calendar:None",
         "resume_ack:None",
         "ResumeComplete",
         "order_state:1",
         "Disconnected",
         "Retrying",
         "Connected",
-        "resume_ack:None",
-        "ResumeComplete",
+        "calendar:None",
     ]
-    assert isinstance(events[4], Disconnected)
-    assert isinstance(events[4].error, LivenessTimeout)
-    assert exchange.received[3] == resume(1)
+    assert isinstance(events[5], Disconnected)
+    assert isinstance(events[5].error, LivenessTimeout)
+    assert exchange.received[3] == resume(1)  # the same term, so the cursor is sent
 
 
 # Report numbers on one session
@@ -490,12 +501,16 @@ async def test_a_reconnect_replays_what_was_missed_and_completes_the_view_again(
     exchange = Scripted(
         # The first session starts from a snapshot of one order, then sees report 3.
         {
+            "term": TERM,
             "answer": [resume_ack(False, 2, 1), snapshot("AAPL", "BUY", PRICE, 100)],
             "after": [order_state(3, size=100)],
             "drop": True,
         },
         # Reports 4 and 5 were sent while disconnected; 3 is sent again and dropped.
-        {"answer": [resume_ack(True, 5), order_state(3), execution(4, 40), cancelled(5)]},
+        {
+            "term": TERM,
+            "answer": [resume_ack(True, 5), order_state(3), execution(4, 40), cancelled(5)],
+        },
     )
     view = RestingOrders()
     async with serve_local(exchange) as url:
@@ -513,6 +528,7 @@ async def test_a_reconnect_replays_what_was_missed_and_completes_the_view_again(
     assert [e for e in exchange.received if e["type"] == "resume"] == [resume(0), resume(3)]
     assert kinds(events) == [
         "Connected",
+        "calendar:None",
         "resume_ack:None",
         "order_snapshot:None",
         "ResumeComplete",
@@ -520,13 +536,14 @@ async def test_a_reconnect_replays_what_was_missed_and_completes_the_view_again(
         "Disconnected",
         "Retrying",
         "Connected",
+        "calendar:None",
         "resume_ack:None",
         "execution:4",
         "order_cancelled:5",
         "ResumeComplete",
     ]
-    assert isinstance(events[7], Connected) and events[7].resume is not None
-    assert events[7].resume.replayed
+    assert isinstance(events[8], Connected) and events[8].resume is not None
+    assert events[8].resume.replayed
     assert at_disconnect == (True, 1)
     # The replay brought the view up to date: the order filled in part, then cancelled.
     assert at_end == (False, 0)
@@ -893,3 +910,83 @@ async def test_a_record_the_exchange_cannot_map_leaves_no_gap():
                 if len(seen) == 2:
                     break
     assert seen == [("order_state:7", False), ("execution:8", False)]
+
+
+# A new term, and the first Connected
+
+
+async def test_a_reconnect_in_a_new_term_asks_for_a_snapshot_and_drops_nothing():
+    exchange = Scripted(
+        # The old term: the cursor reaches 3.
+        {"term": TERM, "answer": [EMPTY], "after": [order_state(3)], "drop": True},
+        # The new term restarted the numbering. Its execution 3 arrives before the ack;
+        # the team's head is 4, and live report 5 follows the snapshot.
+        {
+            "term": NEXT_TERM,
+            "before_resume": [execution(3, 60)],
+            "answer": [resume_ack(False, 4, 1), snapshot("AAPL", "BUY", PRICE, 60)],
+            "after": [execution(5, 20)],
+        },
+    )
+    view = RestingOrders()
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resting=view, sleep=Clock().sleep)
+        async with rs:
+            events = []
+            async for event in rs:
+                events.append(event)
+                if isinstance(event, Received) and event.report_seq == 5:
+                    break
+            assert rs.last_report_seq == 5
+    # The old-term cursor 3 is not sent into the new term, where it would count the new
+    # term's reports 1 to 3 as already delivered.
+    assert [e for e in exchange.received if e["type"] == "resume"] == [resume(0), resume(0)]
+    # The new-term execution 3 is covered by the snapshot (as_of 4), as the contract says,
+    # and report 5, above as_of, is delivered and applied on top of the snapshot.
+    assert kinds(events)[-5:] == [
+        "calendar:None",
+        "resume_ack:None",
+        "order_snapshot:None",
+        "ResumeComplete",
+        "execution:5",
+    ]
+    entry = view.get("AAPL", BUY, PRICE)
+    assert entry is not None and entry.remaining_size == 20
+
+
+async def test_a_failed_attempt_keeps_the_term_the_cursor_belongs_to():
+    exchange = Scripted(
+        {"term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        # Acknowledged in another term, then dropped before the resume is answered.
+        {"term": NEXT_TERM, "answer": [], "drop": True},
+        {"term": TERM, "answer": [resume_ack(True, 1)]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs:
+            async for event in rs:
+                if isinstance(event, ResumeComplete) and event.replayed:
+                    break
+    resumes = [e for e in exchange.received if e["type"] == "resume"]
+    # The failed attempt in the other term asked from 0; the next one, back in the
+    # cursor's term, sends the cursor again.
+    assert resumes == [resume(0), resume(0), resume(1)]
+
+
+async def test_the_first_connected_shows_the_view_incomplete_until_the_snapshot_lands():
+    exchange = Scripted({"answer": [resume_ack(False, 9, 1), snapshot("AAPL", "BUY", PRICE, 10)]})
+    view = RestingOrders()
+    seen: list[tuple[str, bool, int]] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resting=view, sleep=Clock().sleep)
+        async with rs:
+            async for event in rs:
+                seen.append((kinds([event])[0], view.incomplete, len(view)))
+                if isinstance(event, ResumeComplete):
+                    break
+    assert seen == [
+        ("Connected", True, 0),
+        ("resume_ack:None", True, 0),
+        ("order_snapshot:None", True, 0),
+        ("ResumeComplete", False, 1),
+    ]

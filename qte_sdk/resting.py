@@ -207,6 +207,13 @@ class RestingOrders:
         finally:
             self.mark_incomplete()
 
+    def _await_resume(self) -> None:
+        """Mark the view incomplete until the coming resume's `ResumeComplete`: a session
+        is up, but the replay or snapshot it was answered with has not arrived yet."""
+        if not self._incomplete:
+            self._incomplete = True
+            self._replay_restores = True
+
     def _on_disconnected(self) -> None:
         # A snapshot cut short is dropped; the view it would have replaced is untouched.
         self._snapshot = None

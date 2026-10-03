@@ -21,7 +21,14 @@ reports are the `accepted`, `reject` (one sent once the order delay is over), `e
 `order_cancelled`, `order_state` and `risk_notice` messages that carry a `report_seq`. The
 exchange either replays the ones you missed, exactly as first sent, or, when it no longer
 holds them all, sends a snapshot of the team's resting orders instead. The first session
-asks from 0, so it always gets the snapshot, which loads the resting view.
+asks from 0, so it always gets the snapshot, which loads the resting view. The resting
+view reads incomplete from each `Connected` until that resume's `ResumeComplete`.
+
+Report numbers start again each term, so the last report number is only sent in the term
+it was counted in. The term is the one the calendar names (`term_start` and `term_end`).
+The exchange sends the calendar straight after `session_ack`, so before resuming, the
+session waits briefly for it. If the term has changed, or either term is unknown, the
+session asks from 0 instead and gets a snapshot.
 
 Market data sent while the connection was down is not recovered: the new session
 subscribes again and receives the books from then on. Nor are messages that carry no
@@ -120,6 +127,7 @@ from qte_sdk.contract.v1.session_pb2 import Calendar, ResumeAck, Subscribe, Unsu
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     DEFAULT_ACK_TIMEOUT,
+    DEFAULT_CALENDAR_TIMEOUT,
     AuthNotSent,
     ResumeNotAcknowledged,
     ResumeRejected,
@@ -318,6 +326,8 @@ class ReconnectingSession:
         self._resume = resume
         # The report cursor, carried from each session to the next.
         self._reports = _Reports()
+        # The term the cursor was counted in, as the calendar names it, or None if unknown.
+        self._reports_term: tuple[str, str] | None = None
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "connected" if self._up else "not connected"
@@ -441,7 +451,13 @@ class ReconnectingSession:
                 assert session is not None
                 self._info = session.info
                 self._calendar = session.calendar
+                if self._calendar is not None:
+                    self._reports_term = _term_of(self._calendar)
                 self._up = True
+                if resumed is not None and self.resting is not None:
+                    # The replay or snapshot is still to come: until its ResumeComplete,
+                    # the view does not yet reflect it.
+                    self.resting._await_resume()
                 yield Connected(session.info, self.instruments, reconnected, resumed)
                 reconnected = True
 
@@ -453,6 +469,8 @@ class ReconnectingSession:
                         if isinstance(event, Received) and event.type == "calendar":
                             assert isinstance(event.message, Calendar)
                             self._calendar = event.message
+                            # The term of the reports this session counts.
+                            self._reports_term = _term_of(event.message)
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event
@@ -541,6 +559,7 @@ class ReconnectingSession:
         resumed: ResumeAck | None = None
         # Events a failed attempt read ahead are never delivered, so the cursor goes back.
         saved = self._reports.saved()
+        saved_term = self._reports_term
         try:
             opened = await self._unless_closed(
                 open_session(
@@ -561,6 +580,20 @@ class ReconnectingSession:
             self._reports.restore(saved)
             session._reports = self._reports
             if self._resume and not self._closed:
+                if self._reports.cursor:
+                    # report_seq starts again each term, so a cursor is only worth sending
+                    # in the term it was counted in. The calendar, which the exchange sends
+                    # right after session_ack, names the term; whatever else is read ahead
+                    # while waiting for it is kept for delivery. If either term is unknown,
+                    # or they differ, the session asks for a snapshot instead.
+                    calendar = await session.wait_for_calendar(
+                        timeout=_calendar_wait(self._ack_timeout)
+                    )
+                    term = _term_of(calendar)
+                    if term is None or term != self._reports_term:
+                        self._reports.restore((None, frozenset()))
+                    self._reports_term = term
+                resumed = None
                 try:
                     resumed = await session.resume(
                         self._reports.cursor or 0, timeout=self._ack_timeout
@@ -581,6 +614,7 @@ class ReconnectingSession:
             self._session = None
             session = None
             self._reports.restore(saved)
+            self._reports_term = saved_term
         return session, failure, acknowledged, resumed
 
     async def _unless_closed(self, awaitable: Awaitable[Any]) -> Any:
@@ -624,6 +658,19 @@ class ReconnectingSession:
 
 
 _CLOSED = object()
+
+
+def _calendar_wait(ack_timeout: float | None) -> float:
+    if ack_timeout is None:
+        return DEFAULT_CALENDAR_TIMEOUT
+    return min(ack_timeout, DEFAULT_CALENDAR_TIMEOUT)
+
+
+def _term_of(calendar: Calendar | None) -> tuple[str, str] | None:
+    """The term a calendar describes, as its configured start and end dates."""
+    if calendar is None or not (calendar.term_start and calendar.term_end):
+        return None
+    return calendar.term_start, calendar.term_end
 
 
 async def _close_result(task: "asyncio.Future[Any]") -> None:
