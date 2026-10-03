@@ -32,15 +32,6 @@ behind for the next. Steps 3 to 14 need the instrument's session to be open; if 
 not, they are skipped. Step 16 runs only after step 14 has closed the session in the same
 run.
 
-Step 16 also checks the official close the published step expects of the recorded market
-session in its precondition: one valid quote of QTEA, a bid of 99.99 and an ask of 100.01
-from the open, never replaced, and no quote of QTEB or QTEC. QTEA's `official_close` must
-then have the value 100000000, and QTEB and QTEC must get none. That part runs only when
-QTE_CONFORMANCE_INSTRUMENT is QTEA, the one instrument that recorded session quotes, and the
-exchange under test must then be fed that recorded session. With any other instrument, or
-if the exchange rejects QTEB or QTEC as unknown, step 16 makes its other checks and is
-then skipped with the reason.
-
 Every timestamp on the wire is a count of milliseconds since the Unix epoch, UTC, as the
 vendored steps state. The steps only compare timestamps with each other, subtract one from
 another, or add to a `receipt_time` the order delay learnt as `release_time` minus
@@ -65,6 +56,14 @@ declared by setting a variable:
     QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>
         step 14: the exchange runs a single configured session and closes it within this
         many seconds of the step resting its order.
+    QTE_CONFORMANCE_RECORDED_SESSION=1
+        step 16: the exchange is fed the recorded market session the published step names,
+        holding one valid quote of QTEA, a bid of 99.99 and an ask of 100.01 at the session
+        open, never replaced, and no quote of QTEB or QTEC. QTE_CONFORMANCE_INSTRUMENT must
+        then be QTEA, or step 16 fails. Step 16 then checks that QTEA's `official_close`
+        has the value 100000000 and that QTEB and QTEC get none. Without this variable it
+        makes its other checks and then skips those. If the exchange rejects QTEB or QTEC
+        as unknown, it makes every other check, QTEA's value included, and then skips.
 
 The instrument must be an equity whose buy collar is mark x 1.05, the figure steps 10
 and 11 name; an option's wider guard does not fit them.
@@ -1206,15 +1205,22 @@ def unknown_among(reject: Reject, names: tuple[str, ...]) -> bool:
 
 
 async def test_step_16_subscribe_outside_a_session(client: Client):
+    c = client
+    instrument = c.config.instrument
+    # The step's expected value needs the recorded session it names. That session quotes
+    # only QTEA, so QTEA must be the instrument, and the subscribe then also names the two
+    # it never quotes, which must get no official close.
+    recorded = os.environ.get("QTE_CONFORMANCE_RECORDED_SESSION") == "1"
+    if recorded and instrument != STEP_16_QUOTED:
+        pytest.fail(
+            "QTE_CONFORMANCE_RECORDED_SESSION=1 needs "
+            f"QTE_CONFORMANCE_INSTRUMENT={STEP_16_QUOTED}, the one instrument that recorded "
+            f"session quotes, not {instrument}"
+        )
     if not _CLOSED_BY_STEP_14:
         pytest.skip("precondition: step 14 closed the instrument's session in this run")
     closed = _CLOSED_BY_STEP_14[0]
-    c = client
-    instrument = c.config.instrument
-    # The step's expected value is for the one instrument its recorded session quotes, and
-    # the subscribe then also names the two it never quotes, which must get no official close.
-    expected_value = instrument == STEP_16_QUOTED
-    unquoted = STEP_16_UNQUOTED if expected_value else ()
+    unquoted = STEP_16_UNQUOTED if recorded else ()
     unknown: list[str] = []
     start = c.mark()
     await subscribe(c.session, [instrument, *unquoted])
@@ -1262,17 +1268,18 @@ async def test_step_16_subscribe_outside_a_session(client: Client):
     assert len([m for m in after if isinstance(m, SessionState)]) == 1
     assert not [m for m in after if isinstance(m, Book | Trades | Mark)]
     closes = [m for m in after if isinstance(m, OfficialClose)]
-    if expected_value:
+    if recorded:
         assert not [m for m in closes if m.instrument in STEP_16_UNQUOTED], (
             "an official_close for QTEB or QTEC, which have no valid mark in the close window"
         )
     assert [m.instrument for m in closes] == [instrument], (
         "not exactly one official_close, for the instrument"
     )
-    if not expected_value:
+    if not recorded:
         pytest.skip(
-            f"precondition: the instrument is {STEP_16_QUOTED}, the one instrument the "
-            "recorded session of step 16 quotes; the official close value was not checked"
+            "precondition: the exchange is fed the recorded session step 16 names "
+            "(QTE_CONFORMANCE_RECORDED_SESSION=1); QTEA's official close value and that QTEB "
+            "and QTEC get none were not checked"
         )
     assert official.value == STEP_16_OFFICIAL_CLOSE, (
         f"{STEP_16_QUOTED}'s official close is {official.value}, not {STEP_16_OFFICIAL_CLOSE}"
