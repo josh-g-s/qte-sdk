@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -150,7 +151,8 @@ def test_enter_keeps_the_address_already_in_dotenv():
 
     token = synthetic_token()
     assert run(["set"], ask=ask, ask_secret=answers(token)) == 0
-    assert "ws://kept.example.test/ws" in prompts[0]
+    assert "Enter keeps the address already set" in prompts[0]
+    assert "kept.example.test" not in prompts[0]
     assert dotenv().read_text() == f"QTE_URL=ws://kept.example.test/ws\nQTE_TOKEN={token}\n"
 
 
@@ -215,6 +217,55 @@ def test_set_with_redirected_input_refuses_and_shows_nothing(tmp_path):
         assert_token_absent(token, result.stdout + result.stderr)
     assert not dotenv().exists()
     assert not (tmp_path / "home").exists()
+
+
+def test_a_token_that_cannot_be_read_without_echo_is_not_read(capsys):
+    import getpass
+
+    read: list[str] = []
+
+    def falls_back(prompt: str) -> str:
+        warnings.warn("Can not control echo.", getpass.GetPassWarning, stacklevel=2)
+        read.append("read with echo")
+        return synthetic_token()
+
+    assert run(["set"], ask=answers(URL), ask_secret=falls_back) == 1
+    assert read == []
+    assert not dotenv().exists()
+    assert "without showing it" in capsys.readouterr().err
+
+
+def test_a_terminal_failure_after_typing_does_not_show_the_token(capsys):
+    token = synthetic_token()
+
+    def fails_after_reading(prompt: str) -> str:
+        typed = token  # noqa: F841  (what getpass holds when restoring the terminal fails)
+        raise OSError("could not restore the terminal")
+
+    assert run(["set"], ask=answers(URL), ask_secret=fails_after_reading) == 1
+    out, err = capsys.readouterr()
+    assert_token_absent(token, out + err)
+    assert not dotenv().exists()
+
+
+def test_an_interrupt_while_writing_leaves_no_copy_of_the_token(monkeypatch, capsys):
+    def interrupted(fd):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(helper.os, "fsync", interrupted)
+    assert run(["set"], ask=answers(URL), ask_secret=answers(synthetic_token())) == 130
+    assert list(Path.cwd().iterdir()) == []
+
+
+def test_a_dotenv_that_would_grow_too_large_is_left_alone(capsys):
+    from qte_sdk.dotenv import MAX_DOTENV_SIZE
+
+    original = "#" * (MAX_DOTENV_SIZE - 10) + "\n"
+    dotenv().write_text(original)
+    assert run(["set"], ask=answers(URL), ask_secret=answers(synthetic_token())) == 1
+    assert dotenv().read_text() == original
+    assert "larger" in capsys.readouterr().err
+    no_leftovers()
 
 
 def test_an_interrupt_writes_nothing(capsys):
@@ -309,6 +360,18 @@ def test_an_ignored_dotenv_is_not_asked_about():
 
 
 @needs_git
+@needs_posix
+def test_a_symlinked_gitignore_is_not_followed(tmp_path, capsys):
+    git("init", "-q", ".")
+    readme = Path("README.md")
+    readme.write_text("hello\n")
+    Path(".gitignore").symlink_to(readme)
+    assert run(["set"], ask=answers(URL, "y"), ask_secret=answers(synthetic_token())) == 0
+    assert readme.read_text() == "hello\n"
+    assert "by hand" in capsys.readouterr().out
+
+
+@needs_git
 def test_a_tracked_dotenv_is_explained(capsys):
     git("init", "-q", ".")
     dotenv().write_text("OTHER=1\n")
@@ -384,7 +447,8 @@ def test_check_reports_dotenv_without_the_token(capsys):
     assert run(["check"]) == 0
     out, err = capsys.readouterr()
     assert f"token:   {dotenv()}" in out
-    assert f"address: {URL}, from {dotenv()}" in out
+    assert f"address: set, from {dotenv()}" in out
+    assert URL not in out
     assert_token_absent(token, out + err)
 
 
@@ -409,6 +473,16 @@ def test_check_reports_what_is_missing(capsys):
     assert run(["check"], interactive=False) == 1
     out = capsys.readouterr().out
     assert "token:   none usable" in out and "address: none" in out
+
+
+def test_check_never_shows_the_address_in_case_it_is_the_token(monkeypatch, capsys):
+    token = synthetic_token()
+    monkeypatch.setenv(URL_ENV_VAR, token)
+    monkeypatch.setenv(TOKEN_ENV_VAR, synthetic_token())
+    assert run(["check"]) == 1
+    out, err = capsys.readouterr()
+    assert "does not start with ws://" in out
+    assert_token_absent(token, out + err)
 
 
 @needs_posix

@@ -46,7 +46,7 @@ __all__ = ["DOTENV_NAME", "DotenvNotIgnored", "parse_assignment"]
 DOTENV_NAME = ".env"
 _GIT_TIMEOUT = 5.0
 _INLINE_COMMENT = re.compile(r"(?:^|\s)#")
-_MAX_SIZE = 64 * 1024
+MAX_DOTENV_SIZE = 64 * 1024
 _TOKEN_NAME = "QTE_TOKEN"
 # What git needs to run and find your git configuration: nothing else is passed to it.
 _GIT_ENV = frozenset(
@@ -146,13 +146,13 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             if not stat.S_ISREG(mode):
                 problem = "is not a regular file"
             else:
-                data = file.read(_MAX_SIZE + 1)
+                data = file.read(MAX_DOTENV_SIZE + 1)
     except OSError as error:
         problem = f"cannot be read ({error.strerror or type(error).__name__})"
     if problem is not None:
         return None, problem
-    if len(data) > _MAX_SIZE:
-        return None, f"is larger than {_MAX_SIZE // 1024} KiB"
+    if len(data) > MAX_DOTENV_SIZE:
+        return None, f"is larger than {MAX_DOTENV_SIZE // 1024} KiB"
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:

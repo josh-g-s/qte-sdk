@@ -35,6 +35,7 @@ from pathlib import Path
 
 from qte_sdk.dotenv import (
     DOTENV_NAME,
+    MAX_DOTENV_SIZE,
     DotenvNotIgnored,
     dotenv_path,
     is_ignored_by_git,
@@ -91,7 +92,7 @@ def main(
     except _Refused as refusal:
         reason = str(refusal)
     except (KeyboardInterrupt, EOFError):
-        print("\nstopped; nothing was changed", file=sys.stderr)
+        print(f"\nstopped; {DOTENV_NAME} and any token file were not changed", file=sys.stderr)
         return 130
     # Reported outside the handler, so nothing is chained to it.
     print(f"error: {reason}", file=sys.stderr)
@@ -147,6 +148,9 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     secret = _ask_token(ask_secret)
     _offer_gitignore(path, ask)
     text = _merge(lines, {URL_ENV_VAR: address, TOKEN_ENV_VAR: secret.value})
+    if len(text.encode("utf-8")) > MAX_DOTENV_SIZE:
+        del text, secret
+        raise _Refused(f"{path} would be larger than the SDK reads; make it smaller first")
     _write_private(path, text)
     del text, secret
     print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}, readable only by you.")
@@ -191,7 +195,7 @@ def _ask_address(url: str | None, ask: Prompt) -> str:
         warnings.simplefilter("ignore", DotenvNotIgnored)  # `set` offers its own fix
         current = os.environ.get(URL_ENV_VAR) or read_value(URL_ENV_VAR)[0]
     if url is None:
-        hint = f" [Enter keeps {current}]" if current else ""
+        hint = " [Enter keeps the address already set]" if current else ""
         url = ask(f"Exchange address (from the course team){hint}: ").strip()
         if not url and current:
             url = current
@@ -206,7 +210,7 @@ def _ask_address(url: str | None, ask: Prompt) -> str:
 
 
 def _ask_token(ask_secret: Prompt) -> _Secret:
-    secret = _Secret(ask_secret("Token (paste it; nothing is shown): ").strip())
+    secret = _read_secret(ask_secret)
     problem = None
     if not secret.value:
         problem = "no token was entered"
@@ -219,6 +223,28 @@ def _ask_token(ask_secret: Prompt) -> _Secret:
         del secret
         raise _Refused(problem)
     return secret
+
+
+def _read_secret(ask_secret: Prompt) -> _Secret:
+    """Read the token without echo. If echo cannot be turned off, `getpass` would warn and
+    read it visibly; the warning is made an error so it stops before reading anything. Any
+    other failure is reported without the original error, whose frames may hold what was
+    typed."""
+    failed = False
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            return _Secret(ask_secret("Token (paste it; nothing is shown): ").strip())
+    except (KeyboardInterrupt, EOFError):
+        raise
+    except Exception:
+        failed = True
+    # Raised outside the handler, so the original error and its traceback are dropped.
+    assert failed
+    raise _Refused(
+        "could not read the token without showing it, so nothing was read; run this "
+        "command in an ordinary terminal window"
+    )
 
 
 def _is_plain(value: str) -> bool:
@@ -240,6 +266,12 @@ def _offer_gitignore(path: Path, ask: Prompt) -> None:
         )
         return
     gitignore = path.parent / ".gitignore"
+    if gitignore.is_symlink() or (gitignore.exists() and not gitignore.is_file()):
+        print(
+            f"Not added: {gitignore} is a symbolic link or not a regular file. Add "
+            f"{path.name} to your .gitignore by hand before you commit anything."
+        )
+        return
     try:
         existing = gitignore.read_bytes() if gitignore.exists() else b""
         with open(gitignore, "ab") as file:
@@ -252,8 +284,8 @@ def _offer_gitignore(path: Path, ask: Prompt) -> None:
         ) from None
     if is_ignored_by_git(path) is False:
         print(
-            f"Added {path.name} to {gitignore}, but git already tracks {path.name}, so it "
-            f"would still be committed. Run `git rm --cached {path.name}` to stop tracking it."
+            f"Added {path.name} to {gitignore}, but git still does not ignore it. If git "
+            f"already tracks it, run `git rm --cached {path.name}` to stop tracking it."
         )
     else:
         print(f"Added {path.name} to {gitignore}.")
@@ -325,21 +357,26 @@ def _write_private(path: Path, text: str) -> None:
             f"could not write in {path.parent} ({error.strerror or type(error).__name__})"
         ) from None
     failure = None
+    replaced = False
     try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(descriptor, 0o600)  # exact, whatever the umask
         with os.fdopen(descriptor, "wb") as file:
+            if hasattr(os, "fchmod"):
+                os.fchmod(file.fileno(), 0o600)  # exact, whatever the umask
             file.write(text.encode("utf-8"))
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary, path)
+        replaced = True
     except OSError as error:
         failure = f"could not write {path} ({error.strerror or type(error).__name__})"
+    finally:
+        # Also on an interrupt: a partial copy of the token is never left behind.
+        if not replaced:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
     if failure is not None:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
         # Raised outside the handler, so no frame that holds the text is chained to it.
         raise _Refused(failure)
 
@@ -367,7 +404,14 @@ def _check() -> int:
         except MissingURL as error:
             problem = str(error)
         if problem is None:
-            print(f"address: {url}, from {_describe(source)}")
+            # The address itself is not shown: a mistake could have put the token there.
+            shape = (
+                ""
+                if url.startswith(("ws://", "wss://"))
+                else ("; it does not start with ws:// or wss://, so check it")
+            )
+            print(f"address: set, from {_describe(source)}{shape}")
+            ok = ok and not shape
         else:
             ok = False
             print(f"address: none. {problem}")
