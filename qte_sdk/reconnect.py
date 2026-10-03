@@ -49,16 +49,20 @@ A report the exchange sends twice, as a replay of one already delivered, is drop
 report number is skipped, a `ReportGap` is delivered (see `Session`).
 
 Waiting for `resume_ack` is bounded by `ack_timeout`, like the wait for `session_ack`; if
-it does not arrive in time the attempt fails and is retried. An exchange that refuses the
-resume raises `ResumeRejected`, which is not retried. Pass `resume=False` to skip it, for
-example against an exchange that does not offer it: then private reports sent while
-disconnected are not recovered either, and the resting view stays incomplete after a
-reconnect.
+it does not arrive in time the attempt fails and is retried. An exchange that does not
+serve `resume` answers it with a `reject`, either naming `RESUME` or, from an exchange that
+does not know the message, naming no request type. The session then goes on without a
+resume, as sessions did before the exchange offered it: `Connected.resume` is None, the
+`reject` is delivered as an event, private reports sent while disconnected are not
+recovered, and the resting view stays incomplete after a reconnect. Each new session asks
+again. Pass `resume=False` not to ask at all.
 
 Each connection presumes its link dead after `liveness_timeout` seconds with no message
 from the exchange (see `qte_sdk.connection.DEFAULT_LIVENESS_TIMEOUT`; pass
-`liveness_timeout` to change it). The exchange sends heartbeats, which the connection
-absorbs, so a quiet market does not trip it. A dead link is a disconnect like any other.
+`liveness_timeout` to change it). The check starts with the first heartbeat on the
+connection, so it never drops a link to an exchange that does not send heartbeats. The
+heartbeats are absorbed, and a quiet market does not trip it. A dead link is a disconnect
+like any other.
 
 A session the exchange acknowledged but that failed before it could be delivered as
 `Connected` (for example because its subscription could not be sent) is reported with a
@@ -80,8 +84,8 @@ response or with HTTP 5xx, 408 or 429, and a session that closed before it was
 acknowledged or before its resume was answered, and a link presumed dead
 (`LivenessTimeout`). Anything else stops the session and is raised from the iteration,
 because trying again would give the same answer: every `SessionRejected` (for example a
-token the exchange does not accept), including `ContractVersionMismatch` and
-`ResumeRejected`; `AuthNotSent`, when the
+token the exchange does not accept), including `ContractVersionMismatch`; `AuthNotSent`,
+when the
 `auth` message itself could not be encoded or sent; a certificate that failed
 verification; a handshake refused with any other status, which usually means a wrong URL,
 or whose negotiation failed; and any error in the SDK or your own code.
@@ -235,7 +239,7 @@ def is_retryable(error: BaseException) -> bool:
     (other than a certificate that failed verification), a handshake answered with a
     malformed response or with HTTP 5xx, 408 or 429, a session that closed before it was
     acknowledged or before its resume was answered, and a link presumed dead. False for
-    everything else, including every `SessionRejected` (`ResumeRejected` among them) and
+    everything else, including every `SessionRejected` and
     `AuthNotSent`.
     """
     if isinstance(error, SessionRejected | AuthNotSent | ssl.SSLCertVerificationError):
@@ -554,7 +558,15 @@ class ReconnectingSession:
             self._reports.restore(saved)
             session._reports = self._reports
             if self._resume and not self._closed:
-                resumed = await session.resume(self._reports.cursor or 0, timeout=self._ack_timeout)
+                try:
+                    resumed = await session.resume(
+                        self._reports.cursor or 0, timeout=self._ack_timeout
+                    )
+                except ResumeRejected:
+                    # An exchange that does not serve resume (yet): the session goes on
+                    # without it, and the reject is delivered as an event. The next session
+                    # asks again.
+                    resumed = None
             if self._instruments and not self._closed:
                 subscription = Subscribe(instruments=list(self._instruments))
                 await session.connection.send("subscribe", subscription)

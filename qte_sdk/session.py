@@ -72,9 +72,12 @@ class ResumeNotAcknowledged(SessionNotAcknowledged):
 
 
 class ResumeRejected(SessionRejected):
-    """The exchange refused a `resume` with a `reject` whose `request_type` is `RESUME`.
+    """The exchange refused a `resume` with a `reject` whose `request_type` is `RESUME`, or
+    with one that names no request type and no `request_ref`, which is how an exchange that
+    does not serve `resume` yet answers it.
 
-    The connection stays open, but no report is replayed and no snapshot is sent.
+    The connection stays open and the session goes on, but no report is replayed and no
+    snapshot is sent.
     """
 
 
@@ -104,12 +107,15 @@ def _report_seq(event: Event) -> int | None:
 
 
 def _rejects_resume(event: Event) -> bool:
-    return (
-        isinstance(event, Received)
-        and isinstance(event.message, Reject)
-        and event.message.HasField("request_type")
-        and event.message.request_type == RESUME
-    )
+    """Whether `event` refuses a `resume`: a `reject` naming RESUME, or, from an exchange
+    that does not know the message, a `reject` naming no request type and no request_ref,
+    and that is not one of the team's order reports."""
+    if not isinstance(event, Received) or not isinstance(event.message, Reject):
+        return False
+    message = event.message
+    if message.HasField("request_type"):
+        return message.request_type == RESUME
+    return event.report_seq is None and not message.HasField("request_ref")
 
 
 class _Resume:
@@ -140,6 +146,7 @@ class _Reports:
         # What answered the latest resume: a `resume_ack`, a `reject` of it, or a
         # `resume_ack` that could not be decoded.
         self.answer: Event | None = None
+        self.before_resume: tuple[int | None, frozenset[int]] = (None, frozenset())
 
     def saved(self) -> tuple[int | None, frozenset[int]]:
         return self.cursor, frozenset(self.above)
@@ -150,6 +157,8 @@ class _Reports:
         self.resume = None
 
     def begin(self, last_report_seq: int) -> None:
+        # Kept so a resume that is never answered leaves the cursor as it found it.
+        self.before_resume = self.saved()
         self.cursor = last_report_seq
         self.above = {n for n in self.above if n > last_report_seq}
         self._advance()
@@ -157,8 +166,16 @@ class _Reports:
         self.answer = None
 
     def abandon(self) -> list[Event]:
-        """End the resume in progress without completing it, releasing what it held."""
-        return self._finish(None) if self.resume is not None else []
+        """End a resume that was never answered, releasing what it held. The cursor goes
+        back to where it was before the resume, so nothing is counted that was not read."""
+        if self.resume is None:
+            return []
+        self._unbegin()
+        return self._finish(None)
+
+    def _unbegin(self) -> None:
+        self.cursor, above = self.before_resume
+        self.above = set(above)
 
     def route(self, event: Event) -> list[Event]:
         """The events to deliver, in order, now that `event` has arrived."""
@@ -178,6 +195,7 @@ class _Reports:
                 isinstance(event, DecodeFailed) and event.type == "resume_ack"
             ):
                 self.answer = event
+                self._unbegin()
                 return [event, *self._finish(None)]
         elif isinstance(event, SeqGap) or (isinstance(event, DecodeFailed) and event.type is None):
             # A message was lost on the connection, or arrived unreadable, perhaps one the
@@ -222,9 +240,9 @@ class _Reports:
 
     def _complete(self, ack: ResumeAck) -> list[Event]:
         if not ack.replayed:
-            # The snapshot describes the team's orders as of this report; the cursor never
-            # moves back.
-            self.cursor = max(self.cursor or 0, ack.as_of_report_seq)
+            # The snapshot describes the team's orders as of this report, and sets the
+            # cursor to exactly it, lower if report numbers restarted with a new term.
+            self.cursor = ack.as_of_report_seq
             self.above = {n for n in self.above if n > self.cursor}
             self._advance()
         done = ResumeComplete(ack.replayed, ack.as_of_report_seq, ack.snapshot_count)

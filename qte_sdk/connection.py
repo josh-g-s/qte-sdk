@@ -12,10 +12,12 @@ ends when the server closes the connection normally and raises
 Heartbeats: the exchange sends a `heartbeat` message at a regular interval, at any hour, so
 that a live link is never silent for long. A connection absorbs them: they count for
 sequence tracking and for liveness, and are never delivered as events. The client sends
-nothing in return. If nothing at all arrives for `liveness_timeout` seconds, the link is
-presumed dead: the connection is dropped and iteration raises `LivenessTimeout`. The
-default, `DEFAULT_LIVENESS_TIMEOUT`, is this SDK's choice, not a value the exchange sends;
-see its description.
+nothing in return. Once the first heartbeat has arrived, if nothing at all arrives for
+`liveness_timeout` seconds, the link is presumed dead: the connection is dropped and
+iteration raises `LivenessTimeout`. Until then the check is off, so a connection to an
+exchange that does not send heartbeats is never dropped for being quiet. The default,
+`DEFAULT_LIVENESS_TIMEOUT`, is this SDK's choice, not a value the exchange sends; see its
+description.
 
 Report numbers: each of the team's private order reports that the exchange can replay
 carries a `report_seq` on its envelope, which is the event's `report_seq` here (None on
@@ -56,7 +58,8 @@ dead. This is a choice the SDK makes, not a value the exchange sends: it equals 
 after which the exchange's documentation currently says a client should give up, which is
 several of the exchange's heartbeat intervals, so a healthy link never stays quiet this
 long. Pass `liveness_timeout` to `Connection` (or through `open_session` and
-`ReconnectingSession`) to choose another, or None to turn the check off."""
+`ReconnectingSession`) to choose another, or None to turn the check off. The check
+starts with the first heartbeat on a connection."""
 
 
 @dataclass(frozen=True)
@@ -364,6 +367,8 @@ class Connection:
         self.url = url
         self.contract_version = contract_version
         self.liveness_timeout = liveness_timeout
+        # The liveness check starts once the exchange has shown it sends heartbeats.
+        self._heartbeats = False
         # Any logger the caller passes is wrapped too, so no route logs the token.
         logger = connect_options.pop("logger", None) or logging.getLogger("websockets.client")
         if isinstance(logger, str):
@@ -473,9 +478,9 @@ class Connection:
 
     async def _receive(self, ws: ClientConnection) -> str | bytes:
         """The next frame, or `LivenessTimeout` once nothing has arrived for
-        `liveness_timeout` seconds. Any frame restarts the clock, a heartbeat or one that
-        cannot be decoded included."""
-        if self.liveness_timeout is None:
+        `liveness_timeout` seconds, after the first heartbeat. Any frame restarts the
+        clock, a heartbeat or one that cannot be decoded included."""
+        if self.liveness_timeout is None or not self._heartbeats:
             return await ws.recv()
         deadline = asyncio.timeout(self.liveness_timeout)
         try:
@@ -520,6 +525,7 @@ class Connection:
 
         if env.type == "heartbeat":
             # Absorbed: it has counted for sequence tracking, and for liveness on arrival.
+            self._heartbeats = True
             return
         report_seq = env.report_seq if env.HasField("report_seq") else None
 

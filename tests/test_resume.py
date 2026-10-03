@@ -2,12 +2,11 @@
 
 import asyncio
 import json
-import traceback
 
 import pytest
 from fake_exchange import frame, serve_local
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
-from test_session import ack, assert_token_absent, session_reject, synthetic_token
+from test_session import ack, session_reject, synthetic_token
 from websockets.asyncio.server import ServerConnection
 
 import qte_sdk.connection
@@ -141,25 +140,6 @@ class Scripted:
         await ws.wait_closed()
 
 
-def shown(error: BaseException) -> str:
-    """What a traceback showing local variables could print for `error` and its chain,
-    leaving out this module's own frames, which hold the token by design."""
-    parts = [str(error), repr(error), repr(vars(error))]
-    pending = [traceback.TracebackException.from_exception(error, capture_locals=True)]
-    seen: set[int] = set()
-    while pending:
-        link = pending.pop()
-        if id(link) in seen:
-            continue
-        seen.add(id(link))
-        parts.extend(link.format_exception_only())
-        for summary in link.stack:
-            if summary.filename != __file__:
-                parts.append(f"{summary.filename}:{summary.lineno} {summary.locals}")
-        pending.extend(n for n in (link.__cause__, link.__context__) if n is not None)
-    return "\n".join(parts)
-
-
 async def take(events, count: int) -> list[object]:
     """The next `count` events, within 5 seconds."""
     out: list[object] = []
@@ -199,10 +179,11 @@ async def test_heartbeats_are_absorbed_and_keep_a_quiet_link_alive():
     assert kinds(events) == ["book:None"]
 
 
-async def test_silence_for_the_liveness_timeout_drops_the_link():
+async def test_silence_after_a_heartbeat_drops_the_link():
     async def handler(ws: ServerConnection) -> None:
         await ws.recv()
         await ws.send(ack())
+        await ws.send(heartbeat())
         await ws.wait_closed()
 
     async with serve_local(handler) as url:
@@ -213,6 +194,21 @@ async def test_silence_for_the_liveness_timeout_drops_the_link():
     assert caught.value.timeout == 0.1
     assert is_retryable(caught.value)
     assert caught.value.__cause__ is None and caught.value.__context__ is None
+
+
+async def test_an_exchange_that_sends_no_heartbeats_is_never_dropped_for_being_quiet():
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(ack())
+        await asyncio.sleep(0.3)  # three times the timeout, with no heartbeat
+        await ws.send(book(1))
+        await ws.wait_closed()
+
+    async with serve_local(handler) as url:
+        session = await open_session(url, synthetic_token(), liveness_timeout=0.1)
+        async with session:
+            events = await take(session, 1)
+    assert kinds(events) == ["book:None"]
 
 
 def test_the_liveness_timeout_is_a_documented_choice_and_can_be_turned_off():
@@ -226,7 +222,9 @@ def test_the_liveness_timeout_is_a_documented_choice_and_can_be_turned_off():
 
 
 async def test_a_dead_link_reconnects_and_resumes():
-    exchange = Scripted({"answer": [EMPTY], "after": [order_state(1)]}, {"answer": [EMPTY]})
+    exchange = Scripted(
+        {"answer": [EMPTY], "after": [heartbeat(), order_state(1)]}, {"answer": [EMPTY]}
+    )
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep, liveness_timeout=0.1)
         async with rs:
@@ -431,9 +429,11 @@ async def test_a_rejected_resume_raises_and_releases_what_it_held():
         async with await open_session(url, synthetic_token()) as session:
             with pytest.raises(ResumeRejected) as caught:
                 await session.resume(3)
-            events = await take(session, 3)
+            events = await take(session, 2)
     assert caught.value.reason_name == "MALFORMED_MESSAGE"
-    assert kinds(events) == ["reject:None", "ReportGap", "order_state:5"]
+    # The cursor is back where it was before the resume: no starting point yet.
+    assert kinds(events) == ["reject:None", "order_state:5"]
+    assert session.last_report_seq == 5
 
 
 async def test_an_unanswered_resume_times_out():
@@ -566,19 +566,57 @@ async def test_resuming_can_be_turned_off():
     assert isinstance(events[0], Connected) and events[0].resume is None
 
 
-async def test_a_rejected_resume_is_not_retried_and_never_shows_the_token():
+async def test_a_refused_resume_leaves_the_session_up_without_it():
     token = synthetic_token()
-    exchange = Scripted({"answer": [resume_reject(f"no resume for {token}")]})
+    exchange = Scripted(
+        {"answer": [resume_reject(f"no resume for {token}")], "after": [order_state(4)]}
+    )
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(url, token, sleep=Clock().sleep)
-        with pytest.raises(ResumeRejected) as caught:
-            async with rs:
-                async for _ in rs:
-                    pass
+        async with rs:
+            events = await take(rs, 3)
     assert exchange.connections == 1
     assert exchange.received == [auth(token), resume(0)]
-    assert "<token withheld>" in str(caught.value)
-    assert_token_absent(token, shown(caught.value))
+    assert kinds(events) == ["Connected", "reject:None", "order_state:4"]
+    assert isinstance(events[0], Connected) and events[0].resume is None
+
+
+async def test_an_exchange_that_serves_neither_heartbeats_nor_resume_keeps_working():
+    # How a gateway that predates resume answers it: a plain MALFORMED_MESSAGE reject with
+    # no request_type and no request_ref. It sends no heartbeat and no report_seq.
+    unknown_type = frame(
+        "reject",
+        {"reason_code": "MALFORMED_MESSAGE", "reason_detail": 'unknown message type "resume"'},
+    )
+    plain_report = frame(
+        "order_state",
+        {"instrument": "AAPL", "side": "BUY", "price": str(PRICE), "state": "RESTING"},
+    )
+    exchange = Scripted(
+        {"answer": [unknown_type], "after": [plain_report], "drop": True},
+        {"answer": [unknown_type], "after": [book(1)]},
+    )
+    view = RestingOrders()
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url, synthetic_token(), resting=view, sleep=Clock().sleep, liveness_timeout=0.1
+        )
+        async with rs:
+            events = await take(rs, 8)
+            assert rs.last_report_seq is None
+    assert kinds(events) == [
+        "Connected",
+        "reject:None",
+        "order_state:None",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+        "reject:None",
+        "book:None",
+    ]
+    assert all(e.resume is None for e in events if isinstance(e, Connected))
+    # As before resume existed: the view keeps what it saw and stays incomplete.
+    assert view.incomplete and len(view) == 1
 
 
 async def test_an_unanswered_resume_fails_the_attempt_and_is_retried():
@@ -649,3 +687,22 @@ def test_a_replay_does_not_complete_while_a_gap_below_as_of_is_open():
     ]
     assert [[type(e).__name__ for e in r] for r in replayed] == [["Received"], ["ResumeComplete"]]
     assert reports.cursor == 12
+
+
+def test_a_snapshot_sets_the_cursor_exactly_even_lower_at_a_new_term():
+    reports = _Reports()
+    reports.begin(1000)  # a cursor from the last term
+    for n in (4, 5):  # live reports of the new term, held until the snapshot completes
+        reports.route(Received("order_state", OrderState(), None, report_seq=n))
+    ack_event = Received(
+        "resume_ack", ResumeAck(replayed=False, as_of_report_seq=3, snapshot_count=0), None
+    )
+    routed = reports.route(ack_event)
+    assert [type(e).__name__ for e in routed] == [
+        "Received",
+        "ResumeComplete",
+        "Received",
+        "Received",
+    ]
+    assert [getattr(e, "report_seq", None) for e in routed[2:]] == [4, 5]
+    assert reports.cursor == 5
