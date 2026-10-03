@@ -20,6 +20,7 @@ import qte_sdk.session
 from qte_sdk.connection import (
     DEFAULT_LIVENESS_TIMEOUT,
     HEARTBEAT_TIMEOUT_CLOSE_CODE,
+    TERM_CHANGE_CLOSE_CODE,
     Connection,
     DecodeFailed,
     LivenessTimeout,
@@ -31,13 +32,14 @@ from qte_sdk.connection import (
 )
 from qte_sdk.contract.v1.common_pb2 import BUY, RESTING, SELL, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import OrderState, Reject
-from qte_sdk.contract.v1.session_pb2 import OrderSnapshot, ResumeAck
+from qte_sdk.contract.v1.session_pb2 import Calendar, OrderSnapshot, ResumeAck
 from qte_sdk.market_data import as_market_data
 from qte_sdk.reconnect import (
     Backoff,
     Connected,
     Disconnected,
     ReconnectingSession,
+    Retrying,
     is_retryable,
 )
 from qte_sdk.resting import RestingOrders
@@ -133,7 +135,9 @@ class Scripted:
     """Answers auth with an ack, then the calendar of `term` (start, end) if given, and
     sends `before_resume`; then, if `answer` is given,
     receives `resume` and sends `answer`; then sends `after` and holds the connection
-    open. Each connection runs the next script in `scripts`, the last one repeating."""
+    open, unless `drop` is set, when it drops the connection, or `close` (a code and a
+    reason) is given, when it closes it with them. Each connection runs the next script in
+    `scripts`, the last one repeating."""
 
     def __init__(self, *scripts: dict) -> None:
         self.scripts = scripts
@@ -161,6 +165,10 @@ class Scripted:
             await ws.send(f)
         if script.get("drop"):
             ws.transport.abort()
+            return
+        if script.get("close") is not None:
+            code, reason = script["close"]
+            await ws.close(code, reason)
             return
         await ws.wait_closed()
 
@@ -474,8 +482,27 @@ async def test_a_resume_cut_off_by_the_connection_raises_not_acknowledged():
     exchange = Scripted({"answer": [], "drop": True})
     async with serve_local(exchange) as url:
         async with await open_session(url, synthetic_token()) as session:
-            with pytest.raises(ResumeNotAcknowledged):
+            with pytest.raises(ResumeNotAcknowledged) as caught:
                 await session.resume(0)
+    assert str(caught.value) == "the connection closed before resume_ack"
+
+
+@pytest.mark.parametrize(
+    ("reason", "shown"),
+    [
+        ("term change", ' (close code 4001, reason "term change")'),
+        # Any other reason is server text, so only the code is shown.
+        ("term change at 18:00", " (close code 4001)"),
+    ],
+)
+async def test_a_resume_cut_off_by_a_term_change_says_so(reason: str, shown: str):
+    exchange = Scripted({"answer": [], "close": (TERM_CHANGE_CLOSE_CODE, reason)})
+    async with serve_local(exchange) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            with pytest.raises(ResumeNotAcknowledged) as caught:
+                await session.resume(0)
+    assert str(caught.value) == f"the connection closed before resume_ack{shown}"
+    assert is_retryable(caught.value)
 
 
 async def test_resume_is_sent_once_with_a_valid_cursor():
@@ -837,6 +864,75 @@ async def test_a_heartbeat_timeout_close_is_shown_and_retried():
     assert isinstance(error, ConnectionClosedError) and is_retryable(error)
     assert error.rcvd is not None
     assert (error.rcvd.code, error.rcvd.reason) == (4000, "heartbeat timeout")
+
+
+# The exchange's close at a term change
+
+
+@pytest.mark.parametrize("resume_on", [True, False])
+async def test_a_term_change_close_is_shown_and_retried_and_the_new_term_starts_afresh(
+    resume_on: bool,
+):
+    # The old term: the cursor reaches 7, then the exchange closes every connection as the
+    # term ends. The new term numbers its reports from 1 again, and the old cursor of 7
+    # would drop reports 1 and 2 as duplicates if it were kept.
+    old_term: dict = {
+        "term": TERM,
+        "after": [order_state(6), order_state(7)],
+        "close": (TERM_CHANGE_CLOSE_CODE, "term change"),
+    }
+    new_term: dict = {"term": NEXT_TERM, "after": [order_state(1), execution(2, 90)]}
+    if resume_on:
+        old_term["answer"] = [resume_ack(False, 5, 0)]
+        new_term["answer"] = [EMPTY]
+    exchange = Scripted(old_term, new_term)
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resume=resume_on, sleep=Clock().sleep)
+        async with rs:
+            events = []
+            # Bounded, so new-term reports dropped as duplicates fail the test, not hang it.
+            async with asyncio.timeout(5):
+                async for event in rs:
+                    events.append(event)
+                    if isinstance(event, Received) and event.report_seq == 2:
+                        break
+            assert rs.last_report_seq == 2
+            assert rs.calendar is not None
+            assert (rs.calendar.term_start, rs.calendar.term_end) == NEXT_TERM
+    resumed = ["resume_ack:None", "ResumeComplete"] if resume_on else []
+    assert kinds(events) == [
+        "Connected",
+        "calendar:None",
+        *resumed,
+        "order_state:6",
+        "order_state:7",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+        "calendar:None",
+        *resumed,
+        "order_state:1",
+        "execution:2",
+    ]
+    # The code and the reason are shown, and the close is retried.
+    disconnected = next(e for e in events if isinstance(e, Disconnected))
+    error = disconnected.error
+    assert isinstance(error, ConnectionClosedError) and is_retryable(error)
+    assert error.rcvd is not None
+    assert (error.rcvd.code, error.rcvd.reason) == (TERM_CHANGE_CLOSE_CODE, "term change")
+    assert TERM_CHANGE_CLOSE_CODE == 4001
+    retrying = next(e for e in events if isinstance(e, Retrying))
+    assert retrying.attempt == 1
+    connected = [e for e in events if isinstance(e, Connected)]
+    assert [c.reconnected for c in connected] == [False, True]
+    # The second session's calendar names the new term, and the old term's cursor is not
+    # sent into it: the new session asks from 0, and the new term's reports 1 and 2 are
+    # delivered rather than dropped.
+    messages = [e.message for e in events if isinstance(e, Received)]
+    terms = [(m.term_start, m.term_end) for m in messages if isinstance(m, Calendar)]
+    assert terms == [TERM, NEXT_TERM]
+    sent = [e for e in exchange.received if e["type"] != "auth"]
+    assert sent == ([resume(0), resume(0)] if resume_on else [])
 
 
 async def test_a_heartbeat_between_the_ack_and_the_calendar_or_after_it_changes_nothing():

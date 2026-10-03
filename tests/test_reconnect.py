@@ -12,6 +12,7 @@ from test_session import ack, assert_token_absent, session_reject, synthetic_tok
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
+from websockets.frames import Close
 from websockets.protocol import State
 
 import qte_sdk.reconnect
@@ -640,6 +641,7 @@ async def test_a_session_rejected_while_open_is_flagged_then_raised():
     ("error", "retryable"),
     [
         (ConnectionClosedError(None, None), True),
+        (ConnectionClosedError(Close(4001, "term change"), None), True),
         (ConnectionRefusedError(), True),
         (ssl.SSLCertVerificationError(), False),
         (TimeoutError(), True),

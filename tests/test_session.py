@@ -341,14 +341,25 @@ async def test_a_connection_that_closes_before_the_ack_is_an_error():
             await open_session(url, synthetic_token())
 
 
-async def test_an_abnormal_close_before_the_ack_is_an_error():
+@pytest.mark.parametrize(
+    ("code", "reason", "shown"),
+    [
+        # Any other reason is server text, so only the code is shown.
+        (1011, "internal error", " (close code 1011)"),
+        (4000, "heartbeat timeout", ' (close code 4000, reason "heartbeat timeout")'),
+        (4001, "term change", ' (close code 4001, reason "term change")'),
+        (4001, "term change, again", " (close code 4001)"),
+    ],
+)
+async def test_an_abnormal_close_before_the_ack_is_an_error(code: int, reason: str, shown: str):
     async def handler(ws: ServerConnection) -> None:
         await ws.recv()
-        await ws.close(1011, "internal error")
+        await ws.close(code, reason)
 
     async with serve_local(handler) as url:
-        with pytest.raises(SessionNotAcknowledged, match="close code 1011"):
+        with pytest.raises(SessionNotAcknowledged) as caught:
             await open_session(url, synthetic_token())
+    assert str(caught.value) == f"the connection closed before session_ack{shown}"
 
 
 async def test_an_undecodable_ack_is_an_error():

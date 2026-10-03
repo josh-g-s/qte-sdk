@@ -14,6 +14,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from qte_sdk.connection import (
+    TERM_CHANGE_CLOSE_CODE,
     Connection,
     ContractVersionMismatch,
     DecodeFailed,
@@ -488,6 +489,27 @@ async def test_a_close_reason_carrying_the_token_is_withheld_from_the_error():
                 [event async for event in conn]
     assert caught.value.rcvd is not None and caught.value.rcvd.code == 4000
     assert caught.value.rcvd_then_sent is True
+    assert_withheld(caught.value, token)
+
+
+@pytest.mark.parametrize(
+    "reason", ["term change {token}", "Term change", "term change ", "{token} term change"]
+)
+async def test_only_the_exact_term_change_reason_is_kept(reason: str):
+    token = secrets.token_hex(16)
+    reason = reason.format(token=token)
+
+    async def close_at_term_change(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(TERM_CHANGE_CLOSE_CODE, reason)
+
+    async with serve_local(close_at_term_change) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            with pytest.raises(ConnectionClosedError) as caught:
+                [event async for event in conn]
+    assert caught.value.rcvd is not None
+    assert (caught.value.rcvd.code, caught.value.rcvd.reason) == (4001, "<withheld>")
     assert_withheld(caught.value, token)
 
 

@@ -34,6 +34,13 @@ the exchange closes the connection with 4000 instead. Either way the error is a
 promptly, and do slow work elsewhere. You can raise `max_queue` (a `websockets` connect
 option) to absorb bursts, at the cost of memory.
 
+Term change: when one term ends and the next begins, the exchange closes every connection
+open at that moment with close code `TERM_CHANGE_CLOSE_CODE` (4001) and reason
+`term change`, after every message already queued for it, so no connection carries
+reports of two terms. Iteration raises a `ConnectionClosedError`, which
+`ReconnectingSession` retries like any other drop. The new session's calendar names the
+new term, in which report numbers start again (see `qte_sdk.reconnect`).
+
 Report numbers: each of the team's private order reports that the exchange can replay
 carries a `report_seq` on its envelope, which is the event's `report_seq` here (None on
 every other message). A connection only reports it; `qte_sdk.session.Session` keeps the
@@ -162,9 +169,15 @@ HEARTBEAT_TIMEOUT_CLOSE_CODE = 4000
 too long, or when a connection has not authenticated in time. Its reason text is
 `heartbeat timeout`."""
 
+TERM_CHANGE_CLOSE_CODE = 4001
+"""The close code the exchange sends on every connection open when one term ends and the
+next begins, after every message already queued for it. Its reason text is
+`term change`. Reconnect: the new session's calendar names the new term, in which report
+numbers start again."""
+
 # Close reasons whose exact text is fixed by the contract or by `websockets` itself, so
 # they cannot carry the token and are kept. Any other reason is withheld.
-_KNOWN_CLOSE_REASONS = frozenset({"heartbeat timeout", "keepalive ping timeout"})
+_KNOWN_CLOSE_REASONS = frozenset({"heartbeat timeout", "term change", "keepalive ping timeout"})
 
 
 def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
@@ -180,6 +193,18 @@ def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
         return Close(close.code, "<withheld>" if close.reason else "")
 
     return type(error)(withheld(error.rcvd), withheld(error.sent), error.rcvd_then_sent)
+
+
+def _close_detail(error: ConnectionClosed) -> str:
+    """The close the peer sent, for an error message that replaces `error`: its code, and
+    its reason only if it is in `_KNOWN_CLOSE_REASONS`, for example
+    ` (close code 4001, reason "term change")`. Empty if the peer sent no close."""
+    close = error.rcvd
+    if close is None:
+        return ""
+    if close.reason in _KNOWN_CLOSE_REASONS:
+        return f' (close code {close.code}, reason "{close.reason}")'
+    return f" (close code {close.code})"
 
 
 def _exception_name(exc_info: Any) -> str:
