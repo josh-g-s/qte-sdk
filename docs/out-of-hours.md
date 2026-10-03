@@ -40,18 +40,22 @@ Right after it acknowledges you, at any hour, the exchange sends its calendar: e
 ```python
 from qte_sdk.calendar import next_session
 
+last_closed = None  # the date of the last session that has closed, if any
 calendar = await session.wait_for_calendar(timeout=5)
-if calendar is not None:
+if calendar is None:
+    print("no calendar from this exchange")
+else:
     now = session.info.server_time
     closed = [entry for entry in calendar.sessions if entry.close_time <= now]
-    upcoming = next_session(calendar, now)
     if closed:
-        print("last closed session:", closed[-1].session_date)
+        last_closed = closed[-1].session_date
+        print("last closed session:", last_closed)
+    upcoming = next_session(calendar, now)
     if upcoming is not None:
         print("next session:", upcoming.session_date)
 ```
 
-The times are exchange timestamps: compare and subtract them only with other exchange timestamps, such as `session.info.server_time`, never with your computer's clock. The session date of the last closed session is what step 5 asks the history service for.
+The times are exchange timestamps: compare and subtract them only with other exchange timestamps, such as `session.info.server_time`, never with your computer's clock. `last_closed` is the session date step 5 asks the history service for. It stays `None` with no calendar, or before the term's first session has closed.
 
 ## 3. Subscribe and see the closed market
 
@@ -109,11 +113,11 @@ except TimeoutError:
     print("no answer within 10 seconds: check your orders")
 ```
 
-Every order message is held for the exchange's order delay, currently 150 ms, so the answer comes at least that long after you send. Which reject you see depends on your team and on when you send ([quickstart step 8](quickstart.md#8-values-the-exchange-sets) lists them):
+An order message the exchange takes in is held for its order delay, currently 150 ms, before it is applied, but some rejects are sent as soon as the message arrives. So the reject can come at once or after the delay: wait for it either way. Which reject you see depends on your team and on when you send ([quickstart step 8](quickstart.md#8-values-the-exchange-sets) lists them):
 
 | Reason | When |
 |---|---|
-| `NO_MARKET_ACCESS` | Your team may not send orders. This is checked first, so such a team sees it at any hour. Only teams on the trading arms send orders. |
+| `NO_MARKET_ACCESS` | Your team may not send orders. This is checked first, so such a team sees it at any hour. Only teams on the trading arms and Execution teams send orders. |
 | `MARKET_CLOSED` | Before the open, or on a day with no session at all, such as a weekend or an exchange holiday. |
 | `RELEASE_AFTER_CLOSE` | After the close, on a day that had a session. |
 
@@ -127,17 +131,20 @@ from contextlib import aclosing
 from qte_sdk.history import HistoryClient, HistoryPending, HistoryUnavailable
 
 client = HistoryClient()  # address from QTE_HISTORY_URL, token from QTE_TOKEN
-try:
-    states = client.fetch_session_state(closed[-1].session_date)
-    async with aclosing(states) as items:  # closes the download when you stop early
-        async for item in items:
-            if isinstance(item, SessionState):
-                print(item.grid_time, MarketSessionPhase.Name(item.state))
-                break  # the first one is enough here
-except HistoryUnavailable:
-    print("there is no such data")
-except HistoryPending as error:
-    print("not ready yet; ask again in", error.retry_after, "seconds")
+if last_closed is None:
+    print("no closed session to fetch")
+else:
+    try:
+        states = client.fetch_session_state(last_closed)
+        async with aclosing(states) as items:  # closes the download when you stop early
+            async for item in items:
+                if isinstance(item, SessionState):
+                    print(item.grid_time, MarketSessionPhase.Name(item.state))
+                    break  # the first one is enough here
+    except HistoryUnavailable:
+        print("there is no such data")
+    except HistoryPending as error:
+        print("not ready yet; ask again in", error.retry_after, "seconds")
 ```
 
 `client.fetch(date, instrument, "book")` gives that session's books the same way, as the live feed published them: only when they changed.
