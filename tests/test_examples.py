@@ -76,7 +76,10 @@ def test_no_example_or_quickstart_reaches_past_the_session_to_its_connection(pat
 
 class FakeExchange:
     """A scripted exchange: acknowledges the session, publishes a book on every tick once
-    subscribed, and answers order messages the way the contract describes."""
+    subscribed, and answers order messages the way the contract describes.
+
+    With `book_once` it publishes one book after the subscribe and then only the session
+    state on each tick, as the exchange does for a book that does not change."""
 
     def __init__(
         self,
@@ -90,7 +93,13 @@ class FakeExchange:
         stray_reject: bool = False,
         confirm_cancels: asyncio.Event | None = None,
         closed: bool = False,
+        book_once: bool = False,
+        fill_first_buy: bool = False,
     ) -> None:
+        self.book_once = book_once
+        # With `fill_first_buy`, the first buy order to rest is at once filled completely.
+        self.fill_first_buy = fill_first_buy
+        self.books_sent = 0
         # With `closed`, the exchange is outside a session: it answers a subscribe once,
         # with the closed state and each instrument's official close, and publishes nothing.
         self.closed = closed
@@ -162,10 +171,14 @@ class FakeExchange:
         published = 0
         while True:
             if published == self.move_bid_after:
+                # A changed book is published at a later grid time.
                 book["bid_levels"] = [{"price": str(BID - TICK), "size": "300"}]
+                book["grid_time"] = "2"
             # As on the exchange, the session state comes on every interval, unchanged.
             await self.send(ws, "session_state", state)
-            await self.send(ws, "book", book)
+            if not self.book_once or self.books_sent == 0:
+                await self.send(ws, "book", book)
+                self.books_sent += 1
             published += 1
             await asyncio.sleep(0.05)
 
@@ -245,6 +258,24 @@ class FakeExchange:
             self.resting_reports += 1
             if self.resting_reports == self.gap_after_resting:
                 self._seq += 1  # one message the client never receives
+            if self.fill_first_buy and p["side"] == "BUY":
+                self.fill_first_buy = False
+                del self.resting[key]
+                fill = {
+                    "exec_id": "e-3",
+                    "origin": "TEAM",
+                    "strat_id": p["strat_id"],
+                    "instrument": p["instrument"],
+                    "side": p["side"],
+                    "order_price": p["price"],
+                    "fill_price": p["price"],
+                    "fill_size": str(size),
+                    "remaining_size": "0",
+                    "fill_kind": "STUDENT_TO_STUDENT",
+                    "liquidity": "MAKER",
+                    "fee": "5",
+                }
+                await self.send(ws, "execution", fill)
             if self.partial_fill and size > 1:
                 self.partial_fill = False
                 self.resting[key] = (p["strat_id"], size - 1)
@@ -491,6 +522,51 @@ async def test_quote_both_sides_prints_rejects_and_still_exits_cleanly():
     assert 2 <= exchange.types().count("new") <= 12
 
 
+async def test_quote_both_sides_retries_a_reject_with_no_further_book():
+    # One book and then none: the exchange publishes a book only when it changes.
+    exchange = FakeExchange(reject_new="MESSAGE_BUDGET_EXCEEDED", book_once=True)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "1", "--requote-seconds", "0.2", "--drain-seconds", "1"),
+        )
+    assert code == 0, out + err
+    assert exchange.books_sent == 1
+    assert "REJECTED new: MESSAGE_BUDGET_EXCEEDED" in out
+    sides = [m["payload"]["side"] for m in exchange.received if m["type"] == "new"]
+    # Each side retried at least twice after its first reject, no faster than
+    # --requote-seconds allows.
+    assert sides.count("BUY") >= 3 and sides.count("SELL") >= 3, sides
+    assert len(sides) <= 12, sides
+    assert "all of this example's orders are cancelled" in out
+
+
+async def test_quote_both_sides_re_enters_after_a_full_fill_with_no_further_book():
+    exchange = FakeExchange(fill_first_buy=True, book_once=True)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "1.5", "--requote-seconds", "0.1", "--drain-seconds", "5"),
+        )
+    assert code == 0, out + err
+    assert exchange.books_sent == 1
+    buys = [
+        (m["type"], int(m["payload"]["price"]))
+        for m in exchange.received
+        if m["type"] in ("new", "cancel") and m["payload"]["side"] == "BUY"
+    ]
+    # Filled completely, entered again from the book held, then cancelled at the end.
+    assert buys == [("new", BID + TICK), ("new", BID + TICK), ("cancel", BID + TICK)]
+    assert exchange.resting == {}
+    assert "all of this example's orders are cancelled" in out
+
+
 async def test_quote_both_sides_ignores_a_teammates_fill_at_its_level():
     exchange = FakeExchange(teammate_fill_first=True)
     # A teammate's order at another level, which the example must leave alone.
@@ -699,6 +775,21 @@ async def test_take_liquidity_sends_one_market_order_and_reports_the_fill():
     assert news[0]["order_type"] == "MARKET" and "price" not in news[0]
     assert "FILL 3 @ 100.050000" in out
     assert "filled 3 of 3" in out
+
+
+async def test_take_liquidity_acts_on_the_one_book_it_receives():
+    exchange = FakeExchange(book_once=True)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "take_liquidity.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "take-test", "--seconds", "10"),
+        )
+    assert code == 0, out + err
+    assert exchange.books_sent == 1
+    assert exchange.types().count("new") == 1
+    assert "filled 1 of 1" in out
 
 
 async def test_take_liquidity_ignores_a_reject_that_is_not_its_own():

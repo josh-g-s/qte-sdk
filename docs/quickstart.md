@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.6
+**Version:** 0.7
 
 This guide takes you from a fresh checkout to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -223,7 +223,7 @@ except TimeoutError:
     print("no final outcome within 10 seconds: check your orders")
 ```
 
-Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it, and so does each `order_cancelled` that your cancel, amend or mass cancel causes. Match on it with `request_ref_of`.
+Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it, and so does an `order_cancelled` that your cancel or mass cancel causes. One that your amend causes may carry it too. Exactly when an `order_cancelled` carries a `request_ref` is not fully settled yet, so do not rely on it alone: when it is missing, match the cancellation by its strategy, instrument, side and price, as `examples/quote_both_sides.py` does. Match on `request_ref` with `request_ref_of`.
 
 An amend changes the orders at one level: `send_amend(session, instrument=..., side=..., price=..., new_size=...)`. `new_size` is the new total remaining size, not an amount to add. `send_mass_cancel(session)` cancels **every order your team has on the exchange**, including those of your teammates' strategies.
 
@@ -332,8 +332,8 @@ Each example reads `QTE_URL` and `QTE_TOKEN` from the environment, runs for a bo
 | Example | What it shows |
 |---|---|
 | `examples/print_book.py` | Connect, subscribe and print the book, trades, mark and market session state, or the official close outside a session. Sends no orders. Stops after `--seconds` or `--max-messages`. |
-| `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Cancels its own orders when `--seconds` are up. |
-| `examples/take_liquidity.py` | Send one market order once the book shows the side it trades against, and report its fills. Stops when the order is finished or after `--seconds`. |
+| `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Keeps the latest book with `LatestBooks` and acts on it after each order event and on its own timer, not only when a new book arrives, since the exchange publishes a book only when it changes. Cancels its own orders when `--seconds` are up. |
+| `examples/take_liquidity.py` | Send one market order once the latest book shows the side it trades against, and report its fills. Sends at most one order and never retries. Stops when the order is finished or after `--seconds`. |
 
 ```sh
 python examples/print_book.py --instrument AAPL --seconds 10
