@@ -368,8 +368,10 @@ class FakeExchange:
             reason = "NO_ORDER_AT_LEVEL"
         elif key != old and key in self.resting:
             reason = "DUPLICATE_ORDER_AT_LEVEL"
-        elif (key[2] <= BID) if p["side"] == "BUY" else (key[2] >= ASK):
-            reason = "AMEND_PRICE_AT_OR_BEYOND_WALL"  # at or beyond its own side's wall
+        elif key != old and ((key[2] <= BID) if p["side"] == "BUY" else (key[2] >= ASK)):
+            # Price tests run only when the amend moves the price: a new price at or beyond
+            # its own side's wall. A size-only amend at the wall is not price-checked.
+            reason = "AMEND_PRICE_AT_OR_BEYOND_WALL"
         if reason is not None:
             reject = {
                 "request_ref": p.get("request_ref"),
@@ -883,6 +885,33 @@ async def test_the_fakes_amends_keep_a_resting_order_view_right():
             await send_amend(session, price=second, new_price=second, **{**amend, "new_size": 0})
             assert await answer() == "CANCELLED"  # cut to nothing
     assert len(view) == 0
+    assert exchange.resting == {}
+
+
+async def test_the_fake_accepts_a_cut_to_nothing_at_the_wall_without_a_price_test():
+    # A bid resting at the wall's own price, as one can after the wall moves onto it. An
+    # amend that keeps the price is not price-tested, so cutting it to nothing is accepted.
+    exchange = FakeExchange()
+    exchange.resting[(INSTRUMENT, "BUY", BID)] = ("s", 5)
+    received: list[Received] = []
+    async with asyncio.timeout(RUN_LIMIT), serve_local(exchange) as url:
+        session = await open_session(url, token=synthetic_token())
+        async with session:
+            await send_amend(
+                session, instrument=INSTRUMENT, side=BUY, price=BID, new_price=BID, new_size=0
+            )
+            async for event in session:
+                if isinstance(event, Received) and event.type != "session_ack":
+                    received.append(event)
+                    if event.type in ("order_state", "reject"):
+                        break
+    assert [event.type for event in received] == ["accepted", "order_cancelled", "order_state"]
+    cancelled, state = received[1].message, received[2].message
+    assert reason_code_name(cancelled.reason_code) == "AMEND_CUT"
+    assert cancelled.price == BID
+    assert OrderLifecycleState.Name(state.state) == "CANCELLED"
+    assert (state.price, state.old_price, state.remaining_size) == (BID, BID, 0)
+    assert state.HasField("old_price")
     assert exchange.resting == {}
 
 
