@@ -107,7 +107,7 @@ from qte_sdk.contract.v1.common_pb2 import (
 )
 from qte_sdk.contract.v1.order_events_pb2 import AccountState, AccountSummary, PositionValue
 from qte_sdk.contract.v1.session_pb2 import AccountQuery
-from qte_sdk.orders import Sender, _ref, request_ref_of
+from qte_sdk.orders import Sender, _ref, new_request_ref, request_ref_of
 
 __all__ = [
     "ACCOUNT_REPORT_TYPES",
@@ -225,12 +225,14 @@ class AccountReports:
         self._awaiting: str | None = None
         self._held: list[Received] = []
 
-    async def query(self, conn: Sender, *, request_ref: str | None = None) -> str:
-        """Send `account_query` as `send_account_query` does, and wait for its answer in
-        place of any earlier query. Returns its `request_ref`.
+    async def query(self, conn: Sender) -> str:
+        """Send `account_query` and wait for its answer in place of any earlier query.
+        Returns its `request_ref`.
 
-        If the send fails, no query is waited for until the next one."""
-        ref = _ref(request_ref)
+        The `request_ref` is always a fresh one, so no other reply can be taken for this
+        query's. If the send fails, the query is not waited for, and unless a later query
+        has taken its place meanwhile, none is until the next one."""
+        ref = new_request_ref()
         # Waited for from before the send, so no report that arrives meanwhile is missed.
         self._awaiting = ref
         self._held = []
@@ -274,7 +276,8 @@ class AccountReports:
         if message.HasField("request_type"):
             return message.request_type == ACCOUNT_QUERY
         # It names no request type, not even one from a newer contract this SDK does not know.
-        return "request_type" not in (event.payload or {})
+        payload = event.payload or {}
+        return "request_type" not in payload and "requestType" not in payload
 
     def _stop_waiting(self) -> None:
         self._awaiting = None

@@ -81,7 +81,7 @@ def cancelled(report_seq: int) -> str:
 def delayed_reject(report_seq: int) -> str:
     payload = {
         "request_ref": "r-3",
-        "request_type": "NEW_ORDER",
+        "request_type": "NEW",
         "reason_code": "PRICE_COLLAR",
         "receipt_time": "1",
     }
@@ -232,10 +232,17 @@ async def test_query_sends_an_account_query_and_waits_for_its_answer():
     reports = AccountReports()
     ref = await reports.query(sender)
     assert sender.sent == [("account_query", AccountQuery(request_ref=ref))]
-    assert await reports.query(sender, request_ref="acct-1") == "acct-1"
-    with pytest.raises(ValueError, match="request_ref"):
-        await reports.query(sender, request_ref="")
-    assert len(sender.sent) == 2
+    assert len(ref) == 32
+
+
+async def test_every_query_has_a_fresh_request_ref():
+    # A request_ref used twice could not tell the two replies apart, so none is accepted.
+    sender = Recorder()
+    reports = AccountReports()
+    refs = {await reports.query(sender) for _ in range(5)}
+    assert len(refs) == 5
+    with pytest.raises(TypeError):
+        await reports.query(sender, request_ref="acct-1")  # type: ignore[call-arg]
 
 
 async def test_a_report_before_any_reply_applies_once():
@@ -299,6 +306,18 @@ async def test_a_reply_to_a_query_not_waited_for_is_not_taken():
     assert reports.update(report) == [report]
 
 
+async def test_risk_notices_are_held_and_cut_like_fills():
+    reports = AccountReports()
+    ref = await reports.query(Recorder())
+    in_it, not_in_it = await decoded(risk_notice(2), risk_notice(3))
+    assert reports.update(in_it) == [in_it]
+    assert reports.update(not_in_it) == [not_in_it]
+    the_reply = answer(ref, 2)
+    assert reports.update(the_reply) == [the_reply, not_in_it]
+    [covered_after] = await decoded(risk_notice(1))
+    assert reports.update(covered_after) == []
+
+
 async def test_a_refused_query_stops_the_wait():
     reports = AccountReports()
     ref = await reports.query(Recorder())
@@ -316,10 +335,12 @@ async def test_a_reject_of_another_request_does_not_stop_the_wait():
     held = execution(4, 10)
     reports.update(held)
     [other] = await decoded(delayed_reject(5))
-    # The same request_ref on another kind of request, or one this SDK does not know.
+    # The same request_ref on another kind of request, or one this SDK does not know, in
+    # either spelling of the field the decoder accepts.
     same_ref = [
-        frame("reject", {"request_ref": ref, "request_type": kind, "reason_code": "PRICE_COLLAR"})
+        frame("reject", {"request_ref": ref, field: kind, "reason_code": "PRICE_COLLAR"})
         for kind in ("NEW", "A_NEWER_KIND")
+        for field in ("request_type", "requestType")
     ]
     for event in [other, *await decoded(*same_ref)]:
         assert reports.update(event) == []
@@ -418,16 +439,24 @@ async def test_unnumbered_reports_are_not_held():
 
 
 class Broken:
+    """A sender whose every send fails, after noting the request_ref it was given."""
+
+    def __init__(self) -> None:
+        self.refs: list[str] = []
+
     async def send(self, type_, payload):
+        self.refs.append(payload.request_ref)
         raise ConnectionError("gone")
 
 
 async def test_a_query_that_fails_to_send_waits_for_nothing():
     reports = AccountReports()
+    broken = Broken()
     with pytest.raises(ConnectionError):
-        await reports.query(Broken(), request_ref="acct-1")
+        await reports.query(broken)
     reports.update(execution(4, 10))
-    assert reports.update(answer("acct-1", 1)) == []
+    [failed] = broken.refs
+    assert reports.update(answer(failed, 1)) == []
 
     # A failed query that took another's place leaves none waited for.
     first = await reports.query(Recorder())
