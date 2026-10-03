@@ -1,10 +1,14 @@
 import asyncio
+import builtins
 import dataclasses
 import json
 import logging
+import os
 import secrets
+import sys
 import traceback
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fake_exchange import CONTRACT_VERSION, frame, serve_local, silent_server
@@ -17,10 +21,12 @@ from qte_sdk.contract.v1.market_data_pb2 import Book
 from qte_sdk.contract.v1.session_pb2 import Auth, Heartbeat, Subscribe
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
+    TOKEN_FILE_ENV_VAR,
     MissingToken,
     SessionInfo,
     SessionNotAcknowledged,
     open_session,
+    resolve_token,
 )
 
 
@@ -71,6 +77,7 @@ class Server:
 @pytest.fixture(autouse=True)
 def no_token_in_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
+    monkeypatch.delenv(TOKEN_FILE_ENV_VAR, raising=False)
 
 
 # Successful sessions
@@ -153,6 +160,143 @@ async def test_a_missing_token_fails_before_any_connection_attempt(
         with pytest.raises(MissingToken, match=TOKEN_ENV_VAR):
             await open_session(url, argument)
     assert server.connections == 0
+
+
+# The token from a file named by QTE_TOKEN_FILE
+
+
+def token_file(tmp_path: Path, content: bytes) -> Path:
+    path = tmp_path / "token"
+    path.write_bytes(content)
+    return path
+
+
+@pytest.mark.parametrize("ending", ["", "\n", "\r\n"])
+def test_the_token_is_read_from_the_file_without_one_trailing_newline(
+    monkeypatch, tmp_path, ending: str
+):
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(token_file(tmp_path, (token + ending).encode())))
+    assert resolve_token() == token
+
+
+def test_only_one_trailing_newline_is_removed(monkeypatch, tmp_path):
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(token_file(tmp_path, (token + "\n\n").encode())))
+    assert resolve_token() == token + "\n"
+
+
+def test_an_empty_qte_token_falls_through_to_the_file(monkeypatch, tmp_path):
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_ENV_VAR, "")
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(token_file(tmp_path, token.encode())))
+    assert resolve_token() == token
+
+
+async def test_a_session_opens_with_the_token_from_the_file(monkeypatch, tmp_path):
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(token_file(tmp_path, (token + "\n").encode())))
+    server = Server(ack())
+    async with serve_local(server) as url:
+        async with await open_session(url):
+            pass
+    assert server.received[0]["payload"] == {"token": token}
+
+
+@pytest.mark.parametrize("source", ["argument", "empty argument", "environment"])
+def test_the_file_is_never_opened_when_a_higher_source_is_present(
+    monkeypatch, tmp_path, source: str
+):
+    path = str(token_file(tmp_path, synthetic_token().encode()))
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, path)
+    opened: list[object] = []
+    real_open = builtins.open
+
+    def watching_open(file, *args, **kwargs):
+        opened.append(file)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", watching_open)
+    token = synthetic_token()
+    if source == "argument":
+        assert resolve_token(token) == token
+    elif source == "empty argument":
+        with pytest.raises(MissingToken):
+            resolve_token("")
+    else:
+        monkeypatch.setenv(TOKEN_ENV_VAR, token)
+        assert resolve_token() == token
+    assert path not in opened
+
+
+def file_problem(tmp_path: Path, case: str, token: str) -> str:
+    """Set up the file for one failure `case`, holding `token` where it can, and return the
+    path to put in QTE_TOKEN_FILE."""
+    if case == "missing":
+        return str(tmp_path / "absent")
+    if case == "directory":
+        return str(tmp_path)
+    if case == "unreadable":
+        path = token_file(tmp_path, token.encode())
+        path.chmod(0)
+        return str(path)
+    if case == "not utf-8":
+        return str(token_file(tmp_path, b"\xff" + token.encode() + b"\n"))
+    if case == "invalid utf-8 after the token":
+        return str(token_file(tmp_path, token.encode() + b"\xc3\x28\n"))
+    contents = {"empty": b"", "newline only": b"\n", "whitespace only": b" \t\r\n \n"}[case]
+    return str(token_file(tmp_path, contents))
+
+
+FILE_PROBLEMS = [
+    "missing",
+    "directory",
+    "unreadable",
+    "not utf-8",
+    "invalid utf-8 after the token",
+    "empty",
+    "newline only",
+    "whitespace only",
+]
+
+
+@pytest.mark.parametrize("case", FILE_PROBLEMS)
+async def test_a_bad_token_file_raises_missing_token_without_its_contents(
+    monkeypatch, tmp_path, case: str
+):
+    if case == "unreadable" and (sys.platform == "win32" or os.geteuid() == 0):
+        pytest.skip("file permissions do not stop this user reading the file")
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, file_problem(tmp_path, case, token))
+    server = Server(ack())
+    async with serve_local(server) as url:
+        with pytest.raises(MissingToken, match=TOKEN_FILE_ENV_VAR) as caught:
+            await open_session(url)
+    assert server.connections == 0
+    error = caught.value
+    assert error.__cause__ is None and error.__context__ is None
+    assert error.__suppress_context__ is False
+    assert vars(error) == {}
+    assert_token_absent(token, shown(error))
+
+
+def test_a_token_mistakenly_given_as_the_file_path_is_not_shown(monkeypatch):
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, token)
+    with pytest.raises(MissingToken, match=TOKEN_FILE_ENV_VAR) as caught:
+        resolve_token()
+    assert_token_absent(token, shown(caught.value))
+
+
+def test_reading_the_token_file_logs_nothing(monkeypatch, tmp_path, caplog):
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(token_file(tmp_path, token.encode())))
+    with caplog.at_level(logging.DEBUG):
+        assert resolve_token() == token
+        monkeypatch.setenv(TOKEN_FILE_ENV_VAR, file_problem(tmp_path, "not utf-8", token))
+        with pytest.raises(MissingToken):
+            resolve_token()
+    assert caplog.records == []
 
 
 # Refused sessions

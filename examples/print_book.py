@@ -1,6 +1,6 @@
 """Connect to the exchange and print the book of one instrument.
 
-Set QTE_URL and QTE_TOKEN first (see docs/quickstart.md), then:
+Set QTE_URL and QTE_TOKEN (or QTE_TOKEN_FILE) first (see docs/quickstart.md), then:
 
     python examples/print_book.py --instrument AAPL --seconds 10
 
@@ -140,7 +140,7 @@ async def closing(session: Session) -> AsyncIterator[Session]:
 
 
 async def run(url: str, args: argparse.Namespace) -> int:
-    # The token comes from the QTE_TOKEN environment variable.
+    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE.
     session = await open_session(url)
     async with closing(session):
         info = session.info
@@ -191,8 +191,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return asyncio.run(run(url, args))
-    except MissingToken:
-        fail("set QTE_TOKEN to your practice token (see docs/quickstart.md)")
+    except MissingToken as error:
+        # The message names the variable and the problem, never the token.
+        fail(f"{error} (see docs/quickstart.md)")
         return 2
     except SessionRejected as error:
         return fail(f"the exchange refused the session: {error}")
