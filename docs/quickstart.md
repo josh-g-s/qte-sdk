@@ -223,7 +223,7 @@ except TimeoutError:
     print("no final outcome within 10 seconds: check your orders")
 ```
 
-Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it, and so does an `order_cancelled` that your cancel or mass cancel causes. One that your amend causes may carry it too. Exactly when an `order_cancelled` carries a `request_ref` is not fully settled yet, so do not rely on it alone: when it is missing, match the cancellation by its strategy, instrument, side and price, as `examples/quote_both_sides.py` does. Match on `request_ref` with `request_ref_of`.
+Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it, and so does an `order_cancelled` that your cancel or mass cancel causes (reason `CANCEL_REQUEST` or `MASS_CANCEL`). One that your amend causes, by cutting an order to nothing (reason `AMEND_CUT`), may carry it too. Exactly when an `order_cancelled` carries a `request_ref` is not fully settled yet, so do not rely on it alone: when it is missing, match the cancellation by its strategy, instrument, side and price, as `examples/quote_both_sides.py` does. Match on `request_ref` with `request_ref_of`.
 
 An amend changes the orders at one level: `send_amend(session, instrument=..., side=..., price=..., new_size=...)`. `new_size` is the new total remaining size, not an amount to add. `send_mass_cancel(session)` cancels **every order your team has on the exchange**, including those of your teammates' strategies.
 

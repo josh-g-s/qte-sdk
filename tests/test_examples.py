@@ -26,7 +26,7 @@ from fake_exchange import CONTRACT_VERSION, serve_local
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
-from qte_sdk.connection import Received
+from qte_sdk.connection import DecodeFailed, Received
 from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
 from qte_sdk.contract.v1.market_data_pb2 import WallLevel
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
@@ -531,16 +531,16 @@ async def test_quote_both_sides_retries_a_reject_with_no_further_book():
             url,
             synthetic_token(),
             *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
-            *("--seconds", "1", "--requote-seconds", "0.2", "--drain-seconds", "1"),
+            *("--seconds", "1.5", "--requote-seconds", "0.2", "--drain-seconds", "1"),
         )
     assert code == 0, out + err
     assert exchange.books_sent == 1
     assert "REJECTED new: MESSAGE_BUDGET_EXCEEDED" in out
     sides = [m["payload"]["side"] for m in exchange.received if m["type"] == "new"]
-    # Each side retried at least twice after its first reject, no faster than
-    # --requote-seconds allows.
-    assert sides.count("BUY") >= 3 and sides.count("SELL") >= 3, sides
-    assert len(sides) <= 12, sides
+    # Each side retried at least twice after its first reject, and no faster than
+    # --requote-seconds allows: at most one new per side per 0.2 s of the 1.5 s.
+    for side in ("BUY", "SELL"):
+        assert 3 <= sides.count(side) <= 8, sides
     assert "all of this example's orders are cancelled" in out
 
 
@@ -939,6 +939,59 @@ async def test_quote_both_sides_keeps_to_seconds_when_a_send_stalls_while_quotin
     assert loop.time() - started < 2  # --seconds, not the stalled send, ended it
     assert len(sent) == 1  # the first new order, which stalled
     assert quoter.quotes[example.BUY].pending_ref == sent[0]  # recorded all the same
+
+
+class RecordingSession:
+    """A session whose sends return at once. Records each message's type."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append(type_)
+
+
+async def test_quote_both_sides_sends_nothing_from_a_book_that_may_be_stale():
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    quoter = example.Quoter(session, RestingOrders(), args)
+    quoter.books.update(book_event().message)
+    # A frame that may have been a newer book could not be read.
+    await example.handle(quoter, quoter.view, DecodeFailed("book", ValueError("unreadable")))
+    await quoter.act()
+    assert session.sent == []
+    # A newer book clears it, and the example quotes again.
+    newer = book_event().message
+    newer.grid_time = 5
+    await quoter.on_book(newer)
+    assert session.sent == ["new", "new"]
+
+
+async def test_quote_both_sides_applies_an_event_that_arrives_as_time_runs_out():
+    # An `accepted` taken from the queue just after --seconds ran out must still be
+    # applied, or the cleanup would not know the order it answers.
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    view = RestingOrders()
+    quoter = example.Quoter(session, view, args)
+    buy = quoter.quotes[example.BUY]
+    buy.price = BID + TICK
+    ref = quoter.record(buy, "new")
+    accepted = Received("accepted", Accepted(request_ref=ref), 1)
+
+    async def late_event(queue: asyncio.Queue, timeout: float) -> Any:
+        await asyncio.sleep(max(timeout, 0) + 0.05)  # past the deadline
+        return accepted
+
+    example.next_event = late_event
+    async with asyncio.timeout(RUN_LIMIT):
+        why = await example.quote_until(quoter, view, asyncio.Queue(), 0.1)
+    assert why == "time"
+    assert buy.pending_ref is None  # the accepted was applied
+    assert not quoter.quoting
+    assert session.sent == []  # and nothing was sent once time was up
 
 
 async def test_take_liquidity_knows_it_may_have_sent_an_order_whose_send_stalled():

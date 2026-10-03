@@ -54,7 +54,9 @@ the next book may be a long time coming. The example keeps the latest book it ha
 received with `qte_sdk.books.LatestBooks` and decides what to send from that book, not
 only when a new book arrives: also after each order event and on its own timer, at
 least once per --requote-seconds. So a retry after a reject, or a new order after a fill
-or a cancel, does not wait for the market to move.
+or a cancel, does not wait for the market to move. If a message that may have been a
+newer book is missed or cannot be read, the book held may be out of date, so the example
+sends nothing from it until a newer book arrives.
 """
 
 import argparse
@@ -183,6 +185,8 @@ class Quoter:
         self.quoting = True
         # The latest book of each instrument: the exchange sends a book only when it changes.
         self.books = LatestBooks()
+        # When to act next even if no event comes, on the time.monotonic() clock.
+        self.next_act = float("-inf")
 
     # Sending
 
@@ -193,7 +197,7 @@ class Quoter:
 
     def next_ready(self) -> float:
         """Seconds until a side that is waiting out --requote-seconds may send again, or
-        --requote-seconds if none is. The main loop wakes by then to act."""
+        --requote-seconds if none is."""
         now = time.monotonic()
         waits = [
             quote.sent_at + self.requote_seconds - now
@@ -300,8 +304,19 @@ class Quoter:
     async def act(self) -> None:
         """Quote from the latest book held. Safe to call at any time: with no book yet, or
         nothing that may be sent now, it sends nothing."""
+        try:
+            await self.quote_from_book()
+        finally:
+            # Act again by the time a side may send again, whatever events come or not.
+            self.next_act = time.monotonic() + self.next_ready()
+
+    async def quote_from_book(self) -> None:
         book = self.books.get(self.instrument)
         if not self.quoting or book is None:
+            return
+        if self.instrument in self.books.stale:
+            # A message that may have been a newer book was missed or unreadable, so this
+            # book may be out of date. Send nothing until a newer book arrives.
             return
         # Quote --inside dollars inside the wall's best price on each side that has one.
         bid = book.bid_levels[0].price + self.inside if book.bid_levels else None
@@ -413,8 +428,8 @@ async def pump(session: Session, queue: asyncio.Queue) -> None:
 async def next_event(queue: asyncio.Queue, timeout: float):
     """The next item from `pump`, or TimeoutError if none arrives within `timeout`."""
     if timeout <= 0:
-        # The time is up, even if events are waiting. Yield once all the same, so a
-        # Ctrl+C and the reader still get their turn.
+        # No time left to wait, even if events are waiting. Yield once all the same, so
+        # a Ctrl+C and the reader still get their turn.
         await asyncio.sleep(0)
         return TimeoutError()
     # asyncio.timeout rather than asyncio.wait_for: on Python 3.11, wait_for can lose a
@@ -458,22 +473,35 @@ async def quote_until(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     while True:
-        # Wake by the time a side may send again, even if no event comes, so the example
-        # acts on the latest book it holds without waiting for the book to change.
-        item = await next_event(queue, min(deadline - loop.time(), quoter.next_ready()))
-        if item is None:
-            return "closed"
-        if isinstance(item, Exception) and not isinstance(item, TimeoutError):
-            raise item  # the connection dropped
-        if loop.time() >= deadline:
-            return "time"
         try:
             # A send can stall (for example on a connection that stopped taking data), so
             # it too is bounded by the time left. Its request_ref is already recorded.
             async with asyncio.timeout(max(deadline - loop.time(), 0)):
-                if isinstance(item, TimeoutError):
-                    await quoter.act()  # no event: act on the latest book held
-                    continue
+                if time.monotonic() >= quoter.next_act:
+                    # Act on the latest book held, even if no book or other event has
+                    # come: the exchange sends a book only when it changes.
+                    await quoter.act()
+        except TimeoutError:
+            return "time"
+        # Wait for the next event, but only until it is time to act again.
+        wake = min(deadline - loop.time(), quoter.next_act - time.monotonic())
+        item = await next_event(queue, wake)
+        if item is None:
+            return "closed"
+        if isinstance(item, TimeoutError):
+            if loop.time() >= deadline:
+                return "time"
+            continue
+        if isinstance(item, Exception):
+            raise item  # the connection dropped
+        if loop.time() >= deadline:
+            # Time is up, but this event still counts: an `accepted` that is dropped here
+            # would leave an order unknown to the cleanup. Apply it without quoting.
+            quoter.quoting = False
+            await handle(quoter, view, item)
+            return "time"
+        try:
+            async with asyncio.timeout(max(deadline - loop.time(), 0)):
                 keep_quoting = await handle(quoter, view, item)
         except TimeoutError:
             return "time"
