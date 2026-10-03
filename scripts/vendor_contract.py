@@ -1,15 +1,15 @@
-"""Copy the approved platform files from a local qte-platform checkout.
+"""Copy the approved files from a local checkout of the exchange's contract repository.
 
-Maintainers only: qte-platform is private.
+Maintainers only: the exchange's contract repository is not public.
 
-    python scripts/vendor_contract.py /path/to/qte-platform           # vendor at the pinned commits
-    python scripts/vendor_contract.py /path/to/qte-platform --check   # verify the manifests only
+    python scripts/vendor_contract.py /path/to/contract-repository           # vendor at the pins
+    python scripts/vendor_contract.py /path/to/contract-repository --check   # verify the manifests
 
 Two sets of files are vendored, each with its own manifest and pinned commit: the contract
 .proto files (proto/upstream.toml) and the published conformance steps
 (conformance/upstream.toml). For each set, reads the commit from its manifest, copies exactly
 the approved files byte for byte from that commit, and rewrites the manifest with each
-file's git blob hash as `git ls-tree` prints it. CI cannot see qte-platform, so it checks
+file's git blob hash as `git ls-tree` prints it. CI cannot see that repository, so it checks
 the vendored bytes against those hashes instead; `--check` is how a maintainer confirms the
 hashes really belong to the pinned commits.
 """

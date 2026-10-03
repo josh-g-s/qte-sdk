@@ -60,9 +60,7 @@ partial fill leaves at least two shares (step 7) and its spread leaves room for 
 prices a step needs. Step 13's "no budget consumed" is not checked, since no message
 reports a team's budget use. Step 12's resting sell for
 the second strategy is entered by the step itself. Step 15 has no checks until it is
-specified (see issue #12) and is reported as an expected failure. Steps 7 and 9a to 9c
-also check `OrderState.old_price`, which this SDK's contract does not have yet (issue
-#21); they are expected failures until it does, and any other failure in them counts.
+specified (see issue #12) and is reported as an expected failure.
 """
 
 import asyncio
@@ -138,14 +136,7 @@ STEP_10_MARK_FACTOR = (105, 100)
 
 
 def old_price(state: OrderState) -> int | None:
-    """The order's price before the amend this `order_state` reports, or None.
-
-    Steps 7 and 9a to 9c check `OrderState.old_price`, which this SDK's contract does not
-    have yet. Until it does, this marks the step an expected failure, and only here: each
-    step makes every other check first, so any other failure is reported as one.
-    """
-    if "old_price" not in OrderState.DESCRIPTOR.fields_by_name:
-        pytest.xfail("OrderState.old_price is not in this SDK's contract yet; see issue #21")
+    """The order's price before the amend this `order_state` reports, or None."""
     return state.old_price if state.HasField("old_price") else None
 
 
@@ -830,6 +821,7 @@ async def test_step_09c_price_moving_amend_filling_completely(market: Client):
     assert events[-1] is filled, "an execution came after the amend's order_state"
     assert all(f.side == BUY and f.liquidity == TAKER for f in fills)
     assert fills[-1].remaining_size == 0
+    assert filled.side == BUY
     assert filled.price == target
     assert filled.state == FILLED
     assert filled.remaining_size == 0
@@ -903,13 +895,13 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         size=size,
     )
     accepted = await c.answer(ref, start)
-    # Read through the grid point of the release, so every book and mark published up to
-    # it is in hand, then settle the preconditions before checking what the order did.
+    # Read on to the first grid point after the release, so every book and mark published
+    # up to it is in hand, then settle the preconditions before checking what the order did.
     await c.until(
         lambda: any(
-            m.grid_time >= accepted.release_time for m in c.since(c.after(accepted), SessionState)
+            m.grid_time > accepted.release_time for m in c.since(c.after(accepted), SessionState)
         ),
-        "session_state at the market order's release",
+        "session_state after the market order's release",
     )
     books = [m for m in c.seen if isinstance(m, Book) and m.instrument == c.config.instrument]
     at_receipt = [m for m in books if m.grid_time <= accepted.receipt_time][-1]
@@ -939,6 +931,10 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         and m.side == BUY
         and not m.HasField("order_price")
     ]
+    before_remainder = c.seen[start : c.after(remainder)]
+    assert all(any(f is m for m in before_remainder) for f in fills), (
+        "an execution came after the market remainder's cancellation"
+    )
     assert [f.fill_price for f in fills] == [level.price for level in met.ask_levels]
     assert [f.fill_size for f in fills] == [level.size for level in met.ask_levels]
     for fill in fills:
