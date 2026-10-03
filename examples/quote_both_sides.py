@@ -48,6 +48,19 @@ itself, sending at most one message per side per --requote-seconds; that is loca
 pacing, not a promise to stay within your team's budgets, which count every message your
 team sends. If a message is rejected (for example MIN_REST_VIOLATION or
 MESSAGE_BUDGET_EXCEEDED), the reject is printed and the example tries again later.
+
+When it acts. The exchange publishes a book only when it changes, so in a quiet market
+the next book may be a long time coming. The example keeps the latest book it has
+received with `qte_sdk.books.LatestBooks` and decides what to send from that book, not
+only when a new book arrives: also after every other event and on its own timer, at
+least once per --requote-seconds. So a retry after a reject, or a new order after a fill
+or a cancel, does not wait for the market to move. Before it sends anything, it applies
+every event it has already received, so a sign that messages were missed is seen first.
+If a message that may have been a newer book is missed or cannot be read, the book held
+may be out of date, so the example sends nothing from it until a newer book arrives. It
+also quotes only while the latest session state says the market is open, and only from
+a book published since that session opened, never one kept from an earlier session. It
+sends one message at a time, and applies what has come in since before sending the next.
 """
 
 import argparse
@@ -63,8 +76,17 @@ from dataclasses import dataclass
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
+from qte_sdk.books import LatestBooks
 from qte_sdk.connection import Event, SessionRejected
-from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, SELL, ReasonCodes, RiskNoticeKind, Side
+from qte_sdk.contract.v1.common_pb2 import (
+    BUY,
+    LIMIT,
+    SELL,
+    MarketSessionPhase,
+    ReasonCodes,
+    RiskNoticeKind,
+    Side,
+)
 from qte_sdk.contract.v1.order_events_pb2 import (
     Accepted,
     Execution,
@@ -73,7 +95,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     Reject,
     RiskNotice,
 )
-from qte_sdk.market_data import Book, DecodeFailed, SeqGap, as_market_data, subscribe
+from qte_sdk.market_data import DecodeFailed, SeqGap, SessionState, as_market_data, subscribe
 from qte_sdk.orders import (
     is_order_event,
     new_request_ref,
@@ -173,6 +195,27 @@ class Quoter:
         self.requote_seconds: float = args.requote_seconds
         self.quotes = {BUY: Quote(BUY), SELL: Quote(SELL)}
         self.quoting = True
+        # The latest book of each instrument: the exchange sends a book only when it changes.
+        self.books = LatestBooks()
+        # When to act next even if no event comes, on the time.monotonic() clock.
+        self.next_act = float("-inf")
+        # Whether the last session state said the market is open; none is known yet.
+        self.market_open = False
+        self.open_time = 0  # when the session in progress opened, from its session state
+        # How many order messages it has sent, so a caller can tell whether a step sent one.
+        self.messages = 0
+        self.last_side: Side = SELL  # so BUY goes first
+
+    def on_session_state(self, state: SessionState) -> None:
+        self.market_open = state.state == MarketSessionPhase.OPEN
+        # A book published before this session opened is from an earlier session.
+        self.open_time = state.open_time
+
+    def in_turn(self) -> list[Quote]:
+        """Both sides, starting with the one that did not send last, so that with one
+        message per step neither side can keep the other waiting."""
+        first = BUY if self.last_side == SELL else SELL
+        return [self.quotes[first], self.quotes[SELL if first == BUY else BUY]]
 
     # Sending
 
@@ -180,6 +223,17 @@ class Quoter:
         """Whether this side may send now: nothing in flight, and not sent too recently."""
         waited = time.monotonic() - quote.sent_at
         return quote.pending_ref is None and waited >= self.requote_seconds
+
+    def next_ready(self) -> float:
+        """Seconds until a side that is waiting out --requote-seconds may send again, or
+        --requote-seconds if none is."""
+        now = time.monotonic()
+        waits = [
+            quote.sent_at + self.requote_seconds - now
+            for quote in self.quotes.values()
+            if quote.pending_ref is None and quote.sent_at + self.requote_seconds > now
+        ]
+        return min([self.requote_seconds, *waits])
 
     def resting(self, quote: Quote) -> RestingOrder | None:
         """This example's order at its price, as the exchange last reported it, or None."""
@@ -197,6 +251,8 @@ class Quoter:
         the send, and nothing else is sent for this side until that reply comes."""
         ref = new_request_ref()
         quote.pending_ref, quote.pending_kind, quote.sent_at = ref, kind, time.monotonic()
+        self.messages += 1
+        self.last_side = quote.side
         return ref
 
     def sent(self, quote: Quote) -> None:
@@ -249,7 +305,7 @@ class Quoter:
     async def cancel_own(self) -> bool:
         """Cancel this example's orders. Returns True once none are left or in flight."""
         done = True
-        for quote in self.quotes.values():
+        for quote in self.in_turn():
             if quote.pending_ref is not None:
                 done = False
             elif quote.price is not None:
@@ -263,6 +319,9 @@ class Quoter:
                         request_ref=self.record(quote, "cancel"),
                     )
                     self.sent(quote)
+                    # One message per call: the caller applies any events that came in
+                    # meanwhile, which may change what is safe to send, before the next.
+                    return False
         # Done once the exchange has also reported each order gone from the book.
         return done and not any(
             order.strat_id == self.strat_id and order.key.instrument == self.instrument
@@ -271,18 +330,37 @@ class Quoter:
 
     # Receiving
 
-    async def on_book(self, book: Book) -> None:
-        if not self.quoting or book.instrument != self.instrument:
+    async def act(self) -> None:
+        """Quote from the latest book held, sending at most one message. Safe to call at
+        any time: with no book yet, or nothing that may be sent now, it sends nothing. The
+        caller applies the events that came in meanwhile before calling it again."""
+        try:
+            await self.quote_from_book()
+        finally:
+            # Act again by the time a side may send again, whatever events come or not.
+            self.next_act = time.monotonic() + self.next_ready()
+
+    async def quote_from_book(self) -> None:
+        book = self.books.get(self.instrument)
+        if not self.quoting or not self.market_open or book is None:
+            return  # outside a session the exchange takes no orders
+        if book.grid_time < self.open_time:
+            return  # kept from an earlier session: wait for this session's first book
+        if self.instrument in self.books.stale:
+            # A message that may have been a newer book was missed or unreadable, so this
+            # book may be out of date. Send nothing until a newer book arrives.
             return
         # Quote --inside dollars inside the wall's best price on each side that has one.
         bid = book.bid_levels[0].price + self.inside if book.bid_levels else None
         ask = book.ask_levels[0].price - self.inside if book.ask_levels else None
         if bid is not None and ask is not None and bid >= ask:
             return  # the wall's spread is too narrow to quote inside
-        if bid is not None:
-            await self.manage(self.quotes[BUY], bid)
-        if ask is not None:
-            await self.manage(self.quotes[SELL], ask)
+        targets = {BUY: bid, SELL: ask}
+        sent = self.messages
+        for quote in self.in_turn():
+            target = targets[quote.side]
+            if target is not None and self.messages == sent:
+                await self.manage(quote, target)
 
     def pending(self, ref: str | None) -> Quote | None:
         for quote in self.quotes.values():
@@ -384,8 +462,8 @@ async def pump(session: Session, queue: asyncio.Queue) -> None:
 async def next_event(queue: asyncio.Queue, timeout: float):
     """The next item from `pump`, or TimeoutError if none arrives within `timeout`."""
     if timeout <= 0:
-        # The time is up, even if events are waiting. Yield once all the same, so a
-        # Ctrl+C and the reader still get their turn.
+        # No time left to wait, even if events are waiting. Yield once all the same, so
+        # a Ctrl+C and the reader still get their turn.
         await asyncio.sleep(0)
         return TimeoutError()
     # asyncio.timeout rather than asyncio.wait_for: on Python 3.11, wait_for can lose a
@@ -397,22 +475,62 @@ async def next_event(queue: asyncio.Queue, timeout: float):
         return timeout_error
 
 
-async def handle(quoter: Quoter, view: RestingOrders, event: Event) -> bool:
-    """Act on one event. Returns False when there is no point quoting on."""
+def handle(quoter: Quoter, view: RestingOrders, event: Event) -> bool:
+    """Apply one event to what the example knows. It sends nothing: the example acts
+    only once every event already received is applied. Returns False when there is no
+    point quoting on."""
     # Update the view of resting orders first, from this event and in stream order.
     view.apply(event)
     item = as_market_data(event)
-    if isinstance(item, Book):
-        await quoter.on_book(item)
+    # Keeps a newer book; after a message that may have been a book was missed or could
+    # not be read, LatestBooks lists the book held as stale.
+    quoter.books.update(item)
+    if isinstance(item, SessionState):
+        quoter.on_session_state(item)
     elif isinstance(item, Reject):
         # The exchange refused the subscription, for example an unknown instrument.
         print(f"subscription refused: {reason_code_name(item.reason_code)}")
         return False
     elif isinstance(item, SeqGap | DecodeFailed):
         print("warning: a message from the exchange was missed or could not be read")
+        if isinstance(item, DecodeFailed) and item.type in (None, "session_state"):
+            # It may have said the market closed: quote again only after the next OPEN.
+            quoter.market_open = False
     elif is_order_event(event):
         quoter.on_order_event(event.message)
     return True
+
+
+def apply_received(quoter: Quoter, view: RestingOrders, item: object) -> str | None:
+    """Apply one item from `pump`. Returns why quoting must stop, or None to go on."""
+    if item is None:
+        return "closed"
+    if isinstance(item, Exception):
+        raise item  # the connection dropped
+    if not handle(quoter, view, item):
+        return "refused"
+    if view.incomplete:
+        return "unreliable"
+    return None
+
+
+def drain(queue: asyncio.Queue) -> list:
+    """Take every item already queued, in order, without waiting."""
+    items = []
+    while not queue.empty():
+        items.append(queue.get_nowait())
+    return items
+
+
+def apply_waiting(quoter: Quoter, view: RestingOrders, queue: asyncio.Queue) -> str | None:
+    """Apply every item `pump` has already queued, in the order received. Returns why
+    quoting must stop, or None to go on. Run before every decision to send: a queued
+    event may show that messages were missed or that the book held is out of date."""
+    while not queue.empty():
+        why = apply_received(quoter, view, queue.get_nowait())
+        if why is not None:
+            return why
+    return None
 
 
 async def quote_until(
@@ -423,24 +541,32 @@ async def quote_until(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     while True:
-        item = await next_event(queue, deadline - loop.time())
-        if item is None:
-            return "closed"
-        if isinstance(item, TimeoutError):
-            return "time"
-        if isinstance(item, Exception):
-            raise item  # the connection dropped
+        # Apply every event already received before deciding anything, even once time is
+        # up: an `accepted` left unapplied would leave an order unknown to the cleanup.
+        why = apply_waiting(quoter, view, queue)
+        if why is not None:
+            return why
+        if loop.time() >= deadline:
+            return "time"  # checked before acting: a send may complete without waiting
+        sent = quoter.messages
         try:
             # A send can stall (for example on a connection that stopped taking data), so
             # it too is bounded by the time left. Its request_ref is already recorded.
             async with asyncio.timeout(max(deadline - loop.time(), 0)):
-                keep_quoting = await handle(quoter, view, item)
+                # Act on the latest book held after every event, and on the timer even if
+                # no event has come: the exchange sends a book only when it changes.
+                await quoter.act()
         except TimeoutError:
             return "time"
-        if not keep_quoting:
-            return "refused"
-        if view.incomplete:
-            return "unreliable"
+        if quoter.messages != sent:
+            continue  # apply what came in during that send before sending another
+        # Wait for the next event, but only until it is time to act again.
+        wake = min(deadline - loop.time(), quoter.next_act - time.monotonic())
+        item = await next_event(queue, wake)
+        if not isinstance(item, TimeoutError):
+            why = apply_received(quoter, view, item)
+            if why is not None:
+                return why
 
 
 async def cancel_own_orders(
@@ -453,9 +579,17 @@ async def cancel_own_orders(
     quoter.quoting = False
     loop = asyncio.get_running_loop()
     while True:
-        # Checked before every send: after missed events, ownership is no longer known.
+        # Apply every event already received first, so a missed message is seen before
+        # anything is sent. After missed events, ownership is no longer known.
+        for item in drain(queue):
+            if item is None:
+                return "unconfirmed"
+            if isinstance(item, Exception):
+                raise item
+            handle(quoter, view, item)
         if view.incomplete:
             return "unreliable"
+        sent = quoter.messages
         try:
             # Bounded by the time left, so a stalled send cannot outlast --drain-seconds.
             async with asyncio.timeout(max(deadline - loop.time(), 0)):
@@ -466,6 +600,8 @@ async def cancel_own_orders(
             return "done"
         if loop.time() >= deadline:
             return "unconfirmed"
+        if quoter.messages != sent:
+            continue  # apply what came in during that send before sending another
         # Wake at least every requote interval, to retry a rejected cancel.
         item = await next_event(queue, min(deadline - loop.time(), quoter.requote_seconds))
         if item is None:
@@ -474,7 +610,7 @@ async def cancel_own_orders(
             continue
         if isinstance(item, Exception):
             raise item
-        await handle(quoter, view, item)
+        handle(quoter, view, item)
 
 
 def unreliable(quoter: Quoter) -> int:
