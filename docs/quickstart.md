@@ -2,25 +2,27 @@
 
 **Version:** 0.7
 
-This guide takes you from a fresh checkout to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
+This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
 ## What you need
 
 - Python 3.11 or later.
-- A copy of this repository.
+- A clone of this repository, but only to run or read the worked examples (step 11).
 - The address of the exchange you are trading on. The course team tells you the practice exchange's address; a test exchange you run on your own machine is usually `ws://127.0.0.1:8080/ws`.
 - Your team's practice token. The course team gives it to you. Treat it like a password: never put it in a source file, a notebook, a screenshot or a repository.
 - A strategy ID registered for your team, for any program that sends orders.
 
 ## 1. Install
 
-From the root of your copy of this repository:
+Install the SDK into your own project's virtual environment:
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
-pip install .
+pip install "git+https://github.com/josh-g-s/qte-sdk"
 ```
+
+This installs the `qte_sdk` package only. The worked examples (step 11) are not installed with it: to run or read them, clone this repository and run them from the root of the clone, inside a virtual environment where the SDK is installed. You do not need a clone for anything else in this guide.
 
 ## 2. Set the exchange address and your token
 
@@ -78,15 +80,16 @@ if calendar is None:
 else:
     now = session.info.server_time
     opens, closes = next_open(calendar, now), next_close(calendar, now)
+    # Differences of exchange timestamps, in the exchange's time units (see below).
     if opens is not None:
-        print("next open in", opens - now, "exchange time units")
+        print("until the next open:", opens - now)
     if closes is not None:
-        print("next close in", closes - now, "exchange time units")
+        print("until the next close:", closes - now)
 ```
 
 - `wait_for_calendar` keeps every event it reads while it waits, so iterating the session afterwards still delivers all of them, the calendar included. Call it from the loop that reads the session, not from a second task.
 - It returns `None` if no calendar arrives in time. An older exchange never sends one, so your program must still work without it.
-- The times are the exchange's own timestamps, like `session.info.server_time`. Compare them only with timestamps from the exchange, never with your computer's clock, and do not convert them with time zone rules of your own.
+- The times are the exchange's own timestamps, like `session.info.server_time`. A timestamp is a signed 64-bit count of time units since the Unix epoch, in UTC. The contract has not fixed the resolution yet, so do not assume what one unit is. Compare and subtract timestamps only with other timestamps from the exchange, never with your computer's clock, and do not convert them with time zone rules of your own.
 - `next_open` skips days with no session. It returns `None` once the term's last session has opened, and `next_close` returns `None` once it has closed.
 - The calendar is the schedule. Whether the market is open right now is what `SessionState` reports (step 4).
 - A `ReconnectingSession` (step 9) keeps the calendar of its current session in its `calendar` attribute, which is `None` again after each reconnect until the new session's calendar arrives.
@@ -113,7 +116,7 @@ There is **one conflated market-data feed, the same for every participant**. Boo
 
 - A `Book` for an instrument is published at a grid point only if it differs from the last one published for that instrument this session. No `Book` at a grid point means that instrument's book is unchanged, so keep the last one you received.
 - The first grid point of each session publishes the book of every instrument that has one.
-- A subscribe during a session is answered at once with the last book published this session for each instrument you named, carrying the `grid_time` it was published at. That can be older than the latest `SessionState`, and the same book can then arrive again at the same `grid_time`. Keep, per instrument, the book with the latest `grid_time`.
+- A subscribe during a session is answered at once with the last book published this session for each instrument you named that has one, carrying the `grid_time` it was published at. An instrument with no book yet gets none on subscribe; its book arrives when it is first published. The book you get on subscribe can be older than the latest `SessionState`, and the same book can then arrive again at the same `grid_time`. Keep, per instrument, the book with the latest `grid_time`.
 
 `qte_sdk.books.LatestBooks` keeps the latest book of each instrument for you:
 
@@ -136,7 +139,11 @@ A `Book` is the state of one instrument at the end of an interval, not a stream 
 - `SeqGap`: messages were missed, so anything you built from them may be wrong.
 - `DecodeFailed`: a message could not be decoded.
 
-**Outside a session** you can still connect and subscribe, but there is no live market. A subscribe is answered once, not on the grid: a `SessionState` whose `state` is `CLOSED`, then an `OfficialClose` for each subscribed instrument that has one. `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. No `Book`, `Trades` or `Mark` arrives until a session opens, so a loop that waits for a book waits until then.
+**Outside a session** you can still connect and subscribe, but there is no live market. A subscribe is answered once, not on the grid, with a `SessionState` whose `state` is `CLOSED`.
+
+The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`, but **the exchange does not send it yet**. Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. When it is sent, `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. Write your code so it works with or without one.
+
+No `Book`, `Trades` or `Mark` arrives until a session opens, so a loop that waits for a book waits until then.
 
 `market_data` skips everything that is not market data, including your order events. When you also trade, loop over the session yourself and sort each event with `as_market_data(event)` and `is_order_event(event)`, as in the next step.
 
@@ -155,7 +162,11 @@ to_decimal(199_970_000)  # Decimal('199.970000')
 
 There is **no order ID** on the wire. Your team's orders are addressed by **instrument, side and price**, and your team holds **at most one resting order per instrument, side and price**, across all of its strategies. So to cancel an order you name its level, not an ID. A second `new` at a level where your team already rests is rejected (`DUPLICATE_ORDER_AT_LEVEL`); to change its size, send an amend.
 
+Like the snippets of step 4, this runs inside the `async with session:` block of step 3 and uses its `session`; it needs nothing else from earlier steps.
+
 ```python
+import asyncio
+
 from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT
 from qte_sdk.market_data import as_market_data
 from qte_sdk.orders import (
@@ -230,6 +241,8 @@ An amend changes the orders at one level: `send_amend(session, instrument=..., s
 Because a cancel or amend names a level, not an order, it acts on whichever of your team's orders rests at that level when the exchange applies it, after the order delay. If your order fills in the meantime and a teammate's strategy enters an order at the same price, your cancel removes theirs. Agree within your team who trades which instruments or prices.
 
 A send checks its identifiers before anything leaves your machine: `strat_id` and `request_ref` must be 1 to 32 bytes of UTF-8 and `instrument` at most 32 bytes. A send that breaks this raises `ValueError`.
+
+`send_new` also takes `parent_ticket_id`, which is for Execution desks only: it names the working parent ticket a child order works. Leave it out on any other team: the exchange rejects a `new` from any other team that carries it, with `PARENT_NOT_WORKING` (or `MALFORMED_MESSAGE` if the value itself is malformed).
 
 ## 7. Read your order events
 
