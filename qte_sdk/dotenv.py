@@ -177,7 +177,8 @@ def _assigns_token(text: str) -> bool:
     for line in text.splitlines():
         assignment = parse_assignment(line)
         if assignment is not None and assignment[0] == _TOKEN_NAME:
-            if assignment[1].strip() not in ("", "''", '""'):
+            value, problem = _parse_value(assignment[1])
+            if problem is not None or value:
                 return True
     return False
 
