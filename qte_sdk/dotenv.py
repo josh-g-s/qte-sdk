@@ -270,25 +270,42 @@ def is_tracked_by_git(path: Path) -> bool | None:
     return None
 
 
+def tracked_names(directory: Path) -> list[str] | None:
+    """The names of the files git tracks directly in `directory` (its index, so a tracked
+    file deleted from disk is included), or None if that cannot be told."""
+    result = _run_git(directory, "ls-files", "-z", "--", ".", capture=True)
+    if result is None or result.returncode != 0:
+        return None
+    entries = result.stdout.decode("utf-8", "surrogateescape").split("\0")
+    return [entry for entry in entries if entry and "/" not in entry]
+
+
 def _git(path: Path, *args: str) -> int | None:
     """Run git with `args` in the directory of `path` and return its exit status, or None if
-    git is not on the PATH or could not be run. Git is given only the environment variables
-    in `_GIT_ENV`."""
+    git is not on the PATH or could not be run."""
+    result = _run_git(path.parent, *args)
+    return None if result is None else result.returncode
+
+
+def _run_git(
+    directory: Path, *args: str, capture: bool = False
+) -> "subprocess.CompletedProcess[bytes] | None":
+    """Run git with `args` in `directory`, or return None if git is not on the PATH or could
+    not be run. Git is given only the environment variables in `_GIT_ENV`."""
     git = shutil.which("git")
     if git is None:
         return None
     env = {k: v for k, v in os.environ.items() if k in _GIT_ENV}
     try:
-        result = subprocess.run(
+        return subprocess.run(
             [git, *args],
-            cwd=path.parent,
+            cwd=directory,
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=_GIT_TIMEOUT,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.returncode

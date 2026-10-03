@@ -52,6 +52,7 @@ from qte_sdk.dotenv import (
     is_tracked_by_git,
     parse_assignment,
     read_value,
+    tracked_names,
 )
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
@@ -269,7 +270,17 @@ def _refuse_if_tracked(path: Path) -> None:
         return
     tracked = is_tracked_by_git(path)
     if tracked is False:
-        return
+        # Compared ignoring case as well: on a filesystem that ignores case, `readme.md`
+        # is the file git tracks as `README.md`, even after a rename or a deletion.
+        names = tracked_names(path.parent) if path.parent.is_dir() else []
+        if names is None:
+            tracked = None
+        else:
+            spelling = next((n for n in names if n.casefold() == path.name.casefold()), None)
+            if spelling is None:
+                return
+            path = path.parent / spelling
+            tracked = True
     if tracked is None:
         raise _Refused(
             f"{path} is inside a git repository, but git could not say whether it tracks "

@@ -33,6 +33,11 @@ def no_token_in_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(TOKEN_FILE_ENV_VAR, raising=False)
 
 
+class UnexpectedPrompt(BaseException):
+    """Raised by a test prompt asked once too often. A BaseException, so the helper's own
+    handlers cannot swallow it and turn it into an ordinary refusal."""
+
+
 def answers(*replies: str) -> Callable[[str], str]:
     """A prompt that gives each reply in turn and fails if asked once too often."""
     pending: Iterator[str] = iter(replies)
@@ -41,13 +46,13 @@ def answers(*replies: str) -> Callable[[str], str]:
         try:
             return next(pending)
         except StopIteration:
-            raise AssertionError(f"not expected to ask: {prompt!r}") from None
+            raise UnexpectedPrompt(prompt) from None
 
     return ask
 
 
 def never(prompt: str) -> str:
-    raise AssertionError(f"not expected to ask: {prompt!r}")
+    raise UnexpectedPrompt(prompt)
 
 
 def run(
@@ -528,6 +533,7 @@ def test_set_file_refuses_a_gitignore_destination(capsys):
     assert run(["set", "--file", ".gitignore"]) == 1
     assert run(["set", "--file", "sub/.GitIgnore"]) == 1
     assert not Path(".gitignore").exists()
+    assert capsys.readouterr().err.count("cannot go in a .gitignore file") == 2
 
 
 @needs_git
@@ -540,6 +546,32 @@ def test_a_tracked_file_named_in_another_case_is_still_refused(capsys):
     assert run(["set", "--file", "readme.md"]) == 1
     assert Path("README.md").read_text() == "hello\n"
     assert "git tracks" in capsys.readouterr().err
+
+
+def case_insensitive() -> bool:
+    probe = Path("CaseProbe")
+    probe.write_text("")
+    try:
+        return Path("caseprobe").exists()
+    finally:
+        probe.unlink()
+
+
+@needs_git
+@pytest.mark.parametrize("change", ["renamed", "deleted"])
+def test_a_tracked_name_in_another_case_is_refused_after_a_rename_or_deletion(change: str, capsys):
+    git("init", "-q", ".")
+    Path("README.md").write_text("hello\n")
+    git("add", "README.md")
+    if change == "renamed":
+        if not case_insensitive():
+            pytest.skip("this filesystem tells names apart by case")
+        Path("README.md").rename("readme.md")
+    else:
+        Path("README.md").unlink()
+    assert run(["set", "--file", "readme.md"]) == 1  # the token is never asked for
+    err = capsys.readouterr().err
+    assert "git tracks" in err and "README.md" in err
 
 
 @needs_git
