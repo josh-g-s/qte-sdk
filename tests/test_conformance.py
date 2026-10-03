@@ -385,24 +385,31 @@ def check_release_time(accepted: Accepted) -> None:
 
 
 def assert_ladder(book: Book) -> None:
-    """Ten ask levels and ten bid levels, best first.
+    """The wall ladder: ten ask levels and up to ten bid levels, best first, every level at
+    least one share, and both sides spaced uniformly by the asks' own step.
 
     The bid ladder of a low-priced instrument stops at its last level with a positive
-    price, so fewer bids are accepted only when the next level, one more step of the
-    ladder's own spacing below the last, would not be positive. The spacing is the gap
-    between the last two bids, or between the first two asks when there is one bid.
+    price, so fewer than ten bids are accepted only when one more step below the last bid
+    would not be positive.
     """
-    bids = [level.price for level in book.bid_levels]
     asks = [level.price for level in book.ask_levels]
+    bids = [level.price for level in book.bid_levels]
     assert len(asks) == 10, f"{len(asks)} ask levels, not ten"
     assert 1 <= len(bids) <= 10, f"{len(bids)} bid levels"
-    assert all(price > 0 for price in bids)
+    step = asks[1] - asks[0]
+    assert step > 0, "asks not best first"
+    assert all(b - a == step for a, b in zip(asks[:-1], asks[1:], strict=True)), (
+        "asks not evenly spaced"
+    )
+    assert all(a - b == step for a, b in zip(bids[:-1], bids[1:], strict=True)), (
+        "bids not evenly spaced"
+    )
+    assert bids[0] < asks[0], "the bid ladder crosses the ask ladder"
+    assert bids[-1] > 0, "a bid level without a positive price"
     if len(bids) < 10:
-        step = bids[-2] - bids[-1] if len(bids) >= 2 else asks[1] - asks[0]
         assert bids[-1] - step <= 0, f"{len(bids)} bid levels, though the next would be positive"
-    assert bids == sorted(bids, reverse=True) and len(set(bids)) == len(bids), "bids not best first"
-    assert asks == sorted(asks) and len(set(asks)) == 10, "asks not best first"
-    assert bids[0] < asks[0]
+    sizes = [level.size for level in [*book.bid_levels, *book.ask_levels]]
+    assert all(size >= 1 for size in sizes), "a level shows less than one share"
 
 
 def inside_prices(book: Book, tick: int, count: int) -> list[int]:
