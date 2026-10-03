@@ -468,6 +468,9 @@ def test_until_next_open_subtracts_exchange_timestamps_only():
     assert until_next_open(state, 200) == 300
     assert until_next_open(state, 500) == 0
     assert until_next_open(state, 700) == -200  # `now` already past that open
+    # Presence, not value, decides: a next open at timestamp 0 is still a next open.
+    assert until_next_open(SessionState(next_open_time=0), -5) == 5
+    assert until_next_open(SessionState(), -5) is None
 
 
 # What the market-data view passes on and what it leaves out.

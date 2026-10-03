@@ -184,7 +184,8 @@ def until_next_open(state: SessionState, now: int) -> int | None:
 
     Only the `SessionState` that answers a subscribe outside a session carries the next
     session; it is absent there too when the term has no later session. `now` must be an
-    exchange timestamp, such as `session.info.server_time`, never your machine's clock:
+    exchange timestamp, such as `session.info.server_time` (the time the session was
+    acknowledged) or a later one, never your machine's clock:
     the result is `state.next_open_time - now`, in the exchange's time units, whose
     resolution the contract has not fixed. It is negative if `now` is already past that
     open.
