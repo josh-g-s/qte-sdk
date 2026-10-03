@@ -53,7 +53,7 @@ The SDK reads `.env` itself, with no extra package: `open_session()` takes the a
 
 Two safeguards protect the token:
 
-- If other users can read a `.env` that holds `QTE_TOKEN`, the SDK refuses it and raises `MissingToken`, saying to run `chmod 600 .env`. (This check applies on macOS and Linux.)
+- If other users can read a `.env` that holds `QTE_TOKEN`, the SDK uses nothing in it and raises `MissingToken` (or `MissingURL`, when it was reading the address), saying to run `chmod 600 .env`. (This check applies on macOS and Linux.)
 - If the `.env` is inside a git repository and git does not ignore it, the SDK warns you once, so you can add `.env` to `.gitignore` before the token is committed. It still uses the file. The `.gitignore` of this SDK's repository protects only a clone of this repository, not your project. The same warning appears if you run a program inside a repository someone else made that ships a `.env`: check the address in it before you use it.
 
 ### Where the SDK looks, in order

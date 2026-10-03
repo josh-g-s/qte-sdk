@@ -12,4 +12,4 @@ def isolated_from_the_developers_setup(monkeypatch: pytest.MonkeyPatch, tmp_path
     The modules that need it also clear `QTE_TOKEN` and `QTE_TOKEN_FILE`."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("QTE_URL", raising=False)
-    monkeypatch.setattr(dotenv, "_git_checked", False)
+    monkeypatch.setattr(dotenv, "_git_checked", set())
