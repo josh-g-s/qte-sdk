@@ -27,12 +27,14 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
-from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
+from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, MarketSessionPhase
 from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
 from qte_sdk.contract.v1.market_data_pb2 import SessionState as SessionStateMessage
 from qte_sdk.contract.v1.market_data_pb2 import WallLevel
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
+from qte_sdk.orders import send_amend, send_new
 from qte_sdk.resting import RestingOrders
+from qte_sdk.session import open_session
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
@@ -320,13 +322,7 @@ class FakeExchange:
                 }
                 await self.send(ws, "execution", fill)
         elif type_ == "amend":
-            old = (p["instrument"], p["side"], int(p["price"]))
-            key = (p["instrument"], p["side"], int(p["new_price"]))
-            await self.send(ws, "accepted", accepted)
-            strat_id, _ = self.resting.pop(old)
-            self.resting[key] = (strat_id, int(p["new_size"]))
-            # Every accepted amend's order_state names the price the order had before it.
-            await self.send(ws, "order_state", {**self.order_state(key), "old_price": str(old[2])})
+            await self.on_amend(ws, p, accepted)
         elif type_ == "cancel":
             key = (p["instrument"], p["side"], int(p["price"]))
             if self.reject_first_cancel_then_gap:
@@ -358,6 +354,75 @@ class FakeExchange:
             await self.send(ws, "accepted", accepted)
             for key in list(self.resting):
                 await self.send(ws, "order_cancelled", self.cancelled(key, ref, "MASS_CANCEL"))
+
+    async def on_amend(
+        self, ws: ServerConnection, p: dict[str, Any], accepted: dict[str, Any]
+    ) -> None:
+        """Every accepted amend sends one order_state naming the price the order had before
+        it as `old_price`: RESTING where the order still rests, CANCELLED when the amend cut
+        it to nothing, FILLED when a marketable new price filled it against the wall."""
+        old = (p["instrument"], p["side"], int(p["price"]))
+        key = (p["instrument"], p["side"], int(p["new_price"]))
+        reason = None
+        if old not in self.resting:
+            reason = "NO_ORDER_AT_LEVEL"
+        elif key != old and key in self.resting:
+            reason = "DUPLICATE_ORDER_AT_LEVEL"
+        if reason is not None:
+            reject = {
+                "request_ref": p.get("request_ref"),
+                "request_type": "AMEND",
+                "reason_code": reason,
+                "receipt_time": "1",
+            }
+            await self.send(ws, "reject", reject)
+            return
+        await self.send(ws, "accepted", accepted)
+        size = int(p["new_size"])
+        moved = {"old_price": str(old[2])}
+        if size == 0:
+            strat_id = self.resting[old][0]
+            ref = p.get("request_ref", "")
+            await self.send(ws, "order_cancelled", self.cancelled(old, ref, "AMEND_CUT"))
+            await self.send(ws, "order_state", self.ended(key, strat_id, "CANCELLED", moved))
+            return
+        strat_id, _ = self.resting.pop(old)
+        wall = ASK if p["side"] == "BUY" else BID
+        if (key[2] >= wall) if p["side"] == "BUY" else (key[2] <= wall):
+            fill = {
+                "exec_id": "e-4",
+                "origin": "TEAM",
+                "strat_id": strat_id,
+                "instrument": p["instrument"],
+                "side": p["side"],
+                "order_price": str(key[2]),
+                "fill_price": str(wall),
+                "fill_size": str(size),
+                "remaining_size": "0",
+                "fill_kind": "STUDENT_TO_WALL",
+                "liquidity": "TAKER",
+                "fee": "-10",
+            }
+            await self.send(ws, "execution", fill)
+            await self.send(ws, "order_state", self.ended(key, strat_id, "FILLED", moved))
+            return
+        self.resting[key] = (strat_id, size)
+        await self.send(ws, "order_state", {**self.order_state(key), **moved})
+
+    def ended(
+        self, key: tuple[str, str, int], strat_id: str, state: str, extra: dict[str, str]
+    ) -> dict[str, Any]:
+        instrument, side, price = key
+        return {
+            "strat_id": strat_id,
+            "instrument": instrument,
+            "side": side,
+            "price": str(price),
+            "state": state,
+            "remaining_size": "0",
+            "timestamp": "1",
+            **extra,
+        }
 
     async def confirm_later(
         self, ws: ServerConnection, key: tuple[str, str, int], ref: str
@@ -765,6 +830,53 @@ async def test_the_fake_rejects_a_duplicate_without_accepting_it():
     assert out.count("accepted new") == 1  # only the sell side was accepted
     # The teammate's order at that level is untouched.
     assert exchange.resting == {(INSTRUMENT, "BUY", BID + TICK): ("teammate", 7)}
+
+
+async def test_the_fakes_amends_keep_a_resting_order_view_right():
+    exchange = FakeExchange()
+    view = RestingOrders()
+    low, high = BID - TICK, BID - 2 * TICK
+    async with serve_local(exchange) as url:
+        session = await open_session(url, token=synthetic_token())
+        async with session:
+            events = aiter(session)
+
+            async def answer() -> str:
+                # Apply events until the one that settles the last message sent.
+                while True:
+                    event = await anext(events)
+                    view.apply(event)
+                    if isinstance(event, Received) and event.type in ("order_state", "reject"):
+                        return event.type
+
+            for price in (BID, low):
+                await send_new(
+                    session,
+                    strat_id="s",
+                    instrument=INSTRUMENT,
+                    side=BUY,
+                    order_type=LIMIT,
+                    price=price,
+                    size=5,
+                )
+                assert await answer() == "order_state"
+            amend = {"instrument": INSTRUMENT, "side": BUY, "new_size": 5}
+            await send_amend(session, price=BID, new_price=low, **amend)
+            assert await answer() == "reject"  # the team already rests there
+            assert {o.key.price for o in view} == {BID, low}
+
+            await send_amend(session, price=BID, new_price=high, **amend)
+            assert await answer() == "order_state"
+            assert {o.key.price for o in view} == {low, high}
+
+            await send_amend(session, price=high, new_price=ASK, **amend)
+            assert await answer() == "order_state"  # FILLED against the wall
+            assert {o.key.price for o in view} == {low}
+
+            await send_amend(session, price=low, new_price=low, **{**amend, "new_size": 0})
+            assert await answer() == "order_state"  # CANCELLED: cut to nothing
+    assert len(view) == 0
+    assert exchange.resting == {}
 
 
 async def start_quoter(url: str, *args: str) -> asyncio.subprocess.Process:

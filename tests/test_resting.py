@@ -180,24 +180,36 @@ def test_a_marketable_amend_that_fills_in_part_rests_its_remainder_at_the_new_pr
 
 
 def test_an_amend_cut_to_nothing_reported_cancelled_removes_the_entry():
-    view = view_of(
-        rested(price=PX),
-        AMEND_ACCEPTED,
-        cancelled(ReasonCodes.AMEND_CUT, price=PX),
-        amended(PX, old_price=PX, state=CANCELLED, size=0),
-    )
+    # The amend's order_cancelled comes first, then its order_state; either closes it.
+    for ending in (
+        [cancelled(ReasonCodes.AMEND_CUT, price=PX)],
+        [amended(PX, old_price=PX, state=CANCELLED, size=0)],
+    ):
+        view = view_of(rested(price=PX), AMEND_ACCEPTED, *ending)
+        assert len(view) == 0
+    view.apply(amended(PX, old_price=PX, state=CANCELLED, size=0))
     assert len(view) == 0
 
 
-def test_a_price_moving_amend_cancelled_at_its_new_price_leaves_nothing_at_either_price():
-    # For example a remainder that could not rest: the order_state alone clears both levels,
-    # whichever order the messages come in.
+def test_an_ended_amend_alone_leaves_nothing_at_either_price():
+    # For example a remainder that could not rest. The order_state alone clears both levels,
+    # even an entry the view wrongly still holds at the new price.
+    view = view_of(rested(price=PX), rested(price=PX3, size=1))
+    view.apply(amended(PX3, old_price=PX, state=CANCELLED, size=0))
+    assert len(view) == 0
+    view.apply(cancelled(ReasonCodes.REMAINDER_OUTSIDE_BAND, price=PX3))
+    assert len(view) == 0
+
+
+def test_a_marketable_amend_that_fills_in_part_then_cannot_rest_leaves_nothing():
     view = view_of(
-        rested(price=PX),
+        rested(price=PX, size=100),
         AMEND_ACCEPTED,
-        amended(PX3, old_price=PX, state=CANCELLED, size=0),
-        cancelled(ReasonCodes.REMAINDER_OUTSIDE_BAND, price=PX3),
+        fill(remaining=30, size=70, price=PX3, liquidity=TAKER),
+        cancelled(ReasonCodes.REMAINDER_OUTSIDE_BAND, price=PX3, size=30),
     )
+    assert view.get("AAPL", BUY, PX).remaining_size == 100  # not yet told it moved
+    view.apply(amended(PX3, old_price=PX, state=CANCELLED, size=0))
     assert len(view) == 0
 
 
