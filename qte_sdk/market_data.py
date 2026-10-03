@@ -42,9 +42,10 @@ convenience on that reply.
 Messages are the generated contract classes. Prices are `int` micro-dollars and sizes are
 `int` shares, exact at any size; use `qte_sdk.units.to_decimal` for exact `Decimal`
 dollars. Each instrument's condition is the `condition` field of `Book` and of `Mark`
-(an `InstrumentCondition` value), not a separate message. Timestamps are left as the
-`int` the wire carries, milliseconds since the Unix epoch in UTC; use
-`qte_sdk.units.to_datetime` for a `datetime` and `to_timedelta` for the difference of two.
+(an `InstrumentCondition` value), not a separate message. Timestamps are left as `int`
+counts of milliseconds since the Unix epoch, in UTC (the JSON wire format carries them as
+decimal strings); use `qte_sdk.units.to_datetime` for a `datetime` and `to_timedelta`
+for the difference of two.
 """
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterable

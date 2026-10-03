@@ -14,8 +14,9 @@ represent most prices exactly and loses whole micro-dollars above 2**53.
 Quantities need no conversion: use them as they are.
 
 Every timestamp on the wire, such as `session_ack.server_time`, a `grid_time` or a
-calendar session's `open_time`, is a whole number of milliseconds since the Unix epoch,
-in UTC, in a signed 64-bit integer. The difference of two timestamps is a number of
+calendar session's `open_time`, is a signed 64-bit count of milliseconds since the Unix
+epoch, in UTC. The JSON wire format carries it as a decimal string, and the generated
+message classes hold it as an `int`. The difference of two timestamps is a number of
 milliseconds. These helpers convert both with integer arithmetic only:
 
     >>> to_datetime(1_791_207_000_000)
