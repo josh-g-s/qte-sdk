@@ -120,9 +120,18 @@ class FakeExchange:
         reject_detail: str | None = None,
         move_resting_to: tuple[int, ...] = (),
         withhold_accepted: bool = False,
+        account_unknown: str | None = None,
+        first_book_after: int = 0,
     ) -> None:
         # The exchange's clock in the session_ack, in milliseconds since the epoch.
         self.server_time = server_time
+        # With `account_unknown`, an account_query is refused as a message type the
+        # exchange does not know, as an older build does: MALFORMED_MESSAGE naming no
+        # request type. "echo" keeps its request_ref on that reject; "bare" does not.
+        self.account_unknown = account_unknown
+        # The books start only after this many intervals of the session, as for an
+        # instrument with no valid quote yet; the session state comes from the first.
+        self.first_book_after = first_book_after
         # With `withhold_accepted`, a limit order's `accepted` is never sent, as if lost.
         self.withhold_accepted = withhold_accepted
         # With `known_instruments`, a subscribe naming any other instrument is answered with
@@ -180,7 +189,12 @@ class FakeExchange:
             await ws.send(json.dumps(env))
 
     async def answer_account_query(self, ws: ServerConnection, ref: str) -> None:
-        if self.account_reject is not None:
+        if self.account_unknown is not None:
+            unknown: dict[str, Any] = {"reason_code": "MALFORMED_MESSAGE", "receipt_time": "1"}
+            if self.account_unknown == "echo":
+                unknown["request_ref"] = ref
+            await self.send(ws, "reject", unknown)
+        elif self.account_reject is not None:
             reject = {
                 "request_ref": ref,
                 "request_type": "ACCOUNT_QUERY",
@@ -253,7 +267,9 @@ class FakeExchange:
                 book["grid_time"] = "2"
             # As on the exchange, the session state comes on every interval, unchanged.
             await self.send(ws, "session_state", state)
-            if not self.book_once or self.books_sent == 0:
+            if published < self.first_book_after:
+                pass  # no valid quote yet, so no book
+            elif not self.book_once or self.books_sent == 0:
                 await self.send(ws, "book", book)
                 self.books_sent += 1
             published += 1
@@ -2045,13 +2061,58 @@ async def test_the_smoke_test_outside_a_session_sees_the_closed_market_and_place
     assert exchange.types() == ["auth", "subscribe", "account_query"]
 
 
-async def test_the_smoke_test_fails_an_instrument_with_no_book_during_a_session():
-    # The fake publishes a book for TEST only, while its session state comes every interval.
+async def test_the_smoke_test_skips_an_instrument_with_no_book_yet_during_a_session():
+    # The fake publishes a book for TEST only, while its session state comes every interval:
+    # OTHER is like an instrument with no valid quote yet, which has no book.
     exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME)
-    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, "OTHER")
-    assert code == 1, out + err
+    code, out, err, found = await run_smoke_test(
+        exchange, "--instruments", INSTRUMENT, "OTHER", "--book-wait", "1.5"
+    )
+    assert code == 0, out + err
     assert found["market:TEST"][0] == "PASS"
-    assert found["market:OTHER"] == ("FAIL", "no book from this session within 1 s")
+    assert found["market:OTHER"] == (
+        "SKIP",
+        "no book published within 1.5 s (the instrument may have no valid quote yet)",
+    )
+
+
+async def test_the_smoke_test_waits_for_an_instruments_first_book_during_a_session():
+    # The first book comes about 1.5 s into the session, after the --seconds window.
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, first_book_after=30)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    code, out, err, found = await run_smoke_test(
+        exchange, "--instruments", INSTRUMENT, "--book-wait", "20"
+    )
+    assert code == 0, out + err
+    status, reason = found["market:TEST"]
+    assert status == "PASS"
+    assert reason.startswith("bid 99.950000 x 300, ask 100.050000 x 200 (LIVE); ")
+    # It stops waiting once the book is there, well before --book-wait is up.
+    assert loop.time() - started < 15
+
+
+@pytest.mark.parametrize("book_wait", ["-1", "601", "inf", "nan"])
+async def test_the_smoke_test_keeps_its_book_wait_bounded(book_wait: str):
+    code, out, err = await run_example(
+        SMOKE_TEST, None, synthetic_token(), f"--book-wait={book_wait}"
+    )
+    assert code == 2
+    assert "--book-wait must be from 0 to 600 seconds" in err
+
+
+@pytest.mark.parametrize("echo", ["echo", "bare"], ids=["ref-echoed", "no-ref"])
+async def test_the_smoke_test_skips_an_account_query_refused_as_an_unknown_type(echo: str):
+    # An older exchange refuses a message type it does not know: MALFORMED_MESSAGE naming no
+    # request type, with or without the request_ref it could read.
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, account_unknown=echo)
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    assert found["account"] == (
+        "SKIP",
+        "refused as a message type this exchange does not know (MALFORMED_MESSAGE): it does "
+        "not serve the query yet",
+    )
 
 
 async def test_the_smoke_test_fails_a_refused_account_query():

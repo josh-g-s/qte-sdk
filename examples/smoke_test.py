@@ -17,11 +17,14 @@ reason, then a summary:
     calendar         reads the exchange's calendar: the next open and the last close.
     session-state    subscribes to each instrument and watches for --seconds: the market
                      session's state, OPEN during a session and CLOSED outside one.
-    market:<name>    during a session, the instrument's best bid and ask and what arrived;
-                     outside one, its official close, which the exchange may not send yet
-                     (a SKIP). An instrument the exchange does not know is a FAIL.
-    account          asks for your team's account. An exchange that does not answer the
-                     query yet is a SKIP. No figures are printed.
+    market:<name>    during a session, the instrument's best bid and ask and what arrived.
+                     One with no valid quote yet has no book, so the script waits up to
+                     --book-wait for its first, and a SKIP says if none came. Outside a
+                     session, its official close, which the exchange may not send yet (a
+                     SKIP). An instrument the exchange does not know is a FAIL.
+    account          asks for your team's account. No reply, or a refusal as a message
+                     type the exchange does not know, is a SKIP: it does not serve the
+                     query yet. Any other refusal is a FAIL. No figures are printed.
     test-order       only with --place-test-order (see below).
     feed             whether any message was missed or could not be decoded.
     history:<name>   the start of the last closed session's books from the history service, when
@@ -83,7 +86,13 @@ from websockets.exceptions import ConnectionClosed
 from qte_sdk.account import AccountState, ValuationBasis, is_account_state, send_account_query
 from qte_sdk.books import LatestBooks
 from qte_sdk.calendar import Calendar, CalendarSession, next_session, session_open_at
-from qte_sdk.connection import ContractVersionMismatch, ReportGap, SessionRejected, Unknown
+from qte_sdk.connection import (
+    ContractVersionMismatch,
+    Received,
+    ReportGap,
+    SessionRejected,
+    Unknown,
+)
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     LIMIT,
@@ -143,6 +152,12 @@ TEST_ORDER_SIZE = 1
 # exchange sets.
 CLOSE_SECONDS = 5.0
 
+# How long, during a session, to wait for an instrument's first book: a session's first
+# grid point publishes a book only for the instruments that have one, so one with no valid
+# quote yet has none until it does. Local choices, capped so the run stays bounded.
+DEFAULT_BOOK_WAIT = 60.0
+MAX_BOOK_WAIT = 600.0
+
 # Rejects of the test order meaning the exchange is not taking orders just now: nothing was
 # placed, and nothing is wrong with the setup.
 NOT_TAKING_ORDERS = frozenset(
@@ -184,6 +199,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--book-wait",
+        type=float,
+        default=DEFAULT_BOOK_WAIT,
+        help=(
+            "during a session, how long after subscribing to wait for an instrument's first "
+            "book, since one with no valid quote yet has none (default "
+            f"{DEFAULT_BOOK_WAIT:g}, at most {MAX_BOOK_WAIT:g})"
+        ),
+    )
+    parser.add_argument(
         "--place-test-order",
         action="store_true",
         help=(
@@ -208,6 +233,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not math.isfinite(args.seconds) or args.seconds <= 0:
         parser.error("--seconds must be a number of seconds more than 0")
+    if not 0 <= args.book_wait <= MAX_BOOK_WAIT:
+        parser.error(f"--book-wait must be from 0 to {MAX_BOOK_WAIT:g} seconds")
     if args.tick is not None and args.tick <= 0:
         parser.error("--tick must be more than 0, for example 0.01")
     if args.place_test_order and not args.strat_id:
@@ -251,6 +278,22 @@ def reject_text(reject: Reject) -> str:
     """The reject's reason code. Its free-text `reason_detail` is left out: it can name a
     risk limit and the team's figures against it, which this output never shows."""
     return reason_code_name(reject.reason_code)
+
+
+def refuses_unknown_type(event: Received) -> bool:
+    """Whether `event` is the reject an exchange sends for a message type it does not know:
+    MALFORMED_MESSAGE naming no request type at all (the contract names one whenever the
+    exchange knows the type), and not one of the team's order reports. It is how
+    `qte_sdk.session` recognises a `resume` from an exchange that does not serve it."""
+    message = event.message
+    payload = event.payload or {}
+    return (
+        isinstance(message, Reject)
+        and message.reason_code == ReasonCodes.MALFORMED_MESSAGE
+        and "request_type" not in payload
+        and "requestType" not in payload
+        and event.report_seq is None
+    )
 
 
 def best_text(book: Book) -> str:
@@ -513,8 +556,8 @@ class Watcher:
         self.unknown_types: set[str] = set()
         self.account_ref: str | None = None
         self.account_reply: AccountState | Reject | None = None
-        # MALFORMED_MESSAGE rejects that name no request type and no request_ref.
-        self.unattributed_rejects = 0
+        # Whether the reply refuses the query as a message type the exchange does not know.
+        self.account_unknown = False
         self.order: ProbeOrder | None = None
         self.closed = False
         self.failure: Exception | None = None
@@ -571,6 +614,24 @@ class Watcher:
         else:
             self.apply(item)
 
+    def has_session_book(self, instrument: str) -> bool:
+        """Whether a book of `instrument` from the session in progress has arrived."""
+        book = self.books.get(instrument)
+        return (
+            book is not None and self.state is not None and book.grid_time >= self.state.open_time
+        )
+
+    def waiting_for_books(self, instruments: list[str]) -> bool:
+        """Whether the market is open and an instrument the exchange knows has no book from
+        this session yet."""
+        if self.state is None or self.state.state != MarketSessionPhase.OPEN:
+            return False
+        return any(
+            not self.has_session_book(name)
+            for name in instruments
+            if name not in self.unknown_instruments
+        )
+
     def apply(self, event: Any) -> None:
         self.messages += 1
         if isinstance(event, SeqGap):
@@ -607,15 +668,20 @@ class Watcher:
         elif is_order_event(event):
             message = event.message
             ref = request_ref_of(message)
-            if isinstance(message, Reject) and ref is not None and ref == self.account_ref:
+            ours = ref is not None and ref == self.account_ref
+            if isinstance(message, Reject) and ours:
                 self.account_reply = message
+                self.account_unknown = refuses_unknown_type(event)
             elif (
-                isinstance(message, Reject)
+                self.account_ref is not None
+                and self.account_reply is None
                 and ref is None
-                and not message.HasField("request_type")
-                and message.reason_code == ReasonCodes.MALFORMED_MESSAGE
+                and refuses_unknown_type(event)
             ):
-                self.unattributed_rejects += 1
+                # Nothing else this script sends before the test order is a type an
+                # exchange could fail to know, so this refuses the account query.
+                self.account_reply = message
+                self.account_unknown = True
             elif self.order is not None:
                 self.order.apply(message)
 
@@ -623,7 +689,11 @@ class Watcher:
 # Market data, the account and the feed
 
 
-def check_market(report: Report, watcher: Watcher, instruments: list[str], seconds: float) -> None:
+def check_market(
+    report: Report, watcher: Watcher, instruments: list[str], book_limit: float, watched: float
+) -> None:
+    """Report the session state and each instrument. `book_limit` is how long a book was
+    waited for during a session, and `watched` how long market data was watched."""
     if not instruments:
         hint = "no instruments given: pass --instruments, for example --instruments AAPL MSFT"
         report.add(SKIP, "session-state", hint)
@@ -631,7 +701,7 @@ def check_market(report: Report, watcher: Watcher, instruments: list[str], secon
         return
     state = watcher.state
     if state is None:
-        report.add(FAIL, "session-state", f"none received within {seconds:g} s of subscribing")
+        report.add(FAIL, "session-state", f"none received within {watched:.0f} s of subscribing")
     else:
         outage = "; an exchange outage is in force" if state.outage_active else ""
         phase = name_of(MarketSessionPhase, state.state)
@@ -647,20 +717,18 @@ def check_market(report: Report, watcher: Watcher, instruments: list[str], secon
             reason = watcher.unknown_instruments[instrument]
             report.add(FAIL, name, f"the exchange does not know it: {reason}")
         elif is_open:
-            assert state is not None
-            if book is not None and book.grid_time >= state.open_time:
+            if watcher.has_session_book(instrument):
+                assert book is not None
                 counts = watcher.counts[instrument]
                 arrived = ", ".join(
                     f"{counts[kind]} {kind}" for kind in ("books", "trade prints", "marks")
                 )
-                report.add(PASS, name, f"{best_text(book)}; {arrived} in {seconds:g} s")
-            elif watcher.grid_points >= 2:
-                # A session's first grid point publishes every instrument's book, and a
-                # subscribe is answered with the last one published, so one is overdue.
-                report.add(FAIL, name, f"no book from this session within {seconds:g} s")
+                report.add(PASS, name, f"{best_text(book)}; {arrived} in {watched:.0f} s")
             else:
-                why = "too few grid points arrived to expect one"
-                report.add(SKIP, name, f"no book within {seconds:g} s, but {why}")
+                # A session publishes a book only for an instrument that has one, so one
+                # with no valid quote yet has none: not a fault in the setup.
+                why = "the instrument may have no valid quote yet"
+                report.add(SKIP, name, f"no book published within {book_limit:g} s ({why})")
         elif is_closed:
             close = watcher.closes.get(instrument)
             if close is None:
@@ -676,12 +744,10 @@ def check_market(report: Report, watcher: Watcher, instruments: list[str], secon
 def check_account(report: Report, watcher: Watcher, seconds: float) -> None:
     reply = watcher.account_reply
     if reply is None:
-        reason = f"not answered by this exchange within {seconds:g} s"
-        if watcher.unattributed_rejects:
-            # How an exchange that does not know a message type refuses it: no
-            # request_type and no request_ref, as qte_sdk.session treats a resume.
-            reason += ", which sent a MALFORMED_MESSAGE reject naming no request"
-        report.add(SKIP, "account", reason)
+        report.add(SKIP, "account", f"not answered by this exchange within {seconds:g} s")
+    elif isinstance(reply, Reject) and watcher.account_unknown:
+        reason = f"refused as a message type this exchange does not know ({reject_text(reply)})"
+        report.add(SKIP, "account", f"{reason}: it does not serve the query yet")
     elif isinstance(reply, Reject):
         report.add(FAIL, "account", f"refused: {reject_text(reply)}")
     else:
@@ -1101,9 +1167,15 @@ async def session_checks(report: Report, watcher: Watcher, args: argparse.Namesp
         await watcher.sent(subscribe(session, [instrument]))
     watcher.account_ref = new_request_ref()
     await watcher.sent(send_account_query(session, request_ref=watcher.account_ref))
+    subscribed = loop.time()
     # Watch for --seconds, applying every event as it arrives.
-    await watcher.until(lambda: False, loop.time() + args.seconds)
-    check_market(report, watcher, args.instruments, args.seconds)
+    await watcher.until(lambda: False, subscribed + args.seconds)
+    # During a session, give an instrument with no book yet up to --book-wait for its first.
+    book_limit = max(args.seconds, args.book_wait)
+    await watcher.until(
+        lambda: not watcher.waiting_for_books(args.instruments), subscribed + book_limit
+    )
+    check_market(report, watcher, args.instruments, book_limit, loop.time() - subscribed)
     check_account(report, watcher, args.seconds)
     await check_test_order(report, watcher, args)
     watcher.drain()
