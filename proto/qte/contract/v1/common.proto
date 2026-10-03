@@ -203,7 +203,11 @@ message ReasonCodes {
     OUTSIDE_DECLARED_SCOPE = 1101;
     INSTRUMENT_NOT_PERMITTED = 1102;
     INSTRUMENT_SUSPENDED = 1103;
-    // 1104-1199 reserved for band 1100 growth.
+    // A `new` or `amend` in an instrument disabled for the term because its
+    // frozen statistics are degenerate (SPEC 3.3, SPEC 9.4.3). A `cancel`
+    // there is never rejected on this ground.
+    INSTRUMENT_DISABLED = 1104;
+    // 1105-1199 reserved for band 1100 growth.
 
     // 1200: Message validity. MALFORMED_MESSAGE, UNKNOWN_INSTRUMENT,
     // TICK_VIOLATION, INVALID_SIZE and NO_ORDER_AT_LEVEL are validation
