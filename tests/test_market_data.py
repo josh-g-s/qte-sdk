@@ -40,6 +40,7 @@ from qte_sdk.market_data import (
     market_data,
     subscribe,
     unsubscribe,
+    until_next_open,
 )
 from qte_sdk.session import Session, SessionInfo
 from qte_sdk.units import to_decimal
@@ -186,6 +187,9 @@ async def test_session_state_decodes_typed():
     assert state.session_date == "2026-09-18"
     assert (state.open_time, state.close_time, state.grid_time) == (100, 200, 150)
     assert state.outage_active is True
+    # A session_state published at a grid point names no next session.
+    assert not any(state.HasField(f) for f in NEXT_SESSION_FIELDS)
+    assert until_next_open(state, 150) is None
 
 
 async def test_an_official_close_decodes_its_value_exactly_and_its_frozen_flag():
@@ -360,10 +364,23 @@ async def test_unsubscribing_stops_delivery_for_that_instrument():
     assert [(type(m), m.instrument) for m in after] == [(Book, "MSFT"), (Mark, "MSFT")]
 
 
-def closed_market(closes: dict[str, str]) -> Any:
+NEXT_SESSION_FIELDS = ("next_session_date", "next_open_time", "next_close_time")
+
+# The next session as the closed state names it. The open is past 2**53 so the test also
+# shows the timestamp decodes exactly.
+NEXT_SESSION = {
+    "next_session_date": "2026-09-21",
+    "next_open_time": str(ABOVE_2_53),
+    "next_close_time": str(ABOVE_2_53 + 100),
+}
+
+
+def closed_market(closes: dict[str, str], next_session: dict[str, str] | None = None) -> Any:
     """A scripted exchange outside a session. It answers a subscribe once, with the closed
     state and, for each named instrument in `closes`, its last official close (micro-dollars
-    as the wire's decimal string), and sends nothing else: no book, trades or mark."""
+    as the wire's decimal string), and sends nothing else: no book, trades or mark. The
+    closed state carries the `next_session` fields when given, and none of them otherwise,
+    as when the term has no later session."""
 
     async def handler(ws: ServerConnection) -> None:
         subscribed = json.loads(await ws.recv())
@@ -375,6 +392,7 @@ def closed_market(closes: dict[str, str]) -> Any:
             "close_time": "200",
             "grid_time": "200",
             "outage_active": False,
+            **(next_session or {}),
         }
         seq = 1
         await ws.send(frame("session_state", state, seq))
@@ -393,8 +411,10 @@ def closed_market(closes: dict[str, str]) -> Any:
     return handler
 
 
-async def closed_market_reply(closes: dict[str, str], instruments: list[str]) -> list[Any]:
-    async with serve_local(closed_market(closes)) as url, Connection(url) as conn:
+async def closed_market_reply(
+    closes: dict[str, str], instruments: list[str], next_session: dict[str, str] | None = None
+) -> list[Any]:
+    async with serve_local(closed_market(closes, next_session)) as url, Connection(url) as conn:
         session = session_on(conn)
         await subscribe(session, instruments)
         return [item async for item in market_data(session)]
@@ -420,6 +440,34 @@ async def test_outside_a_session_an_instrument_with_no_official_close_yet_gets_n
     items = await closed_market_reply({"AAPL": "200011000"}, ["AAPL", "QTEZ"])
     assert [type(item) for item in items] == [SessionState, OfficialClose]
     assert items[1].instrument == "AAPL"
+
+
+async def test_outside_a_session_the_closed_state_names_the_next_session():
+    [state] = await closed_market_reply({}, ["AAPL"], NEXT_SESSION)
+
+    assert all(state.HasField(f) for f in NEXT_SESSION_FIELDS)
+    assert state.next_session_date == "2026-09-21"
+    assert (state.next_open_time, state.next_close_time) == (ABOVE_2_53, ABOVE_2_53 + 100)
+    # The fields it already had keep their meaning: the most recent session.
+    assert (state.session_date, state.open_time, state.close_time) == ("2026-09-18", 100, 200)
+    server_time = 1  # session_on's ack, as `session.info.server_time` gives it
+    assert until_next_open(state, server_time) == ABOVE_2_53 - server_time
+
+
+async def test_with_no_later_session_the_closed_state_names_none_and_the_wait_is_none():
+    [state] = await closed_market_reply({}, ["AAPL"])
+
+    assert state.state == CLOSED
+    assert not any(state.HasField(f) for f in NEXT_SESSION_FIELDS)
+    assert state.next_session_date == ""  # an absent field reads as its default
+    assert until_next_open(state, 1) is None
+
+
+def test_until_next_open_subtracts_exchange_timestamps_only():
+    state = SessionState(next_open_time=500)
+    assert until_next_open(state, 200) == 300
+    assert until_next_open(state, 500) == 0
+    assert until_next_open(state, 700) == -200  # `now` already past that open
 
 
 # What the market-data view passes on and what it leaves out.

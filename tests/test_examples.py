@@ -174,6 +174,9 @@ class FakeExchange:
 
     async def answer_closed(self, ws: ServerConnection, instruments: list[str]) -> None:
         state = {"state": "CLOSED", "session_date": "2026-01-05", "close_time": "2"}
+        # As the out-of-hours reply does, it names the next scheduled session.
+        state["next_session_date"] = "2026-01-06"
+        state["next_open_time"], state["next_close_time"] = "100", "200"
         await self.send(ws, "session_state", {**state, "grid_time": "2"})
         for instrument in instruments:
             close = {"instrument": instrument, "session_date": "2026-01-05", "value": "100011000"}

@@ -32,6 +32,13 @@ time-weighted average of the mark over the final five minutes of its session. Th
 exchange does not send it yet, so its absence is expected. No `Book`, `Trades` or `Mark`
 arrives until a session opens.
 
+That one out-of-hours `SessionState` can also name the next scheduled session:
+`next_session_date`, `next_open_time` and `next_close_time` are set together, only on that
+reply, and are absent when the term has no later session or the exchange predates them.
+`until_next_open(state, session.info.server_time)` reads the wait until the next open from
+it. The calendar (`qte_sdk.calendar`) stays the full schedule; these fields are a
+convenience on that reply.
+
 Messages are the generated contract classes. Prices are `int` micro-dollars and sizes are
 `int` shares, exact at any size; use `qte_sdk.units.to_decimal` for exact `Decimal`
 dollars. Each instrument's condition is the `condition` field of `Book` and of `Mark`
@@ -87,6 +94,7 @@ __all__ = [
     "market_data",
     "subscribe",
     "unsubscribe",
+    "until_next_open",
 ]
 
 MarketData = Book | Trades | Mark | SessionState | OfficialClose
@@ -168,6 +176,22 @@ async def market_data(events: AsyncIterable[Any]) -> AsyncIterator[MarketDataEve
         item = as_market_data(event)
         if item is not None:
             yield item
+
+
+def until_next_open(state: SessionState, now: int) -> int | None:
+    """The time from `now` until the next session opens, as `state` names it, or None
+    when `state` names no next session.
+
+    Only the `SessionState` that answers a subscribe outside a session carries the next
+    session; it is absent there too when the term has no later session. `now` must be an
+    exchange timestamp, such as `session.info.server_time`, never your machine's clock:
+    the result is `state.next_open_time - now`, in the exchange's time units, whose
+    resolution the contract has not fixed. It is negative if `now` is already past that
+    open.
+    """
+    if not state.HasField("next_open_time"):
+        return None
+    return state.next_open_time - now
 
 
 def _instrument_list(instruments: Iterable[str]) -> list[str]:
