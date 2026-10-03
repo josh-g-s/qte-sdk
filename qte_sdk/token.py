@@ -52,7 +52,7 @@ from qte_sdk.dotenv import (
     is_tracked_by_git,
     parse_assignment,
     read_value,
-    tracked_names,
+    tracked_ignoring_case,
 )
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
@@ -270,17 +270,20 @@ def _refuse_if_tracked(path: Path) -> None:
         return
     tracked = is_tracked_by_git(path)
     if tracked is False:
-        # Compared ignoring case as well: on a filesystem that ignores case, `readme.md`
-        # is the file git tracks as `README.md`, even after a rename or a deletion.
-        names = tracked_names(path.parent) if path.parent.is_dir() else []
-        if names is None:
+        # Compared ignoring case as well, in the whole path: on a filesystem that ignores
+        # case, `config/readme.md` is the file git tracks as `Config/README.md`, even after
+        # a rename or a deletion.
+        matches = tracked_ignoring_case(path) if path.parent.is_dir() else []
+        if matches is None:
             tracked = None
+        elif not matches:
+            return
         else:
-            spelling = next((n for n in names if n.casefold() == path.name.casefold()), None)
-            if spelling is None:
-                return
-            path = path.parent / spelling
-            tracked = True
+            raise _Refused(
+                f"git tracks {matches[0]}, which is the same file as {path} on this "
+                "filesystem, so your token in it would be committed. Choose another path, "
+                "or stop git tracking that file first. Nothing was changed."
+            )
     if tracked is None:
         raise _Refused(
             f"{path} is inside a git repository, but git could not say whether it tracks "

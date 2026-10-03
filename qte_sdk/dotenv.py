@@ -270,14 +270,30 @@ def is_tracked_by_git(path: Path) -> bool | None:
     return None
 
 
-def tracked_names(directory: Path) -> list[str] | None:
-    """The names of the files git tracks directly in `directory` (its index, so a tracked
-    file deleted from disk is included), or None if that cannot be told."""
-    result = _run_git(directory, "ls-files", "-z", "--", ".", capture=True)
+def tracked_ignoring_case(path: Path) -> list[str] | None:
+    """The paths in git's index, relative to the working tree's top, that name `path` when
+    case is ignored in every part of it (the index, so a tracked file deleted from disk is
+    included); or None if that cannot be told. `path`'s directory must exist.
+
+    On a filesystem that ignores case, `config/readme.md` is the file git tracks as
+    `Config/README.md`, even after a rename, and git compares paths exactly, so the whole
+    path relative to the top is matched with git's `icase` pathspec."""
+    directory = path.parent.resolve()
+    top = _run_git(directory, "rev-parse", "--show-toplevel", capture=True)
+    if top is None or top.returncode != 0:
+        return None
+    root = Path(top.stdout.decode("utf-8", "surrogateescape").strip()).resolve()
+    try:
+        relative = (directory / path.name).relative_to(root)
+    except ValueError:
+        return None
+    result = _run_git(
+        root, "ls-files", "-z", "--", f":(icase,literal){relative.as_posix()}", capture=True
+    )
     if result is None or result.returncode != 0:
         return None
     entries = result.stdout.decode("utf-8", "surrogateescape").split("\0")
-    return [entry for entry in entries if entry and "/" not in entry]
+    return [entry for entry in entries if entry]
 
 
 def _git(path: Path, *args: str) -> int | None:

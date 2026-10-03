@@ -575,6 +575,30 @@ def test_a_tracked_name_in_another_case_is_refused_after_a_rename_or_deletion(ch
 
 
 @needs_git
+def test_a_tracked_file_under_a_directory_renamed_in_case_is_refused(capsys):
+    git("init", "-q", ".")
+    Path("Config").mkdir()
+    Path("Config/README.md").write_text("hello\n")
+    git("add", "Config/README.md")
+    if not case_insensitive():
+        pytest.skip("this filesystem tells names apart by case")
+    Path("Config").rename("config")
+    assert run(["set", "--file", "config/readme.md"]) == 1
+    assert Path("config/README.md").read_text() == "hello\n"
+    assert "Config/README.md" in capsys.readouterr().err
+
+
+@needs_git
+def test_an_untracked_name_that_differs_from_a_tracked_one_is_allowed():
+    git("init", "-q", ".")
+    Path("README.md").write_text("hello\n")
+    git("add", "README.md")
+    token = synthetic_token()
+    assert run(["set", "--file", "token.txt"], ask=answers("n"), ask_secret=answers(token)) == 0
+    assert Path("token.txt").read_text() == token + "\n"
+
+
+@needs_git
 def test_set_file_says_plainly_when_the_offer_is_declined(capsys):
     git("init", "-q", ".")
     token = synthetic_token()
