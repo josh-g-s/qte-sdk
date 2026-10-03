@@ -24,6 +24,8 @@ sends changes the view; only what the exchange reports does:
   makes the view complete. Until the `ResumeComplete`, the view is left as it was. An
   entry from a snapshot reads RESTING, since a snapshot does not say whether an order is
   STALE.
+- Any `resume_ack`, replay or snapshot, marks the view incomplete until its
+  `ResumeComplete`.
 
     view = RestingOrders()
     async for event in view.follow(conn):
@@ -48,14 +50,20 @@ What the view cannot know:
   are tracked correctly either way. A snapshot clears any such leftover entry.
 - A new view starts empty, which is right only if the team has no resting orders when it
   starts. A `ReconnectingSession` resumes every session, its first included, so a view
-  that follows one from the start is loaded from a snapshot. Otherwise, if orders may
-  already rest, call `mark_incomplete()`, or call `Session.resume(0)` and follow the
-  session.
+  that follows one from the start, or is passed to it as `resting`, reads incomplete from
+  its first `Connected` and is loaded from a snapshot. Otherwise, if orders may already
+  rest, call `mark_incomplete()`, then `Session.resume(0)`, and follow the session: the
+  snapshot that answers it replaces the view and makes it complete. Without
+  `mark_incomplete()`, the view reads complete and empty until the `resume_ack` reaches
+  it, and other events, such as the calendar, can come first.
 - Events missed on a sequence gap (`SeqGap` or `ReportGap`), or a frame that could not be
   decoded, can leave the view wrong. It is then marked `incomplete` until a snapshot
   replaces it. A `Disconnected` marks it incomplete too, but only until the next session's
   replay is complete, provided nothing else made the view uncertain meanwhile: the replay
   delivers every report the view missed, in order.
+- A session you open yourself delivers no `Disconnected`. When it ends, `follow` marks
+  the view incomplete, and only a snapshot clears that: resume the next session from 0 to
+  have the view complete again, or use a `ReconnectingSession`.
 """
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator
@@ -65,6 +73,7 @@ from typing import Any
 from google.protobuf.message import Message
 
 from qte_sdk.connection import (
+    Connected,
     DataUncertain,
     DecodeFailed,
     Disconnected,
@@ -154,15 +163,20 @@ class RestingOrders:
     def __len__(self) -> int:
         return len(self._orders)
 
-    def apply(self, event: Event | Disconnected | Message | object) -> None:
+    def apply(self, event: Event | Connected | Disconnected | Message | object) -> None:
         """Update the view from one connection event or one decoded exchange message.
 
         A `SeqGap`, `ReportGap` or `Disconnected` (any `DataUncertain`) marks the view
-        incomplete. Events the view has no use for, such as a reconnecting session's
-        `Connected`, are ignored.
+        incomplete. A reconnecting session's `Connected` whose `resume` is set marks it
+        incomplete until that resume's `ResumeComplete`, since the replay or snapshot it
+        announces has not arrived yet. Events the view has no use for, such as a
+        `Connected` without a resume, are ignored.
         """
         if isinstance(event, Disconnected):
             self._on_disconnected()
+        elif isinstance(event, Connected):
+            if event.resume is not None:
+                self._await_resume()
         elif isinstance(event, DataUncertain):
             self.mark_incomplete()
         elif isinstance(event, DecodeFailed):
@@ -178,11 +192,10 @@ class RestingOrders:
             if not event.replayed:
                 self._snapshot = {}
                 self._snapshot_damaged = False
-                # Uncertain until the snapshot is complete. The view itself is untouched
-                # meanwhile, so a replay could still put it right if the snapshot is cut short.
-                if not self._incomplete:
-                    self._incomplete = True
-                    self._replay_restores = True
+            # Uncertain until the replay or snapshot is complete. The view itself is
+            # untouched meanwhile, so a replay could still put it right if a snapshot is
+            # cut short.
+            self._await_resume()
         elif isinstance(event, OrderSnapshot):
             self._on_order_snapshot(event)
         elif isinstance(event, OrderState):

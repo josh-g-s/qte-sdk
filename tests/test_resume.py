@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import typing
+from contextlib import aclosing
 
 import pytest
 from fake_exchange import frame, serve_local
@@ -12,6 +14,8 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError
 
 import qte_sdk.connection
+import qte_sdk.reconnect
+import qte_sdk.session
 from qte_sdk.connection import (
     DEFAULT_LIVENESS_TIMEOUT,
     HEARTBEAT_TIMEOUT_CLOSE_CODE,
@@ -33,6 +37,7 @@ from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     ResumeNotAcknowledged,
     ResumeRejected,
+    SessionInfo,
     _Reports,
     open_session,
 )
@@ -973,20 +978,240 @@ async def test_a_failed_attempt_keeps_the_term_the_cursor_belongs_to():
     assert resumes == [resume(0), resume(0), resume(1)]
 
 
-async def test_the_first_connected_shows_the_view_incomplete_until_the_snapshot_lands():
+@pytest.mark.parametrize("attached", ["resting", "follow"])
+async def test_the_first_connected_shows_the_view_incomplete_until_the_snapshot_lands(
+    attached: str,
+):
+    # The view is either passed as `resting=` or follows the session; both read the same.
     exchange = Scripted({"answer": [resume_ack(False, 9, 1), snapshot("AAPL", "BUY", PRICE, 10)]})
     view = RestingOrders()
     seen: list[tuple[str, bool, int]] = []
     async with serve_local(exchange) as url:
-        rs = ReconnectingSession(url, synthetic_token(), resting=view, sleep=Clock().sleep)
+        rs = ReconnectingSession(
+            url,
+            synthetic_token(),
+            resting=view if attached == "resting" else None,
+            sleep=Clock().sleep,
+        )
         async with rs:
-            async for event in rs:
-                seen.append((kinds([event])[0], view.incomplete, len(view)))
-                if isinstance(event, ResumeComplete):
-                    break
+            events = rs.events() if attached == "resting" else view.follow(rs)
+            async with aclosing(events) as iterator:
+                async for event in iterator:
+                    seen.append((kinds([event])[0], view.incomplete, len(view)))
+                    if isinstance(event, ResumeComplete):
+                        break
     assert seen == [
         ("Connected", True, 0),
         ("resume_ack:None", True, 0),
         ("order_snapshot:None", True, 0),
         ("ResumeComplete", False, 1),
     ]
+
+
+async def test_a_snapshots_cursor_belongs_to_the_term_of_its_own_session():
+    # The old term leaves a cursor of 0 (an empty snapshot). In the new term the snapshot
+    # sets it to 4, a number of the new term, which is kept rather than forgotten as the
+    # old term's.
+    exchange = Scripted(
+        {"term": TERM, "answer": [EMPTY], "drop": True},
+        {"term": NEXT_TERM, "answer": [resume_ack(False, 4, 0)]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs:
+            async for event in rs:
+                if isinstance(event, ResumeComplete) and event.as_of_report_seq == 4:
+                    break
+            assert rs.last_report_seq == 4
+    assert [e for e in exchange.received if e["type"] == "resume"] == [resume(0), resume(0)]
+
+
+def test_a_connected_with_a_resume_shows_the_view_incomplete_until_it_completes():
+    info = SessionInfo("s-1", "team-a", 0, "0.x", False)
+    view = RestingOrders()
+    # Without a resume, nothing is coming that the view lacks.
+    view.apply(Connected(info, (), False, None))
+    assert not view.incomplete
+    view.apply(Connected(info, (), False, ResumeAck(replayed=True, as_of_report_seq=4)))
+    assert view.incomplete
+    view.apply(ResumeComplete(True, 4, 0))
+    assert not view.incomplete
+    # A replay's own resume_ack does the same, as on a session opened by hand, which
+    # delivers no Connected.
+    view.apply(ResumeAck(replayed=True, as_of_report_seq=6))
+    assert view.incomplete
+    view.apply(ResumeComplete(True, 6, 0))
+    assert not view.incomplete
+    # A view that needs a snapshot is not made complete by a replay, Connected or not.
+    view.mark_incomplete()
+    view.apply(Connected(info, (), True, ResumeAck(replayed=True, as_of_report_seq=4)))
+    view.apply(ResumeAck(replayed=True, as_of_report_seq=4))
+    view.apply(ResumeComplete(True, 4, 0))
+    assert view.incomplete
+
+
+async def test_a_view_reads_incomplete_through_a_replay_on_a_session_opened_by_hand():
+    exchange = Scripted({"answer": [resume_ack(True, 2), execution(2, 40)]})
+    view = RestingOrders()
+    seen: list[tuple[str, bool]] = []
+    async with serve_local(exchange) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            await session.resume(1)
+            async with aclosing(view.follow(session)) as events:
+                async for event in events:
+                    seen.append((kinds([event])[0], view.incomplete))
+                    if isinstance(event, ResumeComplete):
+                        break
+    assert seen == [
+        ("resume_ack:None", True),
+        ("execution:2", True),
+        ("ResumeComplete", False),
+    ]
+
+
+def test_connected_is_still_importable_from_the_reconnect_module():
+    assert qte_sdk.reconnect.Connected is qte_sdk.connection.Connected
+    assert "Connected" in qte_sdk.reconnect.__all__
+    assert qte_sdk.session.SessionInfo is qte_sdk.connection.SessionInfo
+    # Its annotations resolve at run time, as they did in qte_sdk.reconnect.
+    assert typing.get_type_hints(Connected)["info"] is SessionInfo
+
+
+async def test_a_cursor_whose_term_cannot_be_told_is_not_sent_again(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # An exchange that numbers reports but sends no calendar: the cursor's term is unknown,
+    # so the next session asks from 0 rather than risk a number from another term.
+    monkeypatch.setattr(qte_sdk.reconnect, "DEFAULT_CALENDAR_TIMEOUT", 0.2)
+    exchange = Scripted(
+        {"answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"answer": [EMPTY]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                if isinstance(event, Connected) and event.reconnected:
+                    break
+    assert [e for e in exchange.received if e["type"] == "resume"] == [resume(0), resume(0)]
+
+
+async def test_reports_counted_beyond_a_gap_are_forgotten_in_a_new_term():
+    # The old term's empty snapshot leaves the cursor at 0, and report 2 arrives after a
+    # gap. In the new term the resume is refused, so no snapshot resets the count: the old
+    # term's 2 must not make the new term's execution 2 look like a duplicate.
+    exchange = Scripted(
+        {"term": TERM, "answer": [EMPTY], "after": [order_state(2)], "drop": True},
+        {
+            "term": NEXT_TERM,
+            "answer": [resume_reject("not now")],
+            "after": [order_state(1), execution(2, 40)],
+        },
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            events = []
+            async for event in rs:
+                events.append(event)
+                if isinstance(event, Received) and event.type == "execution":
+                    break
+            last = rs.last_report_seq
+    assert kinds(events)[-3:] == ["reject:None", "order_state:1", "execution:2"]
+    assert last == 2
+
+
+# Without resume, across terms
+
+
+@pytest.mark.parametrize("new_term", [True, False])
+async def test_without_resume_the_cursor_is_forgotten_only_in_a_new_term(new_term: bool):
+    second = (
+        # The new term restarted the numbering: report 1 is an order resting and report 2
+        # its fill, neither of which the old term's cursor of 100 may drop.
+        {"term": NEXT_TERM, "after": [order_state(1), execution(2, 40)]}
+        if new_term
+        # The same term: reports 101 and 102 were missed while disconnected.
+        else {"term": TERM, "after": [order_state(103), execution(104, 40)]}
+    )
+    exchange = Scripted(
+        {"term": TERM, "after": [order_state(99), order_state(100)], "drop": True}, second
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resume=False, sleep=Clock().sleep)
+        async with rs:
+            events = await take(rs, 10 if new_term else 11)
+            last = rs.last_report_seq
+    assert all(e["type"] == "auth" for e in exchange.received)
+    assert kinds(events)[:7] == [
+        "Connected",
+        "calendar:None",
+        "order_state:99",
+        "order_state:100",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+    ]
+    if new_term:
+        assert kinds(events)[7:] == ["calendar:None", "order_state:1", "execution:2"]
+        assert last == 2
+    else:
+        assert kinds(events)[7:] == [
+            "calendar:None",
+            "ReportGap",
+            "order_state:103",
+            "execution:104",
+        ]
+        assert events[8] == ReportGap(101, 103)
+        assert last == 100  # the cursor never moves over the gap
+
+
+async def test_without_resume_a_calendar_too_late_to_check_still_forgets_an_old_term(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The second session's calendar arrives only after the attempt has stopped waiting for
+    # it, so the cursor is kept at first, then forgotten when the calendar names a new term.
+    monkeypatch.setattr(qte_sdk.reconnect, "DEFAULT_CALENDAR_TIMEOUT", 0.2)
+    connections = 0
+
+    def calendar(term: tuple[str, str]) -> str:
+        return calendar_frame(
+            None, {**CALENDAR_PAYLOAD, "term_start": term[0], "term_end": term[1]}
+        )
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await ws.recv()
+        await ws.send(ack())
+        if connections == 1:
+            await ws.send(calendar(TERM))
+            await ws.recv()  # the subscription, so the session is up before it drops
+            await ws.send(order_state(100))
+            ws.transport.abort()
+            return
+        # The client subscribes only once it has stopped waiting for the calendar, so the
+        # calendar sent after the subscription is certain to come too late for the check.
+        assert json.loads(await ws.recv())["type"] == "subscribe"
+        await ws.send(calendar(NEXT_TERM))
+        await ws.send(order_state(1))
+        await ws.wait_closed()
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url, synthetic_token(), instruments=["AAPL"], resume=False, sleep=Clock().sleep
+        )
+        async with rs:
+            events = await take(rs, 8)
+            last = rs.last_report_seq
+    assert kinds(events) == [
+        "Connected",
+        "calendar:None",
+        "order_state:100",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+        "calendar:None",
+        "order_state:1",
+    ]
+    assert last == 1

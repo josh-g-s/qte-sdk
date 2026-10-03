@@ -27,7 +27,6 @@ import asyncio
 import os
 from collections import deque
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 
 from google.protobuf.message import Message
@@ -41,6 +40,7 @@ from qte_sdk.connection import (
     ReportGap,
     ResumeComplete,
     SeqGap,
+    SessionInfo,
     SessionRejected,
 )
 from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
@@ -89,27 +89,6 @@ class ResumeRejected(SessionRejected):
     The connection stays open and the session goes on, but no report is replayed and no
     snapshot is sent.
     """
-
-
-@dataclass(frozen=True)
-class SessionInfo:
-    """The exchange's acknowledgement of a session, field for field as `session_ack` carries it."""
-
-    session_id: str
-    team: str
-    server_time: int
-    contract_version: str
-    unscored: bool
-
-    @classmethod
-    def from_ack(cls, ack: SessionAck) -> "SessionInfo":
-        return cls(
-            session_id=ack.session_id,
-            team=ack.team,
-            server_time=ack.server_time,
-            contract_version=ack.contract_version,
-            unscored=ack.unscored,
-        )
 
 
 def _report_seq(event: Event) -> int | None:
@@ -390,7 +369,8 @@ class Session:
     def last_report_seq(self) -> int | None:
         """The `report_seq` up to which this session has read every private report with no
         gap, or None before the first report or `resume`. Pass it to the next session's
-        `resume` to have the exchange replay the reports that come after it.
+        `resume` to have the exchange replay the reports that come after it, if that session
+        is in the same term (see `resume`).
 
         It counts reports as they are read, which can be before they are delivered (for
         example while `resume` or `wait_for_calendar` reads ahead), so take it once you
@@ -408,7 +388,10 @@ class Session:
 
         Send it at most once, right after the session opens and before reading any
         events. Pass the `last_report_seq` of the session this one replaces, or 0 to get a
-        snapshot of the team's resting orders instead.
+        snapshot of the team's resting orders instead. Report numbers start again each
+        term, so pass the earlier number only if this session's calendar names the same
+        term (`term_start` and `term_end`) as the session that counted it, and 0 otherwise.
+        Calling `wait_for_calendar` first is fine, since it keeps what it reads.
 
         The exchange then does one of two things, both delivered by iterating the session,
         after the `resume_ack` itself:
