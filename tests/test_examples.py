@@ -479,8 +479,21 @@ CALENDAR = {
 
 
 async def test_out_of_hours_shows_the_calendar_and_the_closed_market_with_no_close():
-    # As on the exchange today: the closed state, and no official close after it.
-    exchange = FakeExchange(closed=True, official_close=False, calendar=CALENDAR)
+    # As on the exchange today: the closed state, and no official close after it. The state
+    # names the last closed session and the next one, as the calendar does.
+    state = {
+        "state": "CLOSED",
+        "session_date": "2026-01-02",
+        "open_time": "-20",
+        "close_time": "0",
+        "grid_time": "0",
+        "next_session_date": "2026-01-05",
+        "next_open_time": "100",
+        "next_close_time": "200",
+    }
+    exchange = FakeExchange(
+        closed=True, official_close=False, calendar=CALENDAR, closed_state=state
+    )
     async with serve_local(exchange) as url:
         code, out, err = await run_example(
             "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
@@ -488,9 +501,9 @@ async def test_out_of_hours_shows_the_calendar_and_the_closed_market_with_no_clo
     assert code == 0, err
     assert "last closed session: 2026-01-02" in out
     assert "next session: 2026-01-05" in out
-    assert "market session 2026-01-05: CLOSED" in out
+    assert "market session 2026-01-02: CLOSED" in out
     # The fake acknowledges at server_time 1 and names a next open at 100.
-    assert "next open: session 2026-01-06, in 99 exchange time units" in out
+    assert "next open: session 2026-01-05, in 99 exchange time units" in out
     assert "no official close: the exchange does not send it yet, as expected" in out
     assert exchange.types() == ["auth", "subscribe"]
 

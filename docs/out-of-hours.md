@@ -103,31 +103,71 @@ If the state is `OPEN`, a session is under way and this is the live market: stop
 
 Order entry is closed outside a session, so an order message is rejected. Only do this once you have seen the `CLOSED` state in step 3: during a session the same message is a real order. You need a strategy ID registered for your team ([quickstart step 6](quickstart.md#6-place-and-cancel-an-order)).
 
+If a session opens between step 3 and your order, the order is accepted and can rest. The snippet then cancels it, once its `order_state` shows it resting, by naming its level, as in quickstart step 6.
+
 ```python
 from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT
-from qte_sdk.orders import is_order_event, reason_code_name, request_ref_of, send_new
+from qte_sdk.orders import (
+    is_order_event,
+    reason_code_name,
+    request_ref_of,
+    send_cancel,
+    send_new,
+)
 from qte_sdk.units import to_micros
 
+STRATEGY, INSTRUMENT = "my-strategy", "AAPL"  # a strategy ID registered for your team
+price = to_micros("100.00")
 ref = await send_new(
     session,
-    strat_id="my-strategy",  # a strategy ID registered for your team
-    instrument="AAPL",
+    strat_id=STRATEGY,
+    instrument=INSTRUMENT,
     side=BUY,
     order_type=LIMIT,
-    price=to_micros("100.00"),
+    price=price,
     size=1,
 )
+cancel_ref = None
+
+
+def is_this_order(message, price_field):
+    """Whether an order_state, execution or order_cancelled is about the order above."""
+    return (
+        message.strat_id == STRATEGY
+        and message.instrument == INSTRUMENT
+        and message.side == BUY
+        and getattr(message, price_field) == price
+    )
+
+
 try:
     async with asyncio.timeout(10):  # never wait for ever
         async for event in session:
-            if is_order_event(event) and request_ref_of(event.message) == ref:
-                if event.type == "reject":
-                    print("rejected:", reason_code_name(event.message.reason_code))
-                else:  # accepted: the order may now rest, so cancel it (quickstart step 6)
-                    print("not rejected:", event.type)
+            if not is_order_event(event):
+                continue
+            message = event.message
+            answers = request_ref_of(message)
+            if event.type == "reject" and answers == ref:
+                print("rejected:", reason_code_name(message.reason_code))
+                break  # the expected outcome outside a session
+            if event.type == "reject" and cancel_ref is not None and answers == cancel_ref:
+                print("cancel rejected:", reason_code_name(message.reason_code))
+                break  # the order may still rest: check your orders
+            if event.type == "order_state" and is_this_order(message, "price"):
+                if cancel_ref is None:  # a session has opened and the order rests
+                    print("accepted and resting: cancelling it")
+                    cancel_ref = await send_cancel(
+                        session, instrument=INSTRUMENT, side=BUY, price=price
+                    )
+            elif event.type == "execution" and is_this_order(message, "order_price"):
+                print("filled", message.fill_size, "left", message.remaining_size)
+                if message.remaining_size == 0:
+                    break
+            elif event.type == "order_cancelled" and is_this_order(message, "price"):
+                print("cancelled:", reason_code_name(message.reason_code))
                 break
 except TimeoutError:
-    print("no answer within 10 seconds: check your orders")
+    print("no final outcome within 10 seconds: check your orders")
 ```
 
 An order message the exchange takes in is held for its order delay, currently 150 ms, before it is applied, but some rejects are sent as soon as the message arrives. So the reject can come at once or after the delay: wait for it either way. Which reject you see depends on your team and on when you send ([quickstart step 8](quickstart.md#8-values-the-exchange-sets) lists them):
