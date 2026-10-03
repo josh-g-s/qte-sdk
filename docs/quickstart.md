@@ -231,7 +231,7 @@ Because a cancel or amend names a level, not an order, it acts on whichever of y
 
 A send checks its identifiers before anything leaves your machine: `strat_id` and `request_ref` must be 1 to 32 bytes of UTF-8 and `instrument` at most 32 bytes. A send that breaks this raises `ValueError`.
 
-`send_new` also takes `parent_ticket_id`, which is for Execution desks only: it names the working parent ticket a child order works. Leave it out on any other team; the exchange rejects a `new` from any other team that carries it with `PARENT_NOT_WORKING`.
+`send_new` also takes `parent_ticket_id`, which is for Execution desks only: it names the working parent ticket a child order works. Leave it out on any other team: the exchange rejects a `new` from any other team that carries it, with `PARENT_NOT_WORKING` (or `MALFORMED_MESSAGE` if the value itself is malformed).
 
 ## 7. Read your order events
 

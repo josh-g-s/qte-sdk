@@ -154,11 +154,12 @@ async def send_new(
 
     `parent_ticket_id` is for Execution desks only: it names, in decimal digits, the working
     parent ticket this child order works, and a desk's `new` must carry it. Leave it out
-    otherwise; it is not sent unless given. The exchange rejects `PARENT_NOT_WORKING` a
-    `new` from any other team that carries it, and a desk's `new` that names no working
-    parent ticket assigned to the desk. Before sending, this checks only that a given value
-    is a non-empty string of ASCII digits, and raises `ValueError` otherwise; the exchange
-    checks the rest.
+    otherwise; it is not sent unless given. Before sending, this checks only that a given
+    value is a string (else `TypeError`) of one or more ASCII digits (else `ValueError`).
+    The exchange checks the rest: a value it cannot accept is rejected `MALFORMED_MESSAGE`,
+    and a well-formed one is rejected `PARENT_NOT_WORKING` on a `new` from any team other
+    than an Execution desk, as is a desk's `new` that names no working parent ticket
+    assigned to the desk.
     """
     ref = _ref(request_ref)
     _id("strat_id", strat_id)

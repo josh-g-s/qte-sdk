@@ -131,6 +131,28 @@ async def test_a_new_carries_no_parent_ticket_id_unless_given():
     assert not msg.HasField("parent_ticket_id")
 
 
+@pytest.mark.parametrize(
+    "ticket",
+    ["0", "0001", "18446744073709551616", "9" * 33],
+    ids=["zero", "leading zeros", "past 64 bits", "33 digits"],
+)
+async def test_a_digit_only_parent_ticket_id_is_left_for_the_exchange_to_judge(ticket):
+    # Range and length are the exchange's to enforce, so the SDK sends these unchanged.
+    conn = Recorder()
+    await send_new(
+        conn,
+        strat_id="s",
+        instrument="AAPL",
+        side=BUY,
+        order_type=LIMIT,
+        price=PRICE,
+        size=1,
+        parent_ticket_id=ticket,
+    )
+    [(_, msg)] = conn.sent
+    assert msg.parent_ticket_id == ticket
+
+
 async def test_an_execution_desk_new_sends_its_parent_ticket_id_as_given():
     ref, env = await sent_by(
         lambda conn: send_new(
