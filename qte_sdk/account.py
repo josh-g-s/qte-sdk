@@ -59,8 +59,8 @@ An `account_state` carries:
   `reject`, `order_cancelled` and `order_state` still apply whatever their `report_seq`,
   since the reply holds no resting-order state. It is absent when the team has had no
   private report this term, and then every report applies. Each event the SDK delivers
-  for such a report carries it as `report_seq`, so the comparison is yours to make; the
-  SDK does not yet apply the cut itself.
+  for such a report carries it as `report_seq`, and `covers` and `AccountReports`
+  (below) make the comparison for you.
 
 Prices, cash and equity are whole numbers of micro-dollars; convert them with
 `qte_sdk.units.to_decimal`. A query the exchange refuses is answered with a `reject`
@@ -72,26 +72,61 @@ malformed query, and `TEAM_DISABLED` for a team that has been disabled.
 
 A program that reads only `qte_sdk.market_data.market_data(session)` never sees the reply,
 because that drops everything that is not market data.
+
+Counting each report once: a program that keeps its own positions takes them from a reply
+and then adds each later fill. Where a report arrives in the stream does not say whether
+the reply includes it; only its `report_seq` does. So a fill the reply already counts can
+arrive after the reply, and would be counted twice, and one the reply does not count can
+arrive between the query and the reply, and would be lost when the reply replaces it.
+`AccountReports` handles both. Send the query with it, pass it every event, and apply what
+it returns:
+
+    account = AccountReports()
+    ref = await account.query(session)
+    async for event in session:
+        to_apply = account.update(event)
+        if is_account_state(event):
+            ...  # take the reply's cash and positions as your account
+        for report in to_apply:
+            ...  # then apply each report's effect: a fill's size, a risk notice
+
+`covers(state, event)` is the rule on its own, for a program that keeps the reply itself.
+Report numbers start again each term, so a reply says nothing about a later term's
+reports: query again in each new term (the calendar's `term_start` and `term_end` name
+it).
 """
 
 from typing import TypeGuard
 
-from qte_sdk.connection import Event, Received
-from qte_sdk.contract.v1.common_pb2 import LAST_OFFICIAL_CLOSE, LIVE_MARK, ValuationBasis
+from qte_sdk.connection import Disconnected, Event, Received
+from qte_sdk.contract.v1.common_pb2 import (
+    ACCOUNT_QUERY,
+    LAST_OFFICIAL_CLOSE,
+    LIVE_MARK,
+    ValuationBasis,
+)
 from qte_sdk.contract.v1.order_events_pb2 import AccountState, AccountSummary, PositionValue
 from qte_sdk.contract.v1.session_pb2 import AccountQuery
-from qte_sdk.orders import Sender, _ref
+from qte_sdk.orders import Sender, _ref, request_ref_of
 
 __all__ = [
+    "ACCOUNT_REPORT_TYPES",
     "LAST_OFFICIAL_CLOSE",
     "LIVE_MARK",
+    "AccountReports",
     "AccountState",
     "AccountSummary",
     "PositionValue",
     "ValuationBasis",
+    "covers",
     "is_account_state",
     "send_account_query",
 ]
+
+ACCOUNT_REPORT_TYPES = frozenset({"execution", "risk_notice"})
+"""The private reports that change the account, and so the only ones an `account_state`
+can already include. The others (`accepted`, `reject`, `order_cancelled`, `order_state`)
+change only your resting orders, which a reply does not hold."""
 
 
 async def send_account_query(conn: Sender, *, request_ref: str | None = None) -> str:
@@ -114,3 +149,126 @@ def is_account_state(event: Event) -> TypeGuard[Received]:
     `send_account_query` returned to match it to your query.
     """
     return isinstance(event, Received) and event.type == "account_state"
+
+
+def covers(state: AccountState | None, event: object) -> bool:
+    """Whether the reply `state` already includes the effect of `event` on the account.
+
+    True only for an `execution` or `risk_notice` whose `report_seq` is at or below the
+    reply's `as_of_report_seq`: its effect on cash, positions and summary is already in the
+    reply, so do not apply it again. This holds wherever the event arrives in the stream,
+    before the reply or after it.
+
+    False means the reply does not include it, so apply it as usual. That is always the
+    answer for:
+
+    - every other event. `accepted`, `reject`, `order_cancelled` and `order_state` still
+      apply to your view of your resting orders whatever their `report_seq`;
+    - any event when `state` is None, or has no `as_of_report_seq`, which the exchange
+      leaves out when your team has had no private report this term;
+    - an event with no `report_seq`. Every `execution` and `risk_notice` carries one, so
+      such an event comes from an exchange that does not number its reports, and that
+      exchange sends no `as_of_report_seq` either, so every report applies. The reply can
+      then be ordered against the reports only by when they arrive, which the exchange
+      does not promise, so trust it fully only when none of your orders can fill meanwhile.
+
+    A `DecodeFailed` for an `execution` or `risk_notice` is judged the same way: when this
+    is True, the reply already includes what it would have told you. Report numbers start
+    again each term, so a reply from an earlier term covers nothing in a later one. This
+    function cannot tell the terms apart, so query again in each new term.
+    """
+    if state is None or not state.HasField("as_of_report_seq"):
+        return False
+    if getattr(event, "type", None) not in ACCOUNT_REPORT_TYPES:
+        return False
+    report_seq = getattr(event, "report_seq", None)
+    return report_seq is not None and report_seq <= state.as_of_report_seq
+
+
+class AccountReports:
+    """Sorts your team's `execution` and `risk_notice` reports against its `account_state`
+    replies, so that a program that keeps its own account applies each report once.
+
+    Send the query with `query` and pass every event of your one loop to `update`, which
+    returns the reports whose effect to apply now:
+
+    - for an `execution` or `risk_notice`: the event itself, unless the latest reply
+      already includes it (see `covers`), and nothing if it does;
+    - for an `account_state`: the reports that arrived while the query was outstanding and
+      that the reply does not include, in the order they arrived. Take the reply's cash
+      and positions as your account first, then apply these again: you applied them once
+      already, to the account the reply replaces. The reply becomes `state`;
+    - for anything else: nothing. Apply `accepted`, `reject`, `order_cancelled` and
+      `order_state` to your resting orders as usual (`qte_sdk.resting.RestingOrders` does).
+
+    Reports are held from `query` until the reply to that query, a `reject` of it, or a
+    `Disconnected`, after which the answer never comes. Only the latest query is waited
+    for: a second `query` before the first is answered takes its place. A query sent with
+    `send_account_query` instead is not waited for, so a report that arrives before its
+    reply and is not in it is lost when you take the reply.
+
+    Only numbered reports are held. Against an exchange that does not number its reports,
+    a reply is taken to include every report that arrived before it and none that arrive
+    after it, which that exchange does not promise. After a `SeqGap`, a `ReportGap`, a
+    `Disconnected` or a report that could not be decoded, your account may be wrong, so
+    query again. Report numbers start again each term, so query again in each new term too.
+    """
+
+    def __init__(self) -> None:
+        self.state: AccountState | None = None
+        """The latest `account_state` passed to `update`, or None before the first."""
+        self._awaiting: str | None = None
+        self._held: list[Received] = []
+
+    async def query(self, conn: Sender, *, request_ref: str | None = None) -> str:
+        """Send `account_query` as `send_account_query` does, and hold the reports that
+        arrive until it is answered. Returns its `request_ref`."""
+        ref = _ref(request_ref)
+        previous = self._awaiting
+        # Waited for from before the send, so no report that arrives meanwhile is missed.
+        self._awaiting = ref
+        try:
+            await send_account_query(conn, request_ref=ref)
+        except BaseException:
+            self._awaiting = previous
+            if previous is None:
+                self._held = []
+            raise
+        return ref
+
+    def update(self, event: object) -> list[Received]:
+        """Take in one event of the session; return the reports whose effect to apply now."""
+        if isinstance(event, Disconnected):
+            self._stop_waiting()
+            return []
+        if not isinstance(event, Received):
+            return []
+        state = event.message
+        if isinstance(state, AccountState):
+            self.state = state
+            again = [report for report in self._held if not covers(state, report)]
+            if state.request_ref == self._awaiting:
+                self._stop_waiting()
+            return again
+        if event.type == "reject":
+            if self._refuses_query(event):
+                self._stop_waiting()
+            return []
+        if event.type not in ACCOUNT_REPORT_TYPES:
+            return []
+        if self._awaiting is not None and event.report_seq is not None:
+            self._held.append(event)
+        return [] if covers(self.state, event) else [event]
+
+    def _refuses_query(self, event: Received) -> bool:
+        message = event.message
+        if self._awaiting is None or request_ref_of(message) != self._awaiting:
+            return False
+        if message.HasField("request_type"):
+            return message.request_type == ACCOUNT_QUERY
+        # It names no request type, not even one from a newer contract this SDK does not know.
+        return "request_type" not in (event.payload or {})
+
+    def _stop_waiting(self) -> None:
+        self._awaiting = None
+        self._held = []
