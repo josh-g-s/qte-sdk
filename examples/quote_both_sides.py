@@ -473,6 +473,8 @@ async def quote_until(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     while True:
+        if loop.time() >= deadline:
+            return "time"  # checked first: a send may complete without ever waiting
         try:
             # A send can stall (for example on a connection that stopped taking data), so
             # it too is bounded by the time left. Its request_ref is already recorded.
@@ -485,7 +487,12 @@ async def quote_until(
             return "time"
         # Wait for the next event, but only until it is time to act again.
         wake = min(deadline - loop.time(), quoter.next_act - time.monotonic())
-        item = await next_event(queue, wake)
+        if wake <= 0 and loop.time() < deadline and not queue.empty():
+            # Already time to act again: take an event that is waiting all the same, so a
+            # short --requote-seconds cannot leave events unread.
+            item = queue.get_nowait()
+        else:
+            item = await next_event(queue, wake)
         if item is None:
             return "closed"
         if isinstance(item, TimeoutError):

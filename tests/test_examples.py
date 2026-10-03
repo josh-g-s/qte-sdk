@@ -994,6 +994,34 @@ async def test_quote_both_sides_applies_an_event_that_arrives_as_time_runs_out()
     assert session.sent == []  # and nothing was sent once time was up
 
 
+async def test_quote_both_sides_sends_nothing_once_time_is_up():
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    view = RestingOrders()
+    quoter = example.Quoter(session, view, args)
+    quoter.books.update(book_event().message)  # a book held, and both sides free to send
+    async with asyncio.timeout(RUN_LIMIT):
+        why = await example.quote_until(quoter, view, asyncio.Queue(), 0)
+    assert why == "time"
+    assert session.sent == []
+
+
+async def test_quote_both_sides_reads_events_with_a_very_short_requote_interval():
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    argv = ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--requote-seconds", "1e-6"]
+    view = RestingOrders()
+    quoter = example.Quoter(session, view, example.parse_args(argv))
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(book_event())
+    async with asyncio.timeout(RUN_LIMIT):
+        why = await example.quote_until(quoter, view, queue, 0.2)
+    assert why == "time"
+    assert queue.empty()
+    assert session.sent == ["new", "new"]  # quoted from the book it read
+
+
 async def test_take_liquidity_knows_it_may_have_sent_an_order_whose_send_stalled():
     example = load_example("take_liquidity.py")
     sent: list[str] = []
