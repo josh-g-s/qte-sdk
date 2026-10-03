@@ -33,6 +33,14 @@ If your project is a git repository, it offers to add `.env` to `.gitignore`; sa
 
 The SDK reads `QTE_URL` and `QTE_TOKEN` from `./.env` itself, only when they are not passed in or set as real environment variables, which always take precedence. For the token the order is `token=`, then `QTE_TOKEN`, then the file named by `QTE_TOKEN_FILE`, then `.env`. It refuses a `.env` holding the token that other users can read, and warns if git tracks it or does not ignore it. Step 2 of the [quickstart](docs/quickstart.md) explains the details and the alternatives: writing `.env` by hand, environment variables, or a private token file named by `QTE_TOKEN_FILE` (`python -m qte_sdk.token set --file` makes one).
 
+Before anything else, check the whole setup with the smoke test, from a clone of this repository:
+
+```sh
+python examples/smoke_test.py --instruments XOM
+```
+
+It reports where the SDK finds the token and the address, connects, reads the calendar, watches the market for a few seconds and asks for your team's account, printing `PASS`, `FAIL` or `SKIP` with a reason for each check. It sends no orders unless you add `--place-test-order`; step 2 of the [quickstart](docs/quickstart.md) says more.
+
 Then run this. It opens a session, subscribes to one instrument and prints the best bid and ask as the book updates, for ten seconds. A book shows two kinds of depth: the wall (`bid_levels`, `ask_levels`) and participants' resting orders (`student_bid_levels`, `student_ask_levels`), each best price first, so the best bid and ask are taken across both.
 
 ```python
@@ -77,7 +85,7 @@ Outside market hours the exchange still accepts the connection and the subscript
 |---|---|
 | [Quickstart](docs/quickstart.md) | Step by step: connect, read the calendar and market data, place and cancel an order, read order events, what each reject means, and fetch past market data |
 | [Outside session hours](docs/out-of-hours.md) | What works when no session is running, with a runnable walk-through: the calendar, the closed market, an order's reject, past market data |
-| [Worked examples](examples/) | Runnable programs: print the book, quote both sides and manage the quotes, take liquidity with a market order, see the closed market outside a session |
+| [Worked examples](examples/) | Runnable programs: check your setup end to end, print the book, quote both sides and manage the quotes, take liquidity with a market order, see the closed market outside a session |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
 The main modules, each documented in its docstrings:
