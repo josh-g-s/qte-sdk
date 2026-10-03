@@ -22,13 +22,13 @@ description.
 Staying alive: the exchange also sends WebSocket pings, and closes a connection that has
 sent it no complete frame for a while, with close code `HEARTBEAT_TIMEOUT_CLOSE_CODE`
 (4000) and reason `heartbeat timeout`. The client sends no messages of its own to stay
-connected: the `websockets` library answers each ping with a pong, and with its default
-`ping_interval` it also sends a ping of its own every 20 seconds. Both happen in the
-background, but only while the library is reading the socket. It stops reading once
-`max_queue` messages (16 by default) are waiting for your loop. If your loop falls that
-far behind and stays there, the library no longer reads the exchange's pongs and closes
-the connection itself after `ping_timeout` (close code 1011, reason `keepalive ping
-timeout`). With `ping_interval=None`, nothing is sent at all while reading is paused, and
+connected: in the background, the `websockets` library answers each ping with a pong, and
+with its default `ping_interval` it also sends a ping of its own every 20 seconds. It can
+only answer a ping, or see the pong to its own, while it is reading the socket, and it
+pauses reading once more than `max_queue` frames (16 by default) are waiting for your
+loop. If your loop falls that far behind and stays there, its own pings go unanswered and
+it closes the connection after `ping_timeout` (close code 1011, reason `keepalive ping
+timeout`). With `ping_interval=None` it sends no pings, the exchange's go unanswered, and
 the exchange closes the connection with 4000 instead. Either way the error is a
 `ConnectionClosedError`, which `ReconnectingSession` retries. Keep your loop reading
 promptly, and do slow work elsewhere. You can raise `max_queue` (a `websockets` connect

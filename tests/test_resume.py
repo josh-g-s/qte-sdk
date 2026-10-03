@@ -821,7 +821,10 @@ async def test_a_loop_that_stops_reading_is_closed_by_the_keepalive_and_says_why
             close_timeout=0.2,
         )
         async with session:
-            await asyncio.sleep(0.5)  # the loop is busy elsewhere and reads nothing
+            # The loop is busy elsewhere and reads nothing until the connection has closed.
+            ws = session.connection._ws  # noqa: SLF001
+            assert ws is not None
+            await asyncio.wait_for(ws.wait_closed(), 5)
             with pytest.raises(ConnectionClosedError) as caught:
                 async with asyncio.timeout(5):
                     async for _ in session:
