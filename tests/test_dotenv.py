@@ -470,7 +470,39 @@ def test_a_tracked_dotenv_warns_even_when_gitignore_names_it(repository):
     (repository / ".gitignore").write_text(".env\n")
     write_dotenv(f"QTE_URL={URL}\n")
     git("add", "-f", ".env")
-    assert len(warned(lambda: resolve_url())) == 1
+    (warning,) = warned(lambda: resolve_url())
+    assert "git tracks" in str(warning.message)
+    assert "git rm --cached .env" in str(warning.message)
+
+
+@needs_git
+def test_an_untracked_dotenv_is_told_to_add_it_to_gitignore(repository):
+    write_dotenv(f"QTE_URL={URL}\n")
+    (warning,) = warned(lambda: resolve_url())
+    assert "does not ignore it" in str(warning.message)
+    assert "git rm" not in str(warning.message)
+
+
+@needs_git
+@pytest.mark.skipif(not POSIX, reason="symbolic links")
+def test_a_symlinked_dotenv_warns_when_its_target_is_not_ignored(repository):
+    (repository / ".gitignore").write_text(".env\n")
+    target = repository / "real.env"
+    target.write_text(f"QTE_URL={URL}\n")
+    target.chmod(0o600)
+    (repository / ".env").symlink_to(target)
+    (warning,) = warned(lambda: resolve_url())
+    assert "real.env" in str(warning.message)
+
+
+@needs_git
+@pytest.mark.skipif(not POSIX, reason="symbolic links")
+def test_a_symlinked_dotenv_whose_target_is_ignored_does_not_warn(repository):
+    (repository / ".gitignore").write_text(".env\nreal.env\n")
+    target = repository / "real.env"
+    target.write_text(f"QTE_URL={URL}\n")
+    (repository / ".env").symlink_to(target)
+    assert warned(lambda: resolve_url()) == []
 
 
 def test_no_warning_outside_a_repository_and_git_is_not_run(monkeypatch):
@@ -509,7 +541,7 @@ def test_each_dotenv_is_checked_once_so_a_later_one_still_warns(monkeypatch, tmp
     write_dotenv(f"QTE_URL={URL}\n")
     assert len(warned(lambda: resolve_url())) == 1
     assert warned(lambda: resolve_url()) == []
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_no_warning_and_no_failure_without_git(monkeypatch):
@@ -535,7 +567,7 @@ def test_a_failing_git_neither_warns_nor_blocks(monkeypatch, failure: str):
     write_dotenv(f"QTE_URL={URL}\n")
     assert warned(lambda: resolve_url()) == []
     assert resolve_url() == URL
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_git_is_given_neither_the_token_nor_other_variables(monkeypatch):
@@ -546,9 +578,10 @@ def test_git_is_given_neither_the_token_nor_other_variables(monkeypatch):
     calls = fake_git(monkeypatch, not_ignored)
     write_dotenv(f"QTE_URL={URL}\n")
     assert len(warned(lambda: resolve_url())) == 1
-    ((args, kwargs),) = calls
-    assert set(kwargs["env"]) <= dotenv._GIT_ENV
-    assert_token_absent(token, repr(args) + repr(kwargs))
+    assert len(calls) == 2
+    for args, kwargs in calls:
+        assert set(kwargs["env"]) <= dotenv._GIT_ENV
+        assert_token_absent(token, repr(args) + repr(kwargs))
 
 
 def test_a_warning_made_an_error_is_logged_and_does_not_block(monkeypatch, caplog):

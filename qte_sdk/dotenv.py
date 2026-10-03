@@ -21,11 +21,12 @@ Two safeguards apply:
 
 - On POSIX, a `.env` that holds `QTE_TOKEN` and that other users can read is refused, and
   nothing in it is used (`chmod 600 .env` fixes it).
-- If the `.env` is inside a git working tree and git does not ignore it, a
-  `DotenvNotIgnored` warning is issued, once per process, since the file could be
-  committed. It never stops the SDK: if a warnings filter makes it an error, it is logged
-  instead. The check runs `git check-ignore` when git is on the PATH and is skipped
-  otherwise; git is given only the environment variables it needs, never the token.
+- If the `.env`, or the file it links to, is inside a git working tree and git tracks
+  it or does not ignore it, a `DotenvNotIgnored` warning is issued, once per process,
+  since the token could be committed. It never stops the SDK: if a warnings filter makes
+  it an error, it is logged instead. The check runs `git ls-files` and `git check-ignore`
+  when git is on the PATH and is skipped otherwise; git is given only the environment
+  variables it needs, never the token.
 
 Nothing here raises for a bad file, logs, or returns any of the file's text other than the
 one value asked for: a problem is described by line number and name only.
@@ -184,23 +185,27 @@ def _assigns_token(text: str) -> bool:
 
 
 def _warn_if_not_ignored(path: Path) -> None:
-    """Warn, once per process for each `.env`, if `path` is inside a git working tree and
-    git does not ignore it. Called before the file is read, so no frame on the stack holds
-    the token. If a warnings filter turns the warning into an error, it is logged instead,
-    since this check must never stop the SDK."""
+    """Warn, once per process for each `.env`, if `path`, or the file it links to, is inside
+    a git working tree and git tracks it or does not ignore it. Called before the file is
+    read, so no frame on the stack holds the token. If a warnings filter turns the warning
+    into an error, it is logged instead, since this check must never stop the SDK."""
     key = str(path)
     if key in _git_checked or not path.exists():
         return
     _git_checked.add(key)
-    if not is_inside_git_work_tree(path.parent):
+    message = None
+    candidates = [path]
+    if path.is_symlink():
+        candidates.append(path.resolve())
+    for candidate in candidates:
+        message = _git_exposure(candidate)
+        if message is not None:
+            break
+    if message is None:
         return
-    if is_ignored_by_git(path) is not False:
-        return
-    message = (
-        f"{path} is inside a git working tree and git does not ignore it, so it could "
-        f"be committed with your token. Add {DOTENV_NAME} to .gitignore. If you did not "
-        "create this file (in a repository you cloned, say), check the exchange "
-        "address in it before you use it."
+    message += (
+        " If you did not create this file (in a repository you cloned, say), check the "
+        "exchange address in it before you use it."
     )
     try:
         warnings.warn(message, DotenvNotIgnored, stacklevel=_caller_level())
@@ -220,6 +225,25 @@ def _caller_level() -> int:
     return level
 
 
+def _git_exposure(path: Path) -> str | None:
+    """What could let git commit `path`, as advice for the person, or None if nothing
+    could or git cannot tell."""
+    if not is_inside_git_work_tree(path.parent):
+        return None
+    if is_tracked_by_git(path):
+        return (
+            f"git tracks {path}, so your token in it would be committed. Adding it to "
+            f".gitignore does not stop that: run `git rm --cached {path.name}` in "
+            f"{path.parent}, add {path.name} to .gitignore and commit."
+        )
+    if is_ignored_by_git(path) is False:
+        return (
+            f"{path} is inside a git working tree and git does not ignore it, so it could "
+            f"be committed with your token. Add {path.name} to .gitignore."
+        )
+    return None
+
+
 def is_inside_git_work_tree(directory: Path) -> bool:
     """Whether `directory` or one of its parents holds a `.git` entry."""
     return any((parent / ".git").exists() for parent in (directory, *directory.parents))
@@ -231,13 +255,35 @@ def is_ignored_by_git(path: Path) -> bool | None:
 
     Git is given only the few environment variables it needs to find itself and your git
     configuration, so no token held in another variable reaches it."""
+    result = _git(path, "check-ignore", "-q", "--", path.name)
+    if result == 0:
+        return True
+    if result == 1:
+        return False
+    return None
+
+
+def is_tracked_by_git(path: Path) -> bool | None:
+    """True if git tracks `path`, False if it does not, or None if that cannot be told."""
+    result = _git(path, "ls-files", "--error-unmatch", "--", path.name)
+    if result == 0:
+        return True
+    if result == 1:
+        return False
+    return None
+
+
+def _git(path: Path, *args: str) -> int | None:
+    """Run git with `args` in the directory of `path` and return its exit status, or None if
+    git is not on the PATH or could not be run. Git is given only the environment variables
+    in `_GIT_ENV`."""
     git = shutil.which("git")
     if git is None:
         return None
     env = {k: v for k, v in os.environ.items() if k in _GIT_ENV}
     try:
         result = subprocess.run(
-            [git, "check-ignore", "-q", "--", path.name],
+            [git, *args],
             cwd=path.parent,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -248,8 +294,4 @@ def is_ignored_by_git(path: Path) -> bool | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode == 0:
-        return True
-    if result.returncode == 1:
-        return False
-    return None
+    return result.returncode

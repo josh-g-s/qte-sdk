@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.11
+**Version:** 0.12
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -40,7 +40,15 @@ touch .env && chmod 600 .env
 ls -l .env
 ```
 
-The last line should show `-rw-------`. Open `.env` in your editor and put in the address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and your token:
+The last line should show `-rw-------`. If your project is a git repository, also check that git does not already track a `.env`, since adding it to `.gitignore` does not stop git committing a file it already tracks:
+
+```sh
+git ls-files --error-unmatch .env
+```
+
+An error saying `.env` did not match any file is what you want. If it prints `.env` instead, run `git rm --cached .env` and commit, before you put the token in.
+
+Open `.env` in your editor and put in the address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and your token:
 
 ```sh
 QTE_URL=ws://127.0.0.1:8080/ws
@@ -54,7 +62,7 @@ The SDK reads `.env` itself, with no extra package: `open_session()` takes the a
 Two safeguards protect the token:
 
 - If other users can read a `.env` that holds `QTE_TOKEN`, the SDK uses nothing in it and raises `MissingToken` (or `MissingURL`, when it was reading the address), saying to run `chmod 600 .env`. (This check applies on macOS and Linux.)
-- If the `.env` is inside a git repository and git does not ignore it, the SDK warns you once, so you can add `.env` to `.gitignore` before the token is committed. It still uses the file. The `.gitignore` of this SDK's repository protects only a clone of this repository, not your project. The same warning appears if you run a program inside a repository someone else made that ships a `.env`: check the address in it before you use it.
+- If the `.env` (or, when it is a symbolic link, the file it points to) is inside a git repository and git tracks it or does not ignore it, the SDK warns you once, saying what to do: add `.env` to `.gitignore`, and if git already tracks it, run `git rm --cached .env` too. It still uses the file. The `.gitignore` of this SDK's repository protects only a clone of this repository, not your project. The same warning appears if you run a program inside a repository someone else made that ships a `.env`: check the address in it before you use it.
 
 ### Where the SDK looks, in order
 
