@@ -16,7 +16,9 @@ What it relies on:
 - Each session's first publication carries the book of every instrument that has one.
   An instrument whose first book comes later in the session is published then.
 - A `subscribe` during a session is answered at once with the last book published this
-  session for each instrument named, carrying the `grid_time` it was published at. That
+  session for each instrument named that has one, carrying the `grid_time` it was
+  published at; an instrument with no book yet gets its first book when it is published.
+  The book from a subscribe
   can be older than the latest `SessionState`, and the same book can then arrive again
   at the same `grid_time`. So the book with the latest `grid_time` wins, and a book whose
   `grid_time` is the same as or older than the one held is ignored.
