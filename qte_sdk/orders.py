@@ -29,7 +29,8 @@ Before sending, every send checks each `request_ref`, `strat_id` and `instrument
 message carries: `request_ref` and `strat_id` must be 1 to 32 bytes of UTF-8, and
 `instrument` at most 32 bytes (0 to 32). Bytes are counted, not characters, so a
 character outside ASCII counts two to four, and none may contain the NUL character. A
-send that breaks this raises `ValueError` and sends nothing.
+send that breaks this raises `ValueError` and sends nothing. A `new` that carries
+`parent_ticket_id`, which only an Execution desk sends, is checked too: see `send_new`.
 """
 
 import uuid
@@ -114,6 +115,16 @@ def _id(name: str, value: str, *, required: bool = True) -> str:
     return value
 
 
+def _ticket_id(name: str, value: str) -> str:
+    """Check a ticket id is a non-empty string of ASCII digits. Errors name the field, never
+    `value`. Its length and range are left to the exchange."""
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str")
+    if not (value.isascii() and value.isdigit()):
+        raise ValueError(f"{name} must be a non-empty string of decimal digits")
+    return value
+
+
 def _ref(request_ref: str | None) -> str:
     """The caller's `request_ref`, or a fresh one when none is given, checked either way."""
     return _id("request_ref", new_request_ref() if request_ref is None else request_ref)
@@ -135,15 +146,27 @@ async def send_new(
     size: int,
     price: int | None = None,
     request_ref: str | None = None,
+    parent_ticket_id: str | None = None,
 ) -> str:
     """Send `new`: one order for one strategy at one price level. Returns its `request_ref`.
 
     A LIMIT order needs `price`; a MARKET order must not have one. To change the size of an
     order already resting, use `send_amend` rather than a second `new` at the same level.
+
+    `parent_ticket_id` is for Execution desks only: it names, in decimal digits, the working
+    parent ticket this child order works, and a desk's `new` must carry it. Leave it out
+    otherwise; it is not sent unless given. Before sending, this checks only that a given
+    value is a string (else `TypeError`) of one or more ASCII digits (else `ValueError`).
+    The exchange checks the rest: a value it cannot accept is rejected `MALFORMED_MESSAGE`,
+    and a well-formed one is rejected `PARENT_NOT_WORKING` on a `new` from any team other
+    than an Execution desk, as is a desk's `new` that names no working parent ticket
+    assigned to the desk.
     """
     ref = _ref(request_ref)
     _id("strat_id", strat_id)
     _id("instrument", instrument, required=False)
+    if parent_ticket_id is not None:
+        _ticket_id("parent_ticket_id", parent_ticket_id)
     if order_type == LIMIT:
         if price is None:
             raise ValueError("a LIMIT order needs a price")
@@ -162,6 +185,8 @@ async def send_new(
     )
     if price is not None:
         msg.price = price
+    if parent_ticket_id is not None:
+        msg.parent_ticket_id = parent_ticket_id
     await conn.send("new", msg)
     return ref
 

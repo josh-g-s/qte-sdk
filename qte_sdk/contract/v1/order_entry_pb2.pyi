@@ -6,7 +6,7 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class NewOrder(_message.Message):
-    __slots__ = ("request_ref", "strat_id", "instrument", "side", "order_type", "price", "size")
+    __slots__ = ("request_ref", "strat_id", "instrument", "side", "order_type", "price", "size", "parent_ticket_id")
     REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
     STRAT_ID_FIELD_NUMBER: _ClassVar[int]
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
@@ -14,6 +14,7 @@ class NewOrder(_message.Message):
     ORDER_TYPE_FIELD_NUMBER: _ClassVar[int]
     PRICE_FIELD_NUMBER: _ClassVar[int]
     SIZE_FIELD_NUMBER: _ClassVar[int]
+    PARENT_TICKET_ID_FIELD_NUMBER: _ClassVar[int]
     request_ref: str
     strat_id: str
     instrument: str
@@ -21,7 +22,8 @@ class NewOrder(_message.Message):
     order_type: _common_pb2.OrderType
     price: int
     size: int
-    def __init__(self, request_ref: _Optional[str] = ..., strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., order_type: _Optional[_Union[_common_pb2.OrderType, str]] = ..., price: _Optional[int] = ..., size: _Optional[int] = ...) -> None: ...
+    parent_ticket_id: str
+    def __init__(self, request_ref: _Optional[str] = ..., strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., order_type: _Optional[_Union[_common_pb2.OrderType, str]] = ..., price: _Optional[int] = ..., size: _Optional[int] = ..., parent_ticket_id: _Optional[str] = ...) -> None: ...
 
 class CancelOrder(_message.Message):
     __slots__ = ("request_ref", "instrument", "side", "price")

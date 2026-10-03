@@ -122,6 +122,112 @@ async def test_new_market_sends_no_price():
     }
 
 
+async def test_a_new_carries_no_parent_ticket_id_unless_given():
+    conn = Recorder()
+    await send_new(
+        conn, strat_id="s", instrument="AAPL", side=BUY, order_type=LIMIT, price=PRICE, size=1
+    )
+    [(_, msg)] = conn.sent
+    assert not msg.HasField("parent_ticket_id")
+
+
+@pytest.mark.parametrize(
+    "ticket",
+    ["0", "0001", "18446744073709551616", "9" * 33],
+    ids=["zero", "leading zeros", "past 64 bits", "33 digits"],
+)
+async def test_a_digit_only_parent_ticket_id_is_left_for_the_exchange_to_judge(ticket):
+    # Range and length are the exchange's to enforce, so the SDK sends these unchanged.
+    conn = Recorder()
+    await send_new(
+        conn,
+        strat_id="s",
+        instrument="AAPL",
+        side=BUY,
+        order_type=LIMIT,
+        price=PRICE,
+        size=1,
+        parent_ticket_id=ticket,
+    )
+    [(_, msg)] = conn.sent
+    assert msg.parent_ticket_id == ticket
+
+
+async def test_an_execution_desk_new_sends_its_parent_ticket_id_as_given():
+    ref, env = await sent_by(
+        lambda conn: send_new(
+            conn,
+            strat_id="ex-1",
+            instrument="AAPL",
+            side=BUY,
+            order_type=LIMIT,
+            price=PRICE,
+            size=100,
+            parent_ticket_id="18446744073709551615",
+        )
+    )
+    assert env["type"] == "new"
+    assert env["payload"] == {
+        "request_ref": ref,
+        "strat_id": "ex-1",
+        "instrument": "AAPL",
+        "side": "BUY",
+        "order_type": "LIMIT",
+        "price": str(PRICE),
+        "size": "100",
+        "parent_ticket_id": "18446744073709551615",
+    }
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", " 7", "7 ", "-7", "+7", "0x7", "7.0", "７", "٧"],
+    ids=[
+        "empty",
+        "leading space",
+        "trailing space",
+        "sign",
+        "plus",
+        "hex",
+        "decimal point",
+        "fullwidth digit",
+        "arabic-indic digit",
+    ],
+)
+async def test_a_malformed_parent_ticket_id_is_refused_before_sending(bad):
+    conn = Recorder()
+    with pytest.raises(ValueError, match="^parent_ticket_id must ") as err:
+        await send_new(
+            conn,
+            strat_id="s",
+            instrument="AAPL",
+            side=BUY,
+            order_type=LIMIT,
+            price=PRICE,
+            size=1,
+            parent_ticket_id=bad,
+        )
+    if bad:
+        assert bad not in str(err.value)
+    assert conn.sent == []
+
+
+async def test_a_parent_ticket_id_that_is_not_text_is_refused_before_sending():
+    conn = Recorder()
+    with pytest.raises(TypeError, match="^parent_ticket_id "):
+        await send_new(
+            conn,
+            strat_id="s",
+            instrument="AAPL",
+            side=BUY,
+            order_type=LIMIT,
+            price=PRICE,
+            size=1,
+            parent_ticket_id=7,  # type: ignore[arg-type]
+        )
+    assert conn.sent == []
+
+
 async def test_cancel_addresses_a_price_level_and_carries_no_strategy():
     ref, env = await sent_by(
         lambda conn: send_cancel(conn, instrument="AAPL", side=SELL, price=PRICE)
@@ -509,6 +615,33 @@ async def test_a_cancel_the_exchange_made_itself_carries_no_request_ref():
     assert isinstance(event.message, OrderCancelled)
     assert event.message.reason_code == ReasonCodes.PURGE_STALE
     assert request_ref_of(event.message) is None
+
+
+@pytest.mark.parametrize(
+    "type_, payload, name",
+    [
+        (
+            "reject",
+            {
+                "request_ref": "r-1",
+                "request_type": "NEW",
+                "reason_code": "PARENT_NOT_WORKING",
+                "receipt_time": "1",
+            },
+            "PARENT_NOT_WORKING",
+        ),
+        (
+            "order_cancelled",
+            {"instrument": "AAPL", "side": "BUY", "reason_code": "LOSS_HALT", "timestamp": "1"},
+            "LOSS_HALT",
+        ),
+    ],
+)
+async def test_a_parent_or_loss_halt_reason_decodes_by_name(type_, payload, name):
+    [event] = await received(frame(type_, payload, 1))
+    assert is_order_event(event)
+    assert event.message.reason_code == ReasonCodes.ReasonCode.Value(name)
+    assert reason_code_name(event.message.reason_code) == name
 
 
 async def test_a_reject_that_could_not_read_a_request_ref_carries_none():

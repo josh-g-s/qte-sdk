@@ -35,6 +35,7 @@ from qte_sdk.resting import RestingOrders
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
 QUICKSTART = EXAMPLES_DIR.parent / "docs" / "quickstart.md"
+SDK_INSTALL_URL = "git+https://github.com/josh-g-s/qte-sdk"
 INSTRUMENT = "TEST"
 BID, ASK = 99_950_000, 100_050_000
 TICK = 10_000
@@ -62,6 +63,8 @@ def test_each_example_compiles_and_imports_without_running(path: Path, tmp_path:
 @pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART], ids=lambda p: p.name)
 def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path):
     for url in re.findall(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\")]+", path.read_text()):
+        if url == SDK_INSTALL_URL:
+            continue  # where pip installs the SDK from, not an exchange
         parts = urlsplit(url)
         assert parts.scheme == "ws", url
         assert parts.hostname == "127.0.0.1", url

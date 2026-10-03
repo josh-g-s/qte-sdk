@@ -63,10 +63,42 @@ class MarketSessionPhase(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     OPEN: _ClassVar[MarketSessionPhase]
     CLOSED: _ClassVar[MarketSessionPhase]
 
+class LossLevel(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    LOSS_LEVEL_UNSPECIFIED: _ClassVar[LossLevel]
+    LOSS_LEVEL_NONE: _ClassVar[LossLevel]
+    LOSS_LEVEL_WARNING: _ClassVar[LossLevel]
+    LOSS_LEVEL_HALT: _ClassVar[LossLevel]
+
+class LimitKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    LIMIT_KIND_UNSPECIFIED: _ClassVar[LimitKind]
+    LIMIT_GROSS: _ClassVar[LimitKind]
+    LIMIT_NET: _ClassVar[LimitKind]
+    LIMIT_INSTRUMENT: _ClassVar[LimitKind]
+    LIMIT_INSTRUMENT_HARD: _ClassVar[LimitKind]
+    LIMIT_SECTOR: _ClassVar[LimitKind]
+    LIMIT_SHORT_OF_GROSS: _ClassVar[LimitKind]
+    LIMIT_VEGA: _ClassVar[LimitKind]
+    LIMIT_GAMMA_DOLLAR: _ClassVar[LimitKind]
+    LIMIT_NET_DELTA_UNDERLYING: _ClassVar[LimitKind]
+    LIMIT_NET_DELTA_BOOK: _ClassVar[LimitKind]
+    LIMIT_HEDGING_ALLOWANCE_UNDERLYING: _ClassVar[LimitKind]
+    LIMIT_HEDGING_ALLOWANCE_BOOK: _ClassVar[LimitKind]
+    LIMIT_VEGA_UNDERLYING_AGGREGATE: _ClassVar[LimitKind]
+    LIMIT_HEDGE_SIGN: _ClassVar[LimitKind]
+    LIMIT_HEDGE_MAGNITUDE_UNDERLYING: _ClassVar[LimitKind]
+    LIMIT_HEDGE_MAGNITUDE_BOOK: _ClassVar[LimitKind]
+
 class RiskNoticeKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     RISK_NOTICE_KIND_UNSPECIFIED: _ClassVar[RiskNoticeKind]
     LOSS_WARNING: _ClassVar[RiskNoticeKind]
+    LOSS_HALT_ENTERED: _ClassVar[RiskNoticeKind]
+    CURE_WINDOW_OPENED: _ClassVar[RiskNoticeKind]
+    CURE_TRADE_PLACED: _ClassVar[RiskNoticeKind]
+    AUTO_FLATTEN_STARTED: _ClassVar[RiskNoticeKind]
+    KILL_SWITCH_ENGAGED: _ClassVar[RiskNoticeKind]
 SIDE_UNSPECIFIED: Side
 BUY: Side
 SELL: Side
@@ -101,8 +133,34 @@ PURGED: OrderLifecycleState
 MARKET_SESSION_PHASE_UNSPECIFIED: MarketSessionPhase
 OPEN: MarketSessionPhase
 CLOSED: MarketSessionPhase
+LOSS_LEVEL_UNSPECIFIED: LossLevel
+LOSS_LEVEL_NONE: LossLevel
+LOSS_LEVEL_WARNING: LossLevel
+LOSS_LEVEL_HALT: LossLevel
+LIMIT_KIND_UNSPECIFIED: LimitKind
+LIMIT_GROSS: LimitKind
+LIMIT_NET: LimitKind
+LIMIT_INSTRUMENT: LimitKind
+LIMIT_INSTRUMENT_HARD: LimitKind
+LIMIT_SECTOR: LimitKind
+LIMIT_SHORT_OF_GROSS: LimitKind
+LIMIT_VEGA: LimitKind
+LIMIT_GAMMA_DOLLAR: LimitKind
+LIMIT_NET_DELTA_UNDERLYING: LimitKind
+LIMIT_NET_DELTA_BOOK: LimitKind
+LIMIT_HEDGING_ALLOWANCE_UNDERLYING: LimitKind
+LIMIT_HEDGING_ALLOWANCE_BOOK: LimitKind
+LIMIT_VEGA_UNDERLYING_AGGREGATE: LimitKind
+LIMIT_HEDGE_SIGN: LimitKind
+LIMIT_HEDGE_MAGNITUDE_UNDERLYING: LimitKind
+LIMIT_HEDGE_MAGNITUDE_BOOK: LimitKind
 RISK_NOTICE_KIND_UNSPECIFIED: RiskNoticeKind
 LOSS_WARNING: RiskNoticeKind
+LOSS_HALT_ENTERED: RiskNoticeKind
+CURE_WINDOW_OPENED: RiskNoticeKind
+CURE_TRADE_PLACED: RiskNoticeKind
+AUTO_FLATTEN_STARTED: RiskNoticeKind
+KILL_SWITCH_ENGAGED: RiskNoticeKind
 
 class ReasonCodes(_message.Message):
     __slots__ = ()
@@ -159,6 +217,8 @@ class ReasonCodes(_message.Message):
         AMEND_CUT: _ClassVar[ReasonCodes.ReasonCode]
         HEDGE_RECHECK_FAILED: _ClassVar[ReasonCodes.ReasonCode]
         PARTICIPATION_LIMIT: _ClassVar[ReasonCodes.ReasonCode]
+        LOSS_HALT: _ClassVar[ReasonCodes.ReasonCode]
+        POSITION_REDUCING_RECHECK_FAILED: _ClassVar[ReasonCodes.ReasonCode]
     REASON_CODE_UNSPECIFIED: ReasonCodes.ReasonCode
     NOT_AUTHENTICATED: ReasonCodes.ReasonCode
     VERSION_MISMATCH: ReasonCodes.ReasonCode
@@ -210,4 +270,6 @@ class ReasonCodes(_message.Message):
     AMEND_CUT: ReasonCodes.ReasonCode
     HEDGE_RECHECK_FAILED: ReasonCodes.ReasonCode
     PARTICIPATION_LIMIT: ReasonCodes.ReasonCode
+    LOSS_HALT: ReasonCodes.ReasonCode
+    POSITION_REDUCING_RECHECK_FAILED: ReasonCodes.ReasonCode
     def __init__(self) -> None: ...

@@ -1,6 +1,6 @@
 // Inbound order entry.
 //
-// **Version:** 1.5
+// **Version:** 1.6
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`. Every new, cancel, amend and mass-cancel message is released
@@ -17,7 +17,8 @@
 // NUL character. A message with a longer identifier, or one containing NUL,
 // is rejected MALFORMED_MESSAGE at receipt, and the reject still echoes
 // request_ref as sent. An empty request_ref or strat_id counts as absent and
-// is rejected MALFORMED_MESSAGE too.
+// is rejected MALFORMED_MESSAGE too. parent_ticket_id, on a NewOrder, is at
+// most 32 bytes as well, but narrower: decimal digits only (see NewOrder).
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -41,6 +42,17 @@ option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
 // CancelOrder and a MassCancel are accepted and nothing matches (SPEC 4.3,
 // SPEC 9.4.3). Order entry for options (contract identifiers and sizes) is
 // not yet specified.
+//
+// An Execution desk's order is a child of a working parent ticket assigned
+// to the desk, and names that ticket in parent_ticket_id; only an Execution
+// desk sets it (SPEC 24, SPEC 24.1). At release the parent controls the
+// child: a new that names no working parent ticket assigned to its sender is
+// rejected PARENT_NOT_WORKING, which is a desk's new without
+// parent_ticket_id and any other team's new with it; one whose instrument or
+// side is not the parent's, or whose limit price is beyond the parent's
+// limit, PARENT_MISMATCH; and one that would take the parent's filled shares
+// plus the shares its outstanding children reserve past the parent quantity,
+// PARENT_QUANTITY_EXCEEDED (SPEC 24.1).
 message NewOrder {
   string request_ref = 1;   // id, 1 to 32 bytes. Client correlation id, echoed on the response. Its other rules are not yet specified
   string strat_id = 2;      // id, 1 to 32 bytes. SPEC 2.5, SPEC 11.3
@@ -50,6 +62,14 @@ message NewOrder {
   // Required iff order_type = LIMIT; absent for MARKET. SPEC 8.2
   optional int64 price = 6; // int64-micro
   int64 size = 7;           // int64-qty, a whole number of shares. SPEC 0.1, SPEC 8.2
+  // Present iff the sender is an Execution desk: the ticket id of the
+  // working parent ticket the order works, written in decimal digits only,
+  // at most 32 bytes, from 1 to 18446744073709551615. A value present in any
+  // other form (empty, 0, a sign, a non-digit, over 32 bytes, or a number
+  // past that range) is rejected
+  // MALFORMED_MESSAGE at receipt, unless an earlier receipt check fails
+  // first. SPEC 24.1
+  optional string parent_ticket_id = 8; // id
 }
 
 // Cancels the team's resting order in the stated instrument at the stated

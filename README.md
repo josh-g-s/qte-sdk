@@ -11,11 +11,15 @@ This repository contains only participant-facing material. Exchange internals (t
 
 ## Install
 
+Install the SDK into your own project's virtual environment:
+
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
 pip install "git+https://github.com/josh-g-s/qte-sdk"
 ```
+
+This installs the `qte_sdk` package only, not the [worked examples](examples/). Clone this repository only to run or read the examples; you do not need a clone to use the SDK.
 
 ## A first program
 
@@ -73,7 +77,7 @@ Outside market hours the exchange still accepts the connection and the subscript
 
 | Where | What |
 |---|---|
-| [Quickstart](docs/quickstart.md) | Step by step: connect, read market data, place and cancel an order, read order events, and what each reject means |
+| [Quickstart](docs/quickstart.md) | Step by step: connect, read the calendar and market data, place and cancel an order, read order events, what each reject means, and fetch past market data |
 | [Worked examples](examples/) | Runnable programs: print the book, quote both sides and manage the quotes, take liquidity with a market order |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
@@ -83,6 +87,9 @@ The main modules, each documented in its docstrings:
 |---|---|
 | [`qte_sdk.session`](qte_sdk/session.py) | `open_session`: authenticate and get a `Session` you can send on and iterate |
 | [`qte_sdk.market_data`](qte_sdk/market_data.py) | `subscribe`, `unsubscribe`, `market_data`: the book, trades, marks and market state |
+| [`qte_sdk.books`](qte_sdk/books.py) | `LatestBooks`: the latest book of each instrument, since a book is sent only when it changes |
+| [`qte_sdk.calendar`](qte_sdk/calendar.py) | `next_open`, `next_close`: when the market next opens and closes, from the exchange's calendar |
+| [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |
@@ -90,15 +97,15 @@ The main modules, each documented in its docstrings:
 
 ## Things to know before you trade
 
-- **Every order message is delayed 150 ms** on its way into the exchange, cancels and amends included. The delay, the minimum time an order must rest, the price collar and your message budgets are set by the exchange; never hard-code them.
+- **Every order message is delayed** on its way into the exchange, cancels and amends included; the delay is currently 150 ms. The delay, the minimum time an order must rest, the price collar and your message budgets are set by the exchange; never hard-code them.
 - **Prices are whole numbers of micro-dollars** ($199.97 is `199_970_000`). Convert with `qte_sdk.units`; never use `float` for prices.
 - **There is no order ID.** Your team's orders are addressed by instrument, side and price, and your team holds at most one resting order at each price.
-- **One market-data feed for everyone.** Market data is published on a fixed 100 ms grid: the market state every grid point, and an instrument's book only when it has changed, so keep the last book you received for each instrument.
+- **One market-data feed for everyone.** Market data is published on a fixed 100 ms grid: during a session the market state at every grid point, and an instrument's book only when it has changed, so keep the last book you received for each instrument.
 - **Not every team sends orders.** Teams on the trading arms send orders; an order from a team without market access is rejected with a reason code that says so.
 
 ## Status
 
-Working today: session authentication, market data, order entry and order events, the resting-order view, reconnect, the quickstart and the worked examples. Planned: the market calendar, handling of the closed market's official close price, a query for your team's positions and cash, access to past market data, and heartbeats with session resume. Progress is tracked in [the issues](https://github.com/josh-g-s/qte-sdk/issues).
+Working today: session authentication, the market calendar, market data, order entry and order events, the resting-order view, reconnect, past market data from the history service, the quickstart and the worked examples. Planned: the closed market's official close price, which the exchange does not send yet, a query for your team's positions and cash, and heartbeats with session resume. Progress is tracked in [the issues](https://github.com/josh-g-s/qte-sdk/issues).
 
 ## Licence
 

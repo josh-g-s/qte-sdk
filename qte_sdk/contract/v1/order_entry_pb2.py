@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from qte_sdk.contract.v1 import common_pb2 as qte_dot_contract_dot_v1_dot_common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!qte/contract/v1/order_entry.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"\xc6\x01\n\x08NewOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x10\n\x08strat_id\x18\x02 \x01(\t\x12\x12\n\ninstrument\x18\x03 \x01(\t\x12#\n\x04side\x18\x04 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12.\n\norder_type\x18\x05 \x01(\x0e\x32\x1a.qte.contract.v1.OrderType\x12\x12\n\x05price\x18\x06 \x01(\x03H\x00\x88\x01\x01\x12\x0c\n\x04size\x18\x07 \x01(\x03\x42\x08\n\x06_price\"j\n\x0b\x43\x61ncelOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\"\x8e\x01\n\nAmendOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x11\n\tnew_price\x18\x05 \x01(\x03\x12\x10\n\x08new_size\x18\x06 \x01(\x03\"!\n\nMassCancel\x12\x13\n\x0brequest_ref\x18\x01 \x01(\tB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!qte/contract/v1/order_entry.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"\xfa\x01\n\x08NewOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x10\n\x08strat_id\x18\x02 \x01(\t\x12\x12\n\ninstrument\x18\x03 \x01(\t\x12#\n\x04side\x18\x04 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12.\n\norder_type\x18\x05 \x01(\x0e\x32\x1a.qte.contract.v1.OrderType\x12\x12\n\x05price\x18\x06 \x01(\x03H\x00\x88\x01\x01\x12\x0c\n\x04size\x18\x07 \x01(\x03\x12\x1d\n\x10parent_ticket_id\x18\x08 \x01(\tH\x01\x88\x01\x01\x42\x08\n\x06_priceB\x13\n\x11_parent_ticket_id\"j\n\x0b\x43\x61ncelOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\"\x8e\x01\n\nAmendOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x11\n\tnew_price\x18\x05 \x01(\x03\x12\x10\n\x08new_size\x18\x06 \x01(\x03\"!\n\nMassCancel\x12\x13\n\x0brequest_ref\x18\x01 \x01(\tB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,11 +34,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1'
   _globals['_NEWORDER']._serialized_start=85
-  _globals['_NEWORDER']._serialized_end=283
-  _globals['_CANCELORDER']._serialized_start=285
-  _globals['_CANCELORDER']._serialized_end=391
-  _globals['_AMENDORDER']._serialized_start=394
-  _globals['_AMENDORDER']._serialized_end=536
-  _globals['_MASSCANCEL']._serialized_start=538
-  _globals['_MASSCANCEL']._serialized_end=571
+  _globals['_NEWORDER']._serialized_end=335
+  _globals['_CANCELORDER']._serialized_start=337
+  _globals['_CANCELORDER']._serialized_end=443
+  _globals['_AMENDORDER']._serialized_start=446
+  _globals['_AMENDORDER']._serialized_end=588
+  _globals['_MASSCANCEL']._serialized_start=590
+  _globals['_MASSCANCEL']._serialized_end=623
 # @@protoc_insertion_point(module_scope)
