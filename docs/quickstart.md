@@ -297,7 +297,7 @@ The exchange sends these events about your team's own orders:
 
 ### Query your account
 
-You can ask the exchange for your team's own account at any hour, inside a session or not: its positions, cash and, for most teams, its equity, daily profit and loss and limit use. This needs an exchange that serves the query. Like step 6, it runs inside the `async with session:` block of step 3:
+You can ask the exchange for your team's own account at any hour, inside a session or not: its positions and, for most teams, its cash, equity, daily profit and loss and limit use. This needs an exchange that serves the query. Like step 6, it runs inside the `async with session:` block of step 3:
 
 ```python
 import asyncio
@@ -316,7 +316,8 @@ try:
                 print("inside a session" if live else "outside a session")
                 if state.HasField("session_date"):
                     print("session:", state.session_date)
-                print("cash:", to_decimal(state.cash))
+                if state.HasField("cash"):
+                    print("cash:", to_decimal(state.cash))
                 for position in state.positions:
                     print(position.instrument, position.quantity, to_decimal(position.price))
                 if state.HasField("summary"):
@@ -332,7 +333,7 @@ except TimeoutError:
     print("no answer within 10 seconds")
 ```
 
-The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session. `session_date` names the session the values belong to: the current one, or outside a session the one that last closed, whose profit and loss `daily_pnl` then shows. `summary` is absent for an Execution desk and the house, so check `HasField("summary")` first; `cash` is always there. Read the `qte_sdk.account` docstring for every field.
+The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session. `session_date` is the date of the current session inside one. Outside a session it is the date of the last session with an official close, whose profit and loss `daily_pnl` then shows, even between terms: positions carried over from the term before are returned, valued at that close. It is absent only before the exchange's first session ever. `summary` is absent for an Execution desk and the house, and `cash` is absent for an Execution desk, so check `HasField("summary")` and `HasField("cash")` first. Read the `qte_sdk.account` docstring for every field.
 
 The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
 

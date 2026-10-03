@@ -137,12 +137,34 @@ async def test_reply_summary_keeps_limits_and_optional_fields():
     assert got.HasField("cure_paused") and not got.cure_paused
 
 
-async def test_reply_for_a_desk_or_the_house_has_no_summary():
+async def test_reply_for_an_execution_desk_has_neither_summary_nor_cash():
     [event] = await received(
         frame(
             "account_state",
             {
                 "request_ref": "acct-2",
+                "positions": [{"instrument": "AAPL", "quantity": "-300", "price": "199970000"}],
+                "valuation_basis": "LIVE_MARK",
+                "session_date": "2026-10-02",
+                "as_of": "7",
+            },
+            1,
+        )
+    )
+    assert is_account_state(event)
+    state = event.message
+    assert not state.HasField("summary")
+    assert not state.HasField("cash")
+    assert [(p.instrument, p.quantity) for p in state.positions] == [("AAPL", -300)]
+    assert state.HasField("session_date")
+
+
+async def test_reply_without_summary_may_still_carry_cash():
+    [event] = await received(
+        frame(
+            "account_state",
+            {
+                "request_ref": "acct-6",
                 "valuation_basis": "LAST_OFFICIAL_CLOSE",
                 "session_date": "2026-10-02",
                 "as_of": "7",
@@ -151,16 +173,50 @@ async def test_reply_for_a_desk_or_the_house_has_no_summary():
             1,
         )
     )
-    assert is_account_state(event)
     state = event.message
     assert not state.HasField("summary")
+    assert state.HasField("cash") and state.cash == -1_500_000
     assert list(state.positions) == []
     assert state.valuation_basis == LAST_OFFICIAL_CLOSE
-    assert state.cash == -1_500_000
-    assert state.HasField("session_date")
 
 
-async def test_reply_before_the_first_session_has_no_session_date():
+async def test_reply_with_zero_cash_still_has_cash():
+    [event] = await received(
+        frame(
+            "account_state",
+            {"request_ref": "acct-7", "valuation_basis": "LIVE_MARK", "as_of": "1", "cash": "0"},
+            1,
+        )
+    )
+    assert event.message.HasField("cash")
+    assert event.message.cash == 0
+
+
+async def test_reply_between_terms_carries_positions_valued_at_the_last_close():
+    [event] = await received(
+        frame(
+            "account_state",
+            {
+                "request_ref": "acct-8",
+                "summary": SUMMARY,
+                "positions": [{"instrument": "MSFT", "quantity": "50", "price": "410250000"}],
+                "valuation_basis": "LAST_OFFICIAL_CLOSE",
+                "session_date": "2026-06-30",
+                "as_of": "9",
+                "cash": "800000000",
+            },
+            1,
+        )
+    )
+    state = event.message
+    assert state.valuation_basis == LAST_OFFICIAL_CLOSE
+    assert state.session_date == "2026-06-30"
+    assert [(p.instrument, p.quantity, p.price) for p in state.positions] == [
+        ("MSFT", 50, 410_250_000)
+    ]
+
+
+async def test_reply_before_the_first_session_ever_has_no_session_date():
     [event] = await received(
         frame(
             "account_state",

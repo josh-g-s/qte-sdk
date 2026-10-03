@@ -187,6 +187,7 @@ class ReasonCodes(_message.Message):
         OUTSIDE_DECLARED_SCOPE: _ClassVar[ReasonCodes.ReasonCode]
         INSTRUMENT_NOT_PERMITTED: _ClassVar[ReasonCodes.ReasonCode]
         INSTRUMENT_SUSPENDED: _ClassVar[ReasonCodes.ReasonCode]
+        INSTRUMENT_DISABLED: _ClassVar[ReasonCodes.ReasonCode]
         MALFORMED_MESSAGE: _ClassVar[ReasonCodes.ReasonCode]
         UNKNOWN_INSTRUMENT: _ClassVar[ReasonCodes.ReasonCode]
         TICK_VIOLATION: _ClassVar[ReasonCodes.ReasonCode]
@@ -240,6 +241,7 @@ class ReasonCodes(_message.Message):
     OUTSIDE_DECLARED_SCOPE: ReasonCodes.ReasonCode
     INSTRUMENT_NOT_PERMITTED: ReasonCodes.ReasonCode
     INSTRUMENT_SUSPENDED: ReasonCodes.ReasonCode
+    INSTRUMENT_DISABLED: ReasonCodes.ReasonCode
     MALFORMED_MESSAGE: ReasonCodes.ReasonCode
     UNKNOWN_INSTRUMENT: ReasonCodes.ReasonCode
     TICK_VIOLATION: ReasonCodes.ReasonCode

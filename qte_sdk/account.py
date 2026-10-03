@@ -32,12 +32,16 @@ An `account_state` carries:
   at: `LIVE_MARK` inside a session, `LAST_OFFICIAL_CLOSE` outside one. Under `LIVE_MARK`
   an instrument with no valid mark yet in the session is still valued at its last
   official close, so a `LIVE_MARK` price is not always a mark;
-- `session_date`, the current session inside one, or outside one the session whose close
-  the values are taken at, absent only before the first session of the term (check
-  `state.HasField("session_date")`). Outside a session, `summary.daily_pnl` is the profit
-  and loss of that session;
+- `session_date`, the date of the current session inside one. Outside a session it is
+  the date of the last session that has an official close, which the values are taken
+  at, even across the break between terms: positions carried over from the term before
+  are returned, valued at that close. It is absent only before the exchange's first
+  session ever, so check `state.HasField("session_date")`. Outside a session,
+  `summary.daily_pnl` is the profit and loss of that session;
 - `as_of`, the exchange's timestamp of the state the reply reads;
-- `cash`, the team's cash balance, sent to every team.
+- `cash`, the team's cash balance, present only for an account that holds one and then
+  equal to `summary.cash` when `summary` is present. It is absent for an Execution desk,
+  which holds no cash balance of its own, so check `state.HasField("cash")`.
 
 Prices, cash and equity are whole numbers of micro-dollars; convert them with
 `qte_sdk.units.to_decimal`. A query the exchange refuses (for example from a team that

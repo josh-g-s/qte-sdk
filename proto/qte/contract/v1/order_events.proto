@@ -289,17 +289,22 @@ message AccountState {
   // LIVE_MARK inside a session, LAST_OFFICIAL_CLOSE outside one. The basis for
   // `summary` and for every `positions` price. SPEC 7.1, SPEC 13.4
   ValuationBasis valuation_basis = 4;
-  // The US session date (ISO 8601) of the current session: inside a session
-  // that session, outside one the session whose official close the values are
-  // taken at. Absent only before the term's first session. SPEC 7.1, SPEC 13.1
+  // The US session date (ISO 8601). Inside a session, the current session's
+  // date. Outside a session, the date of the last session that has an
+  // official close, including across the break between terms: a Fundamentals
+  // pod that queries before a term's first session, holding positions carried
+  // over from the term before, gets the date of that term's last session.
+  // Absent only before the platform's first session ever. SPEC 7.1,
+  // SPEC 13.1, SPEC 13.4
   optional string session_date = 5;
   // timestamp. The exchange's own timestamp of the state this reply reads, the
   // same instant as `summary.timestamp`, so a client can order the reply
   // against the `account_summary` and other private reports it is also sent.
   // SPEC 9.2
   int64 as_of = 6;
-  // int64-micro. The account's cash balance. Equals `summary.cash` when
-  // `summary` is present; the only cash figure an Execution desk or the house
-  // is sent. SPEC 12.2
-  int64 cash = 7;
+  // int64-micro. The account's cash balance. Present only for an account that
+  // holds a cash balance, and equal to `summary.cash` when `summary` is
+  // present. Absent for an Execution desk, which holds no cash balance of its
+  // own. SPEC 12.2, SPEC 24
+  optional int64 cash = 7;
 }
