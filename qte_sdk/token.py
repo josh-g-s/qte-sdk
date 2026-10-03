@@ -167,6 +167,8 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
 
 def _existing_lines(path: Path) -> list[str]:
     """The lines of the existing `.env`, with their endings, or none if there is no file."""
+    if path.exists() and not path.is_file():
+        raise _Refused(f"{path} is not a regular file, so it was left unchanged")
     try:
         data = path.read_bytes()
     except FileNotFoundError:
