@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.11
+**Version:** 0.12
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -32,7 +32,21 @@ The SDK needs two things: the exchange address, `QTE_URL`, and your team token, 
 
 ### A `.env` file (recommended)
 
-From your project folder, first make sure git will never commit the file, then create it readable only by you:
+From your project folder, with your virtual environment active, run the SDK's setup helper:
+
+```sh
+python -m qte_sdk.token set
+```
+
+It asks for the exchange address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and then for the token: paste it and press Enter. Nothing is shown as you paste, and since the token is typed at a prompt rather than on the command line, it never reaches your shell history. The helper writes both to `.env` as `QTE_URL` and `QTE_TOKEN`, in a file created readable only by you, keeping any other lines already in it. If the folder is a git repository that does not ignore `.env`, it offers to add `.env` to `.gitignore`; say yes. Run it again whenever the token changes. If `QTE_URL` is already set, press Enter at the address prompt to keep it.
+
+To see where the SDK will take the token and the address from, without showing the token, run:
+
+```sh
+python -m qte_sdk.token check
+```
+
+To set it up by hand instead, first make sure git will never commit the file, then create it readable only by you:
 
 ```sh
 printf '\n.env\n' >> .gitignore
@@ -40,14 +54,12 @@ touch .env && chmod 600 .env
 ls -l .env
 ```
 
-The last line should show `-rw-------`. Open `.env` in your editor and put in the address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and your token:
+The last line should show `-rw-------`. Open `.env` in your editor, put in the address and your token, and save it. The token never passes through your shell, so it stays out of your shell history:
 
 ```sh
 QTE_URL=ws://127.0.0.1:8080/ws
 QTE_TOKEN=paste-your-token-here
 ```
-
-Save it. The token never passes through your shell, so it stays out of your shell history.
 
 The SDK reads `.env` itself, with no extra package: `open_session()` takes the address and the token from it, and so do the worked examples. It reads only the `.env` in the working directory (not a parent folder), so run your programs from the folder that holds it. It reads only `QTE_URL` and `QTE_TOKEN`; other lines are left alone, and nothing is put in your environment. Blank lines, `#` comments, an `export ` prefix and single or double quotes around a value are fine.
 
@@ -80,7 +92,7 @@ read -rs QTE_TOKEN && export QTE_TOKEN
 
 An exported variable lasts only for that shell and the programs it starts. A new terminal does not have it, so a program run there falls back to `.env`, or raises `MissingToken` if there is none.
 
-To keep the token in one place for all your projects, put it in a file outside any repository, readable only by you, and name that file in `QTE_TOKEN_FILE`. The first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
+To keep the token in one place for all your projects, put it in a file outside any repository, readable only by you, and name that file in `QTE_TOKEN_FILE`. The helper does this with `python -m qte_sdk.token set --file`: it writes the token alone to `~/.qte/token` (or the path you give after `--file`) in a directory only you can open, and prints the `export QTE_TOKEN_FILE=...` line to add to your shell profile. To do it by hand, the first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
 
 ```sh
 (umask 077 && mkdir -p "$HOME/.qte" && chmod 700 "$HOME/.qte" && read -rs T && rm -f "$HOME/.qte/token" && printf '%s\n' "$T" > "$HOME/.qte/token")
