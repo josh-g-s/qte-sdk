@@ -633,6 +633,9 @@ class ReconnectingSession:
                 drained = await session._failure_after_close(_CLOSE_READ_TIMEOUT)
                 if drained is not None:
                     failure = self._safe(drained)
+                # It may repeat the token, so it is not kept in this frame while the close
+                # below is awaited, where a cancellation would show it in the traceback.
+                del drained
             await _close(session)
             self._session = None
             session = None

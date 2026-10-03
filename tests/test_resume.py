@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import traceback
 import typing
 from contextlib import aclosing
 
@@ -1333,6 +1334,49 @@ async def test_a_session_rejected_before_the_first_send_is_not_retried(
     # Found by reading what the closed connection held, whenever there was a send to fail.
     sends = resume_on or bool(instruments)
     assert [type(d).__name__ for d in drained] == (["SessionRejected"] if sends else [])
+
+
+async def test_a_rejection_that_repeats_the_token_stays_out_of_a_cancelled_close(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The rejection read off the closed connection repeats the token. If the close that
+    # follows is cancelled, no frame the traceback shows may still hold it.
+    token = synthetic_token()
+    close = qte_sdk.reconnect._close
+    closes = 0
+
+    async def close_then_cancelled(session: qte_sdk.session.Session) -> None:
+        nonlocal closes
+        await close(session)
+        closes += 1
+        if closes == 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(qte_sdk.reconnect, "_close", close_then_cancelled)
+
+    async def exchange(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(ack())
+        await ws.send(session_reject("TEAM_DISABLED", f"no session for {token}"))
+        await ws.close()
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, token, sleep=Clock().sleep)
+        with pytest.raises(asyncio.CancelledError) as caught:
+            async with rs, asyncio.timeout(5):
+                async for _ in rs:
+                    pass
+    assert closes >= 1
+    parts: list[str] = []
+    pending = [traceback.TracebackException.from_exception(caught.value, capture_locals=True)]
+    while pending:
+        link = pending.pop()
+        parts.extend(link.format_exception_only())
+        # This module's own frames hold the token by design.
+        parts.extend(f"{s.filename} {s.locals}" for s in link.stack if s.filename != __file__)
+        pending.extend(n for n in (link.__cause__, link.__context__) if n is not None)
+    assert "_attempt" in "".join(f"{s.name}" for s in caught.traceback)
+    assert_token_absent(token, "\n".join(parts))
 
 
 async def test_an_attempt_cancelled_after_its_resume_puts_the_cursor_back(
