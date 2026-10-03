@@ -120,3 +120,9 @@ class Unsubscribe(_message.Message):
     INSTRUMENTS_FIELD_NUMBER: _ClassVar[int]
     instruments: _containers.RepeatedScalarFieldContainer[str]
     def __init__(self, instruments: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class AccountQuery(_message.Message):
+    __slots__ = ("request_ref",)
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    def __init__(self, request_ref: _Optional[str] = ...) -> None: ...

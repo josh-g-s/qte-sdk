@@ -133,6 +133,7 @@ from qte_sdk.session import (
     _without_token,
     open_session,
     resolve_token,
+    resolve_url,
 )
 
 __all__ = [
@@ -262,8 +263,9 @@ class ReconnectingSession:
     and the `instruments` given here, are made again on every new session. Close it, or use
     it with `async with`, when done.
 
-    `token` is used as `open_session` uses it, falling back to `QTE_TOKEN` and then
-    `QTE_TOKEN_FILE` (see `qte_sdk.session.resolve_token`), and is resolved once, here.
+    `url` and `token` are used as `open_session` uses them, falling back to `QTE_URL`, and
+    to `QTE_TOKEN`, `QTE_TOKEN_FILE` and then `.env` (see `qte_sdk.session.resolve_url` and
+    `qte_sdk.session.resolve_token`), and are resolved once, here.
     `resting`, if given, is updated from every event and marked incomplete on every
     disconnect; the resume that follows makes it complete again (see the module). `resume`
     turns resuming on (the default) or off. `backoff=None` turns reconnecting off: the
@@ -277,12 +279,13 @@ class ReconnectingSession:
     `calendar` is the session calendar the exchange sent on the current session; see
     `qte_sdk.calendar`.
 
-    Raises `MissingToken` here, before any connection, if there is no token.
+    Raises `MissingToken` or `MissingURL` here, before any connection, if there is no token
+    or no address.
     """
 
     def __init__(
         self,
-        url: str,
+        url: str | None = None,
         token: str | None = None,
         *,
         instruments: Iterable[str] = (),
@@ -296,7 +299,7 @@ class ReconnectingSession:
     ) -> None:
         self._secret = _Secret(resolve_token(token))
         del token
-        self.url = url
+        self.url = resolve_url(url)
         self.resting = resting
         self.backoff = backoff
         self._instruments = dict.fromkeys(_instrument_list(instruments))

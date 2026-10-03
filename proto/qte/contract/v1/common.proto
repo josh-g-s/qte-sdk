@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.7
+// **Version:** 1.8
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -26,9 +26,9 @@ enum OrderType {
 }
 
 // The inbound message kind an `accepted` or `reject` responds to (SPEC 8.2).
-// `reject.request_type` additionally allows SUBSCRIBE, UNSUBSCRIBE and RESUME
-// (see `Reject` in `order_events.proto`); `accepted.request_type` only ever
-// carries the first four values, a subset of this same enum.
+// `reject.request_type` additionally allows SUBSCRIBE, UNSUBSCRIBE, RESUME and
+// ACCOUNT_QUERY (see `Reject` in `order_events.proto`); `accepted.request_type`
+// only ever carries the first four values, a subset of this same enum.
 enum RequestType {
   REQUEST_TYPE_UNSPECIFIED = 0;
   NEW = 1;
@@ -38,6 +38,7 @@ enum RequestType {
   SUBSCRIBE = 5;
   UNSUBSCRIBE = 6;
   RESUME = 7;
+  ACCOUNT_QUERY = 8;
 }
 
 // The origin of a fill or a cancellation (SPEC 11.1, SPEC 11.2).
@@ -88,6 +89,22 @@ enum MarketSessionPhase {
   MARKET_SESSION_PHASE_UNSPECIFIED = 0;
   OPEN = 1;
   CLOSED = 2;
+}
+
+// The prices a team's positions and equity are valued at in an
+// `account_state` reply (SPEC 7.1, SPEC 13.4). LIVE_MARK: inside a session,
+// at each instrument's official mark as it stands (SPEC 7.1, SPEC 7.2); an
+// instrument with no valid mark yet in the session is valued at its last
+// official close.
+// LAST_OFFICIAL_CLOSE: outside a session, at each instrument's latest official
+// close, a break day's close included. `account_state.session_date` is
+// defined separately and does not date that close.
+//
+// This enum is closed: adding a value later is a breaking change.
+enum ValuationBasis {
+  VALUATION_BASIS_UNSPECIFIED = 0; // proto3's required zero value; never valid on the wire.
+  LIVE_MARK = 1;
+  LAST_OFFICIAL_CLOSE = 2;
 }
 
 // Where a team stands against its arm's daily loss limits

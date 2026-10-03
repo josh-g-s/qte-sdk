@@ -46,6 +46,7 @@ packages = ["qte_sdk"]
 only-include = [
     "qte_sdk",
     "proto",
+    "conformance",
     "scripts",
     "tests",
     "docs",

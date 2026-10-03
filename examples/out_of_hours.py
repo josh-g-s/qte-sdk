@@ -1,6 +1,7 @@
 """Connect outside a session and see the closed market. Sends no orders.
 
-Set QTE_URL and QTE_TOKEN first (see docs/quickstart.md), then:
+Set QTE_URL and QTE_TOKEN first, in ./.env or the environment (see docs/quickstart.md),
+then:
 
     python examples/out_of_hours.py --instrument AAPL
 
@@ -39,7 +40,14 @@ from qte_sdk.market_data import (
     until_next_open,
 )
 from qte_sdk.orders import reason_code_name
-from qte_sdk.session import MissingToken, Session, SessionNotAcknowledged, open_session
+from qte_sdk.session import (
+    MissingToken,
+    MissingURL,
+    Session,
+    SessionNotAcknowledged,
+    open_session,
+    resolve_url,
+)
 from qte_sdk.units import to_decimal
 
 # The longest wait for the calendar, and for the connection to close at the end. Local
@@ -149,14 +157,16 @@ def fail(message: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    url = os.environ.get("QTE_URL")
-    if not url:
-        fail("set QTE_URL to the exchange address, for example ws://127.0.0.1:8080/ws")
+    try:
+        url = resolve_url()  # QTE_URL from the environment, or from ./.env
+    except MissingURL as error:
+        fail(f"{error}; for example ws://127.0.0.1:8080/ws (see docs/quickstart.md)")
         return 2
     try:
         return asyncio.run(run(url, args))
-    except MissingToken:
-        fail("set QTE_TOKEN to your practice token (see docs/quickstart.md)")
+    except MissingToken as error:
+        # The message names the source and the problem, never the token.
+        fail(f"{error} (see docs/quickstart.md)")
         return 2
     except SessionRejected as error:
         return fail(f"the exchange refused the session: {error}")

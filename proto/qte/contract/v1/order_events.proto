@@ -1,14 +1,17 @@
 // Outbound order events.
 //
-// **Version:** 1.9
+// **Version:** 1.13
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
-// `obligation_state`, `risk_notice`. These are private to the team whose orders
-// they concern. Each but `account_summary` and `obligation_state` is sent as
+// `obligation_state`, `account_state`, `risk_notice`. These are private to the team whose
+// orders they concern. Each but `account_summary` and `obligation_state` is sent as
 // soon as the engine records it, not held to the market-data publication grid
-// (SPEC 4.3); when `account_summary` is sent is not yet specified, and
-// `obligation_state` is sent once per desk per whole-second close of a session.
+// (SPEC 4.3); `account_summary` is never sent unprompted and is sent only in
+// reply to an `account_query`, and `obligation_state` is sent once per desk per
+// whole-second close of a session.
+// `account_state` is the reply to a team's `account_query` and is sent only in
+// answer to one.
 // Every `timestamp` field's wire resolution and representation is not yet
 // specified.
 syntax = "proto3";
@@ -36,8 +39,9 @@ message Reject {
   // Required, except absent when the message could not be parsed far enough
   // to read one. Not yet specified.
   optional string request_ref = 1; // id
-  // Required when the received `type` token is one of the enum values;
-  // absent when it is not, independently of request_ref. Not yet specified.
+  // Required when the received `type` token is one of the enum values
+  // (including ACCOUNT_QUERY for a rejected `account_query`); absent when it
+  // is not, independently of request_ref. Not yet specified.
   optional RequestType request_type = 2;
   ReasonCodes.ReasonCode reason_code = 3; // Bands 1000-1600. SPEC 8.1, SPEC 8.3, SPEC 11
   optional string reason_detail = 4;      // Free text, for example the risk limit that failed
@@ -150,9 +154,9 @@ message LimitUtilisation {
 // A team's own account state: equity, cash, the day's profit and loss, where it
 // stands against its daily loss limits, how much of each Table 3 limit of its
 // arm it uses, and its exposure cure. Private to the team; it carries only the
-// team's own information (SPEC 4.3, SPEC 15.4). When it is sent is not yet
-// specified. The message is self-contained so another message can carry it
-// whole.
+// team's own information (SPEC 4.3, SPEC 15.4). It is sent only inside the
+// `account_state` reply to an `account_query`, never unprompted. The message is
+// self-contained so another message can carry it whole.
 message AccountSummary {
   int64 equity = 1; // int64-micro. Live equity: cash plus positions at the official mark. SPEC 11.1
   int64 cash = 2;   // int64-micro. The team's cash balance. SPEC 12.2
@@ -263,4 +267,78 @@ message RiskNotice {
   // element. The breached limits, one entry per limit, as at the moment the
   // window opened. SPEC 11.1, SPEC 11.2
   repeated LimitUtilisation breached_limits = 4;
+}
+
+// One position in an `account_state` reply (SPEC 7.1, SPEC 12.2).
+message PositionValue {
+  // id. The instrument held. An equity is named by its symbol; an option
+  // contract by its 21-character OCC option symbol, as Alpaca uses.
+  string instrument = 1;
+  // int64-qty. Signed: positive long, negative short. Shares of an equity; a
+  // whole number of contracts for an option (SPEC 18.1).
+  int64 quantity = 2;
+  // int64-micro. The price the position is valued at: the instrument's
+  // official mark inside a session once it has a valid one, its last official
+  // close otherwise: outside a session, or inside one before the instrument's
+  // first valid mark, while it is still reference unavailable (see
+  // `AccountState.valuation_basis`). SPEC 7.1, SPEC 7.2
+  int64 price = 3;
+}
+
+// Outbound. The reply to an `account_query`, sent to the asking team only,
+// at any hour. It carries the team's own information and nothing of any other
+// team's (SPEC 4.3, SPEC 15.4).
+message AccountState {
+  // id. Echoes the `account_query`'s request_ref, always present: a query
+  // without one is rejected, so a reply always has one to echo.
+  string request_ref = 1;
+  // The team's equity, cash, daily loss and limit use, exactly the message
+  // `account_summary` carries, defined once. Valued on this reply's
+  // `valuation_basis`. Out of hours its previous_close_equity is the close
+  // before the last one, so daily_pnl shows the session just finished.
+  // Present iff the account is sent `account_summary`: absent for an
+  // Execution desk and for the house, whose query is answered with the fields
+  // that exist and not rejected. SPEC 11.1, SPEC 15.4, SPEC 24.3
+  AccountSummary summary = 2;
+  // Every instrument the team holds a nonzero position in, in ascending order
+  // of `instrument`. Empty when the team holds no nonzero net position,
+  // whether or not it has traded. A position is held by the
+  // team, not by a strategy (SPEC 12.2). SPEC 7.1, SPEC 13.4
+  repeated PositionValue positions = 3;
+  // LIVE_MARK inside a session, LAST_OFFICIAL_CLOSE outside one. The basis for
+  // `summary` and for every `positions` price. SPEC 7.1, SPEC 13.4
+  ValuationBasis valuation_basis = 4;
+  // The US session date (ISO 8601). Inside a session, the current session's
+  // date. Outside a session, the date of the last session that has an
+  // official close, including across the break between terms: a Fundamentals
+  // pod that queries before a term's first session, holding positions carried
+  // over from the term before, gets the date of that term's last session.
+  // Inside a session it is the current session's date even if no official
+  // close exists yet. Outside a session it is absent while no session has an
+  // official close: before the platform's first session, and after a first
+  // session that ended with no official close (SPEC 7.2). This date names a
+  // session only: it does not date the close the values use. Positions and
+  // `summary` are valued at the latest official close, which on a break day
+  // is that day's close, not this session's. SPEC 7.1, SPEC 13.1, SPEC 13.4
+  optional string session_date = 5;
+  // timestamp. The exchange's own timestamp of the state this reply reads, the
+  // same instant as `summary.timestamp`. It does not order the reply against
+  // the private reports: as_of_report_seq does. SPEC 9.2
+  int64 as_of = 6;
+  // int64-micro. The account's cash balance. Present only for an account that
+  // holds a cash balance, and equal to `summary.cash` when `summary` is
+  // present. The house's reply carries it; only an Execution desk's reply
+  // omits it, because a desk holds no cash balance of its own. SPEC 12.2,
+  // SPEC 24
+  optional int64 cash = 7;
+  // integer. The team's report_seq this reply reflects: the highest one the
+  // team had been assigned when the state was read. The cut is for account
+  // effects only: an execution or risk_notice at or below it is already in
+  // cash, positions and summary, so its account effect is not applied again,
+  // while accepted, reject, order_cancelled and order_state are still applied
+  // whatever their report_seq (the reply holds no resting-order state). The
+  // client's contiguous cursor and resume rules are unchanged. Absent when the
+  // team has had no private report in this term, so a client applies every
+  // one. The reply itself carries no report_seq.
+  optional int64 as_of_report_seq = 8;
 }

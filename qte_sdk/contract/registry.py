@@ -5,7 +5,10 @@ from google.protobuf.message import Message
 from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, OfficialClose, SessionState, Trades
 from qte_sdk.contract.v1.order_events_pb2 import (
     Accepted,
+    AccountState,
+    AccountSummary,
     Execution,
+    ObligationState,
     OrderCancelled,
     OrderState,
     Reject,
@@ -38,6 +41,9 @@ INBOUND: dict[str, type[Message]] = {
     "order_cancelled": OrderCancelled,
     "order_state": OrderState,
     "risk_notice": RiskNotice,
+    "account_summary": AccountSummary,
+    "obligation_state": ObligationState,
+    "account_state": AccountState,
     "book": Book,
     "trades": Trades,
     "mark": Mark,

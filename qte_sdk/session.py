@@ -1,6 +1,6 @@
 """Open an authenticated session on the exchange.
 
-    session = await open_session("ws://127.0.0.1:8080/ws")  # token from QTE_TOKEN(_FILE)
+    session = await open_session()  # address from QTE_URL, token from QTE_TOKEN(_FILE) or .env
     async with session:
         print(session.info.team, session.info.unscored)
         async for event in session:
@@ -8,8 +8,11 @@
 
 A session is a `Connection` that has sent `auth` with your account's token and received
 `session_ack`. The token comes from the `token` argument or, failing that, the `QTE_TOKEN`
-environment variable or, failing that, the file named by the `QTE_TOKEN_FILE` environment
-variable (see `resolve_token`). Keep it out of source files and out of the repository.
+environment variable, the file named by the `QTE_TOKEN_FILE` environment variable, or
+`QTE_TOKEN` in a `.env` file in the working directory, in that order (see `resolve_token`).
+The exchange address comes from the `url` argument, the `QTE_URL` environment variable or
+`QTE_URL` in `.env` (see `resolve_url`). Keep the token out of source files and out of the
+repository.
 
 The token is sent once, in the `auth` message, and is not kept afterwards. The SDK never
 logs it or puts it in an exception: the connection drops the frame-level debug lines of
@@ -43,17 +46,24 @@ from qte_sdk.connection import (
 from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import Reject
 from qte_sdk.contract.v1.session_pb2 import Auth, Calendar, Resume, ResumeAck, SessionAck
+from qte_sdk.dotenv import DOTENV_NAME, read_value
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
 TOKEN_FILE_ENV_VAR = "QTE_TOKEN_FILE"
+URL_ENV_VAR = "QTE_URL"
 DEFAULT_ACK_TIMEOUT = 10.0
 DEFAULT_CALENDAR_TIMEOUT = 5.0
 
 
 class MissingToken(ValueError):
-    """No token was given, `QTE_TOKEN` is unset or empty, and `QTE_TOKEN_FILE` is unset or
-    names a file that holds no readable token. The message says which; it never holds any
-    of the file's contents."""
+    """No token was given, `QTE_TOKEN` is unset or empty, `QTE_TOKEN_FILE` is unset or names
+    a file that holds no readable token, or `.env` holds no token the SDK may use. The
+    message says which; it never holds any of the file's contents."""
+
+
+class MissingURL(ValueError):
+    """No exchange address was given, `QTE_URL` is unset or empty, and `.env` sets no
+    usable `QTE_URL`. The message says which; it never holds any of the file's contents."""
 
 
 class SessionNotAcknowledged(Exception):
@@ -573,27 +583,60 @@ def resolve_token(token: str | None = None) -> str:
     - `token`, when it is not None (an empty string raises `MissingToken`);
     - the `QTE_TOKEN` environment variable, when it is set and not empty;
     - the contents of the file named by the `QTE_TOKEN_FILE` environment variable, when it
-      is set and not empty, with one trailing newline removed.
+      is set and not empty, with one trailing newline removed;
+    - `QTE_TOKEN` in the `.env` file in the working directory (see `qte_sdk.dotenv`).
 
-    The file is read only when neither of the first two is present, and is read on each
-    call. Raises `MissingToken` if there is no token, or if the file cannot be read, is not
-    UTF-8 text, or holds nothing but whitespace.
+    Each file is read only when nothing before it is present, and is read on each call.
+    Raises `MissingToken` if there is no token; if the file named by `QTE_TOKEN_FILE`
+    cannot be read, is not UTF-8 text, or holds nothing but whitespace (the `.env` is then
+    not tried); or if the `.env` cannot be read or parsed, or, on POSIX, holds the token
+    and other users can read it.
     """
     if token is None:
         token = os.environ.get(TOKEN_ENV_VAR) or None
     problem = None
+    source = TOKEN_FILE_ENV_VAR + " names a file that"
     if token is None:
         token, problem = _token_from_file()
+    if token is None and problem is None:
+        source = DOTENV_NAME
+        token, problem = read_value(TOKEN_ENV_VAR)
     if problem is not None:
         # Raised outside any handler, from a frame that holds neither the file's path nor
         # its contents, so the exception carries neither.
-        raise MissingToken(f"no token: {TOKEN_FILE_ENV_VAR} names a file that {problem}")
+        raise MissingToken(f"no token: {source} {problem}")
     if not token:
         raise MissingToken(
-            f"no token: pass token=, set the {TOKEN_ENV_VAR} environment variable, or set "
-            f"{TOKEN_FILE_ENV_VAR} to the path of a file holding it"
+            f"no token: pass token=, set the {TOKEN_ENV_VAR} environment variable, set "
+            f"{TOKEN_FILE_ENV_VAR} to the path of a file holding it, or put {TOKEN_ENV_VAR} "
+            f"in a {DOTENV_NAME} file in the working directory"
         )
     return token
+
+
+def resolve_url(url: str | None = None) -> str:
+    """The exchange address, from the first of these that is present:
+
+    - `url`, when it is not None (an empty string raises `MissingURL`);
+    - the `QTE_URL` environment variable, when it is set and not empty;
+    - `QTE_URL` in the `.env` file in the working directory (see `qte_sdk.dotenv`).
+
+    Raises `MissingURL` if there is none, or if the `.env` cannot be read or parsed, or, on
+    POSIX, holds `QTE_TOKEN` and other users can read it.
+    """
+    if url is None:
+        url = os.environ.get(URL_ENV_VAR) or None
+    problem = None
+    if url is None:
+        url, problem = read_value(URL_ENV_VAR)
+    if problem is not None:
+        raise MissingURL(f"no exchange address: {DOTENV_NAME} {problem}")
+    if not url:
+        raise MissingURL(
+            f"no exchange address: pass url=, set the {URL_ENV_VAR} environment variable, "
+            f"or put {URL_ENV_VAR} in a {DOTENV_NAME} file in the working directory"
+        )
+    return url
 
 
 def _token_from_file() -> tuple[str | None, str | None]:
@@ -626,13 +669,16 @@ def _token_from_file() -> tuple[str | None, str | None]:
 
 
 async def open_session(
-    url: str,
+    url: str | None = None,
     token: str | None = None,
     *,
     ack_timeout: float | None = DEFAULT_ACK_TIMEOUT,
     **connection_options: Any,
 ) -> Session:
     """Connect to `url`, authenticate, and wait for the exchange to acknowledge the session.
+
+    `url` is the exchange address, or None to take it from `QTE_URL` in the environment or
+    in `.env` (see `resolve_url`). Raises `MissingURL` before connecting if there is none.
 
     `connection_options` are passed to `Connection` (for example `contract_version`) and on
     to `websockets.asyncio.client.connect`.
@@ -653,6 +699,7 @@ async def open_session(
     """
     secret = _Secret(resolve_token(token))
     del token
+    url = resolve_url(url)
 
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)

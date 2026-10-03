@@ -42,7 +42,7 @@ def test_typed_payload_round_trips_through_an_envelope_exactly():
 
 
 def test_int32_payload_fields_stay_json_integers():
-    wire = codec.encode("0.x", "resume_ack", ResumeAck(replayed=False, snapshot_count=42))
+    wire = codec.encode("0.x", "resume_ack", ResumeAck(snapshot_count=42))
     value = json.loads(wire)["payload"]["snapshot_count"]
     assert value == 42
     assert type(value) is int

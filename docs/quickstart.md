@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.12
+**Version:** 0.14
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -28,46 +28,84 @@ This installs the `qte_sdk` package only. The worked examples (step 11) are not 
 
 ## 2. Set the exchange address and your token
 
-The SDK reads your token from the `QTE_TOKEN` environment variable or, when that is unset or empty, from the file named by `QTE_TOKEN_FILE`. The examples read the exchange address from `QTE_URL`.
+The SDK needs two things: the exchange address, `QTE_URL`, and your team token, `QTE_TOKEN`. The simplest way to keep both is a `.env` file in your project folder, the folder you run your programs from. It lasts across terminals and needs no shell profile.
 
-To try the SDK in one terminal, set the exchange address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and read the token without echoing it, so it stays out of your screen and your shell history. Run the second line, paste the token (nothing is shown) and press Enter:
+### A `.env` file (recommended)
+
+From your project folder, first make sure git will never commit the file, then create it readable only by you:
+
+```sh
+printf '\n.env\n' >> .gitignore
+touch .env && chmod 600 .env
+ls -l .env
+```
+
+The last line should show `-rw-------`. If your project is a git repository, also check that git does not already track a `.env`, since adding it to `.gitignore` does not stop git committing a file it already tracks:
+
+```sh
+git ls-files --error-unmatch .env
+```
+
+An error saying `.env` did not match any file is what you want. If it prints `.env` instead, run `git rm --cached .env` and commit, before you put the token in.
+
+Open `.env` in your editor and put in the address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and your token:
+
+```sh
+QTE_URL=ws://127.0.0.1:8080/ws
+QTE_TOKEN=paste-your-token-here
+```
+
+Save it. The token never passes through your shell, so it stays out of your shell history.
+
+The SDK reads `.env` itself, with no extra package: `open_session()` takes the address and the token from it, and so do the worked examples. It reads only the `.env` in the working directory (not a parent folder), so run your programs from the folder that holds it. It reads only `QTE_URL` and `QTE_TOKEN`; other lines are left alone, and nothing is put in your environment. Blank lines, `#` comments, an `export ` prefix and single or double quotes around a value are fine.
+
+Two safeguards protect the token:
+
+- If other users can read a `.env` that holds `QTE_TOKEN`, the SDK uses nothing in it and raises `MissingToken` (or `MissingURL`, when it was reading the address), saying to run `chmod 600 .env`. (This check applies on macOS and Linux.)
+- If the `.env` (or, when it is a symbolic link, the file it points to) is inside a git repository and git tracks it or does not ignore it, the SDK warns you once, saying what to do: add `.env` to `.gitignore`, and if git already tracks it, run `git rm --cached .env` too. It still uses the file. The `.gitignore` of this SDK's repository protects only a clone of this repository, not your project. The same warning appears if you run a program inside a repository someone else made that ships a `.env`: check the address in it before you use it.
+
+### Where the SDK looks, in order
+
+For the token, the SDK uses the first of these that is set:
+
+1. `token=` passed to `open_session` (or `ReconnectingSession` or `HistoryClient`);
+2. the `QTE_TOKEN` environment variable;
+3. the file named by the `QTE_TOKEN_FILE` environment variable;
+4. `QTE_TOKEN` in `./.env`.
+
+For the exchange address: the address passed to `open_session`, then the `QTE_URL` environment variable, then `QTE_URL` in `./.env`. If there is none, `open_session` raises `MissingURL`, which names both. A real environment variable always wins over `.env`, so an old `export QTE_TOKEN=...` in your terminal or shell profile hides the token in `.env`: run `unset QTE_TOKEN` and remove the line from your profile. If `QTE_TOKEN_FILE` is set but its file cannot be used, the SDK raises `MissingToken` rather than falling back to `.env`.
+
+The history service (step 10) has its own address, which comes from `QTE_HISTORY_URL` in the environment, never from `.env`. Its token comes from the same places as above.
+
+### Other ways
+
+Environment variables work too. To try the SDK in one terminal, set the address and read the token without echoing it: run the second line, paste the token (nothing is shown) and press Enter.
 
 ```sh
 export QTE_URL=ws://127.0.0.1:8080/ws
 read -rs QTE_TOKEN && export QTE_TOKEN
 ```
 
-An exported variable lasts only for that shell and the programs it starts. A new terminal does not have it, and closing the terminal loses it, so a program run from a new terminal raises `MissingToken` until you set the token there again.
+An exported variable lasts only for that shell and the programs it starts. A new terminal does not have it, so a program run there falls back to `.env`, or raises `MissingToken` if there is none.
 
-### Keep the token across terminal sessions
-
-The recommended way is to keep the token in a file outside any repository, readable only by you, and to name that file in `QTE_TOKEN_FILE`. The first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
+To keep the token in one place for all your projects, put it in a file outside any repository, readable only by you, and name that file in `QTE_TOKEN_FILE`. The first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
 
 ```sh
 (umask 077 && mkdir -p "$HOME/.qte" && chmod 700 "$HOME/.qte" && read -rs T && rm -f "$HOME/.qte/token" && printf '%s\n' "$T" > "$HOME/.qte/token")
 ls -l "$HOME/.qte/token"
 ```
 
-The parentheses run it in a subshell, so the `umask` and the variable `T` end with it.
-
-Then add this line to your shell profile, which is `~/.zshrc` for zsh (the macOS default) or `~/.bashrc` for bash (`~/.bash_profile` on macOS):
+The parentheses run it in a subshell, so the `umask` and the variable `T` end with it. Then add this line to your shell profile, which is `~/.zshrc` for zsh (the macOS default) or `~/.bashrc` for bash (`~/.bash_profile` on macOS), and run it in your current terminal too:
 
 ```sh
 export QTE_TOKEN_FILE="$HOME/.qte/token"
 ```
 
-Run the same line in your current terminal too, so you can carry on there. Every new terminal then has it, but not `QTE_URL` or your virtual environment: set `QTE_URL` again (or add its `export` line to your profile as well) and run `source .venv/bin/activate` from your project. The line holds a path, not the token. `QTE_TOKEN` takes precedence over the file, so run `unset QTE_TOKEN` in any terminal where you exported it, and remove any line that sets it from your shell profile.
+The line holds a path, not the token. The SDK reads the file each time it needs the token, removing one trailing newline. If the file is missing, unreadable, empty or not UTF-8 text, it raises `MissingToken` with a message that says which, and never shows the file's contents. You can still keep `QTE_URL` in a `.env`.
 
-The SDK reads the file each time it needs the token, removing one trailing newline. If the file is missing, unreadable, empty or not UTF-8 text, it raises `MissingToken` with a message that says which, and never shows the file's contents.
+On macOS you can also keep the token in the Keychain. Store it once with `security add-generic-password -a "$USER" -s qte-token -w`, which prompts for it without echo, and load it with `export QTE_TOKEN="$(security find-generic-password -a "$USER" -s qte-token -w)"` in each terminal or in your shell profile.
 
-Other ways work too:
-
-- The macOS Keychain. Store the token once with `security add-generic-password -a "$USER" -s qte-token -w`, which prompts for it without echo, and load it with `export QTE_TOKEN="$(security find-generic-password -a "$USER" -s qte-token -w)"` in each terminal or in your shell profile.
-- A `.env` file loaded by python-dotenv, or a `.envrc` file loaded by direnv, in your own project. Add the file to that project's `.gitignore` before you put the token in it: this repository's `.gitignore` protects only a copy of this repository, not your project. The SDK does not read `.env` files itself.
-
-Whichever you choose, never put the token in a source file or a notebook.
-
-The SDK never logs your token or puts it in an exception message.
+Whichever you choose, never put the token in a source file or a notebook. The SDK never logs your token or puts it in an exception message, and a `.env` it cannot parse is reported by line number, never by its contents.
 
 ## 3. Open a session
 
@@ -75,13 +113,12 @@ Everything in the SDK is `async`. A session is an authenticated connection: `ope
 
 ```python
 import asyncio
-import os
 
 from qte_sdk.session import open_session
 
 
 async def main() -> None:
-    session = await open_session(os.environ["QTE_URL"])  # the token comes from QTE_TOKEN
+    session = await open_session()  # the address and token come from .env or the environment
     async with session:
         print("team:", session.info.team)
         print("unscored session:", session.info.unscored)
@@ -92,7 +129,7 @@ asyncio.run(main())
 
 `session.info.unscored` is `True` when nothing in this session counts towards any score.
 
-If the exchange refuses the session, `open_session` raises `SessionRejected` (from `qte_sdk.connection`), whose `reason_name` says why. With no token set it raises `MissingToken` before connecting.
+If the exchange refuses the session, `open_session` raises `SessionRejected` (from `qte_sdk.connection`), whose `reason_name` says why. With no token set it raises `MissingToken` before connecting, and with no address `MissingURL`.
 
 Two rules about sessions:
 
@@ -295,6 +332,50 @@ The exchange sends these events about your team's own orders:
 
 `qte_sdk.resting.RestingOrders` keeps a view of your team's resting orders built only from these events. Read its docstring for what it cannot know. When an amend's `order_state` arrives, the view removes the order from `old_price` and, if it still rests, records it at `price` with its remaining size. So an amend that moves the price moves the entry to the new level, a size-only amend (where `old_price` equals `price`) updates it in place, and an amend that fills the order completely or ends it some other way leaves nothing at either price. An older exchange that does not send `old_price` leaves the entry at the old price in the view; against one, cancel and re-enter instead of amending the price if you rely on the view.
 
+### Query your account
+
+You can ask the exchange for your team's own account at any hour, inside a session or not: its positions, its cash and, for most teams, its equity, daily profit and loss and limit use. This needs an exchange that serves the query. Like step 6, it runs inside the `async with session:` block of step 3:
+
+```python
+import asyncio
+
+from qte_sdk.account import LIVE_MARK, is_account_state, send_account_query
+from qte_sdk.orders import is_order_event, reason_code_name, request_ref_of
+from qte_sdk.units import to_decimal
+
+ref = await send_account_query(session)
+try:
+    async with asyncio.timeout(10):  # never wait for ever
+        async for event in session:
+            if is_account_state(event) and event.message.request_ref == ref:
+                state = event.message
+                live = state.valuation_basis == LIVE_MARK
+                print("inside a session" if live else "outside a session")
+                if state.HasField("session_date"):
+                    print("session:", state.session_date)
+                if state.HasField("cash"):
+                    print("cash:", to_decimal(state.cash))
+                for position in state.positions:
+                    print(position.instrument, position.quantity, to_decimal(position.price))
+                if state.HasField("summary"):
+                    print("equity:", to_decimal(state.summary.equity))
+                    print("daily P&L:", to_decimal(state.summary.daily_pnl))
+                break
+            if is_order_event(event) and event.type == "reject":
+                if request_ref_of(event.message) == ref:
+                    print("refused:", reason_code_name(event.message.reason_code))
+                    break
+            # a real program handles market data and order events here too
+except TimeoutError:
+    print("no answer within 10 seconds")
+```
+
+The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session, at each instrument's latest official close, a break day's close included. An option is named by its 21-character OCC option symbol. `session_date` is the date of the current session inside one. Outside a session it is the date of the last session with an official close, whose profit and loss `daily_pnl` then shows, even between terms, when positions carried over from the term before are returned too. It names a session, not the close the values use. It is always there inside a session, and outside one it is absent while no session has an official close yet. `summary` is absent for an Execution desk and the house, and `cash` is absent only for an Execution desk, so check `HasField("summary")` and `HasField("cash")` first. A refused query is a `reject` with `request_type` `ACCOUNT_QUERY` that echoes your `request_ref` whenever the exchange could read it. Read the `qte_sdk.account` docstring for every field.
+
+The reply also carries `as_of_report_seq`: the newest of your private order reports it already reflects. Each private report (`accepted`, a delayed `reject`, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a `report_seq` on its envelope. The cut is for your account only: an `execution` or `risk_notice` at or below `as_of_report_seq` is already in the reply's cash, positions and summary, so do not add its effect again, while `accepted`, `reject`, `order_cancelled` and `order_state` still apply to your view of your resting orders whatever their `report_seq`. `as_of_report_seq` is absent when your team has had no private report this term, and then every report applies. Every event this SDK delivers for such a report carries it as `event.report_seq` (None on other messages), so you can compare it with `as_of_report_seq` yourself: skip the effect of an `execution` or `risk_notice` whose `report_seq` is at or below it. The SDK does not yet apply this cut for you.
+
+The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
+
 ## 8. Values the exchange sets
 
 **Every order message you send (new, cancel, amend and mass cancel) is held by the exchange for its order delay before it is applied. The delay is currently 150 ms.** An `accepted` therefore arrives at least that long after you send, and the book you acted on is at least that old by the time your order reaches it. Plan for it rather than around it.
@@ -390,7 +471,7 @@ except HistoryPending as error:
 
 ## 11. Worked examples
 
-Each example reads `QTE_URL` and `QTE_TOKEN` from the environment, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
+Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the environment or a `.env` in the folder you run it from, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
 
 | Example | What it shows |
 |---|---|

@@ -58,3 +58,28 @@ def test_generated_modules_exist_for_every_vendored_proto():
         stem = name.removesuffix(".proto")
         assert (out / f"{stem}_pb2.py").is_file()
         assert (out / f"{stem}_pb2.pyi").is_file()
+
+
+# The published conformance steps, vendored the same way from their own pinned commit.
+CONFORMANCE_DIR = ROOT / "conformance"
+CONFORMANCE_MANIFEST = tomllib.loads((CONFORMANCE_DIR / "upstream.toml").read_text())
+CONFORMANCE_APPROVED = {"CONFORMANCE.md"}
+
+
+def test_conformance_manifest_lists_exactly_the_approved_files():
+    assert set(CONFORMANCE_MANIFEST["blobs"]) == CONFORMANCE_APPROVED
+
+
+def test_conformance_bytes_hash_to_the_pinned_blob():
+    for name, sha in CONFORMANCE_MANIFEST["blobs"].items():
+        data = (CONFORMANCE_DIR / name).read_bytes()
+        assert git_blob_sha(data) == sha, f"{name} differs from the pinned blob"
+
+
+def test_conformance_manifest_pins_a_full_commit():
+    assert re.fullmatch(r"[0-9a-f]{40}", CONFORMANCE_MANIFEST["commit"])
+
+
+def test_conformance_tree_holds_only_the_approved_files():
+    vendored = {p.relative_to(CONFORMANCE_DIR).as_posix() for p in CONFORMANCE_DIR.rglob("*")}
+    assert vendored == {"upstream.toml"} | CONFORMANCE_APPROVED
