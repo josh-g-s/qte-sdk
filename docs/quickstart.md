@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.15
+**Version:** 0.16
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -405,6 +405,8 @@ Iterating a session ends normally when the exchange closes the connection, and r
 The exchange sends a heartbeat at a regular interval, at any hour, so a working connection is never silent for long. The SDK absorbs heartbeats: they never appear among your events, and you send nothing back. Once the first heartbeat has arrived, if nothing at all arrives for `liveness_timeout` seconds, the SDK treats the link as dead, drops it and raises `qte_sdk.connection.LivenessTimeout`. The check starts only with that first heartbeat, so an exchange that does not send heartbeats is never dropped for being quiet. The default, 45 seconds, is the SDK's own choice, not a value the exchange sends; pass `liveness_timeout=` to `open_session` or `ReconnectingSession` to change it, or `None` to turn the check off.
 
 The exchange also drops a connection that has sent it nothing for a while, with close code 4000 and reason `heartbeat timeout`. You do not need to send anything: in the background, the `websockets` library answers the exchange's pings and sends pings of its own. It can only answer a ping, or see the reply to its own, while it is reading the connection, and it pauses reading once more than 16 frames (its `max_queue` option) are waiting for your loop. If your loop stops reading for long, the connection is closed: by the library itself, with code 1011 and reason `keepalive ping timeout`, or by the exchange with 4000. Either way iterating raises `websockets.exceptions.ConnectionClosedError`, which `ReconnectingSession` treats as a drop and reconnects. Keep the loop that reads events quick, and do slow work in another task.
+
+When one term ends and the next begins, the exchange closes every connection, with close code 4001 and reason `term change`, so no connection stays open from one term into the next. Iterating raises `ConnectionClosedError` as for any drop, and `ReconnectingSession` reconnects. Report numbers start again in the new term, which the new session's calendar names, so the old term's number is not carried over: the new session asks from 0 for a snapshot, or, with `resume=False`, forgets the number (see below). If you resume a session you opened yourself after a term change, pass 0.
 
 Each of your team's private order reports (`accepted`, a `reject` sent once the order delay is over, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a report number, `event.report_seq`, which counts up by one for each report your team receives. A session delivers reports in that order and keeps `session.last_report_seq`, the number up to which it has delivered every one. If a number is skipped, a `ReportGap` event comes first. A report the exchange fails to build is dropped without a number, so it causes no gap, nothing tells you it is missing, and a replay does not bring it back. Only a snapshot puts your resting orders right again (a resume answered with one; `session.resume(0)` asks for one), and the dropped report itself, a fill for example, is never delivered.
 
