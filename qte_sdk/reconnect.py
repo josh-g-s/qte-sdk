@@ -37,7 +37,8 @@ disconnected is noticed (see below). It is forgotten when the new session's cale
 a different term from the one it was counted in, so the new term's first reports are not
 dropped as duplicates of the old term's. The session waits for the calendar as above, but
 only when the term the number was counted in is known; if either term is unknown, the
-number is kept.
+number is kept. A calendar that arrives only after the wait still has the number
+forgotten, if it names a different term, before any later report is counted.
 
 Market data sent while the connection was down is not recovered: the new session
 subscribes again and receives the books from then on. Nor are messages that carry no
