@@ -34,7 +34,7 @@ the session asks from 0 instead and gets a snapshot.
 
 When one term ends and the next begins, the exchange closes every connection open at that
 moment with close code `qte_sdk.connection.TERM_CHANGE_CLOSE_CODE` (4001) and reason
-`term change`, after everything it still owed that connection, so no session carries
+`term change`, after every message already queued for it, so no session carries
 reports of two terms. That close is retried like any other drop, and the new session's
 calendar names the new term, so its cursor starts again as described here. A client that
 was not connected when the term changed is not sent the close; the same check of the new

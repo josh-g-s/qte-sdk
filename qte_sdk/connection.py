@@ -36,7 +36,7 @@ option) to absorb bursts, at the cost of memory.
 
 Term change: when one term ends and the next begins, the exchange closes every connection
 open at that moment with close code `TERM_CHANGE_CLOSE_CODE` (4001) and reason
-`term change`, after everything it still owed that connection, so no connection carries
+`term change`, after every message already queued for it, so no connection carries
 reports of two terms. Iteration raises a `ConnectionClosedError`, which
 `ReconnectingSession` retries like any other drop. The new session's calendar names the
 new term, in which report numbers start again (see `qte_sdk.reconnect`).
@@ -171,7 +171,7 @@ too long, or when a connection has not authenticated in time. Its reason text is
 
 TERM_CHANGE_CLOSE_CODE = 4001
 """The close code the exchange sends on every connection open when one term ends and the
-next begins, after everything it still owed that connection. Its reason text is
+next begins, after every message already queued for it. Its reason text is
 `term change`. Reconnect: the new session's calendar names the new term, in which report
 numbers start again."""
 
