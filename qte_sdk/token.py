@@ -278,9 +278,16 @@ def _refuse_if_tracked(path: Path) -> None:
         )
     raise _Refused(
         f"git tracks {path}, so your token in it would be committed, and adding it to "
-        f".gitignore does not stop that. Run `git rm --cached {path.name}` and commit, then "
+        f".gitignore does not stop that. Run `{_untrack_command(path)}` and commit, then "
         "run this command again. Nothing was changed."
     )
+
+
+def _untrack_command(path: Path) -> str:
+    """The command that stops git tracking `path`, to run from the working directory."""
+    if path.parent == Path.cwd():
+        return f"git rm --cached {shlex.quote(path.name)}"
+    return f"git -C {shlex.quote(str(path.parent))} rm --cached -- {shlex.quote(path.name)}"
 
 
 def _offer_gitignore(path: Path, ask: Prompt) -> None:
@@ -327,7 +334,7 @@ def _offer_gitignore(path: Path, ask: Prompt) -> None:
         print(
             f"Added {path.name} to {gitignore}, but git still does not ignore it: check "
             f"{gitignore} and run `git check-ignore -v {path.name}`. If git tracks it, run "
-            f"`git rm --cached {path.name}`."
+            f"`{_untrack_command(path)}`."
         )
     else:
         print(f"Added {path.name} to {gitignore}.")
@@ -371,12 +378,27 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
         raise _Refused(
             f"could not create {directory} ({error.strerror or type(error).__name__})"
         ) from None
+    # The real directory, so a symbolic link on the way cannot hide a git working tree.
+    path = directory.resolve() / path.name
+    if path.is_symlink() or path.is_dir():
+        raise _Refused(f"{path} is a directory or a symbolic link; choose another path")
     _refuse_if_tracked(path)
     secret = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")
     del secret
     print(f"Saved the token to {path}{_privacy()}")
-    _offer_gitignore(path, ask)
+    interrupted = False
+    try:
+        _offer_gitignore(path, ask)
+    except (KeyboardInterrupt, EOFError):
+        interrupted = True
+    if interrupted:
+        print(
+            f"\nstopped: the token was saved to {path}, but .gitignore was not changed. Add "
+            f"{path.name} to .gitignore before you commit anything.",
+            file=sys.stderr,
+        )
+        return 130
     line = f"export {TOKEN_FILE_ENV_VAR}={shlex.quote(str(path))}"
     print("Add this line to your shell profile (~/.zshrc or ~/.bashrc), and run it here too:")
     print()

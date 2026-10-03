@@ -2,6 +2,7 @@
 
 import os
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -87,7 +88,7 @@ def test_set_writes_the_address_and_token_to_a_private_dotenv(capsys):
     assert resolve_token() == token
     out, err = capsys.readouterr()
     assert_token_absent(token, out + err)
-    assert "readable only by you" in out
+    assert ("readable only by you" in out) == POSIX
     no_leftovers()
 
 
@@ -424,7 +425,7 @@ def test_set_file_writes_only_the_token_to_a_private_default_file(home, capsys, 
         assert mode(path.parent) == 0o700
     assert not dotenv().exists()
     out, err = capsys.readouterr()
-    assert f"export QTE_TOKEN_FILE={path}" in out
+    assert f"export QTE_TOKEN_FILE={shlex.quote(str(path))}" in out
     assert_token_absent(token, out + err)
     monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
     assert resolve_token() == token
@@ -453,7 +454,7 @@ def test_set_file_takes_a_path(tmp_path, capsys):
     assert path.read_text() == token + "\n"
     if POSIX:
         assert mode(path) == 0o600
-    assert f"export QTE_TOKEN_FILE='{path}'" in capsys.readouterr().out
+    assert f"export QTE_TOKEN_FILE={shlex.quote(str(path.resolve()))}" in capsys.readouterr().out
 
 
 def test_set_file_refuses_a_directory(tmp_path):
@@ -470,7 +471,12 @@ def test_set_file_refuses_a_tracked_destination_before_asking(target: str, capsy
     git("add", "-f", target)
     assert run(["set", "--file", target]) == 1  # the token is never asked for
     assert path.read_text() == "old\n"
-    assert f"git rm --cached {path.name}" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    if path.parent == Path("."):
+        assert "git rm --cached .env" in err
+    else:
+        real = Path.cwd().resolve() / "secrets"
+        assert f"git -C {shlex.quote(str(real))} rm --cached -- qte-token" in err
 
 
 @needs_git
@@ -481,6 +487,38 @@ def test_set_file_offers_to_ignore_an_unignored_destination(capsys):
     assert Path(".gitignore").read_text() == "qte-token\n"
     assert ignored_path("qte-token")
     out, err = capsys.readouterr()
+    assert_token_absent(token, out + err)
+
+
+@needs_git
+@pytest.mark.skipif(not POSIX, reason="symbolic links")
+def test_set_file_through_a_linked_directory_still_checks_git(tmp_path, capsys):
+    repository = tmp_path / "repo"
+    (repository / "config").mkdir(parents=True)
+    git("init", "-q", str(repository))
+    token_file = repository / "config" / "token"
+    token_file.write_text("old\n")
+    git("-C", str(repository), "add", "config/token")
+    alias = tmp_path / "alias"
+    alias.symlink_to(repository / "config")
+    assert run(["set", "--file", str(alias / "token")]) == 1
+    assert token_file.read_text() == "old\n"
+    assert "git tracks" in capsys.readouterr().err
+
+
+@needs_git
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, EOFError])
+def test_stopping_at_the_gitignore_offer_says_the_token_was_saved(stop, capsys):
+    git("init", "-q", ".")
+
+    def interrupted(prompt: str) -> str:
+        raise stop
+
+    token = synthetic_token()
+    assert run(["set", "--file", "qte-token"], ask=interrupted, ask_secret=answers(token)) == 130
+    assert Path("qte-token").exists()
+    out, err = capsys.readouterr()
+    assert "the token was saved" in err and ".gitignore was not changed" in err
     assert_token_absent(token, out + err)
 
 
