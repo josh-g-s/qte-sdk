@@ -19,11 +19,11 @@ pip install "git+https://github.com/josh-g-s/qte-sdk"
 
 ## A first program
 
-Put the exchange address and your token in the environment. Read the token without echoing it, so it stays off your screen and out of your shell history:
+Put the exchange address and your token in the environment. Read the token without echoing it, so it stays off your screen and out of your shell history: run the second line, paste the token (nothing is shown) and press Enter.
 
 ```sh
 export QTE_URL="<the exchange address from the course team>"
-read -rs QTE_TOKEN && export QTE_TOKEN   # paste the token, then press Enter
+read -rs QTE_TOKEN && export QTE_TOKEN
 ```
 
 An exported `QTE_TOKEN` lasts only for that shell and the programs it starts. A new terminal does not have it, and closing the terminal loses it, so set it again in each new terminal.
