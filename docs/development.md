@@ -80,7 +80,7 @@ and commit the protos, the manifest and the generated code together. The vendor 
 
 ## Running the conformance session
 
-`tests/test_conformance.py` runs the WebSocket session of `conformance/CONFORMANCE.md` (steps 1 to 16) against an exchange, through the SDK's public API, one test per step. It does not run the history service steps. It is skipped unless the exchange URL, a token and the instrument are all set, so CI and a plain `pytest` skip it. Run it against a test exchange on your own machine:
+`tests/test_conformance.py` runs the WebSocket session of `conformance/CONFORMANCE.md` (steps 1 to 16, with 9a to 9c) against an exchange, through the SDK's public API, one test per step. It does not run the history service steps. It is skipped unless the exchange URL, a token and the instrument are all set, so CI and a plain `pytest` skip it. Run it against a test exchange on your own machine:
 
 ```sh
 export QTE_CONFORMANCE_URL=ws://127.0.0.1:8080/ws
@@ -97,8 +97,9 @@ Each step opens its own session, and steps 4 to 14 first mass cancel the team's 
 
 | Variable | Step | What the exchange under test does |
 | --- | --- | --- |
-| `QTE_CONFORMANCE_COUNTERPARTY=1` | 6 | A scripted counterparty aggresses part of the step's resting buy. |
-| `QTE_CONFORMANCE_WALL_ONLY=1` | 11 | Nothing but the wall trades against the step's market buy. The team's risk limits must allow buying through ten ask levels, and the position is left open. |
+| `QTE_CONFORMANCE_COUNTERPARTY=1` | 6, 7 | A scripted counterparty aggresses part of the step's resting buy. Step 7 amends down after that partial fill, and skips if it leaves fewer than 2 shares. |
+| `QTE_CONFORMANCE_RESTING_SELL=1` | 9c | A counterparty of another team rests a sell of `QTE_CONFORMANCE_SIZE` shares strictly inside the band, above the two lowest buy prices inside it, with nothing else resting at or below it on the ask side. |
+| `QTE_CONFORMANCE_WALL_ONLY=1` | 11 | Nothing but the wall trades against the step's market buy, and the instrument's quote holds steady while the order waits out its delay. The step skips if its ten ask levels do not all lie within mark x 1.05. The team's risk limits must allow buying through ten ask levels, and the position is left open. |
 | `QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>` | 14 | It runs a single configured session and closes it within that many seconds of the step resting its order. |
 
-Step 16 runs only after step 14 has closed the session in the same run, so run the whole file in order with step 14 enabled to cover it. Step 10 checks the collar at the figure the script names (a buy above mark x 1.05). Step 13's "no budget consumed" is not checked, since no message reports a team's budget use. Step 15 (heartbeat and resume) is reported as an expected failure until it is specified (issue #12).
+Step 16 runs only after step 14 has closed the session in the same run, so run the whole file in order with step 14 enabled to cover it. Steps 10 and 11 use the figure the script names for the buy collar, mark x 1.05, so the instrument must be an equity under that guard; an option's guard is wider. Step 13's "no budget consumed" is not checked, since no message reports a team's budget use. Step 15 (heartbeat and resume) is reported as an expected failure until it is specified (issue #12). Steps 7 and 9a to 9c also check `OrderState.old_price`, which this SDK's contract does not have yet (issue #21): their other checks run first, and only the missing field is reported as an expected failure.

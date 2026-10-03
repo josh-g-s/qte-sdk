@@ -1,13 +1,14 @@
 # Conformance steps
 
-**Version:** 1.0
+**Version:** 1.1
 
 The scripted checks a client and an exchange are run against, end to end. Each step names
 the messages it exercises and the rule it proves, citing `SPEC.md` sections and naming
 the `.proto` messages and fields of the published contract. A client that cannot produce
 or consume every named message with every Required field has not met the contract.
 
-There are two scripts: a WebSocket session (steps 1 to 16) and the read-only history
+There are two scripts: a WebSocket session (steps 1 to 16, with steps 9a to 9c lettered
+between 9 and 10) and the read-only history
 service (steps H1 to H19). The history service is a separate, stateless HTTP interface:
 it has no `auth`, no `subscribe` and no step in the numbered session script.
 
@@ -63,7 +64,8 @@ price and side; step 8 checks that the exchange refuses to.
    (SPEC 10).
 7. **Amend down.** `amend` at the same level with a smaller `new_size` and
    `new_price` equal to `price`. `accepted`; `order_state` shows `remaining_size` equal to
-   `new_size`, the new remaining size (SPEC 8.2).
+   `new_size`, the new remaining size, and `old_price` equal to `price`, since the amend
+   changed only the size (SPEC 8.2; `OrderState.old_price`).
 8. **Second strategy at the same price.** `new` for `strat-b` at the same price and side
    as `strat-a`'s resting order. `reject` with `reason_code = DUPLICATE_ORDER_AT_LEVEL`,
    logged at release (SPEC 8.2, SPEC 9.4.3 release step 4). `strat-a`'s order is
@@ -73,6 +75,35 @@ price and side; step 8 checks that the exchange refuses to.
 9. **Cancel the level.** `cancel` at that price and side. One `order_cancelled`, for
    `strat-a`'s order, with `reason_code = CANCEL_REQUEST`, the cancel's `request_ref` and
    `cancelled_size` equal to the `remaining_size` step 7's `order_state` showed (SPEC 8.2).
+
+   Steps 9a to 9c track a price-moving amend from outbound messages alone. They are
+   lettered so that steps 10 to 16 keep their numbers. Every accepted amend sends one
+   `order_state` for each order it acts on, carrying `old_price`, the order's price before
+   the amend, and the amend's new price as `price`. A client keeping its own view of its
+   resting orders applies one rule to it: remove the order at `old_price`, then add it at
+   `price` if `state` is `RESTING` or `STALE` (the `OrderState` message).
+
+9a. **Rest for the amend.** `new` for `strat-a`, a buy strictly inside the band at a
+    price P1 where the team has no resting order. `accepted`; `order_state` shows
+    `RESTING` at P1, with no `old_price`, since it reports no amend.
+9b. **Price-moving amend, resting.** At least 50 ms after step 9a's `new` was received
+    (SPEC 8.1), `amend` at P1 with `new_price` P2, a buy price strictly inside the band,
+    below the best ask so not marketable, where the team has no resting order, and
+    `new_size` equal to the size resting at P1. `accepted`; one `order_state` with
+    `price` P2, `old_price` P1, `state = RESTING` and `remaining_size` equal to
+    `new_size`; no `execution`. A client applying the rule above holds the order at P2
+    and nothing at P1.
+9c. **Price-moving amend, filling completely.** Precondition: a counterparty of another
+    team rests a sell at a price P3 strictly inside the band and above P2, of exactly the
+    size resting at P2, with nothing else resting at or below P3 on the ask side. Then
+    (the minimum rest still counts from step 9a's `new`, since an amend keeps the order's
+    submission time, SPEC 8.1, SPEC 8.2) `amend` at P2 with `new_price` P3 and `new_size`
+    equal to that size: marketable, so the order executes at once and fills completely
+    (SPEC 8.2). `accepted`; `execution` with `liquidity = TAKER` and `remaining_size: 0`
+    on its last fill; then one `order_state` with `price` P3, `old_price` P2,
+    `state = FILLED` and `remaining_size: 0`, after the executions. A script that sees no
+    `order_state` for this amend, or one without `old_price`, fails this step. Nothing of
+    the team rests at P2 or P3 afterwards.
 10. **Collar.** `new` for `strat-a`, a buy limit above mark x 1.05. `reject` with
     `reason_code = PRICE_COLLAR` (SPEC 8.1).
 11. **Wall sweep with a market order.** Precondition: the instrument's book shows ten ask

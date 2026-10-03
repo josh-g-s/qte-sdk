@@ -1,8 +1,8 @@
 """The published conformance session, run against a local exchange.
 
 `conformance/CONFORMANCE.md` is vendored byte for byte from the exchange's published
-conformance steps. This module runs its WebSocket session (steps 1 to 16) through the
-public SDK API only: `open_session`, `subscribe`, the `send_*` functions and the message
+conformance steps. This module runs its WebSocket session (steps 1 to 16, with 9a to 9c)
+through the public SDK API only: `open_session`, `subscribe`, the `send_*` functions and the message
 classes. The history service steps (H1 to H19) are not run here.
 
 It is skipped unless these are set, so CI and a plain `pytest` never reach an exchange:
@@ -37,21 +37,32 @@ operators. A step whose precondition cannot be met is skipped with the reason. T
 declared by setting a variable:
 
     QTE_CONFORMANCE_COUNTERPARTY=1
-        step 6: a scripted counterparty aggresses part of the step's resting buy.
+        steps 6 and 7: a scripted counterparty aggresses part of the step's resting buy.
+    QTE_CONFORMANCE_RESTING_SELL=1
+        step 9c: a counterparty of another team rests a sell of QTE_CONFORMANCE_SIZE shares
+        strictly inside the band, above the two lowest buy prices inside it, with nothing
+        else resting at or below it on the ask side.
     QTE_CONFORMANCE_WALL_ONLY=1
         step 11: no counterparty trades against the step's market order other than the
-        wall. The team's risk limits must allow buying through ten ask levels, and the
-        position this leaves is not closed by the test.
+        wall, and the instrument's quote holds steady while the order waits out its delay.
+        The team's risk limits must allow buying through ten ask levels, and the position
+        this leaves is not closed by the test.
     QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>
         step 14: the exchange runs a single configured session and closes it within this
         many seconds of the step resting its order.
 
+The instrument must be an equity whose buy collar is mark x 1.05, the figure steps 10
+and 11 name; an option's wider guard does not fit them.
+
 The others are checked when the step runs: the instrument has a two-sided live quote
-(steps 4 to 14), its book shows ten ask levels (step 11) and its spread leaves room for
-the prices a step needs. Step 13's "no budget consumed" is not checked, since no message
+(steps 4 to 14), its book shows ten ask levels all within mark x 1.05 (step 11), step 6's
+partial fill leaves at least two shares (step 7) and its spread leaves room for the
+prices a step needs. Step 13's "no budget consumed" is not checked, since no message
 reports a team's budget use. Step 12's resting sell for
 the second strategy is entered by the step itself. Step 15 has no checks until it is
-specified (see issue #12) and is reported as an expected failure.
+specified (see issue #12) and is reported as an expected failure. Steps 7 and 9a to 9c
+also check `OrderState.old_price`, which this SDK's contract does not have yet (issue
+#21); they are expected failures until it does, and any other failure in them counts.
 """
 
 import asyncio
@@ -70,6 +81,7 @@ from qte_sdk.connection import DecodeFailed, Received, SeqGap
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     CLOSED,
+    FILLED,
     LIMIT,
     MAKER,
     MARKET,
@@ -122,6 +134,19 @@ pytestmark = pytest.mark.skipif(
 # steps require of the exchange under test, not a value trading code may rely on: take it
 # from CONFORMANCE.md again whenever that file is re-vendored.
 STEP_10_MARK_FACTOR = (105, 100)
+
+# Steps 7 and 9a to 9c check `OrderState.old_price`, which the vendored contract does not
+# have yet. Reading it raises ValueError until it does; any other failure is a real one.
+OLD_PRICE_PENDING = pytest.mark.xfail(
+    raises=ValueError,
+    strict=False,
+    reason="OrderState.old_price is not in this SDK's contract yet; see issue #21",
+)
+
+
+def old_price(state: OrderState) -> int | None:
+    """The order's price before the amend this `order_state` reports, or None."""
+    return state.old_price if state.HasField("old_price") else None
 
 
 @dataclass(frozen=True)
@@ -523,16 +548,17 @@ async def test_step_05_early_cancel(market: Client):
     assert state.state == RESTING
 
 
-@pytest.mark.skipif(
+NEEDS_COUNTERPARTY = pytest.mark.skipif(
     os.environ.get("QTE_CONFORMANCE_COUNTERPARTY") != "1",
     reason="precondition: a scripted counterparty (QTE_CONFORMANCE_COUNTERPARTY=1)",
 )
-async def test_step_06_partial_fill(market: Client):
-    c = market
-    (price,) = inside_prices(c.books.get(c.config.instrument), c.config.tick, 1)
+
+
+async def partial_fill(c: Client, price: int) -> Execution:
+    """Rest a buy at `price` and wait for the scripted counterparty's first fill of it."""
     start = c.mark()
     await c.rest(c.config.strat_a, BUY, price)
-    fill = await c.wait_for(
+    return await c.wait_for(
         lambda m: (
             isinstance(m, Execution)
             and m.strat_id == c.config.strat_a
@@ -544,6 +570,13 @@ async def test_step_06_partial_fill(market: Client):
         "execution against the resting order",
         start,
     )
+
+
+@NEEDS_COUNTERPARTY
+async def test_step_06_partial_fill(market: Client):
+    c = market
+    (price,) = inside_prices(c.books.get(c.config.instrument), c.config.tick, 1)
+    fill = await partial_fill(c, price)
     assert fill.fill_kind == STUDENT_TO_STUDENT
     assert fill.liquidity == MAKER
     assert fill.fee > 0, "the maker's fee is not a rebate"
@@ -565,11 +598,17 @@ async def test_step_06_partial_fill(market: Client):
     )
 
 
+@NEEDS_COUNTERPARTY
+@OLD_PRICE_PENDING
 async def test_step_07_amend_down(market: Client):
+    # After step 6's partial fill, so that `new_size` read as the new total size and as the
+    # new remaining size give different answers, and only the remaining size passes.
     c = market
     (price,) = inside_prices(c.books.get(c.config.instrument), c.config.tick, 1)
-    await c.rest(c.config.strat_a, BUY, price)
-    new_size = c.config.size // 2
+    fill = await partial_fill(c, price)
+    if fill.remaining_size < 2:
+        pytest.skip("precondition: step 6's partial fill leaves at least 2 shares to amend down")
+    new_size = fill.remaining_size // 2
     start = c.mark()
     ref = await send_amend(
         c.session,
@@ -583,6 +622,7 @@ async def test_step_07_amend_down(market: Client):
     assert accepted.request_type == RequestType.AMEND
     state = await c.order_state(c.config.strat_a, BUY, price, c.after(accepted))
     assert state.remaining_size == new_size
+    assert old_price(state) == price
 
 
 async def test_step_08_second_strategy_at_the_same_price(market: Client):
@@ -656,6 +696,122 @@ async def test_step_09_cancel_the_level(market: Client):
     assert len([m for m in c.since(start, OrderCancelled) if request_ref_of(m) == ref]) == 1
 
 
+async def rest_and_move(c: Client, low: int, high: int) -> tuple[OrderState, OrderState]:
+    """Steps 9a and 9b: rest a buy at `low`, then amend it to `high`. Returns the
+    `order_state` of each. Their `old_price` is left to the caller to check last, so every
+    other check runs even while the contract lacks it."""
+    rested = await c.rest(c.config.strat_a, BUY, low)
+    start = c.mark()
+    ref = await send_amend(
+        c.session,
+        instrument=c.config.instrument,
+        side=BUY,
+        price=low,
+        new_price=high,
+        new_size=c.config.size,
+    )
+    accepted = await c.answer(ref, start)
+    assert accepted.request_type == RequestType.AMEND
+    moved = await c.order_state(c.config.strat_a, BUY, high, c.after(accepted))
+    assert moved.state == RESTING
+    assert moved.remaining_size == c.config.size
+    assert not [m for m in c.since(start, Execution) if m.strat_id == c.config.strat_a], (
+        "the amend executed"
+    )
+    return rested, moved
+
+
+@OLD_PRICE_PENDING
+async def test_step_09a_rest_for_the_amend(market: Client):
+    c = market
+    (low,) = inside_prices(c.books.get(c.config.instrument), c.config.tick, 1)
+    state = await c.rest(c.config.strat_a, BUY, low)
+    assert old_price(state) is None, "order_state for a new order carries old_price"
+
+
+@OLD_PRICE_PENDING
+async def test_step_09b_price_moving_amend_resting(market: Client):
+    c = market
+    low, high = inside_prices(c.books.get(c.config.instrument), c.config.tick, 2)
+    rested, moved = await rest_and_move(c, low, high)
+    assert old_price(rested) is None, "order_state for a new order carries old_price"
+    assert old_price(moved) == low
+
+
+@pytest.mark.skipif(
+    os.environ.get("QTE_CONFORMANCE_RESTING_SELL") != "1",
+    reason="precondition: another team rests a sell for the amend to meet "
+    "(QTE_CONFORMANCE_RESTING_SELL=1)",
+)
+@OLD_PRICE_PENDING
+async def test_step_09c_price_moving_amend_filling_completely(market: Client):
+    c = market
+    low, high = inside_prices(c.books.get(c.config.instrument), c.config.tick, 2)
+    rested, moved = await rest_and_move(c, low, high)
+
+    def counterparty_sell() -> int | None:
+        book = c.books.get(c.config.instrument)
+        if book is None or not book.student_ask_levels:
+            return None
+        lowest = min(book.student_ask_levels, key=lambda level: level.price)
+        if not high < lowest.price < book.ask_levels[0].price:
+            return None
+        if lowest.size != c.config.size:
+            return None
+        return lowest.price
+
+    try:
+        await c.until(lambda: counterparty_sell() is not None, "counterparty sell in the book")
+    except NoMessage:
+        pytest.skip(
+            "precondition: another team rests a sell of QTE_CONFORMANCE_SIZE shares inside "
+            "the band above the step's prices, with nothing else resting at or below it"
+        )
+    target = counterparty_sell()
+    assert target is not None
+    start = c.mark()
+    ref = await send_amend(
+        c.session,
+        instrument=c.config.instrument,
+        side=BUY,
+        price=high,
+        new_price=target,
+        new_size=c.config.size,
+    )
+    await c.answer(ref, start)
+    filled = await c.wait_for(
+        lambda m: (
+            isinstance(m, OrderState)
+            and m.strat_id == c.config.strat_a
+            and m.instrument == c.config.instrument
+            and m.side == BUY
+            and m.price == target
+        ),
+        "order_state for the amend",
+        start,
+    )
+    fills = [
+        m
+        for m in c.seen[start : c.after(filled)]
+        if isinstance(m, Execution) and m.strat_id == c.config.strat_a and m.side == BUY
+    ]
+    assert fills, "no execution before the amend's order_state"
+    assert all(f.liquidity == TAKER for f in fills)
+    assert fills[-1].remaining_size == 0
+    assert filled.state == FILLED
+    assert filled.remaining_size == 0
+    after = c.after(filled)
+    await c.next_session_state(after)
+    assert not [
+        m
+        for m in c.since(after, OrderState)
+        if m.strat_id == c.config.strat_a and m.state == RESTING and m.price in (high, target)
+    ], "an order of the team rests at the old or new price"
+    assert old_price(rested) is None
+    assert old_price(moved) == low
+    assert old_price(filled) == high
+
+
 async def test_step_10_collar(market: Client):
     c = market
     mark = await c.wait_for(
@@ -689,7 +845,16 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
     c = market
     if len(c.books.get(c.config.instrument).ask_levels) != 10:
         pytest.skip("precondition: the instrument's book shows ten ask levels")
+    mark = await c.wait_for(
+        lambda m: isinstance(m, Mark) and m.instrument == c.config.instrument,
+        "mark",
+        0,
+        timeout=3 * c.config.timeout,
+    )
     shown = c.books.get(c.config.instrument)
+    numerator, denominator = STEP_10_MARK_FACTOR
+    if shown.ask_levels[-1].price * denominator > mark.value * numerator:
+        pytest.skip("precondition: all ten ask levels lie within mark x 1.05, the market guard")
     size = sum(level.size for level in shown.ask_levels) + 1
     start = c.mark()
     ref = await send_new(
@@ -720,14 +885,14 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         and m.side == BUY
         and not m.HasField("order_price")
     ]
-    # The ladder the order met: the latest book published by its release.
-    met = [
-        m
-        for m in c.seen
-        if isinstance(m, Book)
-        and m.instrument == c.config.instrument
-        and m.grid_time <= accepted.release_time
-    ][-1]
+    # The ladder the order met: the latest book published by its release. The quote must
+    # hold steady while the order waits out its delay; if a book published meanwhile shows
+    # it moved, the fills cannot be checked against one ladder.
+    books = [m for m in c.seen if isinstance(m, Book) and m.instrument == c.config.instrument]
+    at_receipt = [m for m in books if m.grid_time <= accepted.receipt_time][-1]
+    met = [m for m in books if m.grid_time <= accepted.release_time][-1]
+    if list(met.ask_levels) != list(at_receipt.ask_levels):
+        pytest.skip("precondition: the quote holds steady while the market order is delayed")
     assert [f.fill_price for f in fills] == [level.price for level in met.ask_levels]
     assert [f.fill_size for f in fills] == [level.size for level in met.ask_levels]
     for fill in fills:
@@ -826,7 +991,7 @@ async def test_step_13_mass_cancel(market: Client):
     assert len(cancelled) == 2
     for m in cancelled:
         assert m.reason_code == ReasonCodes.MASS_CANCEL
-        assert m.timestamp >= accepted.release_time
+        assert m.timestamp == accepted.release_time, "not cancelled at the mass cancel's release"
     # "No budget consumed" is not checked: no message reports a team's budget use.
 
 
