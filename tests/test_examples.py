@@ -13,7 +13,9 @@ import os
 import py_compile
 import re
 import secrets
+import shutil
 import signal
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -23,18 +25,21 @@ from urllib.parse import urlsplit
 
 import pytest
 from fake_exchange import CONTRACT_VERSION, serve_local
+from test_history import FakeHistory, serve_history
+from test_history import book as history_book
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
 from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, MarketSessionPhase, OrderLifecycleState
+from qte_sdk.contract.v1.market_data_pb2 import LIVE, StudentLevel, WallLevel
 from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
 from qte_sdk.contract.v1.market_data_pb2 import SessionState as SessionStateMessage
-from qte_sdk.contract.v1.market_data_pb2 import WallLevel
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
 from qte_sdk.orders import reason_code_name, send_amend, send_new
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import open_session
+from qte_sdk.units import to_decimal
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
@@ -106,7 +111,18 @@ class FakeExchange:
         official_close: bool = True,
         calendar: dict[str, Any] | None = None,
         closed_state: dict[str, Any] | None = None,
+        known_instruments: frozenset[str] | None = None,
+        account_state: dict[str, Any] | None = None,
+        cancel_rejects: list[str] | None = None,
     ) -> None:
+        # With `known_instruments`, a subscribe naming any other instrument is answered with
+        # an UNKNOWN_INSTRUMENT reject for it, and only the known ones are served.
+        self.known_instruments = known_instruments
+        # With `account_state`, an account_query is answered with it, echoing request_ref;
+        # without, it is never answered, as by an exchange that does not serve it.
+        self.account_state = account_state
+        # Each cancel takes the next reason here, if any, and is rejected with it.
+        self.cancel_rejects = list(cancel_rejects or [])
         # With `closed_state`, that is the session_state answering a subscribe when closed.
         self.closed_state = closed_state
         self.book_once = book_once
@@ -160,7 +176,18 @@ class FakeExchange:
             async for raw in ws:
                 message = json.loads(raw)
                 self.received.append(message)
-                if message["type"] == "subscribe" and self.closed:
+                if message["type"] == "subscribe" and self.known_instruments is not None:
+                    known = await self.refuse_unknown(ws, message["payload"]["instruments"])
+                    if not known:
+                        continue
+                    message["payload"] = {**message["payload"], "instruments": known}
+                if message["type"] == "account_query":
+                    if self.account_state is not None:
+                        ref = message["payload"]["request_ref"]
+                        await self.send(
+                            ws, "account_state", {**self.account_state, "request_ref": ref}
+                        )
+                elif message["type"] == "subscribe" and self.closed:
                     await self.answer_closed(ws, message["payload"]["instruments"])
                 elif message["type"] == "subscribe" and ticker is None:
                     if self.stray_reject:
@@ -200,6 +227,20 @@ class FakeExchange:
                 self.books_sent += 1
             published += 1
             await asyncio.sleep(0.05)
+
+    async def refuse_unknown(self, ws: ServerConnection, instruments: list[str]) -> list[str]:
+        """Reject each instrument this exchange does not know; return the ones it does."""
+        assert self.known_instruments is not None
+        for instrument in instruments:
+            if instrument not in self.known_instruments:
+                reject = {
+                    "request_type": "SUBSCRIBE",
+                    "reason_code": "UNKNOWN_INSTRUMENT",
+                    "receipt_time": "1",
+                    "instrument": instrument,
+                }
+                await self.send(ws, "reject", reject)
+        return [name for name in instruments if name in self.known_instruments]
 
     async def answer_closed(self, ws: ServerConnection, instruments: list[str]) -> None:
         state = {"state": "CLOSED", "session_date": "2026-01-05", "close_time": "2"}
@@ -325,6 +366,15 @@ class FakeExchange:
             await self.on_amend(ws, p, accepted)
         elif type_ == "cancel":
             key = (p["instrument"], p["side"], int(p["price"]))
+            if self.cancel_rejects:
+                reject = {
+                    "request_ref": ref,
+                    "request_type": "CANCEL",
+                    "reason_code": self.cancel_rejects.pop(0),
+                    "receipt_time": "1",
+                }
+                await self.send(ws, "reject", reject)
+                return
             if self.reject_first_cancel_then_gap:
                 self.reject_first_cancel_then_gap = False
                 reject = {
@@ -1622,3 +1672,274 @@ async def test_the_bounded_close_lets_an_interrupt_through(presses: int):
         with pytest.raises(asyncio.CancelledError):
             await task
     assert loop.time() - started < 3
+
+
+# The smoke test
+
+
+SMOKE_TEST = "smoke_test.py"
+CHECK_LINE = re.compile(r"(PASS|FAIL|SKIP)  (\S+) +(.*)")
+TEST_ORDER = ("--place-test-order", "--strat-id", "smoke")
+
+
+def checks(out: str) -> dict[str, tuple[str, str]]:
+    """The smoke test's checks by name: each one's status and reason."""
+    found: dict[str, tuple[str, str]] = {}
+    for line in out.splitlines():
+        match = CHECK_LINE.fullmatch(line)
+        if match is not None:
+            assert match[2] not in found, f"{match[2]} reported twice"
+            found[match[2]] = (match[1], match[3])
+    return found
+
+
+async def run_smoke_test(
+    exchange: FakeExchange, *args: str, token: str | None = None, **extra_env: str
+) -> tuple[int, str, str, dict[str, tuple[str, str]]]:
+    token = token or synthetic_token()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            SMOKE_TEST, url, token, "--seconds", "1", *args, **extra_env
+        )
+    # Neither the token nor the address is ever shown.
+    assert token not in out + err
+    assert url not in out + err
+    return code, out, err, checks(out)
+
+
+async def test_the_smoke_test_checks_a_setup_during_a_session_and_sends_no_order():
+    exchange = FakeExchange(calendar=CALENDAR)
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    assert found["token"] == ("PASS", "found in the QTE_TOKEN environment variable (not shown)")
+    assert found["address"] == ("PASS", "set, from the QTE_URL environment variable (not shown)")
+    assert found["connect"] == ("PASS", "authenticated as team team-a (unscored, contract 0.x)")
+    # The fake acknowledges at server_time 1, between the calendar's two sessions.
+    assert found["calendar"] == (
+        "PASS",
+        "next open: session 2026-01-05, in 99 exchange time units; last closed: 2026-01-02",
+    )
+    assert found["session-state"] == ("PASS", "OPEN, session 2026-01-05")
+    status, reason = found["market:TEST"]
+    assert status == "PASS"
+    assert reason.startswith("bid 99.950000 x 300, ask 100.050000 x 200 (LIVE); ")
+    assert found["account"] == ("SKIP", "not answered by this exchange within 1 s")
+    assert found["test-order"][0] == "SKIP"
+    assert found["feed"][0] == "PASS"
+    status, reason = found["history"]
+    assert status == "SKIP"
+    assert "QTE_HISTORY_URL is not set" in reason
+    assert out.splitlines()[-1] == "summary: 7 passed, 0 failed, 3 skipped"
+    assert exchange.types() == ["auth", "subscribe", "account_query"]
+
+
+@pytest.mark.parametrize(
+    ("tick", "price"),
+    [((), 100_000_000), (("--tick", "0.01"), 99_960_000)],
+    ids=["step-from-the-book", "tick-given"],
+)
+async def test_the_smoke_tests_order_rests_inside_the_band_and_is_cancelled(
+    tick: tuple[str, ...], price: int
+):
+    # The book shows 99.95 and 100.05, so the largest step both are multiples of is 0.05.
+    exchange = FakeExchange(calendar=CALENDAR)
+    code, out, err, found = await run_smoke_test(
+        exchange, "--instruments", INSTRUMENT, *TEST_ORDER, *tick
+    )
+    assert code == 0, out + err
+    kinds = ("new", "cancel", "amend", "mass_cancel")
+    orders = [m for m in exchange.received if m["type"] in kinds]
+    assert [m["type"] for m in orders] == ["new", "cancel"]
+    new, cancel = (m["payload"] for m in orders)
+    assert (new["strat_id"], new["instrument"], new["side"], new["order_type"]) == (
+        "smoke",
+        INSTRUMENT,
+        "BUY",
+        "LIMIT",
+    )
+    assert (int(new["size"]), int(new["price"])) == (1, price)
+    # Exactly that level is cancelled.
+    level = (cancel["instrument"], cancel["side"], int(cancel["price"]))
+    assert level == (INSTRUMENT, "BUY", price)
+    assert exchange.resting == {}
+    status, reason = found["test-order"]
+    assert status == "PASS"
+    assert reason.startswith(f"BUY 1 TEST @ {to_decimal(price)} rested (accepted after ")
+    assert reason.endswith("then was cancelled and the cancel confirmed")
+
+
+async def test_the_smoke_test_sends_a_cancel_again_after_a_min_rest_violation():
+    exchange = FakeExchange(calendar=CALENDAR, cancel_rejects=["MIN_REST_VIOLATION"])
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
+    assert code == 0, out + err
+    types = exchange.types()
+    assert types.count("new") == 1
+    assert types.count("cancel") == 2
+    assert "mass_cancel" not in types
+    assert exchange.resting == {}
+    status, reason = found["test-order"]
+    assert status == "PASS"
+    assert "after 1 rejected cancel(s) (MIN_REST_VIOLATION) sent again" in reason
+
+
+async def test_the_smoke_test_fails_loudly_when_it_cannot_confirm_the_cancel():
+    # The cancel is accepted, but no order_cancelled ever follows.
+    exchange = FakeExchange(calendar=CALENDAR, confirm_cancels=asyncio.Event())
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
+    assert code == 1, out + err
+    status, reason = found["test-order"]
+    assert status == "FAIL"
+    assert "the order may still be resting at BUY 1 TEST @ 100.000000" in reason
+    assert "WARNING: the test order may still be resting" in err
+    assert "mass_cancel" not in exchange.types()
+
+
+@pytest.mark.parametrize(
+    ("reason", "status", "code"),
+    [("STRATEGY_NOT_REGISTERED", "FAIL", 1), ("MARKET_CLOSED", "SKIP", 0)],
+)
+async def test_the_smoke_test_reports_a_rejected_test_order_by_its_reason(
+    reason: str, status: str, code: int
+):
+    exchange = FakeExchange(calendar=CALENDAR, reject_new=reason)
+    returned, out, err, found = await run_smoke_test(
+        exchange, "--instruments", INSTRUMENT, *TEST_ORDER
+    )
+    assert returned == code, out + err
+    assert found["test-order"][0] == status
+    assert reason in found["test-order"][1]
+    assert "cancel" not in exchange.types()
+
+
+@pytest.mark.parametrize(
+    ("official_close", "expected"),
+    [
+        (False, ("SKIP", "no official close: not sent by this exchange")),
+        (True, ("PASS", "official close 100.011000 for session 2026-01-05")),
+    ],
+    ids=["no-close", "close"],
+)
+async def test_the_smoke_test_outside_a_session_sees_the_closed_market_and_places_no_order(
+    official_close: bool, expected: tuple[str, str]
+):
+    exchange = FakeExchange(closed=True, official_close=official_close, calendar=CALENDAR)
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
+    assert code == 0, out + err
+    assert found["session-state"] == ("PASS", "CLOSED, session 2026-01-05")
+    assert found["market:TEST"] == expected
+    assert found["test-order"] == (
+        "SKIP",
+        "the market session is CLOSED: it is placed only while OPEN",
+    )
+    assert exchange.types() == ["auth", "subscribe", "account_query"]
+
+
+async def test_the_smoke_test_fails_an_instrument_the_exchange_does_not_know():
+    exchange = FakeExchange(calendar=CALENDAR, known_instruments=frozenset({INSTRUMENT}))
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, "NOPE")
+    assert code == 1, out + err
+    assert found["market:NOPE"] == ("FAIL", "the exchange does not know it: UNKNOWN_INSTRUMENT")
+    assert found["market:TEST"][0] == "PASS"
+    # One subscribe each, so the unknown one cannot keep the other from being served.
+    assert exchange.types() == ["auth", "subscribe", "subscribe", "account_query"]
+
+
+async def test_the_smoke_test_says_the_account_query_was_answered_without_its_figures():
+    state = {
+        "valuation_basis": "LIVE_MARK",
+        "cash": "123456789",
+        "positions": [{"instrument": INSTRUMENT, "quantity": "7", "price": "100000000"}],
+    }
+    exchange = FakeExchange(calendar=CALENDAR, account_state=state)
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    assert found["account"] == (
+        "PASS",
+        "answered, valued at LIVE_MARK, without a summary (figures not shown)",
+    )
+    assert "123.456789" not in out
+    assert "123456789" not in out
+
+
+async def test_the_smoke_test_reads_the_last_closed_sessions_books_from_history():
+    token = synthetic_token()
+    books = history_book(1) + history_book(2, bid="99960000")
+    fake = FakeHistory(token=token, objects={("2026-01-02", INSTRUMENT, "book"): books})
+    with serve_history(fake) as history_url:
+        code, out, err, found = await run_smoke_test(
+            FakeExchange(calendar=CALENDAR),
+            "--instruments",
+            INSTRUMENT,
+            token=token,
+            QTE_HISTORY_URL=history_url,
+        )
+    assert code == 0, out + err
+    assert found["history:TEST"] == (
+        "PASS",
+        "session 2026-01-02 served; its first book: bid 99.950000 x 300, ask 100.050000 x 200 "
+        "(LIVE)",
+    )
+    assert [path for path, _ in fake.requests] == ["/v1/history/2026-01-02/TEST/book"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
+async def test_the_smoke_test_fails_a_dotenv_that_git_does_not_ignore():
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "QTE_"))}
+    # The conftest makes the working directory a fresh one: make it a git repository.
+    subprocess.run(["git", "init", "-q", "."], check=True, capture_output=True, env=env)
+    exchange = FakeExchange(calendar=CALENDAR)
+    token = synthetic_token()
+    async with serve_local(exchange) as url:
+        dotenv = Path.cwd() / ".env"
+        dotenv.write_text(f"QTE_URL={url}\nQTE_TOKEN='{token}'\n")
+        dotenv.chmod(0o600)
+        code, out, err = await run_example(
+            SMOKE_TEST, None, None, "--instruments", INSTRUMENT, "--seconds", "1"
+        )
+    assert code == 1, out + err
+    found = checks(out)
+    assert found["token"] == ("PASS", f"found in {dotenv} (not shown)")
+    assert found["address"] == ("PASS", f"set, from {dotenv} (not shown)")
+    status, reason = found["dotenv"]
+    assert status == "FAIL"
+    assert ".gitignore" in reason
+    assert found["connect"][0] == "PASS"
+    assert token not in out + err
+    assert url not in out + err
+
+
+async def test_the_smoke_test_needs_a_strategy_for_the_test_order():
+    code, out, err = await run_example(SMOKE_TEST, None, synthetic_token(), "--place-test-order")
+    assert code == 2
+    assert "--place-test-order needs --strat-id" in err
+
+
+def smoke_book(bid: int, ask: int, student_asks: tuple[int, ...] = ()) -> BookMessage:
+    return BookMessage(
+        instrument=INSTRUMENT,
+        bid_levels=[WallLevel(price=bid, size=1)],
+        ask_levels=[WallLevel(price=ask, size=1)],
+        student_ask_levels=[StudentLevel(price=price, size=1) for price in student_asks],
+        condition=LIVE,
+    )
+
+
+def test_the_smoke_tests_order_price_is_the_first_step_above_the_wall_bid():
+    smoke = load_example(SMOKE_TEST)
+    # 199.97 and 200.05 are both multiples of 0.01, and of no larger step.
+    assert smoke.probe_price(smoke_book(199_970_000, 200_050_000), None) == (199_980_000, "")
+    # A tick given is used instead of the step worked out from the book.
+    assert smoke.probe_price(smoke_book(99_950_000, 100_050_000), TICK) == (99_960_000, "")
+    # A one-step spread leaves no room strictly inside the band.
+    price, why = smoke.probe_price(smoke_book(100_000_000, 100_010_000), None)
+    assert price is None
+    assert "no room inside the band" in why
+    # Nor does a resting sell just above the wall's bid.
+    price, _ = smoke.probe_price(smoke_book(99_950_000, 100_050_000, (99_960_000,)), TICK)
+    assert price is None
+    # A one-sided book has no band to rest inside.
+    one_sided = smoke_book(99_950_000, 100_050_000)
+    del one_sided.ask_levels[:]
+    price, why = smoke.probe_price(one_sided, TICK)
+    assert price is None
+    assert "not two-sided" in why
