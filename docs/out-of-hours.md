@@ -1,6 +1,6 @@
 # Using the SDK outside session hours
 
-**Version:** 0.5
+**Version:** 0.6
 
 You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market, query your account and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 
@@ -80,8 +80,8 @@ try:
         async for item in market_data(session):
             if isinstance(item, SessionState):
                 print("market session:", MarketSessionPhase.Name(item.state))
-                if item.HasField("next_session_date"):
-                    wait = until_next_open(item, session.info.server_time)
+                wait = until_next_open(item, session.info.server_time)
+                if wait is not None:  # None when the reply names no next session
                     print("next session:", item.next_session_date, "opens in", to_timedelta(wait))
             elif isinstance(item, OfficialClose):
                 print("official close:", item.instrument, to_decimal(item.value))
@@ -180,7 +180,7 @@ An order message the exchange takes in is held for its order delay, currently 15
 | `MARKET_CLOSED` | Before the open, or on a day with no session at all, such as a weekend or an exchange holiday. |
 | `RELEASE_AFTER_CLOSE` | After the close, on a day that had a session. |
 
-Your account query is not an order message, so it works outside a session too. Send `send_account_query(session)` from `qte_sdk.account` and read the `account_state` that answers it in your one loop. Outside a session it values your positions at each instrument's latest official close, and `session_date` names the last session with an official close, even between terms, when positions carried over from the term before are returned too, and it is absent while no session has an official close yet ([Query your account](quickstart.md#query-your-account)). It also needs an exchange that serves the query.
+Your account query is not an order message, so it works outside a session too. Send `send_account_query(session)` from `qte_sdk.account` and read the `account_state` that answers it in your one loop. Outside a session it values your positions at each instrument's latest official close, a break day's close included, or at 0 for one that has never had an official close. `session_date` is then the trading date of those closes, even between terms, when positions carried over from the term before are returned too. It is absent only before the competition's first session ([Query your account](quickstart.md#query-your-account)). It also needs an exchange that serves the query.
 
 ## 5. Fetch the last closed session
 

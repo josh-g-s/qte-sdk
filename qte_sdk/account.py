@@ -36,13 +36,17 @@ An `account_state` carries:
   an instrument with no valid mark yet in the session is still valued at its last
   official close, so a `LIVE_MARK` price is not always a mark. Under
   `LAST_OFFICIAL_CLOSE` each instrument is valued at its latest official close, a break
-  day's close included;
-- `session_date`, the date of the current session inside one. Outside a session it is
-  the date of the last session that has an official close, even across the break
-  between terms, when positions carried over from the term before are returned too. It
-  names a session only and does not date the close the values use: on a break day that
-  day's close is later. Inside a session it is always present. Outside one it is absent
-  while no session has an official close yet, so check `state.HasField("session_date")`.
+  day's close included, and one that has never had an official close at 0;
+- `session_date`, a US trading date. Inside a session it is the current session's date,
+  even before any official close exists. Outside a session it is the trading date of the
+  official closes the values use, those of the latest session or break day: on a break
+  day, once that day's close has run, it is that day's date, not the term's last
+  session's. One date covers the whole reply, including an instrument that kept an
+  older close for want of a valid mark. It holds across the break between terms too,
+  when positions carried over from the term before are returned. After the
+  competition's first session it is always present, even if no instrument got an
+  official close in that session. It is absent only before the competition's first
+  session, when there are no positions, so check `state.HasField("session_date")`.
   Outside a session, `summary.daily_pnl` is the profit and loss of the session just
   finished;
 - `as_of`, the exchange's timestamp of the state the reply reads. It does not order the
