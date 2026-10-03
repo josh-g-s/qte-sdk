@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.6
+// **Version:** 1.7
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -87,6 +87,21 @@ enum MarketSessionPhase {
   MARKET_SESSION_PHASE_UNSPECIFIED = 0;
   OPEN = 1;
   CLOSED = 2;
+}
+
+// The prices a team's positions and equity are valued at in an
+// `account_state` reply (SPEC 7.1, SPEC 13.4). LIVE_MARK: inside a session,
+// at each instrument's official mark as it stands (SPEC 7.1, SPEC 7.2); an
+// instrument with no valid mark yet in the session is valued at its last
+// official close.
+// LAST_OFFICIAL_CLOSE: outside a session, at each instrument's last official
+// close, whose session date `account_state.session_date` names.
+//
+// This enum is closed: adding a value later is a breaking change.
+enum ValuationBasis {
+  VALUATION_BASIS_UNSPECIFIED = 0; // proto3's required zero value; never valid on the wire.
+  LIVE_MARK = 1;
+  LAST_OFFICIAL_CLOSE = 2;
 }
 
 // Where a team stands against its arm's daily loss limits

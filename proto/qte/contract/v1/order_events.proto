@@ -1,14 +1,16 @@
 // Outbound order events.
 //
-// **Version:** 1.8
+// **Version:** 1.9
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
-// `obligation_state`, `risk_notice`. These are private to the team whose orders
-// they concern. Each but `account_summary` and `obligation_state` is sent as
+// `obligation_state`, `account_state`, `risk_notice`. These are private to the team whose
+// orders they concern. Each but `account_summary` and `obligation_state` is sent as
 // soon as the engine records it, not held to the market-data publication grid
 // (SPEC 4.3); when `account_summary` is sent is not yet specified, and
 // `obligation_state` is sent once per desk per whole-second close of a session.
+// `account_state` is the reply to a team's `account_query` and is sent only in
+// answer to one.
 // Every `timestamp` field's wire resolution and representation is not yet
 // specified.
 syntax = "proto3";
@@ -248,4 +250,56 @@ message RiskNotice {
   // element. The breached limits, one entry per limit, as at the moment the
   // window opened. SPEC 11.1, SPEC 11.2
   repeated LimitUtilisation breached_limits = 4;
+}
+
+// One position in an `account_state` reply (SPEC 7.1, SPEC 12.2).
+message PositionValue {
+  // id. The instrument held. How an options contract is named is not yet
+  // specified.
+  string instrument = 1;
+  // int64-qty. Signed: positive long, negative short. Shares of an equity; a
+  // whole number of contracts for an option (SPEC 18.1).
+  int64 quantity = 2;
+  // int64-micro. The price the position is valued at: the instrument's
+  // official mark inside a session once it has a valid one, its last official
+  // close otherwise: outside a session, or inside one before the instrument's
+  // first valid mark, while it is still reference unavailable (see
+  // `AccountState.valuation_basis`). SPEC 7.1, SPEC 7.2
+  int64 price = 3;
+}
+
+// Outbound. The reply to an `account_query`, sent to the asking team only,
+// at any hour. It carries the team's own information and nothing of any other
+// team's (SPEC 4.3, SPEC 15.4).
+message AccountState {
+  string request_ref = 1; // id. Echoes the `account_query`. Its rules are not yet specified
+  // The team's equity, cash, daily loss and limit use, exactly the message
+  // `account_summary` carries, defined once. Valued on this reply's
+  // `valuation_basis`. Out of hours its previous_close_equity is the close
+  // before the last one, so daily_pnl shows the session just finished.
+  // Present iff the account is sent `account_summary`: absent for an
+  // Execution desk and for the house, whose query is answered with the fields
+  // that exist and not rejected (Head ruling, 2 October 2026). SPEC 11.1,
+  // SPEC 15.4, SPEC 24.3
+  AccountSummary summary = 2;
+  // Every instrument the team holds a nonzero position in, in ascending order
+  // of `instrument`. Empty when the team holds none. A position is held by the
+  // team, not by a strategy (SPEC 12.2). SPEC 7.1, SPEC 13.4
+  repeated PositionValue positions = 3;
+  // LIVE_MARK inside a session, LAST_OFFICIAL_CLOSE outside one. The basis for
+  // `summary` and for every `positions` price. SPEC 7.1, SPEC 13.4
+  ValuationBasis valuation_basis = 4;
+  // The US session date (ISO 8601) of the current session: inside a session
+  // that session, outside one the session whose official close the values are
+  // taken at. Absent only before the term's first session. SPEC 7.1, SPEC 13.1
+  optional string session_date = 5;
+  // timestamp. The exchange's own timestamp of the state this reply reads, the
+  // same instant as `summary.timestamp`, so a client can order the reply
+  // against the `account_summary` and other private reports it is also sent.
+  // SPEC 9.2
+  int64 as_of = 6;
+  // int64-micro. The account's cash balance. Equals `summary.cash` when
+  // `summary` is present; the only cash figure an Execution desk or the house
+  // is sent. SPEC 12.2
+  int64 cash = 7;
 }

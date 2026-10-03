@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.10
+**Version:** 0.11
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -294,6 +294,45 @@ The exchange sends these events about your team's own orders:
 | `risk_notice` | A risk warning for your team. |
 
 `qte_sdk.resting.RestingOrders` keeps a view of your team's resting orders built only from these events. Read its docstring for what it cannot know. In particular, after an amend that changes an order's price, the entry at the old price stays in the view, so cancel and re-enter instead of amending the price if you rely on it.
+
+### Query your account
+
+You can ask the exchange for your team's own account at any hour, inside a session or not: its positions, cash and, for most teams, its equity, daily profit and loss and limit use. This needs an exchange that serves the query. Like step 6, it runs inside the `async with session:` block of step 3:
+
+```python
+import asyncio
+
+from qte_sdk.account import LIVE_MARK, is_account_state, send_account_query
+from qte_sdk.orders import is_order_event, reason_code_name, request_ref_of
+from qte_sdk.units import to_decimal
+
+ref = await send_account_query(session)
+try:
+    async with asyncio.timeout(10):  # never wait for ever
+        async for event in session:
+            if is_account_state(event) and event.message.request_ref == ref:
+                state = event.message
+                live = state.valuation_basis == LIVE_MARK
+                print("valued at", "the live mark" if live else "the last official close")
+                print("cash:", to_decimal(state.cash))
+                for position in state.positions:
+                    print(position.instrument, position.quantity, to_decimal(position.price))
+                if state.HasField("summary"):
+                    print("equity:", to_decimal(state.summary.equity))
+                    print("today:", to_decimal(state.summary.daily_pnl))
+                break
+            if is_order_event(event) and event.type == "reject":
+                if request_ref_of(event.message) == ref:
+                    print("refused:", reason_code_name(event.message.reason_code))
+                    break
+            # a real program handles market data and order events here too
+except TimeoutError:
+    print("no answer within 10 seconds")
+```
+
+The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: the live mark inside a session, the last official close outside one, and `session_date` names that session. `summary` is absent for an Execution desk and the house, so check `HasField("summary")` first; `cash` is always there. Read the `qte_sdk.account` docstring for every field.
+
+The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
 
 ## 8. Values the exchange sets
 

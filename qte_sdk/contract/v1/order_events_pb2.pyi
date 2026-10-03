@@ -190,3 +190,31 @@ class RiskNotice(_message.Message):
     cure_deadline: int
     breached_limits: _containers.RepeatedCompositeFieldContainer[LimitUtilisation]
     def __init__(self, kind: _Optional[_Union[_common_pb2.RiskNoticeKind, str]] = ..., timestamp: _Optional[int] = ..., cure_deadline: _Optional[int] = ..., breached_limits: _Optional[_Iterable[_Union[LimitUtilisation, _Mapping]]] = ...) -> None: ...
+
+class PositionValue(_message.Message):
+    __slots__ = ("instrument", "quantity", "price")
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    QUANTITY_FIELD_NUMBER: _ClassVar[int]
+    PRICE_FIELD_NUMBER: _ClassVar[int]
+    instrument: str
+    quantity: int
+    price: int
+    def __init__(self, instrument: _Optional[str] = ..., quantity: _Optional[int] = ..., price: _Optional[int] = ...) -> None: ...
+
+class AccountState(_message.Message):
+    __slots__ = ("request_ref", "summary", "positions", "valuation_basis", "session_date", "as_of", "cash")
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    SUMMARY_FIELD_NUMBER: _ClassVar[int]
+    POSITIONS_FIELD_NUMBER: _ClassVar[int]
+    VALUATION_BASIS_FIELD_NUMBER: _ClassVar[int]
+    SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
+    AS_OF_FIELD_NUMBER: _ClassVar[int]
+    CASH_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    summary: AccountSummary
+    positions: _containers.RepeatedCompositeFieldContainer[PositionValue]
+    valuation_basis: _common_pb2.ValuationBasis
+    session_date: str
+    as_of: int
+    cash: int
+    def __init__(self, request_ref: _Optional[str] = ..., summary: _Optional[_Union[AccountSummary, _Mapping]] = ..., positions: _Optional[_Iterable[_Union[PositionValue, _Mapping]]] = ..., valuation_basis: _Optional[_Union[_common_pb2.ValuationBasis, str]] = ..., session_date: _Optional[str] = ..., as_of: _Optional[int] = ..., cash: _Optional[int] = ...) -> None: ...

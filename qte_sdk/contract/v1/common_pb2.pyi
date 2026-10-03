@@ -63,6 +63,12 @@ class MarketSessionPhase(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     OPEN: _ClassVar[MarketSessionPhase]
     CLOSED: _ClassVar[MarketSessionPhase]
 
+class ValuationBasis(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    VALUATION_BASIS_UNSPECIFIED: _ClassVar[ValuationBasis]
+    LIVE_MARK: _ClassVar[ValuationBasis]
+    LAST_OFFICIAL_CLOSE: _ClassVar[ValuationBasis]
+
 class LossLevel(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     LOSS_LEVEL_UNSPECIFIED: _ClassVar[LossLevel]
@@ -133,6 +139,9 @@ PURGED: OrderLifecycleState
 MARKET_SESSION_PHASE_UNSPECIFIED: MarketSessionPhase
 OPEN: MarketSessionPhase
 CLOSED: MarketSessionPhase
+VALUATION_BASIS_UNSPECIFIED: ValuationBasis
+LIVE_MARK: ValuationBasis
+LAST_OFFICIAL_CLOSE: ValuationBasis
 LOSS_LEVEL_UNSPECIFIED: LossLevel
 LOSS_LEVEL_NONE: LossLevel
 LOSS_LEVEL_WARNING: LossLevel

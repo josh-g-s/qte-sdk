@@ -1,10 +1,10 @@
 // Session and subscription messages.
 //
-// **Version:** 1.4
+// **Version:** 1.5
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `session_reject`, `heartbeat`, `resume`, `order_snapshot`,
-// `subscribe`, `unsubscribe`.
+// `subscribe`, `unsubscribe`, `account_query`.
 //
 // Status: PROVISIONAL. The session layer is not yet specified; SPEC.md does
 // not define it. These messages are a working proposal, so clients have
@@ -133,4 +133,20 @@ message Subscribe {
 // Inbound.
 message Unsubscribe {
   repeated string instruments = 1; // array of id. Not yet specified
+}
+
+// Inbound. A team asks for its own account: its positions, cash, equity and
+// limit use, at any hour, inside a session or not (SPEC 13.1, SPEC 13.4). It
+// carries no team: the account is always the team the connection
+// authenticated as (`SessionAck.team`), so a team can never ask for another's.
+// It is not an order message. It has no order delay, no receipt or release
+// stage and no place in the new, cancel and amend message budgets (SPEC 8.1,
+// SPEC 8.3, SPEC 9.4.3), and a Fundamentals pod, whose account has no market
+// access but holds positions (SPEC 2.2), may send it. The reply is one
+// `account_state` (`order_events.proto`) echoing `request_ref`. An
+// unauthenticated or malformed query, or one from a team the Directors' kill
+// switch has stopped (`TEAM_DISABLED`, SPEC 8.2), gets a `reject` echoing
+// `request_ref`.
+message AccountQuery {
+  string request_ref = 1; // id. Echoed on the reply. Its rules are not yet specified
 }
