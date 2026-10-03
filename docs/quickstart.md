@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.7
+**Version:** 0.8
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -26,14 +26,44 @@ This installs the `qte_sdk` package only. The worked examples (step 11) are not 
 
 ## 2. Set the exchange address and your token
 
-The SDK reads your token from the `QTE_TOKEN` environment variable or, when that is unset or empty, from the file named by `QTE_TOKEN_FILE`. The examples read the exchange address from `QTE_URL`. Read the token without echoing it, so it stays out of your screen and your shell history:
+The SDK reads your token from the `QTE_TOKEN` environment variable or, when that is unset or empty, from the file named by `QTE_TOKEN_FILE`. The examples read the exchange address from `QTE_URL`.
+
+To try the SDK in one terminal, set the exchange address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and read the token without echoing it, so it stays out of your screen and your shell history. Run the second line, paste the token (nothing is shown) and press Enter:
 
 ```sh
-export QTE_URL=ws://127.0.0.1:8080/ws   # or the address the course team gives you
-read -rs QTE_TOKEN && export QTE_TOKEN   # paste the token, then press Enter
+export QTE_URL=ws://127.0.0.1:8080/ws
+read -rs QTE_TOKEN && export QTE_TOKEN
 ```
 
-To keep the token across terminal sessions, the recommended way is `QTE_TOKEN_FILE`: put the token in a file readable only by you, outside any repository, and set `QTE_TOKEN_FILE` to that file's path in your shell profile. The SDK reads the file, removing one trailing newline, and raises `MissingToken` if it is missing, unreadable, empty or not UTF-8 text. `QTE_TOKEN` takes precedence over the file, so unset any old one with `unset QTE_TOKEN`.
+An exported variable lasts only for that shell and the programs it starts. A new terminal does not have it, and closing the terminal loses it, so a program run from a new terminal raises `MissingToken` until you set the token there again.
+
+### Keep the token across terminal sessions
+
+The recommended way is to keep the token in a file outside any repository, readable only by you, and to name that file in `QTE_TOKEN_FILE`. The first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
+
+```sh
+(umask 077 && mkdir -p "$HOME/.qte" && chmod 700 "$HOME/.qte" && read -rs T && rm -f "$HOME/.qte/token" && printf '%s\n' "$T" > "$HOME/.qte/token")
+ls -l "$HOME/.qte/token"
+```
+
+The parentheses run it in a subshell, so the `umask` and the variable `T` end with it.
+
+Then add this line to your shell profile, which is `~/.zshrc` for zsh (the macOS default) or `~/.bashrc` for bash (`~/.bash_profile` on macOS):
+
+```sh
+export QTE_TOKEN_FILE="$HOME/.qte/token"
+```
+
+Run the same line in your current terminal too, so you can carry on there. Every new terminal then has it, but not `QTE_URL` or your virtual environment: set `QTE_URL` again (or add its `export` line to your profile as well) and run `source .venv/bin/activate` from your project. The line holds a path, not the token. `QTE_TOKEN` takes precedence over the file, so run `unset QTE_TOKEN` in any terminal where you exported it, and remove any line that sets it from your shell profile.
+
+The SDK reads the file each time it needs the token, removing one trailing newline. If the file is missing, unreadable, empty or not UTF-8 text, it raises `MissingToken` with a message that says which, and never shows the file's contents.
+
+Other ways work too:
+
+- The macOS Keychain. Store the token once with `security add-generic-password -a "$USER" -s qte-token -w`, which prompts for it without echo, and load it with `export QTE_TOKEN="$(security find-generic-password -a "$USER" -s qte-token -w)"` in each terminal or in your shell profile.
+- A `.env` file loaded by python-dotenv, or a `.envrc` file loaded by direnv, in your own project. Add the file to that project's `.gitignore` before you put the token in it: this repository's `.gitignore` protects only a copy of this repository, not your project. The SDK does not read `.env` files itself.
+
+Whichever you choose, never put the token in a source file or a notebook.
 
 The SDK never logs your token or puts it in an exception message.
 
