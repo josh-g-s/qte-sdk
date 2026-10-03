@@ -1,6 +1,6 @@
 # Using the SDK outside session hours
 
-**Version:** 0.2
+**Version:** 0.3
 
 You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 
@@ -18,13 +18,12 @@ This is the same at any hour. `open_session` connects, sends your token and wait
 
 ```python
 import asyncio
-import os
 
 from qte_sdk.session import open_session
 
 
 async def main() -> None:
-    session = await open_session(os.environ["QTE_URL"])  # the token comes from QTE_TOKEN
+    session = await open_session()  # the address and token come from .env or the environment
     async with session:
         print("team:", session.info.team)
         ...  # the snippets below go here

@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.11
+**Version:** 0.12
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -28,46 +28,84 @@ This installs the `qte_sdk` package only. The worked examples (step 11) are not 
 
 ## 2. Set the exchange address and your token
 
-The SDK reads your token from the `QTE_TOKEN` environment variable or, when that is unset or empty, from the file named by `QTE_TOKEN_FILE`. The examples read the exchange address from `QTE_URL`.
+The SDK needs two things: the exchange address, `QTE_URL`, and your team token, `QTE_TOKEN`. The simplest way to keep both is a `.env` file in your project folder, the folder you run your programs from. It lasts across terminals and needs no shell profile.
 
-To try the SDK in one terminal, set the exchange address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and read the token without echoing it, so it stays out of your screen and your shell history. Run the second line, paste the token (nothing is shown) and press Enter:
+### A `.env` file (recommended)
+
+From your project folder, first make sure git will never commit the file, then create it readable only by you:
+
+```sh
+printf '\n.env\n' >> .gitignore
+touch .env && chmod 600 .env
+ls -l .env
+```
+
+The last line should show `-rw-------`. If your project is a git repository, also check that git does not already track a `.env`, since adding it to `.gitignore` does not stop git committing a file it already tracks:
+
+```sh
+git ls-files --error-unmatch .env
+```
+
+An error saying `.env` did not match any file is what you want. If it prints `.env` instead, run `git rm --cached .env` and commit, before you put the token in.
+
+Open `.env` in your editor and put in the address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and your token:
+
+```sh
+QTE_URL=ws://127.0.0.1:8080/ws
+QTE_TOKEN=paste-your-token-here
+```
+
+Save it. The token never passes through your shell, so it stays out of your shell history.
+
+The SDK reads `.env` itself, with no extra package: `open_session()` takes the address and the token from it, and so do the worked examples. It reads only the `.env` in the working directory (not a parent folder), so run your programs from the folder that holds it. It reads only `QTE_URL` and `QTE_TOKEN`; other lines are left alone, and nothing is put in your environment. Blank lines, `#` comments, an `export ` prefix and single or double quotes around a value are fine.
+
+Two safeguards protect the token:
+
+- If other users can read a `.env` that holds `QTE_TOKEN`, the SDK uses nothing in it and raises `MissingToken` (or `MissingURL`, when it was reading the address), saying to run `chmod 600 .env`. (This check applies on macOS and Linux.)
+- If the `.env` (or, when it is a symbolic link, the file it points to) is inside a git repository and git tracks it or does not ignore it, the SDK warns you once, saying what to do: add `.env` to `.gitignore`, and if git already tracks it, run `git rm --cached .env` too. It still uses the file. The `.gitignore` of this SDK's repository protects only a clone of this repository, not your project. The same warning appears if you run a program inside a repository someone else made that ships a `.env`: check the address in it before you use it.
+
+### Where the SDK looks, in order
+
+For the token, the SDK uses the first of these that is set:
+
+1. `token=` passed to `open_session` (or `ReconnectingSession` or `HistoryClient`);
+2. the `QTE_TOKEN` environment variable;
+3. the file named by the `QTE_TOKEN_FILE` environment variable;
+4. `QTE_TOKEN` in `./.env`.
+
+For the exchange address: the address passed to `open_session`, then the `QTE_URL` environment variable, then `QTE_URL` in `./.env`. If there is none, `open_session` raises `MissingURL`, which names both. A real environment variable always wins over `.env`, so an old `export QTE_TOKEN=...` in your terminal or shell profile hides the token in `.env`: run `unset QTE_TOKEN` and remove the line from your profile. If `QTE_TOKEN_FILE` is set but its file cannot be used, the SDK raises `MissingToken` rather than falling back to `.env`.
+
+The history service (step 10) has its own address, which comes from `QTE_HISTORY_URL` in the environment, never from `.env`. Its token comes from the same places as above.
+
+### Other ways
+
+Environment variables work too. To try the SDK in one terminal, set the address and read the token without echoing it: run the second line, paste the token (nothing is shown) and press Enter.
 
 ```sh
 export QTE_URL=ws://127.0.0.1:8080/ws
 read -rs QTE_TOKEN && export QTE_TOKEN
 ```
 
-An exported variable lasts only for that shell and the programs it starts. A new terminal does not have it, and closing the terminal loses it, so a program run from a new terminal raises `MissingToken` until you set the token there again.
+An exported variable lasts only for that shell and the programs it starts. A new terminal does not have it, so a program run there falls back to `.env`, or raises `MissingToken` if there is none.
 
-### Keep the token across terminal sessions
-
-The recommended way is to keep the token in a file outside any repository, readable only by you, and to name that file in `QTE_TOKEN_FILE`. The first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
+To keep the token in one place for all your projects, put it in a file outside any repository, readable only by you, and name that file in `QTE_TOKEN_FILE`. The first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
 
 ```sh
 (umask 077 && mkdir -p "$HOME/.qte" && chmod 700 "$HOME/.qte" && read -rs T && rm -f "$HOME/.qte/token" && printf '%s\n' "$T" > "$HOME/.qte/token")
 ls -l "$HOME/.qte/token"
 ```
 
-The parentheses run it in a subshell, so the `umask` and the variable `T` end with it.
-
-Then add this line to your shell profile, which is `~/.zshrc` for zsh (the macOS default) or `~/.bashrc` for bash (`~/.bash_profile` on macOS):
+The parentheses run it in a subshell, so the `umask` and the variable `T` end with it. Then add this line to your shell profile, which is `~/.zshrc` for zsh (the macOS default) or `~/.bashrc` for bash (`~/.bash_profile` on macOS), and run it in your current terminal too:
 
 ```sh
 export QTE_TOKEN_FILE="$HOME/.qte/token"
 ```
 
-Run the same line in your current terminal too, so you can carry on there. Every new terminal then has it, but not `QTE_URL` or your virtual environment: set `QTE_URL` again (or add its `export` line to your profile as well) and run `source .venv/bin/activate` from your project. The line holds a path, not the token. `QTE_TOKEN` takes precedence over the file, so run `unset QTE_TOKEN` in any terminal where you exported it, and remove any line that sets it from your shell profile.
+The line holds a path, not the token. The SDK reads the file each time it needs the token, removing one trailing newline. If the file is missing, unreadable, empty or not UTF-8 text, it raises `MissingToken` with a message that says which, and never shows the file's contents. You can still keep `QTE_URL` in a `.env`.
 
-The SDK reads the file each time it needs the token, removing one trailing newline. If the file is missing, unreadable, empty or not UTF-8 text, it raises `MissingToken` with a message that says which, and never shows the file's contents.
+On macOS you can also keep the token in the Keychain. Store it once with `security add-generic-password -a "$USER" -s qte-token -w`, which prompts for it without echo, and load it with `export QTE_TOKEN="$(security find-generic-password -a "$USER" -s qte-token -w)"` in each terminal or in your shell profile.
 
-Other ways work too:
-
-- The macOS Keychain. Store the token once with `security add-generic-password -a "$USER" -s qte-token -w`, which prompts for it without echo, and load it with `export QTE_TOKEN="$(security find-generic-password -a "$USER" -s qte-token -w)"` in each terminal or in your shell profile.
-- A `.env` file loaded by python-dotenv, or a `.envrc` file loaded by direnv, in your own project. Add the file to that project's `.gitignore` before you put the token in it: this repository's `.gitignore` protects only a copy of this repository, not your project. The SDK does not read `.env` files itself.
-
-Whichever you choose, never put the token in a source file or a notebook.
-
-The SDK never logs your token or puts it in an exception message.
+Whichever you choose, never put the token in a source file or a notebook. The SDK never logs your token or puts it in an exception message, and a `.env` it cannot parse is reported by line number, never by its contents.
 
 ## 3. Open a session
 
@@ -75,13 +113,12 @@ Everything in the SDK is `async`. A session is an authenticated connection: `ope
 
 ```python
 import asyncio
-import os
 
 from qte_sdk.session import open_session
 
 
 async def main() -> None:
-    session = await open_session(os.environ["QTE_URL"])  # the token comes from QTE_TOKEN
+    session = await open_session()  # the address and token come from .env or the environment
     async with session:
         print("team:", session.info.team)
         print("unscored session:", session.info.unscored)
@@ -92,7 +129,7 @@ asyncio.run(main())
 
 `session.info.unscored` is `True` when nothing in this session counts towards any score.
 
-If the exchange refuses the session, `open_session` raises `SessionRejected` (from `qte_sdk.connection`), whose `reason_name` says why. With no token set it raises `MissingToken` before connecting.
+If the exchange refuses the session, `open_session` raises `SessionRejected` (from `qte_sdk.connection`), whose `reason_name` says why. With no token set it raises `MissingToken` before connecting, and with no address `MissingURL`.
 
 Two rules about sessions:
 
@@ -376,7 +413,7 @@ except HistoryPending as error:
 
 ## 11. Worked examples
 
-Each example reads `QTE_URL` and `QTE_TOKEN` from the environment, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
+Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the environment or a `.env` in the folder you run it from, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
 
 | Example | What it shows |
 |---|---|
