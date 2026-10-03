@@ -735,6 +735,26 @@ def test_a_rejection_quoting_the_token_escaped_is_redacted(special):
     assert_no_form_of(token, shown(safe))
 
 
+def test_a_token_that_is_not_valid_unicode_is_still_found_and_withheld():
+    # A lone surrogate, as from an environment variable holding bytes that are not UTF-8:
+    # looking for the token must not itself raise an error that holds it.
+    token = synthetic_token() + "\udc80" + synthetic_token()
+    secret = qte_sdk.session._Secret(token)
+    error = UnicodeEncodeError("utf-8", f"auth {token}", 50, 51, "surrogates not allowed")
+    assert qte_sdk.session._holds_token(error, secret)
+    safe = qte_sdk.session._without_token(error, secret)
+    assert isinstance(safe, SessionNotAcknowledged)
+    assert_no_form_of(token, shown(safe))
+
+
+async def test_auth_with_a_token_that_is_not_valid_unicode_fails_without_showing_it():
+    token = synthetic_token() + "\udc80" + synthetic_token()
+    async with serve_local(Server(ack())) as url:
+        with pytest.raises(qte_sdk.session.AuthNotSent) as caught:
+            await open_session(url, token)
+    assert_no_form_of(token, shown(caught.value))
+
+
 @escaping
 async def test_auth_that_cannot_be_sent_withholds_a_token_it_quotes_escaped(special):
     token = synthetic_token() + special + synthetic_token()

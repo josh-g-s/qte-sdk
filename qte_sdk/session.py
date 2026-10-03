@@ -835,8 +835,12 @@ def _token_forms(token: str) -> list[str]:
     """The token as written, and as the usual escapes write it: Python's repr of it as text
     or bytes (with a quote escaped or not) and JSON. Those escape a backslash, newline or
     tab, so text that holds an escaped copy does not hold the token as written. Longest
-    first, so a redaction replaces a whole escaped copy rather than part of it."""
-    raw = token.encode()
+    first, so a redaction replaces a whole escaped copy rather than part of it. Never
+    raises, even for a token that is not valid Unicode, such as one read from an
+    environment variable holding bytes that are not UTF-8."""
+    # surrogatepass: a lone surrogate would make a plain encode() raise an error that
+    # holds the token.
+    raw = token.encode("utf-8", "surrogatepass")
     forms = {
         token,
         repr(token)[1:-1],
