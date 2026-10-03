@@ -26,10 +26,11 @@ Optional settings:
                              wait for a mark, which is published on a slower grid, is three
                              times this
 
-Each numbered step is its own test with its own session. Steps 4 to 13 start by mass
+Each numbered step is its own test with its own session. Steps 4 to 14 start by mass
 cancelling the team's resting orders, so a step that fails or is skipped leaves nothing
-behind for the next. Steps 1 to 13 need the instrument's session to be open; if it is
-not, they are skipped.
+behind for the next. Steps 3 to 14 need the instrument's session to be open; if it is
+not, they are skipped. Step 16 runs only after step 14 has closed the session in the same
+run.
 
 The steps' preconditions are things the exchange under test provides, and some need its
 operators. A step whose precondition cannot be met is skipped with the reason. These are
@@ -46,8 +47,9 @@ declared by setting a variable:
         many seconds of the step resting its order.
 
 The others are checked when the step runs: the instrument has a two-sided live quote
-(steps 4 to 13), its book shows ten ask levels (step 11), its spread leaves room for the
-prices a step needs, and the session has closed (step 16). Step 12's resting sell for
+(steps 4 to 14), its book shows ten ask levels (step 11) and its spread leaves room for
+the prices a step needs. Step 13's "no budget consumed" is not checked, since no message
+reports a team's budget use. Step 12's resting sell for
 the second strategy is entered by the step itself. Step 15 has no checks until it is
 specified (see issue #12) and is reported as an expected failure.
 """
@@ -116,8 +118,9 @@ pytestmark = pytest.mark.skipif(
     reason=f"conformance session: set {URL_VAR}, {TOKEN_VAR} and {INSTRUMENT_VAR} to run it",
 )
 
-# Step 10 names the collar as a buy limit above mark x 1.05. This is the figure in the
-# vendored steps, not the exchange's setting: take it from CONFORMANCE.md when re-vendoring.
+# Step 10 names the collar as a buy limit above mark x 1.05. This is the figure the vendored
+# steps require of the exchange under test, not a value trading code may rely on: take it
+# from CONFORMANCE.md again whenever that file is re-vendored.
 STEP_10_MARK_FACTOR = (105, 100)
 
 
@@ -262,6 +265,18 @@ class Client:
                 index += 1
                 if match(message):
                     return message
+            remaining = deadline - loop.time()
+            if remaining <= 0 or not await self._pull(remaining):
+                raise NoMessage(f"no {what} within {timeout} s")
+
+    async def until(
+        self, done: Callable[[], bool], what: str, timeout: float | None = None
+    ) -> None:
+        """Read until `done()` is true, with one deadline for the whole wait."""
+        timeout = self.config.timeout if timeout is None else timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not done():
             remaining = deadline - loop.time()
             if remaining <= 0 or not await self._pull(remaining):
                 raise NoMessage(f"no {what} within {timeout} s")
@@ -418,12 +433,11 @@ async def mass_cancel_all(c: Client) -> None:
     start = c.mark()
     ref = await send_mass_cancel(c.session)
     accepted = await c.answer(ref, start)
-    after = c.mark()
-    while True:
-        state = await c.next_session_state(after)
-        if state.grid_time >= accepted.release_time:
-            return
-        after = c.mark()
+    after = c.after(accepted)
+    await c.until(
+        lambda: any(s.grid_time >= accepted.release_time for s in c.since(after, SessionState)),
+        "session_state after the mass cancel's release",
+    )
 
 
 # Steps 1 to 3: the session layer.
@@ -459,7 +473,7 @@ async def test_step_03_first_book(client: Client):
     assert bids[0] < asks[0]
 
 
-# Steps 4 to 13: order entry during the session.
+# Steps 4 to 13: order entry during the session. Step 14 uses the same set-up.
 
 
 async def test_step_04_new_limit_order(market: Client):
@@ -519,6 +533,7 @@ async def test_step_06_partial_fill(market: Client):
         lambda m: (
             isinstance(m, Execution)
             and m.strat_id == c.config.strat_a
+            and m.instrument == c.config.instrument
             and m.side == BUY
             and m.HasField("order_price")
             and m.order_price == price
@@ -598,6 +613,16 @@ async def test_step_08_second_strategy_at_the_same_price(market: Client):
         for m in c.since(rested, OrderCancelled)
         if m.strat_id == c.config.strat_a and m.price == price
     ], "the first strategy's order was cancelled"
+    assert not [
+        m
+        for m in c.since(rested, Execution)
+        if m.strat_id == c.config.strat_a and m.order_price == price
+    ], "the first strategy's order was filled"
+    assert all(
+        m.state == RESTING and m.remaining_size == c.config.size
+        for m in c.since(rested, OrderState)
+        if m.strat_id == c.config.strat_a and m.side == BUY and m.price == price
+    ), "the first strategy's order changed"
 
 
 async def test_step_09_cancel_the_level(market: Client):
@@ -677,6 +702,8 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         lambda m: (
             isinstance(m, OrderCancelled)
             and m.strat_id == c.config.strat_a
+            and m.instrument == c.config.instrument
+            and m.side == BUY
             and m.reason_code == ReasonCodes.MARKET_REMAINDER
         ),
         "order_cancelled for the market remainder",
@@ -685,7 +712,10 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
     fills = [
         m
         for m in c.since(start, Execution)
-        if m.strat_id == c.config.strat_a and not m.HasField("order_price")
+        if m.strat_id == c.config.strat_a
+        and m.instrument == c.config.instrument
+        and m.side == BUY
+        and not m.HasField("order_price")
     ]
     # The ladder the order met: the latest book published by its release.
     met = [
@@ -712,17 +742,18 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
     )
     assert len(rebuilt.bid_levels) == 10 and len(rebuilt.ask_levels) == 10
     assert rebuilt.ask_levels[0].price > met.ask_levels[0].price, "the band did not shift"
-    wall_prints: list[int] = []
-    deadline_start = c.mark()
-    while len(wall_prints) < len(fills):
-        trades = await c.wait_for(
-            lambda m: isinstance(m, Trades) and m.instrument == c.config.instrument,
-            "trades for the wall fills",
-            deadline_start,
-        )
-        deadline_start = c.after(trades)
-        wall_prints += [p.price for p in trades.prints if p.kind == STUDENT_TO_WALL]
-    assert sorted(wall_prints) == sorted(f.fill_price for f in fills)
+
+    def wall_prints() -> list[tuple[int, int]]:
+        return [
+            (p.price, p.size)
+            for t in c.since(start, Trades)
+            if t.instrument == c.config.instrument
+            for p in t.prints
+            if p.kind == STUDENT_TO_WALL
+        ]
+
+    await c.until(lambda: len(wall_prints()) >= len(fills), "trades prints for the wall fills")
+    assert sorted(wall_prints()) == sorted((f.fill_price, f.fill_size) for f in fills)
 
 
 async def test_step_12_self_trade_prevention(market: Client):
@@ -792,6 +823,7 @@ async def test_step_13_mass_cancel(market: Client):
     for m in cancelled:
         assert m.reason_code == ReasonCodes.MASS_CANCEL
         assert m.timestamp >= accepted.release_time
+    # "No budget consumed" is not checked: no message reports a team's budget use.
 
 
 # Steps 14 to 16: the close.
@@ -851,19 +883,19 @@ async def test_step_15_heartbeat_and_resume():
 
 
 async def test_step_16_subscribe_outside_a_session(client: Client):
+    if not _CLOSED_BY_STEP_14:
+        pytest.skip("precondition: step 14 closed the instrument's session in this run")
+    closed = _CLOSED_BY_STEP_14[0]
     c = client
     start = c.mark()
     await subscribe(c.session, [c.config.instrument])
     state = await c.next_session_state(start)
-    if state.state != CLOSED:
-        pytest.skip("precondition: the instrument's session has closed (step 14)")
-    if _CLOSED_BY_STEP_14:
-        closed = _CLOSED_BY_STEP_14[0]
-        assert (state.session_date, state.open_time, state.close_time) == (
-            closed.session_date,
-            closed.open_time,
-            closed.close_time,
-        ), "session_state does not name the session step 14 closed"
+    assert state.state == CLOSED, "the session is open again since step 14 closed it"
+    assert (state.session_date, state.open_time, state.close_time) == (
+        closed.session_date,
+        closed.open_time,
+        closed.close_time,
+    ), "session_state does not name the session step 14 closed"
     assert state.grid_time == state.close_time
     calendar = c.session.calendar
     assert calendar is not None
@@ -872,11 +904,12 @@ async def test_step_16_subscribe_outside_a_session(client: Client):
         assert not calendar.HasField("next_open")
     else:
         assert calendar.next_open == expected_next
-    await c.wait_for(
+    official = await c.wait_for(
         lambda m: isinstance(m, OfficialClose) and m.instrument == c.config.instrument,
         "official_close",
         start,
     )
+    assert official.session_date == closed.session_date
     await c.drain(min(2.0, c.config.timeout))
     after = c.seen[start:]
     assert len([m for m in after if isinstance(m, SessionState)]) == 1

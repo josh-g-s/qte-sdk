@@ -117,7 +117,9 @@ def run(target: Target, platform: Path, check: bool) -> int:
         return 0
 
     # The manifest may live in the same directory as the files it describes.
-    expected = set(target.allowed) | {target.manifest.name}
+    expected = set(target.allowed)
+    if target.manifest.parent == target.dest:
+        expected.add(target.manifest.name)
     for existing in target.dest.glob("*"):
         if existing.name not in expected:
             print(f"refusing to continue: unexpected file {existing}", file=sys.stderr)

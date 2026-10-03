@@ -91,9 +91,9 @@ pytest tests/test_conformance.py -v
 
 `read -rs` takes the token without echoing it or keeping it in your shell history. The token is read from `QTE_CONFORMANCE_TOKEN` only, never from `QTE_TOKEN`. A URL whose host is not this machine is refused unless `QTE_CONFORMANCE_ALLOW_REMOTE=1` is also set, because the steps send real orders.
 
-The exchange under test must provide what the script's preconditions name: one team with two registered strategies (`strat-a` and `strat-b` unless `QTE_CONFORMANCE_STRAT_A` and `QTE_CONFORMANCE_STRAT_B` name others), and the instrument with a two-sided live quote during an open session. Steps 1 to 13 are skipped while the session is not open. Other settings are the instrument's tick (`QTE_CONFORMANCE_TICK`, in dollars, default 0.01), the size of each resting order (`QTE_CONFORMANCE_SIZE`, default 10) and how long to wait for each message (`QTE_CONFORMANCE_TIMEOUT`, in seconds, default 10).
+The exchange under test must provide what the script's preconditions name: one team with two registered strategies (`strat-a` and `strat-b` unless `QTE_CONFORMANCE_STRAT_A` and `QTE_CONFORMANCE_STRAT_B` name others), and the instrument with a two-sided live quote during an open session. Steps 3 to 14 are skipped while the session is not open. Other settings are the instrument's tick (`QTE_CONFORMANCE_TICK`, in dollars, default 0.01), the size of each resting order (`QTE_CONFORMANCE_SIZE`, default 10) and how long to wait for each message (`QTE_CONFORMANCE_TIMEOUT`, in seconds, default 10).
 
-Each step opens its own session, and steps 4 to 13 first mass cancel the team's orders, so a failing or skipped step does not affect the next. The steps whose preconditions need the exchange's operators run only when you declare them:
+Each step opens its own session, and steps 4 to 14 first mass cancel the team's orders, so a failing or skipped step does not affect the next. The steps whose preconditions need the exchange's operators run only when you declare them:
 
 | Variable | Step | What the exchange under test does |
 | --- | --- | --- |
@@ -101,4 +101,4 @@ Each step opens its own session, and steps 4 to 13 first mass cancel the team's 
 | `QTE_CONFORMANCE_WALL_ONLY=1` | 11 | Nothing but the wall trades against the step's market buy. The team's risk limits must allow buying through ten ask levels, and the position is left open. |
 | `QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>` | 14 | It runs a single configured session and closes it within that many seconds of the step resting its order. |
 
-Step 16 runs only once the session has closed, so run the whole file in order with step 14 enabled to cover it. Step 15 (heartbeat and resume) is reported as an expected failure until it is specified (issue #12).
+Step 16 runs only after step 14 has closed the session in the same run, so run the whole file in order with step 14 enabled to cover it. Step 10 checks the collar at the figure the script names (a buy above mark x 1.05). Step 13's "no budget consumed" is not checked, since no message reports a team's budget use. Step 15 (heartbeat and resume) is reported as an expected failure until it is specified (issue #12).
