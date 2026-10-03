@@ -243,7 +243,9 @@ async def test_reply_between_terms_carries_positions_valued_at_the_last_close():
     ]
 
 
-async def test_reply_before_any_official_close_has_no_session_date_or_report_seq():
+async def test_reply_before_the_competitions_first_session_has_no_session_date_or_report_seq():
+    # The only time a reply outside a session has no session_date: nothing has closed and
+    # the book is empty.
     [event] = await received(
         frame(
             "account_state",
@@ -258,6 +260,69 @@ async def test_reply_before_any_official_close_has_no_session_date_or_report_seq
     )
     assert not event.message.HasField("session_date")
     assert not event.message.HasField("as_of_report_seq")
+    assert list(event.message.positions) == []
+
+
+async def test_reply_after_a_first_session_with_no_official_close_has_its_date():
+    # The competition's first session ended with no official close for any instrument:
+    # outside a session the reply still carries that session's date, and a position in an
+    # instrument that has never had an official close is valued at 0.
+    unclosed = [{"instrument": "AAPL", "quantity": "100", "price": "0"}]
+    [event] = await received(
+        frame(
+            "account_state",
+            {
+                "request_ref": "acct-13",
+                "summary": summary_for(1_000_000_000, unclosed, 5),
+                "positions": unclosed,
+                "valuation_basis": "LAST_OFFICIAL_CLOSE",
+                "session_date": "2026-09-01",
+                "as_of": "5",
+                "cash": "1000000000",
+            },
+            1,
+        )
+    )
+    state = event.message
+    assert state.valuation_basis == LAST_OFFICIAL_CLOSE
+    assert state.HasField("session_date") and state.session_date == "2026-09-01"
+    [position] = state.positions
+    assert (position.instrument, position.quantity, position.price) == ("AAPL", 100, 0)
+    assert state.summary.equity == state.cash
+
+
+@pytest.mark.parametrize(
+    ("break_day_close_has_run", "session_date"),
+    [(True, "2026-07-01"), (False, "2026-06-30")],
+)
+async def test_reply_on_a_break_day_dates_the_latest_close_that_has_run(
+    break_day_close_has_run, session_date
+):
+    # 2026-06-30 is the term's last session and 2026-07-01 a break day with its own
+    # official close. Once that close has run, the reply carries the break day's date, not
+    # the last session's, and the positions are valued at that close.
+    price = "410500000" if break_day_close_has_run else "410250000"
+    positions = [{"instrument": "MSFT", "quantity": "50", "price": price}]
+    [event] = await received(
+        frame(
+            "account_state",
+            {
+                "request_ref": "acct-14",
+                "summary": summary_for(800_000_000, positions, 7),
+                "positions": positions,
+                "valuation_basis": "LAST_OFFICIAL_CLOSE",
+                "session_date": session_date,
+                "as_of": "7",
+                "cash": "800000000",
+            },
+            1,
+        )
+    )
+    state = event.message
+    assert state.valuation_basis == LAST_OFFICIAL_CLOSE
+    assert state.session_date == session_date
+    [position] = state.positions
+    assert (position.instrument, position.price) == ("MSFT", int(price))
 
 
 async def test_reply_carries_the_report_seq_it_reflects():
@@ -279,7 +344,9 @@ async def test_reply_carries_the_report_seq_it_reflects():
     assert event.message.as_of_report_seq == 1234
 
 
-async def test_reply_with_reports_but_no_official_close_yet():
+async def test_reply_before_the_competitions_first_session_with_reports_has_no_session_date():
+    # A team can have private reports before the first session, such as an order's
+    # delayed reject, and still no session_date.
     big = 2**53 + 1  # above what a JSON number holds exactly
     [event] = await received(
         frame(
