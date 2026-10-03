@@ -19,6 +19,21 @@ exchange that does not send heartbeats is never dropped for being quiet. The def
 `DEFAULT_LIVENESS_TIMEOUT`, is this SDK's choice, not a value the exchange sends; see its
 description.
 
+Staying alive: the exchange also sends WebSocket pings, and closes a connection that has
+sent it no complete frame for a while, with close code `HEARTBEAT_TIMEOUT_CLOSE_CODE`
+(4000) and reason `heartbeat timeout`. The client sends no messages of its own to stay
+connected: the `websockets` library answers each ping with a pong, and with its default
+`ping_interval` it also sends a ping of its own every 20 seconds. Both happen in the
+background, but only while the library is reading the socket. It stops reading once
+`max_queue` messages (16 by default) are waiting for your loop. If your loop falls that
+far behind and stays there, the library no longer reads the exchange's pongs and closes
+the connection itself after `ping_timeout` (close code 1011, reason `keepalive ping
+timeout`). With `ping_interval=None`, nothing is sent at all while reading is paused, and
+the exchange closes the connection with 4000 instead. Either way the error is a
+`ConnectionClosedError`, which `ReconnectingSession` retries. Keep your loop reading
+promptly, and do slow work elsewhere. You can raise `max_queue` (a `websockets` connect
+option) to absorb bursts, at the cost of memory.
+
 Report numbers: each of the team's private order reports that the exchange can replay
 carries a `report_seq` on its envelope, which is the event's `report_seq` here (None on
 every other message). A connection only reports it; `qte_sdk.session.Session` keeps the
@@ -141,13 +156,26 @@ def _without_handshake_values(msg: Any, args: tuple[Any, ...]) -> tuple[Any, ...
     return args
 
 
+HEARTBEAT_TIMEOUT_CLOSE_CODE = 4000
+"""The close code the exchange uses when it has had no complete frame from the client for
+too long, or when a connection has not authenticated in time. Its reason text is
+`heartbeat timeout`."""
+
+# Close reasons whose exact text is fixed by the contract or by `websockets` itself, so
+# they cannot carry the token and are kept. Any other reason is withheld.
+_KNOWN_CLOSE_REASONS = frozenset({"heartbeat timeout", "keepalive ping timeout"})
+
+
 def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
     """The same close, with the reason text withheld: a close reason is free text from the
-    server, and the client echoes it back, so it could carry the token either way."""
+    server, and the client echoes it back, so it could carry the token either way. Only
+    reasons in `_KNOWN_CLOSE_REASONS`, matched exactly, are kept."""
 
     def withheld(close: Close | None) -> Close | None:
         if close is None:
             return None
+        if close.reason in _KNOWN_CLOSE_REASONS:
+            return Close(close.code, close.reason)
         return Close(close.code, "<withheld>" if close.reason else "")
 
     return type(error)(withheld(error.rcvd), withheld(error.sent), error.rcvd_then_sent)

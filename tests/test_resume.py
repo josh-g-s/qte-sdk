@@ -5,13 +5,16 @@ import json
 
 import pytest
 from fake_exchange import frame, serve_local
+from test_calendar import CALENDAR, calendar_frame
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
 from websockets.asyncio.server import ServerConnection
+from websockets.exceptions import ConnectionClosedError
 
 import qte_sdk.connection
 from qte_sdk.connection import (
     DEFAULT_LIVENESS_TIMEOUT,
+    HEARTBEAT_TIMEOUT_CLOSE_CODE,
     Connection,
     DecodeFailed,
     LivenessTimeout,
@@ -752,3 +755,77 @@ def test_only_an_untyped_malformed_reject_answers_a_resume():
     )
     reports.route(untyped)
     assert reports.answer is untyped and reports.resume is None
+
+
+# Staying alive against the exchange's heartbeat rule
+
+
+async def test_a_heartbeat_timeout_close_is_shown_and_retried():
+    calls = 0
+
+    async def handler(ws: ServerConnection) -> None:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            await Scripted({"answer": [EMPTY]})(ws)
+            return
+        await ws.recv()
+        await ws.send(ack())
+        await ws.recv()  # resume
+        await ws.send(EMPTY)
+        await ws.close(HEARTBEAT_TIMEOUT_CLOSE_CODE, "heartbeat timeout")
+
+    async with serve_local(handler) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs:
+            events = await take(rs, 7)
+    assert kinds(events)[3:] == ["Disconnected", "Retrying", "Connected", "resume_ack:None"]
+    error = events[3].error  # type: ignore[attr-defined]
+    assert isinstance(error, ConnectionClosedError) and is_retryable(error)
+    assert error.rcvd is not None
+    assert (error.rcvd.code, error.rcvd.reason) == (4000, "heartbeat timeout")
+
+
+async def test_a_heartbeat_between_the_ack_and_the_calendar_or_after_it_changes_nothing():
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(ack())
+        await ws.send(heartbeat())
+        await ws.send(calendar_frame(2))
+        await ws.send(heartbeat())
+        await ws.send(book(1))
+        await ws.wait_closed()
+
+    async with serve_local(handler) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            assert await session.wait_for_calendar() == CALENDAR
+            events = await take(session, 2)
+    assert kinds(events) == ["calendar:None", "book:None"]
+
+
+async def test_a_loop_that_stops_reading_is_closed_by_the_keepalive_and_says_why():
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(ack())
+        for n in range(50):
+            await ws.send(book(n))
+        await ws.wait_closed()
+
+    async with serve_local(handler) as url:
+        session = await open_session(
+            url,
+            synthetic_token(),
+            max_queue=1,
+            ping_interval=0.05,
+            ping_timeout=0.1,
+            close_timeout=0.2,
+        )
+        async with session:
+            await asyncio.sleep(0.5)  # the loop is busy elsewhere and reads nothing
+            with pytest.raises(ConnectionClosedError) as caught:
+                async with asyncio.timeout(5):
+                    async for _ in session:
+                        pass
+    assert caught.value.sent is not None
+    assert (caught.value.sent.code, caught.value.sent.reason) == (1011, "keepalive ping timeout")
+    assert is_retryable(caught.value)
