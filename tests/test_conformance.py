@@ -55,7 +55,10 @@ The instrument must be an equity whose buy collar is mark x 1.05, the figure ste
 and 11 name; an option's wider guard does not fit them.
 
 The others are checked when the step runs: the instrument has a two-sided live quote
-(steps 4 to 14), its book shows ten ask levels all within mark x 1.05 (step 11), step 6's
+(steps 4 to 14), its book shows ten ask levels all within mark x 1.05 (step 11), the
+sweep shifts the band so that a rebuilt book is published (step 11: a book is published
+only when it changes, so a sweep whose impact is already at its clamp publishes none),
+the order is still above mark x 1.05 at the mark in force at its release (step 10), step 6's
 partial fill leaves at least two shares (step 7) and its spread leaves room for the
 prices a step needs. Step 13's "no budget consumed" is not checked, since no message
 reports a team's budget use. Step 12's resting sell for
@@ -381,6 +384,20 @@ def check_release_time(accepted: Accepted) -> None:
     assert delay == _ORDER_DELAY[0], "release_time minus receipt_time differs between orders"
 
 
+def assert_ladder(book: Book) -> None:
+    """Ten ask levels and ten bid levels, best first. The bid ladder of a low-priced
+    instrument stops at its last level with a positive price, so fewer bids are accepted
+    as long as there is at least one."""
+    bids = [level.price for level in book.bid_levels]
+    asks = [level.price for level in book.ask_levels]
+    assert len(asks) == 10, f"{len(asks)} ask levels, not ten"
+    assert 1 <= len(bids) <= 10, f"{len(bids)} bid levels"
+    assert all(price > 0 for price in bids)
+    assert bids == sorted(bids, reverse=True) and len(set(bids)) == len(bids), "bids not best first"
+    assert asks == sorted(asks) and len(set(asks)) == 10, "asks not best first"
+    assert bids[0] < asks[0]
+
+
 def inside_prices(book: Book, tick: int, count: int) -> list[int]:
     """`count` buy prices strictly inside the band, from the best bid up, and below every
     resting sell, so none is marketable. Skips the step if the spread is too narrow."""
@@ -481,13 +498,7 @@ async def test_step_02_subscribe(client: Client):
 async def test_step_03_first_book(client: Client):
     book = await open_book(client)
     assert book.grid_time > 0
-    assert len(book.bid_levels) == 10
-    assert len(book.ask_levels) == 10
-    bids = [level.price for level in book.bid_levels]
-    asks = [level.price for level in book.ask_levels]
-    assert bids == sorted(bids, reverse=True) and len(set(bids)) == 10, "bids not best first"
-    assert asks == sorted(asks) and len(set(asks)) == 10, "asks not best first"
-    assert bids[0] < asks[0]
+    assert_ladder(book)
 
 
 # Steps 4 to 13: order entry during the session. Step 14 uses the same set-up.
@@ -844,15 +855,20 @@ async def test_step_09c_price_moving_amend_filling_completely(market: Client):
 
 async def test_step_10_collar(market: Client):
     c = market
-    mark = await c.wait_for(
+    await c.wait_for(
         lambda m: isinstance(m, Mark) and m.instrument == c.config.instrument,
         "mark",
         0,
         timeout=3 * c.config.timeout,
     )
+
+    def marks() -> list[Mark]:
+        return [m for m in c.seen if isinstance(m, Mark) and m.instrument == c.config.instrument]
+
     numerator, denominator = STEP_10_MARK_FACTOR
     tick = c.config.tick
-    price = (mark.value * numerator // (denominator * tick) + 1) * tick
+    # Priced from the latest mark; the collar applies at the mark in force at release.
+    price = (marks()[-1].value * numerator // (denominator * tick) + 1) * tick
     start = c.mark()
     ref = await send_new(
         c.session,
@@ -863,8 +879,28 @@ async def test_step_10_collar(market: Client):
         price=price,
         size=c.config.size,
     )
-    reject = await c.rejection(ref, start)
-    assert reject.reason_code == ReasonCodes.PRICE_COLLAR, reason_code_name(reject.reason_code)
+    reply = await c.wait_for(
+        lambda m: isinstance(m, Accepted | Reject) and request_ref_of(m) == ref,
+        "accepted or reject for the request",
+        start,
+    )
+    # A reject carries no release time: it is its receipt time plus the order delay, which
+    # every accepted shows.
+    if isinstance(reply, Accepted):
+        release = reply.release_time
+    else:
+        delay_ref = await send_mass_cancel(c.session)
+        delay = await c.answer(delay_ref, c.after(reply))
+        release = reply.receipt_time + (delay.release_time - delay.receipt_time)
+    await c.until(
+        lambda: any(m.grid_time > release for m in c.since(start, SessionState)),
+        "session_state after the order's release",
+    )
+    in_force = [m for m in marks() if m.sampled_at <= release]
+    if in_force and price * denominator <= in_force[-1].value * numerator:
+        pytest.skip("precondition: the order is still above mark x 1.05 at the mark in force")
+    assert isinstance(reply, Reject), "the order above mark x 1.05 was accepted"
+    assert reply.reason_code == ReasonCodes.PRICE_COLLAR, reason_code_name(reply.reason_code)
 
 
 @pytest.mark.skipif(
@@ -959,14 +995,22 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         assert fill.fee < 0
     assert remainder.cancelled_size == size - sum(f.fill_size for f in fills)
     last_fill = max(f.timestamp for f in fills)
-    rebuilt = await c.wait_for(
-        lambda m: (
-            isinstance(m, Book) and m.instrument == c.config.instrument and m.grid_time >= last_fill
-        ),
-        "book after the sweep",
-        start,
-    )
-    assert len(rebuilt.bid_levels) == 10 and len(rebuilt.ask_levels) == 10
+    # A book is published only when it changes. If the sweep's impact was already at its
+    # clamp, the rebuilt ladder can equal the one before and no new book is published; the
+    # step's "shifted band" then cannot be observed, so it is a precondition.
+    try:
+        rebuilt = await c.wait_for(
+            lambda m: (
+                isinstance(m, Book)
+                and m.instrument == c.config.instrument
+                and m.grid_time >= last_fill
+            ),
+            "book after the sweep",
+            start,
+        )
+    except NoMessage:
+        pytest.skip("precondition: the sweep shifts the band, so a rebuilt book is published")
+    assert_ladder(rebuilt)
     assert rebuilt.ask_levels[0].price > met.ask_levels[0].price, "the band did not shift"
 
     def wall_prints() -> list[tuple[int, int]]:
