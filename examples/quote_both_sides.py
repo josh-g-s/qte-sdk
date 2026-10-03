@@ -58,8 +58,8 @@ or a cancel, does not wait for the market to move. Before it sends anything, it 
 every event it has already received, so a sign that messages were missed is seen first.
 If a message that may have been a newer book is missed or cannot be read, the book held
 may be out of date, so the example sends nothing from it until a newer book arrives. It
-also quotes only while the latest session state says the market is open, so a book kept
-from before the close is not quoted after it. It sends one message at a time and applies
+also quotes only while the latest session state says the market is open, and only from
+a book of the session in progress, never one kept from an earlier session. It sends one message at a time and applies
 what has come in since before sending the next.
 """
 
@@ -201,9 +201,22 @@ class Quoter:
         self.next_act = float("-inf")
         # Whether the last session state said the market is open; none is known yet.
         self.market_open = False
+        self.session_date = ""
         # How many order messages it has sent, so a caller can tell whether a step sent one.
         self.messages = 0
         self.last_side: Side = SELL  # so BUY goes first
+
+    def on_session_state(self, state: SessionState) -> None:
+        """Quote only while the market is open, and only from a book of the session in
+        progress, never one kept from an earlier session."""
+        if state.state != MarketSessionPhase.OPEN:
+            self.market_open = False
+            self.books = LatestBooks()  # the session is over: its book is no use
+        else:
+            if self.session_date and state.session_date != self.session_date:
+                self.books = LatestBooks()  # a new session, with the close not seen
+            self.market_open = True
+        self.session_date = state.session_date
 
     def in_turn(self) -> list[Quote]:
         """Both sides, starting with the one that did not send last, so that with one
@@ -478,7 +491,7 @@ def handle(quoter: Quoter, view: RestingOrders, event: Event) -> bool:
     # not be read, LatestBooks lists the book held as stale.
     quoter.books.update(item)
     if isinstance(item, SessionState):
-        quoter.market_open = item.state == MarketSessionPhase.OPEN
+        quoter.on_session_state(item)
     elif isinstance(item, Reject):
         # The exchange refused the subscription, for example an unknown instrument.
         print(f"subscription refused: {reason_code_name(item.reason_code)}")
