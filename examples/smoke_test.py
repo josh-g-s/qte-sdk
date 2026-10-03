@@ -37,15 +37,15 @@ two-sided and LIVE, waits until the exchange reports it resting, then cancels ex
 price level and waits for the exchange to confirm the cancel. It never sends a mass cancel,
 which would cancel every order your team has, other strategies' included.
 
-Its price is as low as a buy can rest. Your orders rest only strictly inside the band
-between the wall's best bid and best ask: an order at the wall's own price or beyond it is
-not left resting (`order_cancelled` with REMAINDER_OUTSIDE_BAND). So the price is one step
-above the wall's best bid, and it must be below every ask. The exchange does not send the
-tick, so the step is the tick you give with --tick or, without it, the largest step that
-every price in the book is a multiple of. Every price in a book is on the tick, so that
-step is a whole number of ticks and a price on it is on the tick too, though it may be a
-few ticks above the lowest price that could rest. If the spread leaves no room, the check
-is a SKIP: try another instrument, or give --tick.
+Its price is the lowest on its step at which a buy can rest. Your orders rest only strictly
+inside the band between the wall's best bid and best ask: an order at the wall's own price
+or beyond it is not left resting (`order_cancelled` with REMAINDER_OUTSIDE_BAND). So the
+price is one step above the wall's best bid, and it must be below every ask. The exchange
+does not send the tick, so the step is the tick you give with --tick or, without it, the
+largest step that every price in the book is a multiple of. Every price in a book is on
+the tick, so that step is a whole number of ticks and a price on it is on the tick too,
+though it may be a few ticks above the lowest price that could rest. If the spread leaves
+no room, the check is a SKIP: try another instrument, or give --tick.
 
 A resting buy can still be filled. If it is, the check says so: your team then holds that
 position. A cancel names a price level, not an order, and acts on whichever of your team's
@@ -373,6 +373,12 @@ class ProbeOrder:
         return f"BUY {TEST_ORDER_SIZE} {self.instrument} @ {to_decimal(self.price)}"
 
     @property
+    def level_price(self) -> int:
+        """The price the order rests at as far as this script knows: its own, or the price
+        another program last moved it to."""
+        return self.price if self.moved_to is None else self.moved_to
+
+    @property
     def where_now(self) -> str:
         """Where the order may rest now: its own level, or the one it was moved to."""
         if self.moved_to is None:
@@ -390,7 +396,24 @@ class ProbeOrder:
 
     @property
     def may_rest(self) -> bool:
-        return self.sent and self.rejected is None and not self.gone and not self.absent
+        if not self.sent or self.rejected is not None:
+            return False
+        if self.accepted_ms is None:
+            # Never seen accepted, so nothing seen at its level can be tied to it.
+            return True
+        return not self.gone and not self.absent
+
+    def warning(self) -> str:
+        if self.accepted_ms is None:
+            return (
+                f"WARNING: no reply to the test order ({self.where}) was seen, so it may "
+                "still be resting there, or wherever an amend moved it. Check your team's "
+                "orders and cancel it yourself."
+            )
+        return (
+            f"WARNING: the test order may still be resting at {self.where_now}. Check your "
+            "team's orders and cancel that level yourself."
+        )
 
     def answered(self) -> bool:
         """Whether the exchange has said what became of the new order."""
@@ -403,8 +426,8 @@ class ProbeOrder:
         order. Only once its `new` is accepted: a report before that is about an order
         that held the level earlier, such as one that filled while the `new` was delayed.
         From then on the level holds the test order until it leaves, since the team holds
-        at most one order at a level."""
-        level = (instrument, side, price) == (self.instrument, BUY, self.price)
+        at most one order at a level. After a move, its level is the new one."""
+        level = (instrument, side, price) == (self.instrument, BUY, self.level_price)
         return level and strat_id == self.strat_id and self.accepted_ms is not None
 
     def apply(self, message: Message) -> None:
@@ -441,7 +464,13 @@ class ProbeOrder:
                 if not message.HasField("price"):
                     return
                 level = (message.instrument, message.side, message.price)
-                mine = level == (self.instrument, BUY, self.price) and ref in self.cancel_refs
+                # This script's own cancel names the order's first level, which is no
+                # longer the order's once another program has moved it.
+                mine = (
+                    self.moved_to is None
+                    and level == (self.instrument, BUY, self.price)
+                    and ref in self.cancel_refs
+                )
                 if mine or self.ours(message.strat_id, *level):
                     self.cancelled = message
 
@@ -764,7 +793,10 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     grid_points = 1
-    while not order.gone and order.moved_to is None:
+    while True:
+        watcher.drain()  # apply what has arrived before deciding to send
+        if order.gone or order.moved_to is not None:
+            return None
         if watcher.closed:
             return "the connection ended"
         if loop.time() >= deadline:
@@ -814,10 +846,15 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
             ),
             deadline,
         )
-    return None
 
 
 def moved(order: ProbeOrder) -> tuple[str, str]:
+    """The verdict when another program of the team amended the order to a new price."""
+    if order.gone:
+        return FAIL, (
+            f"{order.where} was moved by another of your team's programs to "
+            f"{order.where_now}, then left the book there"
+        )
     return FAIL, (
         f"{order.where} was moved by another of your team's programs, and may still be "
         f"resting at {order.where_now}; check your team's orders and cancel it yourself"
@@ -847,12 +884,13 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
         order.sent = False
         return FAIL, f"not sent: {error}"
     await watcher.until(order.answered, loop.time() + seconds)
+    watcher.drain()  # so a later report, such as a second move, is seen before deciding
     if order.rejected is not None:
         return rejected_new(order)
-    if order.gone:
-        return left_alone(order)
     if order.moved_to is not None:
         return moved(order)
+    if order.gone:
+        return left_alone(order)
     # It rests, or what became of it is unknown. Cancel the level either way: a cancel is
     # applied after the new, so it also removes an order that rests after this wait.
     unsure = None
@@ -861,7 +899,8 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
     elif not order.resting:
         unsure = f"accepted, but not reported resting within {seconds:g} s"
     why_not = await cancel_level(watcher, order, seconds)
-    if order.moved_to is not None and not order.gone:
+    watcher.drain()  # a move or a fill may have arrived just behind the last reply
+    if order.moved_to is not None:
         return moved(order)
     if order.confirmed:
         assert order.cancelled is not None
@@ -869,6 +908,11 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
             return FAIL, (
                 f"the cancel at {order.where} removed strategy {order.cancelled.strat_id}'s "
                 "order there, not the test order: tell whoever runs that strategy"
+            )
+        if order.accepted_ms is None:
+            return FAIL, (
+                f"{order.where}: {unsure}; a cancel then removed an order of this strategy "
+                "at that level, which cannot be tied to the test order"
             )
         if unsure is not None:
             return FAIL, f"{order.where}: {unsure}; the cancel then removed it"
@@ -886,6 +930,11 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
         return PASS, text
     if order.gone:
         return left_alone(order)
+    if order.absent and order.accepted_ms is None:
+        return FAIL, (
+            f"{order.where}: {unsure}; the exchange then reported no order of your team at "
+            "that level, so it is not there, but this script cannot tell where it went"
+        )
     if order.absent:
         return FAIL, (
             f"{order.where}: {unsure or 'it rested'}, then the exchange reported no order at "
@@ -922,20 +971,13 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
     instrument, price = choice
     order = ProbeOrder(instrument, args.strat_id, price)
     watcher.order = order
-    reported = False
     try:
         status, reason = await place_and_cancel(watcher, order, args.seconds)
         report.add(status, name, reason)
-        reported = True
     finally:
+        # Also on Ctrl+C or a failure part-way, so the level is always named.
         if order.may_rest:
-            where = "" if reported else f": {order.where_now}"
-            print(
-                f"WARNING: the test order may still be resting{where}. Check your team's "
-                "orders and cancel that level yourself.",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(order.warning(), file=sys.stderr, flush=True)
 
 
 # History

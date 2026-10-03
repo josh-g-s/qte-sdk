@@ -116,8 +116,11 @@ class FakeExchange:
         account_reject: str | None = None,
         cancel_rejects: list[str] | None = None,
         reject_detail: str | None = None,
-        move_resting_to: int | None = None,
+        move_resting_to: tuple[int, ...] = (),
+        withhold_accepted: bool = False,
     ) -> None:
+        # With `withhold_accepted`, a limit order's `accepted` is never sent, as if lost.
+        self.withhold_accepted = withhold_accepted
         # With `known_instruments`, a subscribe naming any other instrument is answered with
         # an UNKNOWN_INSTRUMENT reject for it, and only the known ones are served.
         self.known_instruments = known_instruments
@@ -131,7 +134,7 @@ class FakeExchange:
         # With `reject_detail`, the reject that `reject_new` asks for carries it.
         self.reject_detail = reject_detail
         # With `move_resting_to`, the first limit order to rest is at once amended, as by
-        # another program of the same team, to rest at that price instead.
+        # another program of the same team, to rest at each of those prices in turn.
         self.move_resting_to = move_resting_to
         # Every message sent and received, in order, by type.
         self.log: list[tuple[str, str]] = []
@@ -330,7 +333,8 @@ class FakeExchange:
                     "fee": "5",
                 }
                 await self.send(ws, "execution", teammate)
-            await self.send(ws, "accepted", accepted)
+            if not (self.withhold_accepted and p["order_type"] == "LIMIT"):
+                await self.send(ws, "accepted", accepted)
             size = int(p["size"])
             if p["order_type"] == "MARKET":
                 fill = {
@@ -351,12 +355,13 @@ class FakeExchange:
             key = (p["instrument"], p["side"], int(p["price"]))
             self.resting[key] = (p["strat_id"], size)
             await self.send(ws, "order_state", self.order_state(key))
-            if self.move_resting_to is not None:
-                moved = (key[0], key[1], self.move_resting_to)
-                self.move_resting_to = None
+            moves, self.move_resting_to = self.move_resting_to, ()
+            for price in moves:
+                moved = (key[0], key[1], price)
                 self.resting[moved] = self.resting.pop(key)
                 state = {**self.order_state(moved), "old_price": str(key[2])}
                 await self.send(ws, "order_state", state)
+                key = moved
             self.resting_reports += 1
             if self.resting_reports == self.gap_after_resting:
                 self._seq += 1  # one message the client never receives
@@ -1824,18 +1829,42 @@ async def test_the_smoke_test_sends_a_cancel_again_after_later_grid_points():
     assert "2 rejected cancel(s) (MIN_REST_VIOLATION, MIN_REST_VIOLATION) sent again" in reason
 
 
-async def test_the_smoke_test_fails_loudly_when_the_order_is_moved_away_from_its_level():
+@pytest.mark.parametrize(
+    "moves", [(100_010_000,), (100_010_000, 100_020_000)], ids=["once", "twice"]
+)
+async def test_the_smoke_test_fails_loudly_when_the_order_is_moved_away_from_its_level(
+    moves: tuple[int, ...],
+):
     # Another program of the team amends the resting test order to a new price, so a
     # cancel of the test order's own level would not touch it.
-    exchange = FakeExchange(calendar=CALENDAR, move_resting_to=100_010_000)
+    exchange = FakeExchange(calendar=CALENDAR, move_resting_to=moves)
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
     assert code == 1, out + err
     status, reason = found["test-order"]
     assert status == "FAIL"
-    assert "may still be resting at BUY TEST @ 100.010000" in reason
-    assert "WARNING: the test order may still be resting" in err
-    assert exchange.resting == {(INSTRUMENT, "BUY", 100_010_000): ("smoke", 1)}
+    where = f"BUY TEST @ {to_decimal(moves[-1])}"
+    assert f"may still be resting at {where}" in reason
+    assert f"WARNING: the test order may still be resting at {where}" in err
+    assert exchange.resting == {(INSTRUMENT, "BUY", moves[-1]): ("smoke", 1)}
+    # A cancel, if one went before the move was seen, names only the test order's level.
+    cancels = [m["payload"] for m in exchange.received if m["type"] == "cancel"]
+    assert all(int(cancel["price"]) == 100_000_000 for cancel in cancels)
     assert "mass_cancel" not in exchange.types()
+
+
+async def test_the_smoke_test_still_warns_when_it_never_sees_the_order_accepted():
+    # With no accepted, nothing at the level can be tied to the test order: the script
+    # cancels the level all the same, and warns that the order may be anywhere.
+    exchange = FakeExchange(calendar=CALENDAR, withhold_accepted=True)
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
+    assert code == 1, out + err
+    status, reason = found["test-order"]
+    assert status == "FAIL"
+    assert "no reply to the order within 1 s" in reason
+    assert "cannot be tied to the test order" in reason
+    assert "WARNING: no reply to the test order (BUY 1 TEST @ 100.000000) was seen" in err
+    assert exchange.types().count("cancel") == 1
+    assert exchange.resting == {}
 
 
 async def test_the_smoke_test_ignores_an_earlier_orders_fill_at_its_level():
