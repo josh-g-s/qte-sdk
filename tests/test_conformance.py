@@ -892,13 +892,13 @@ async def test_step_10_collar(market: Client):
         start,
     )
     # A reject carries no release time: it is its receipt time plus the order delay, which
-    # every accepted shows.
+    # the set-up's mass cancel `accepted` already showed.
     if isinstance(reply, Accepted):
         release = reply.release_time
     else:
-        delay_ref = await send_mass_cancel(c.session)
-        delay = await c.answer(delay_ref, c.after(reply))
-        release = reply.receipt_time + (delay.release_time - delay.receipt_time)
+        earlier = [m for m in c.seen[:start] if isinstance(m, Accepted)]
+        assert earlier, "no accepted to take the order delay from"
+        release = reply.receipt_time + (earlier[-1].release_time - earlier[-1].receipt_time)
     await c.until(
         lambda: any(m.grid_time > release for m in c.since(start, SessionState)),
         "session_state after the order's release",
@@ -1013,7 +1013,8 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         ]
 
     await c.until(lambda: len(wall_prints()) >= len(fills), "trades prints for the wall fills")
-    assert sorted(wall_prints()) == sorted((f.fill_price, f.fill_size) for f in fills)
+    expected_prints = sorted((f.fill_price, f.fill_size) for f in fills)
+    assert sorted(wall_prints()) == expected_prints
 
     # A book is published only when it changes. If the sweep's impact was already at its
     # clamp, the rebuilt ladder can equal the one before and no new book is published; the
@@ -1029,7 +1030,10 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
             start,
         )
     except NoMessage:
+        # Everything read while waiting still counts: no further wall prints may appear.
+        assert sorted(wall_prints()) == expected_prints, "extra wall prints after the sweep"
         pytest.skip("precondition: the sweep shifts the band, so a rebuilt book is published")
+    assert sorted(wall_prints()) == expected_prints, "extra wall prints after the sweep"
     assert_ladder(rebuilt)
     assert rebuilt.ask_levels[0].price > met.ask_levels[0].price, "the band did not shift"
 
