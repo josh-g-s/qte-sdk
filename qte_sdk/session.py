@@ -251,26 +251,52 @@ def resolve_token(token: str | None = None) -> str:
     not tried); or if the `.env` cannot be read or parsed, or, on POSIX, holds the token
     and other users can read it.
     """
-    if token is None:
-        token = os.environ.get(TOKEN_ENV_VAR) or None
-    problem = None
-    source = TOKEN_FILE_ENV_VAR + " names a file that"
-    if token is None:
-        token, problem = _token_from_file()
-    if token is None and problem is None:
-        source = DOTENV_NAME
-        token, problem = read_value(TOKEN_ENV_VAR)
+    token, _, problem = _find_token(token)
     if problem is not None:
         # Raised outside any handler, from a frame that holds neither the file's path nor
         # its contents, so the exception carries neither.
-        raise MissingToken(f"no token: {source} {problem}")
+        raise MissingToken(problem)
+    assert token is not None
+    return token
+
+
+def token_source() -> str:
+    """Where `resolve_token()` would take the token from, without reading it out: the name
+    `QTE_TOKEN`, `QTE_TOKEN_FILE` or `.env`. Raises `MissingToken` as `resolve_token` does."""
+    token, source, problem = _find_token(None)
+    del token
+    if problem is not None:
+        raise MissingToken(problem)
+    assert source is not None
+    return source
+
+
+def _find_token(token: str | None) -> tuple[str | None, str | None, str | None]:
+    """The token, the name of its source and None; or None, None and the message for
+    `MissingToken`. Never raises, so no exception carries a frame that holds the token."""
+    source = None
+    if token is None:
+        token = os.environ.get(TOKEN_ENV_VAR) or None
+        source = TOKEN_ENV_VAR
+    problem = None
+    if token is None:
+        source = TOKEN_FILE_ENV_VAR
+        token, problem = _token_from_file()
+        if problem is not None:
+            return None, None, f"no token: {TOKEN_FILE_ENV_VAR} names a file that {problem}"
+    if token is None:
+        source = DOTENV_NAME
+        token, problem = read_value(TOKEN_ENV_VAR)
+        if problem is not None:
+            return None, None, f"no token: {DOTENV_NAME} {problem}"
     if not token:
-        raise MissingToken(
+        problem = (
             f"no token: pass token=, set the {TOKEN_ENV_VAR} environment variable, set "
             f"{TOKEN_FILE_ENV_VAR} to the path of a file holding it, or put {TOKEN_ENV_VAR} "
             f"in a {DOTENV_NAME} file in the working directory"
         )
-    return token
+        return None, None, problem
+    return token, source, None
 
 
 def resolve_url(url: str | None = None) -> str:
@@ -283,10 +309,19 @@ def resolve_url(url: str | None = None) -> str:
     Raises `MissingURL` if there is none, or if the `.env` cannot be read or parsed, or, on
     POSIX, holds `QTE_TOKEN` and other users can read it.
     """
+    return url_source(url)[1]
+
+
+def url_source(url: str | None = None) -> tuple[str, str]:
+    """Where `resolve_url(url)` takes the address from, and the address: the source is
+    `url`, `QTE_URL` or `.env`. Raises `MissingURL` as `resolve_url` does."""
+    source = "url"
     if url is None:
         url = os.environ.get(URL_ENV_VAR) or None
+        source = URL_ENV_VAR
     problem = None
     if url is None:
+        source = DOTENV_NAME
         url, problem = read_value(URL_ENV_VAR)
     if problem is not None:
         raise MissingURL(f"no exchange address: {DOTENV_NAME} {problem}")
@@ -295,7 +330,7 @@ def resolve_url(url: str | None = None) -> str:
             f"no exchange address: pass url=, set the {URL_ENV_VAR} environment variable, "
             f"or put {URL_ENV_VAR} in a {DOTENV_NAME} file in the working directory"
         )
-    return url
+    return source, url
 
 
 def _token_from_file() -> tuple[str | None, str | None]:
