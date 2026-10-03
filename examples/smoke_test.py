@@ -24,7 +24,7 @@ reason, then a summary:
                      query yet is a SKIP. No figures are printed.
     test-order       only with --place-test-order (see below).
     feed             whether any message was missed or could not be decoded.
-    history:<name>   the last closed session's books from the history service, when
+    history:<name>   the start of the last closed session's books from the history service, when
                      QTE_HISTORY_URL is set (from the environment only, never .env).
 
 It exits with status 0 when no check failed, 1 when one did, and 2 when it found no token
@@ -37,15 +37,15 @@ two-sided and LIVE, waits until the exchange reports it resting, then cancels ex
 price level and waits for the exchange to confirm the cancel. It never sends a mass cancel,
 which would cancel every order your team has, other strategies' included.
 
-Its price is the lowest at which a buy can rest. Your orders rest only strictly inside the
-band between the wall's best bid and best ask: an order at the wall's own price or beyond
-it is not left resting (`order_cancelled` with REMAINDER_OUTSIDE_BAND). So the price is the
-first price on the tick above the wall's best bid, as far below the asks as an order can
-rest, and it must be below every ask. The exchange does not send the tick: give it with
---tick, or the script uses the largest step that every price in the book is a multiple of.
-Every price in a book is on the tick, so that step is a whole number of ticks and a price
-on it is on the tick too. If the spread leaves no room, the check is a SKIP: try another
-instrument, or give --tick.
+Its price is as low as a buy can rest. Your orders rest only strictly inside the band
+between the wall's best bid and best ask: an order at the wall's own price or beyond it is
+not left resting (`order_cancelled` with REMAINDER_OUTSIDE_BAND). So the price is one step
+above the wall's best bid, and it must be below every ask. The exchange does not send the
+tick, so the step is the tick you give with --tick or, without it, the largest step that
+every price in the book is a multiple of. Every price in a book is on the tick, so that
+step is a whole number of ticks and a price on it is on the tick too, though it may be a
+few ticks above the lowest price that could rest. If the spread leaves no room, the check
+is a SKIP: try another instrument, or give --tick.
 
 A resting buy can still be filled. If it is, the check says so: your team then holds that
 position. A cancel names a price level, not an order, and acts on whichever of your team's
@@ -205,8 +205,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     args = parser.parse_args(argv)
-    if args.seconds <= 0:
-        parser.error("--seconds must be more than 0")
+    if not math.isfinite(args.seconds) or args.seconds <= 0:
+        parser.error("--seconds must be a number of seconds more than 0")
     if args.tick is not None and args.tick <= 0:
         parser.error("--tick must be more than 0, for example 0.01")
     if args.place_test_order and not args.strat_id:
@@ -247,8 +247,9 @@ def name_of(enum: Any, value: int) -> str:
 
 
 def reject_text(reject: Reject) -> str:
-    detail = f" ({reject.reason_detail})" if reject.HasField("reason_detail") else ""
-    return f"{reason_code_name(reject.reason_code)}{detail}"
+    """The reject's reason code. Its free-text `reason_detail` is left out: it can name a
+    risk limit and the team's figures against it, which this output never shows."""
+    return reason_code_name(reject.reason_code)
 
 
 def best_text(book: Book) -> str:
@@ -361,6 +362,8 @@ class ProbeOrder:
     cancelled: OrderCancelled | None = None
     # Set when a cancel is rejected NO_ORDER_AT_LEVEL: nothing of the team's rests there.
     absent: bool = False
+    # The price another of the team's programs amended the order to, if one did.
+    moved_to: int | None = None
     cancel_refs: list[str] = field(default_factory=list)
     replies: dict[str, Message] = field(default_factory=dict)
     retried: list[str] = field(default_factory=list)
@@ -368,6 +371,13 @@ class ProbeOrder:
     @property
     def where(self) -> str:
         return f"BUY {TEST_ORDER_SIZE} {self.instrument} @ {to_decimal(self.price)}"
+
+    @property
+    def where_now(self) -> str:
+        """Where the order may rest now: its own level, or the one it was moved to."""
+        if self.moved_to is None:
+            return self.where
+        return f"BUY {self.instrument} @ {to_decimal(self.moved_to)}"
 
     @property
     def gone(self) -> bool:
@@ -384,12 +394,18 @@ class ProbeOrder:
 
     def answered(self) -> bool:
         """Whether the exchange has said what became of the new order."""
-        if self.rejected is not None or self.gone:
+        if self.rejected is not None or self.gone or self.moved_to is not None:
             return True
         return self.accepted_ms is not None and self.resting
 
-    def at(self, instrument: str, side: int, price: int) -> bool:
-        return (instrument, side, price) == (self.instrument, BUY, self.price)
+    def ours(self, strat_id: str, instrument: str, side: int, price: int) -> bool:
+        """Whether a report about this strategy's order at this level is about the test
+        order. Only once its `new` is accepted: a report before that is about an order
+        that held the level earlier, such as one that filled while the `new` was delayed.
+        From then on the level holds the test order until it leaves, since the team holds
+        at most one order at a level."""
+        level = (instrument, side, price) == (self.instrument, BUY, self.price)
+        return level and strat_id == self.strat_id and self.accepted_ms is not None
 
     def apply(self, message: Message) -> None:
         ref = request_ref_of(message)
@@ -405,26 +421,28 @@ class ProbeOrder:
                 elif ref in self.cancel_refs:
                     self.replies[ref] = message
             case OrderState():
-                if (
-                    message.strat_id == self.strat_id
-                    and self.at(message.instrument, message.side, message.price)
-                    and message.state in (RESTING, STALE)
-                ):
+                level = (message.strat_id, message.instrument, message.side, message.price)
+                resting = message.state in (RESTING, STALE)
+                if message.HasField("old_price") and message.old_price != message.price:
+                    # An amend, which this script never sends, moved an order: if it was
+                    # the test order, it is no longer at the level this script cancels.
+                    moved = (message.strat_id, message.instrument, message.side)
+                    if self.ours(*moved, message.old_price) and resting:
+                        self.moved_to = message.price
+                elif self.ours(*level) and resting:
                     self.resting = True
             case Execution():
-                if (
-                    message.strat_id == self.strat_id
-                    and message.HasField("order_price")
-                    and self.at(message.instrument, message.side, message.order_price)
+                if message.HasField("order_price") and self.ours(
+                    message.strat_id, message.instrument, message.side, message.order_price
                 ):
                     self.filled += message.fill_size
                     self.fully_filled = message.remaining_size == 0
             case OrderCancelled():
-                if (
-                    message.HasField("price")
-                    and self.at(message.instrument, message.side, message.price)
-                    and (ref in self.cancel_refs or message.strat_id == self.strat_id)
-                ):
+                if not message.HasField("price"):
+                    return
+                level = (message.instrument, message.side, message.price)
+                mine = level == (self.instrument, BUY, self.price) and ref in self.cancel_refs
+                if mine or self.ours(message.strat_id, *level):
                     self.cancelled = message
 
 
@@ -450,6 +468,8 @@ class Watcher:
         self.unknown_types: set[str] = set()
         self.account_ref: str | None = None
         self.account_reply: AccountState | Reject | None = None
+        # MALFORMED_MESSAGE rejects that name no request type and no request_ref.
+        self.unattributed_rejects = 0
         self.order: ProbeOrder | None = None
         self.closed = False
         self.failure: Exception | None = None
@@ -465,11 +485,13 @@ class Watcher:
         else:
             await self.queue.put(None)
 
-    async def sent(self, sending: Awaitable[object]) -> bool:
+    async def sent(self, sending: Awaitable[object], deadline: float | None = None) -> bool:
         """Await one send. False if the connection had closed, or if the send did not
-        finish within --seconds, as on a connection that has stopped taking data."""
+        finish within --seconds or by `deadline` (on the event loop's clock), as on a
+        connection that has stopped taking data."""
+        limit = asyncio.get_running_loop().time() + self.seconds
         try:
-            async with asyncio.timeout(self.seconds):
+            async with asyncio.timeout_at(limit if deadline is None else min(limit, deadline)):
                 await sending
         except (ConnectionClosed, TimeoutError):
             return False
@@ -542,6 +564,13 @@ class Watcher:
             ref = request_ref_of(message)
             if isinstance(message, Reject) and ref is not None and ref == self.account_ref:
                 self.account_reply = message
+            elif (
+                isinstance(message, Reject)
+                and ref is None
+                and not message.HasField("request_type")
+                and message.reason_code == ReasonCodes.MALFORMED_MESSAGE
+            ):
+                self.unattributed_rejects += 1
             elif self.order is not None:
                 self.order.apply(message)
 
@@ -572,14 +601,21 @@ def check_market(report: Report, watcher: Watcher, instruments: list[str], secon
         if instrument in watcher.unknown_instruments:
             reason = watcher.unknown_instruments[instrument]
             report.add(FAIL, name, f"the exchange does not know it: {reason}")
-        elif book is not None:
-            counts = watcher.counts[instrument]
-            arrived = ", ".join(
-                f"{counts[kind]} {kind}" for kind in ("books", "trade prints", "marks")
-            )
-            report.add(PASS, name, f"{best_text(book)}; {arrived} in {seconds:g} s")
         elif is_open:
-            report.add(SKIP, name, f"no book within {seconds:g} s: none published for it yet")
+            assert state is not None
+            if book is not None and book.grid_time >= state.open_time:
+                counts = watcher.counts[instrument]
+                arrived = ", ".join(
+                    f"{counts[kind]} {kind}" for kind in ("books", "trade prints", "marks")
+                )
+                report.add(PASS, name, f"{best_text(book)}; {arrived} in {seconds:g} s")
+            elif watcher.grid_points >= 2:
+                # A session's first grid point publishes every instrument's book, and a
+                # subscribe is answered with the last one published, so one is overdue.
+                report.add(FAIL, name, f"no book from this session within {seconds:g} s")
+            else:
+                why = "too few grid points arrived to expect one"
+                report.add(SKIP, name, f"no book within {seconds:g} s, but {why}")
         elif is_closed:
             close = watcher.closes.get(instrument)
             if close is None:
@@ -595,19 +631,14 @@ def check_market(report: Report, watcher: Watcher, instruments: list[str], secon
 def check_account(report: Report, watcher: Watcher, seconds: float) -> None:
     reply = watcher.account_reply
     if reply is None:
-        report.add(SKIP, "account", f"not answered by this exchange within {seconds:g} s")
+        reason = f"not answered by this exchange within {seconds:g} s"
+        if watcher.unattributed_rejects:
+            # How an exchange that does not know a message type refuses it: no
+            # request_type and no request_ref, as qte_sdk.session treats a resume.
+            reason += ", which sent a MALFORMED_MESSAGE reject naming no request"
+        report.add(SKIP, "account", reason)
     elif isinstance(reply, Reject):
-        text = reject_text(reply)
-        if reply.reason_code in (
-            ReasonCodes.MALFORMED_MESSAGE,
-            ReasonCodes.REASON_CODE_UNSPECIFIED,
-        ):
-            # The query this SDK sends is well formed, so this is how an exchange that does
-            # not serve it yet would refuse it.
-            reason = f"refused as {text}: this exchange may not serve the query yet"
-            report.add(SKIP, "account", reason)
-        else:
-            report.add(FAIL, "account", f"refused: {text}")
+        report.add(FAIL, "account", f"refused: {reject_text(reply)}")
     else:
         basis = name_of(ValuationBasis, reply.valuation_basis)
         summary = "with" if reply.HasField("summary") else "without"
@@ -651,8 +682,9 @@ def price_step(book: Book) -> int:
 def probe_price(book: Book, tick: int | None) -> tuple[int | None, str]:
     """The test buy's price and "", or None and why there is none.
 
-    The price is the first one on the tick above the wall's best bid: the lowest at which a
-    buy can rest, since an order rests only strictly inside the wall's best bid and ask. It
+    The price is one step above the wall's best bid, since an order rests only strictly
+    inside the wall's best bid and ask: the lowest price that can rest when the step is the
+    tick. The step is `tick`, or else `price_step(book)`, a whole number of ticks. The price
     must also be below every ask, the wall's and resting orders', so it cannot trade on
     arrival."""
     if book.condition != InstrumentCondition.LIVE or not book.bid_levels or not book.ask_levels:
@@ -732,7 +764,7 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     grid_points = 1
-    while not order.gone:
+    while not order.gone and order.moved_to is None:
         if watcher.closed:
             return "the connection ended"
         if loop.time() >= deadline:
@@ -746,13 +778,19 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
                 side=BUY,
                 price=order.price,
                 request_ref=ref,
-            )
+            ),
+            deadline,
         ):
             return "the cancel could not be sent: the connection closed or stalled"
         answered = await watcher.until(
-            lambda ref=ref: order.gone or isinstance(order.replies.get(ref), Reject), deadline
+            lambda ref=ref: (
+                order.gone
+                or order.moved_to is not None
+                or isinstance(order.replies.get(ref), Reject)
+            ),
+            deadline,
         )
-        if order.gone:
+        if order.gone or order.moved_to is not None:
             return None
         reply = order.replies.get(ref)
         if not answered:
@@ -771,9 +809,19 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
         target = watcher.grid_points + grid_points
         grid_points *= 2
         await watcher.until(
-            lambda target=target: order.gone or watcher.grid_points >= target, deadline
+            lambda target=target: (
+                order.gone or order.moved_to is not None or watcher.grid_points >= target
+            ),
+            deadline,
         )
     return None
+
+
+def moved(order: ProbeOrder) -> tuple[str, str]:
+    return FAIL, (
+        f"{order.where} was moved by another of your team's programs, and may still be "
+        f"resting at {order.where_now}; check your team's orders and cancel it yourself"
+    )
 
 
 async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) -> tuple[str, str]:
@@ -790,7 +838,7 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
         request_ref=order.new_ref,
     )
     try:
-        if not await watcher.sent(sending):
+        if not await watcher.sent(sending, loop.time() + seconds):
             return FAIL, (
                 f"{order.where} could not be sent (the connection closed or stalled): it may be "
                 "resting; check your team's orders and cancel that level yourself"
@@ -803,6 +851,8 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
         return rejected_new(order)
     if order.gone:
         return left_alone(order)
+    if order.moved_to is not None:
+        return moved(order)
     # It rests, or what became of it is unknown. Cancel the level either way: a cancel is
     # applied after the new, so it also removes an order that rests after this wait.
     unsure = None
@@ -811,6 +861,8 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
     elif not order.resting:
         unsure = f"accepted, but not reported resting within {seconds:g} s"
     why_not = await cancel_level(watcher, order, seconds)
+    if order.moved_to is not None and not order.gone:
+        return moved(order)
     if order.confirmed:
         assert order.cancelled is not None
         if order.cancelled.strat_id != order.strat_id:
@@ -877,7 +929,7 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
         reported = True
     finally:
         if order.may_rest:
-            where = "" if reported else f": {order.where}"
+            where = "" if reported else f": {order.where_now}"
             print(
                 f"WARNING: the test order may still be resting{where}. Check your team's "
                 "orders and cancel that level yourself.",
@@ -892,12 +944,16 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
 async def first_past_book(
     client: HistoryClient, day: str, instrument: str, seconds: float
 ) -> tuple[str, str]:
+    """Read the start of one closed session's books, up to the first book. A whole session
+    is too much to download here, so the rest, and the digest the service states for the
+    whole, are not checked."""
     try:
         async with asyncio.timeout(seconds):
             async with aclosing(client.fetch(day, instrument, "book")) as items:
                 async for item in items:
                     if isinstance(item, Book):
-                        return PASS, f"session {day} served; its first book: {best_text(item)}"
+                        sample = "only its start was read, not checked against its digest"
+                        return PASS, f"session {day}: first book {best_text(item)}; {sample}"
                     if isinstance(item, Unknown | DecodeFailed):
                         kind = type(item).__name__
                         return FAIL, f"session {day}: a line could not be used ({kind})"
@@ -910,8 +966,9 @@ async def first_past_book(
         return FAIL, f"session {day}: {type(error).__name__}: {error}"
     except TimeoutError:
         return FAIL, f"session {day}: no answer within {seconds:g} s"
-    except Exception as error:  # a network failure; the SDK keeps the token out of it
-        return FAIL, f"session {day}: {type(error).__name__}: {error}"
+    except Exception as error:
+        # A network failure. Its text can repeat the address, so only its kind is shown.
+        return FAIL, f"session {day}: could not reach the service ({type(error).__name__})"
 
 
 async def check_history(
@@ -940,7 +997,14 @@ async def check_history(
         # Never wait for data that is not ready yet: report it instead.
         client = HistoryClient(timeout=args.seconds, max_retries=0)
     except (ValueError, MissingToken) as error:
-        report.add(FAIL, "history", f"{HISTORY_URL_ENV_VAR} cannot be used: {error}")
+        # Not the error's text, which can repeat part of the address.
+        why = (
+            "it must be the service's https address (http only on this machine), with no "
+            "credentials, query or fragment, and the token printable ASCII"
+        )
+        report.add(
+            FAIL, "history", f"cannot use {HISTORY_URL_ENV_VAR} ({type(error).__name__}): {why}"
+        )
         return
     for instrument in instruments:
         status, reason = await first_past_book(
@@ -991,7 +1055,7 @@ async def session_checks(report: Report, watcher: Watcher, args: argparse.Namesp
 async def run(url: str, args: argparse.Namespace, report: Report) -> None:
     failure = None
     try:
-        session = await open_session(url)
+        session = await open_session(url, ack_timeout=args.seconds)
     except ContractVersionMismatch as error:
         failure = f"the exchange does not serve this SDK's contract version: {error}; update it"
     except SessionRejected as error:
