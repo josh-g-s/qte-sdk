@@ -101,6 +101,9 @@ message StudentLevel {
 
 // The adjusted book of one instrument at the end of one 100 ms interval: the
 // wall ladder and the resting student depth (SPEC 4.3, SPEC 5.3, SPEC 5.4).
+// Published at a grid point only when it differs from the instrument's last
+// published book in any field other than grid_time, and for every instrument
+// at the first grid publication of a session (SPEC 4.3).
 message Book {
   string instrument = 1;  // id. SPEC 3.1
   int64 grid_time = 2;    // timestamp. The end of the interval; identical for every subscriber. SPEC 4.3

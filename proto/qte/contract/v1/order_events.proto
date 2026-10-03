@@ -1,11 +1,14 @@
 // Outbound order events.
 //
-// **Version:** 1.4
+// **Version:** 1.8
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
-// `execution`, `order_cancelled`, `order_state`, `risk_notice`. These are
-// private to the team whose orders they concern. Each is sent as soon as the
-// engine records it, not held to the market-data publication grid (SPEC 4.3).
+// `execution`, `order_cancelled`, `order_state`, `account_summary`,
+// `obligation_state`, `risk_notice`. These are private to the team whose orders
+// they concern. Each but `account_summary` and `obligation_state` is sent as
+// soon as the engine records it, not held to the market-data publication grid
+// (SPEC 4.3); when `account_summary` is sent is not yet specified, and
+// `obligation_state` is sent once per desk per whole-second close of a session.
 // Every `timestamp` field's wire resolution and representation is not yet
 // specified.
 syntax = "proto3";
@@ -47,9 +50,9 @@ message Reject {
 // disclosed (SPEC 10). Every fill, fee and rebate an Execution ticket's child
 // orders generate posts immediately to the originating Fundamentals pod's or
 // house's own cash balance and position; a desk holds no separate ticket cash
-// position of its own (SPEC 12.2, SPEC 24). How a child order names its parent
-// ticket, and how a fill in this report links to one, are not yet in this
-// contract.
+// position of its own (SPEC 12.2, SPEC 24). A child order names its parent
+// ticket in NewOrder.parent_ticket_id (SPEC 24.1); how a fill in this report
+// links to that ticket is not yet specified.
 message Execution {
   string exec_id = 1;  // id. Fill report identity. SPEC 8.2. Its format is not yet specified
   Origin origin = 2;   // SPEC 11.1, SPEC 11.2
@@ -105,12 +108,144 @@ message OrderState {
   int64 timestamp = 8; // timestamp. SPEC 9.2
 }
 
+// One limit of the team's arm and how much of it is used (SPEC 11.1, Table 3).
+// Both amounts are magnitudes in micro-dollars, so a client computes the
+// utilisation as used over cap, and a limit is breached when used exceeds cap.
+message LimitUtilisation {
+  LimitKind kind = 1; // SPEC 11.1
+  // The instrument, sector or underlying the row is for; absent for a
+  // whole-book limit. How an options underlying-and-expiry is named is not
+  // yet specified.
+  optional string scope = 2;
+  // int64-micro. The amount held, as a magnitude. For the Fundamentals entry
+  // limits (LIMIT_INSTRUMENT, LIMIT_SECTOR, LIMIT_GROSS, LIMIT_SHORT_OF_GROSS)
+  // it is the projected exposure: held shares plus the unfilled shares of
+  // working increasing tickets, with no relief from working reducing tickets;
+  // a row is sent for a name with only working tickets. LIMIT_INSTRUMENT_HARD
+  // stays the filled position. For LIMIT_SHORT_OF_GROSS, used is held shorts
+  // plus unfilled shares of increasing short tickets, and cap is 20% of filled
+  // gross plus those short shares only (long tickets excluded until filled).
+  // LIMIT_GAMMA_DOLLAR is whole-book, sum of
+  // abs(g_i); LIMIT_VEGA_UNDERLYING_AGGREGATE is abs(summed signed vega) of
+  // an underlying against the longest live tenor's cap. SPEC 11.1, 18.7, 23.3
+  int64 used = 3;
+  int64 cap = 4;  // int64-micro. The limit's cap, fixed by the arm's equity in Table 3, not by live equity. SPEC 11.1
+}
+
+// A team's own account state: equity, cash, the day's profit and loss, where it
+// stands against its daily loss limits, how much of each Table 3 limit of its
+// arm it uses, and its exposure cure. Private to the team; it carries only the
+// team's own information (SPEC 4.3, SPEC 15.4). When it is sent is not yet
+// specified. The message is self-contained so another message can carry it
+// whole.
+message AccountSummary {
+  int64 equity = 1; // int64-micro. Live equity: cash plus positions at the official mark. SPEC 11.1
+  int64 cash = 2;   // int64-micro. The team's cash balance. SPEC 12.2
+  // int64-micro. The daily-loss reference: equity at the previous official
+  // close, except that for Market Making, Market Taking and both Options
+  // sub-arms in the first session of a new term it is the reset opening
+  // equity (the new term's starting capital), not the prior term's closing
+  // equity. Fundamentals is not reset. SPEC 11.1, SPEC 13.5, SPEC 15.1
+  int64 previous_close_equity = 3;
+  // Signed: equity minus previous_close_equity, realised and unrealised,
+  // including overnight financing and dividends. Capital removed or supplied
+  // by a term reset is not P&L. SPEC 11.1, SPEC 13.5
+  int64 daily_pnl = 4; // int64-micro
+  // Present iff the arm has a daily loss limit: the loss that raises the
+  // warning, 60% of the halt amount. SPEC 11.1, Table 3
+  optional int64 loss_warning_amount = 5; // int64-micro
+  // Present iff the arm has a daily loss limit: the loss that starts the
+  // halt, a percentage of the arm's fixed equity. SPEC 11.1, Table 3
+  optional int64 loss_halt_amount = 6; // int64-micro
+  LossLevel loss_level = 7; // SPEC 11.1
+  // One row per whole-book limit of the arm, and one per instrument, sector or
+  // underlying where the team holds a position. May be empty. SPEC 11.1, Table 3
+  repeated LimitUtilisation limits = 8;
+  bool in_cure = 9; // True while the team is in the 15-minute exposure cure. SPEC 11.2
+  // Present iff in_cure: when the window ends. Set by the first breach and
+  // never extended for a further breach; a scheduled session closure or a
+  // declared exchange outage pauses it. SPEC 11.2
+  optional int64 cure_deadline = 10; // timestamp
+  // Present iff in_cure: true while the cure is paused, when cure_deadline is
+  // the end the window would have if it resumed at this message's timestamp.
+  // SPEC 11.2
+  optional bool cure_paused = 11;
+  int64 timestamp = 12; // timestamp. When the state was read. SPEC 9.2
+}
+
+// A market making desk's own quoting-obligation state: for each instrument
+// assigned to it, its running two-sided presence in the current
+// instrument-session, whether its latest second met the spread and size tests,
+// and whether it is in the live Tier-M state (SPEC 16.2, SPEC 9.3.5). One
+// message per desk per whole-second close of a session, sent right after
+// SPEC 9.4.2 rank 1, with one entry for every instrument assigned to the desk;
+// nothing is sent outside a session. Private to the desk it concerns and never
+// on the public feed: it carries no other desk's information (SPEC 4.3,
+// SPEC 15.4). It is defined for equity Market Making desks. Whether it also
+// covers an Options market making desk, for its own obligated contracts under
+// SPEC 18.5, is not yet confirmed, and option contracts are not yet identified
+// on the wire.
+message ObligationState {
+  // One entry for every instrument assigned to the desk, in no required order.
+  repeated ObligationEntry entries = 1;
+  int64 timestamp = 2; // timestamp. The second close every entry is as of. SPEC 9.2, 9.4.2
+}
+
+// One assigned instrument's obligation state within an ObligationState.
+message ObligationEntry {
+  string instrument = 1; // The desk's assigned instrument. SPEC 16.1
+  // Whether the second just closed is eligible time for this desk in this
+  // instrument. False in the first five minutes of the session, during an
+  // exchange suspension affecting the instrument, after the desk's own daily
+  // loss halt, and in the term's final closing window; a 15-minute exposure
+  // cure does not make it false. SPEC 16.2, 9.3.5, 13.3, 13.5
+  bool eligible = 2;
+  // Present iff eligible. Whether that second counted: both a non-stale
+  // executable bid and offer existed, their full spread was at most 60% of the
+  // band width in force, and the quantity displayed at each of those prices
+  // met the minimum size. SPEC 16.2
+  optional bool qualifying = 3;
+  // Present iff eligible and the desk had both a non-stale executable bid and
+  // offer. Whether the full quoted spread was at most 60% of the full
+  // two-sided band width in force. SPEC 16.2, 5.2
+  optional bool spread_compliant = 4;
+  // Present iff eligible and the desk had both a non-stale executable bid and
+  // offer. Whether the quantity displayed at the bid price and at the offer
+  // price, each summed across the desk's orders at that price, independently
+  // met the minimum size. Size at other prices does not count. SPEC 16.2
+  optional bool size_compliant = 5;
+  // Whole seconds. Qualifying seconds so far in the current instrument-session.
+  // SPEC 16.2
+  int32 session_qualifying_seconds = 6;
+  // Whole seconds. Eligible seconds so far in the current instrument-session.
+  // Presence is qualifying over eligible; no ratio is sent. SPEC 16.2
+  int32 session_eligible_seconds = 7;
+  // Whether the desk is in the live Tier-M state for this instrument: over the
+  // trailing 900 seconds it qualified in at least 85% of that window's
+  // eligible seconds. False with no eligible second yet, and for a desk under a
+  // daily loss halt or a penalty suspension. SPEC 9.3.5, 16.2
+  bool in_tier_m = 8;
+  // Whole seconds. Qualifying seconds in the trailing 900-second window.
+  // SPEC 9.3.5
+  int32 tier_m_qualifying_seconds = 9;
+  // Whole seconds. Eligible seconds in the same window. SPEC 9.3.5
+  int32 tier_m_eligible_seconds = 10;
+}
+
 // SPEC 11.1. A team is told on this connection, when the engine records it,
 // of the daily loss warning, a loss halt, a cure window opening and its
 // deadline, a cure trade, the auto-flatten and the kill switch (SPEC 11.1,
-// SPEC 15.4). Only LOSS_WARNING has a kind value so far; the other five, and
-// any field carrying a cure deadline, are not yet specified.
+// SPEC 15.4). Each has its own kind value.
 message RiskNotice {
   RiskNoticeKind kind = 1; // SPEC 11.1
   int64 timestamp = 2;     // timestamp. SPEC 9.2
+  // Present iff kind = CURE_WINDOW_OPENED: when the window's deadline
+  // falls, as set by the first breach. A paused deadline (a scheduled closure,
+  // a declared outage) sends no further notice. SPEC 11.2
+  optional int64 cure_deadline = 3; // timestamp
+  // Always present as an array (the shared encoder emits every field): empty
+  // for every kind except CURE_WINDOW_OPENED, where it has at least one
+  // element. The breached limits, one entry per limit, as at the moment the
+  // window opened. SPEC 11.1, SPEC 11.2
+  repeated LimitUtilisation breached_limits = 4;
 }

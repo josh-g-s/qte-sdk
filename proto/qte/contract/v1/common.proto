@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.4
+// **Version:** 1.6
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -89,18 +89,84 @@ enum MarketSessionPhase {
   CLOSED = 2;
 }
 
+// Where a team stands against its arm's daily loss limits
+// (`account_summary.loss_level`, SPEC 11.1, Table 3). NONE: the daily loss is
+// below 60% of the halt level, or the arm has no daily loss limit. WARNING:
+// the daily loss has reached 60% of the halt level; a notification only.
+// HALT: the daily loss has reached the halt level and the team is restricted
+// to position-reducing orders until the session end (for the Agentic AI arm
+// the level is its 4.0% single-session auto-flatten threshold).
+//
+// This enum is open to extension: adding a value later is an additive change,
+// not a breaking one.
+enum LossLevel {
+  LOSS_LEVEL_UNSPECIFIED = 0;
+  LOSS_LEVEL_NONE = 1;
+  LOSS_LEVEL_WARNING = 2;
+  LOSS_LEVEL_HALT = 3;
+}
+
+// The kind of one Table 3 limit (`LimitUtilisation.kind`, SPEC 11.1). Each
+// value fixes what its `used` and `cap` measure; every one is an amount in
+// micro-dollars (a vega limit is micro-dollars per volatility point). Only the
+// limits that bound a held position appear: the per-order caps, the message
+// limits and the Fundamentals drawdown review are not utilisations.
+//
+// This enum is open to extension: adding a value later is an additive change,
+// not a breaking one.
+enum LimitKind {
+  LIMIT_KIND_UNSPECIFIED = 0;
+  LIMIT_GROSS = 1;         // Gross notional, whole book. SPEC 11.1
+  LIMIT_NET = 2;           // Market Making net exposure, whole book. SPEC 11.1
+  LIMIT_INSTRUMENT = 3;    // One instrument's position notional; Fundamentals' entry cap, projected exposure. SPEC 11.1, SPEC 23.3
+  LIMIT_INSTRUMENT_HARD = 4; // Fundamentals' hard per-instrument cap. SPEC 11.1
+  LIMIT_SECTOR = 5;        // One GICS sector's notional (Fundamentals). SPEC 11.1
+  LIMIT_SHORT_OF_GROSS = 6; // Short notional against its share of gross (Fundamentals). SPEC 11.1
+  LIMIT_VEGA = 7;          // Vega against the sqrt(T) schedule (Options). SPEC 11.1, SPEC 18.7
+  LIMIT_GAMMA_DOLLAR = 8;  // Whole book: sum over underlyings of abs(gamma dollars) (Options). SPEC 11.1, SPEC 18.7
+  LIMIT_NET_DELTA_UNDERLYING = 9; // Absolute net delta of one underlying (Options). SPEC 11.1
+  LIMIT_NET_DELTA_BOOK = 10;      // Absolute net delta, whole book (Options). SPEC 11.1
+  LIMIT_HEDGING_ALLOWANCE_UNDERLYING = 11; // Hedge-stock allowance of one underlying (Options). SPEC 11.1, SPEC 18.8
+  LIMIT_HEDGING_ALLOWANCE_BOOK = 12;       // Hedge-stock allowance, whole book (Options). SPEC 11.1, SPEC 18.8
+  // One underlying with two live expiries: abs(summed signed vega) against the longest live tenor's cap (Options). SPEC 18.7
+  LIMIT_VEGA_UNDERLYING_AGGREGATE = 13;
+  // The three SPEC 18.8 hedge-qualification tests, which are not Table 3 limits
+  // but start a cure window all the same (SPEC 18.8 "Hedge orders and unwinds").
+  // Wrong-sign hedge stock of one underlying: used is the wrong-sign stock
+  // notional |H_i|, cap is 0. SPEC 18.8
+  LIMIT_HEDGE_SIGN = 14;
+  // One underlying's hedge stock magnitude: used is |H_i|, cap is |D_i| plus
+  // tau_hedge ($100k). SPEC 18.8
+  LIMIT_HEDGE_MAGNITUDE_UNDERLYING = 15;
+  // The book's hedge stock magnitude: used is sum_i |H_i|, cap is sum_i |D_i|
+  // plus $150k. SPEC 18.8
+  LIMIT_HEDGE_MAGNITUDE_BOOK = 16;
+}
+
 // `risk_notice.kind` (SPEC 11.1). A loss halt, a cure window and its deadline,
 // a cure trade, the auto-flatten and the Directors' kill switch are notified
 // on this connection alongside the loss warning, when the engine records them
-// (SPEC 11.1, SPEC 15.4). Their kind values are not yet specified.
+// (SPEC 11.1, SPEC 15.4).
 //
-// This enum is open to extension: adding those values later is an additive
-// change, not a breaking one.
+// This enum is open to extension: adding values later is an additive change,
+// not a breaking one.
 enum RiskNoticeKind {
   RISK_NOTICE_KIND_UNSPECIFIED = 0;
-  LOSS_WARNING = 1;
-  // 2-15 reserved for the notices not yet specified: loss halt start, cure
-  // window open and its deadline, cure trade, auto-flatten, kill switch.
+  // The daily loss reached 60% of the halt level; a notification only.
+  LOSS_WARNING = 1; // SPEC 11.1
+  // The daily loss reached the halt level and the desk entered its loss halt
+  // (SPEC 11.1, SPEC 11.2, SPEC 16.5, SPEC 17.4).
+  LOSS_HALT_ENTERED = 2;
+  // A cure window opened. The notice carries its deadline and the breached
+  // limits (SPEC 11.2).
+  CURE_WINDOW_OPENED = 3;
+  // The engine placed a cure trade from the team's account (SPEC 11.2).
+  CURE_TRADE_PLACED = 4;
+  // The Agentic AI single-session auto-flatten began (SPEC 11.1, SPEC 11.2).
+  AUTO_FLATTEN_STARTED = 5;
+  // The Directors' kill switch stopped the team (SPEC 8.2, SPEC 11.1).
+  KILL_SWITCH_ENGAGED = 6;
+  // 7-15 reserved for growth.
 }
 
 // Namespacing wrapper. `ReasonCode`'s values would otherwise collide with
@@ -203,6 +269,13 @@ message ReasonCodes {
     // An Execution desk's order cancelled because the participation cap
     // bound: what its permitted fills leave of it (SPEC 24.3).
     PARTICIPATION_LIMIT = 1812;
-    // 1813-1899 reserved for band 1800 growth.
+    // An outstanding order cancelled at loss-halt entry: the halt is
+    // desk-wide (SPEC 11.2, SPEC 16.5, SPEC 17.4).
+    LOSS_HALT = 1813;
+    // Under a loss halt, a resting order's quantity cancelled before a fill
+    // because it would increase the position or cross zero (SPEC 16.5,
+    // SPEC 17.4).
+    POSITION_REDUCING_RECHECK_FAILED = 1814;
+    // 1815-1899 reserved for band 1800 growth.
   }
 }
