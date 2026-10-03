@@ -26,9 +26,18 @@ view reads incomplete from each `Connected` until that resume's `ResumeComplete`
 
 Report numbers start again each term, so the last report number is only sent in the term
 it was counted in. The term is the one the calendar names (`term_start` and `term_end`).
-The exchange sends the calendar straight after `session_ack`, so before resuming, the
-session waits briefly for it. If the term has changed, or either term is unknown, the
-session asks from 0 instead and gets a snapshot.
+The exchange sends the calendar straight after `session_ack`, so when there is a report
+number to carry over, the new session first waits for it, for at most `ack_timeout` or
+`qte_sdk.session.DEFAULT_CALENDAR_TIMEOUT` seconds, whichever is less, keeping whatever
+else it reads meanwhile for delivery. If the term has changed, or either term is unknown,
+the session asks from 0 instead and gets a snapshot.
+
+With `resume=False` the report number is carried over too, so that a report missed while
+disconnected is noticed (see below). It is forgotten when the new session's calendar names
+a different term from the one it was counted in, so the new term's first reports are not
+dropped as duplicates of the old term's. The session waits for the calendar as above, but
+only when the term the number was counted in is known; if either term is unknown, the
+number is kept.
 
 Market data sent while the connection was down is not recovered: the new session
 subscribes again and receives the books from then on. Nor are messages that carry no
@@ -42,8 +51,9 @@ What happens on a disconnect, in this order:
 2. After a backoff delay (see `Backoff`), a new connection is opened. Its sequence tracking
    starts afresh, so the new session's numbering is not reported as a gap.
 3. The new connection authenticates with the same token. Once the exchange acknowledges the
-   session, it sends `resume` with `last_report_seq` and waits for the exchange's
-   `resume_ack`, then subscribes again to every instrument this session is subscribed to.
+   session, it checks the term against the calendar (see above), sends `resume` with
+   `last_report_seq` and waits for the exchange's `resume_ack`, then subscribes again to
+   every instrument this session is subscribed to.
 4. A `Connected` event is delivered, with `reconnected=True` and the `resume_ack` as
    `resume`.
 5. The `resume_ack` follows as an event, then the replayed reports or the `order_snapshot`
@@ -113,6 +123,7 @@ from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import (
+    Connected,
     DataUncertain,
     Disconnected,
     Event,
@@ -204,23 +215,6 @@ DEFAULT_BACKOFF = Backoff()
 
 
 @dataclass(frozen=True)
-class Connected:
-    """A session is up: authenticated, acknowledged, resumed, and subscribed to
-    `instruments`.
-
-    `reconnected` is False for the first session and True for every later one. `resume` is
-    the exchange's `resume_ack`, or None when resuming is turned off. The private reports
-    missed while disconnected follow; market data sent meanwhile is lost (see
-    `Disconnected`).
-    """
-
-    info: SessionInfo
-    instruments: tuple[str, ...]
-    reconnected: bool
-    resume: ResumeAck | None = None
-
-
-@dataclass(frozen=True)
 class Retrying:
     """The next connection attempt, number `attempt`, starts after `delay` seconds.
 
@@ -276,13 +270,14 @@ class ReconnectingSession:
     `qte_sdk.session.resolve_token`), and are resolved once, here.
     `resting`, if given, is updated from every event and marked incomplete on every
     disconnect; the resume that follows makes it complete again (see the module). `resume`
-    turns resuming on (the default) or off. `backoff=None` turns reconnecting off: the
-    first failure to connect is raised, and iteration ends after the first `Disconnected`.
-    `sleep` and `rng` wait and draw the jitter; replace them in tests. `ack_timeout` and
-    `connection_options` are passed to `open_session` for every connection, so
-    `ack_timeout` bounds each attempt to open one; it also bounds each wait for
-    `resume_ack`. `connection_options` include `liveness_timeout` (see
-    `qte_sdk.connection.Connection`).
+    turns resuming on (the default) or off; either way, a new session may first wait
+    briefly for the exchange's calendar, to check the term (see the module). `backoff=None`
+    turns reconnecting off: the first failure to connect is raised, and iteration ends
+    after the first `Disconnected`. `sleep` and `rng` wait and draw the jitter; replace
+    them in tests. `ack_timeout` and `connection_options` are passed to `open_session` for
+    every connection, so `ack_timeout` bounds each attempt to open one; it also bounds each
+    wait for `resume_ack`, and the wait for the calendar. `connection_options` include
+    `liveness_timeout` (see `qte_sdk.connection.Connection`).
 
     `calendar` is the session calendar the exchange sent on the current session; see
     `qte_sdk.calendar`.
@@ -350,7 +345,8 @@ class ReconnectingSession:
 
         The exchange sends one right after it acknowledges each session. It is delivered
         as an ordinary event too, after `Connected`, but may already be set when
-        `Connected` arrives, since the session reads ahead while it waits for `resume_ack`.
+        `Connected` arrives, since the session reads ahead while it waits for the calendar
+        or for `resume_ack`.
         Each new session starts with None here until its calendar is read: the calendar's
         `next_open` was worked out from the exchange's clock when the earlier session
         opened, so it is not carried over. An exchange that predates the calendar message
@@ -363,7 +359,8 @@ class ReconnectingSession:
     def last_report_seq(self) -> int | None:
         """The `report_seq` up to which every private report has been read with no gap,
         across all sessions so far, or None before the first. The next session resumes
-        from it."""
+        from it if its calendar names the same term; report numbers start again each term,
+        so in a new term it resumes from 0 instead."""
         return self._reports.cursor
 
     @property
@@ -452,13 +449,13 @@ class ReconnectingSession:
                 self._info = session.info
                 self._calendar = session.calendar
                 if self._calendar is not None:
-                    self._reports_term = _term_of(self._calendar)
+                    self._enter_term(_term_of(self._calendar), strict=False)
                 self._up = True
-                if resumed is not None and self.resting is not None:
-                    # The replay or snapshot is still to come: until its ResumeComplete,
-                    # the view does not yet reflect it.
-                    self.resting._await_resume()
-                yield Connected(session.info, self.instruments, reconnected, resumed)
+                connected = Connected(session.info, self.instruments, reconnected, resumed)
+                if self.resting is not None:
+                    # With a resume, the view reads incomplete until its ResumeComplete.
+                    self.resting.apply(connected)
+                yield connected
                 reconnected = True
 
                 failure = None
@@ -469,8 +466,9 @@ class ReconnectingSession:
                         if isinstance(event, Received) and event.type == "calendar":
                             assert isinstance(event.message, Calendar)
                             self._calendar = event.message
-                            # The term of the reports this session counts.
-                            self._reports_term = _term_of(event.message)
+                            # Before any later report is counted: a calendar that arrived
+                            # too late for the attempt to check may name a new term.
+                            self._enter_term(_term_of(event.message), strict=False)
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event
@@ -579,20 +577,25 @@ class ReconnectingSession:
             # even without a resume.
             self._reports.restore(saved)
             session._reports = self._reports
+            if not self._reports.cursor:
+                # Whatever the cursor becomes from here on (the first report read, or a
+                # snapshot's as_of) is counted in this session's term, which its calendar
+                # names when it arrives.
+                self._reports_term = None
+            elif (self._resume or self._reports_term is not None) and not self._closed:
+                # report_seq starts again each term, so a cursor counted in another term
+                # would send the wrong number in `resume`, and would drop the new term's
+                # first reports as duplicates. The calendar, which the exchange sends right
+                # after session_ack, names the term. It is checked before any report of
+                # this session is counted; whatever else is read ahead while waiting for it
+                # is kept for delivery. Without a resume, the wait is pointless while the
+                # cursor's own term is unknown, since only two known terms that differ
+                # reset it then.
+                calendar = await session.wait_for_calendar(
+                    timeout=_calendar_wait(self._ack_timeout)
+                )
+                self._enter_term(_term_of(calendar), strict=self._resume)
             if self._resume and not self._closed:
-                if self._reports.cursor:
-                    # report_seq starts again each term, so a cursor is only worth sending
-                    # in the term it was counted in. The calendar, which the exchange sends
-                    # right after session_ack, names the term; whatever else is read ahead
-                    # while waiting for it is kept for delivery. If either term is unknown,
-                    # or they differ, the session asks for a snapshot instead.
-                    calendar = await session.wait_for_calendar(
-                        timeout=_calendar_wait(self._ack_timeout)
-                    )
-                    term = _term_of(calendar)
-                    if term is None or term != self._reports_term:
-                        self._reports.restore((None, frozenset()))
-                    self._reports_term = term
                 resumed = None
                 try:
                     resumed = await session.resume(
@@ -641,6 +644,25 @@ class ReconnectingSession:
         finally:
             if self._pending is task:
                 self._pending = None
+
+    def _enter_term(self, term: tuple[str, str] | None, *, strict: bool) -> None:
+        """Note that the reports read from now on are counted in `term`, the term a
+        calendar names (None if it names none).
+
+        report_seq starts again each term, so the cursor is forgotten if it was counted in
+        another term: when both terms are known and differ, or, if `strict`, when either
+        is unknown too. `strict` is for a cursor about to be sent in `resume`, where asking
+        from 0 for a snapshot is always safe; without a resume the cursor only drops
+        duplicates and notices gaps, and is kept unless it is known to be stale. A resume
+        in progress is never cut short. A cursor that is kept keeps the term it was
+        counted in, unless `term` names one."""
+        reports = self._reports
+        counted_in = self._reports_term
+        if reports.resume is None and reports.cursor is not None and term != counted_in:
+            if strict or (term is not None and counted_in is not None):
+                reports.restore((None, frozenset()))
+        if term is not None or reports.cursor is None:
+            self._reports_term = term
 
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):

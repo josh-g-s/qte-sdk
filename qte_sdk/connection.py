@@ -56,7 +56,7 @@ import logging
 import sys
 from collections.abc import AsyncIterator, Iterator, MutableMapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from google.protobuf.message import Message
 from websockets.asyncio.client import ClientConnection, connect
@@ -66,6 +66,10 @@ from websockets.frames import Close, Frame
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import CONTRACT_VERSION, INBOUND
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+from qte_sdk.contract.v1.session_pb2 import ResumeAck
+
+if TYPE_CHECKING:
+    from qte_sdk.session import SessionInfo
 
 DEFAULT_LIVENESS_TIMEOUT = 45.0
 """Seconds with no message from the exchange after which a connection presumes the link
@@ -285,6 +289,24 @@ class Disconnected(DataUncertain):
     """
 
     error: Exception | None
+
+
+@dataclass(frozen=True)
+class Connected:
+    """A session is up: authenticated, acknowledged, resumed, and subscribed to
+    `instruments`.
+
+    `reconnected` is False for the first session and True for every later one. `resume` is
+    the exchange's `resume_ack`, or None when resuming is turned off or the exchange
+    refused it. When it is set, the replay or snapshot it announces follows, ending with a
+    `ResumeComplete`; market data sent meanwhile is lost (see `Disconnected`). A
+    `Connection` never yields this itself; `qte_sdk.reconnect.ReconnectingSession` does.
+    """
+
+    info: "SessionInfo"
+    instruments: tuple[str, ...]
+    reconnected: bool
+    resume: ResumeAck | None = None
 
 
 @dataclass(frozen=True)

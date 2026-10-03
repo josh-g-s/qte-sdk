@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import aclosing
 
 import pytest
 from fake_exchange import frame, serve_local
@@ -33,6 +34,7 @@ from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     ResumeNotAcknowledged,
     ResumeRejected,
+    SessionInfo,
     _Reports,
     open_session,
 )
@@ -973,20 +975,140 @@ async def test_a_failed_attempt_keeps_the_term_the_cursor_belongs_to():
     assert resumes == [resume(0), resume(0), resume(1)]
 
 
-async def test_the_first_connected_shows_the_view_incomplete_until_the_snapshot_lands():
+@pytest.mark.parametrize("attached", ["resting", "follow"])
+async def test_the_first_connected_shows_the_view_incomplete_until_the_snapshot_lands(
+    attached: str,
+):
+    # The view is either passed as `resting=` or follows the session; both read the same.
     exchange = Scripted({"answer": [resume_ack(False, 9, 1), snapshot("AAPL", "BUY", PRICE, 10)]})
     view = RestingOrders()
     seen: list[tuple[str, bool, int]] = []
     async with serve_local(exchange) as url:
-        rs = ReconnectingSession(url, synthetic_token(), resting=view, sleep=Clock().sleep)
+        rs = ReconnectingSession(
+            url,
+            synthetic_token(),
+            resting=view if attached == "resting" else None,
+            sleep=Clock().sleep,
+        )
         async with rs:
-            async for event in rs:
-                seen.append((kinds([event])[0], view.incomplete, len(view)))
-                if isinstance(event, ResumeComplete):
-                    break
+            events = rs.events() if attached == "resting" else view.follow(rs)
+            async with aclosing(events) as iterator:
+                async for event in iterator:
+                    seen.append((kinds([event])[0], view.incomplete, len(view)))
+                    if isinstance(event, ResumeComplete):
+                        break
     assert seen == [
         ("Connected", True, 0),
         ("resume_ack:None", True, 0),
         ("order_snapshot:None", True, 0),
         ("ResumeComplete", False, 1),
     ]
+
+
+def test_a_connected_with_a_resume_shows_the_view_incomplete_until_it_completes():
+    info = SessionInfo("s-1", "team-a", 0, "0.x", False)
+    view = RestingOrders()
+    # Without a resume, nothing is coming that the view lacks.
+    view.apply(Connected(info, (), False, None))
+    assert not view.incomplete
+    view.apply(Connected(info, (), False, ResumeAck(replayed=True, as_of_report_seq=4)))
+    assert view.incomplete
+    view.apply(ResumeComplete(True, 4, 0))
+    assert not view.incomplete
+    # A view that needs a snapshot is not made complete by a replay, Connected or not.
+    view.mark_incomplete()
+    view.apply(Connected(info, (), True, ResumeAck(replayed=True, as_of_report_seq=4)))
+    view.apply(ResumeComplete(True, 4, 0))
+    assert view.incomplete
+
+
+def test_connected_is_still_importable_from_the_reconnect_module():
+    import qte_sdk.reconnect
+
+    assert qte_sdk.reconnect.Connected is qte_sdk.connection.Connected
+    assert "Connected" in qte_sdk.reconnect.__all__
+
+
+# Without resume, across terms
+
+
+@pytest.mark.parametrize("new_term", [True, False])
+async def test_without_resume_the_cursor_is_forgotten_only_in_a_new_term(new_term: bool):
+    second = (
+        # The new term restarted the numbering: report 1 is an order resting and report 2
+        # its fill, neither of which the old term's cursor of 100 may drop.
+        {"term": NEXT_TERM, "after": [order_state(1), execution(2, 40)]}
+        if new_term
+        # The same term: reports 101 and 102 were missed while disconnected.
+        else {"term": TERM, "after": [order_state(103), execution(104, 40)]}
+    )
+    exchange = Scripted(
+        {"term": TERM, "after": [order_state(99), order_state(100)], "drop": True}, second
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resume=False, sleep=Clock().sleep)
+        async with rs:
+            events = await take(rs, 10 if new_term else 11)
+            last = rs.last_report_seq
+    assert all(e["type"] == "auth" for e in exchange.received)
+    assert kinds(events)[:7] == [
+        "Connected",
+        "calendar:None",
+        "order_state:99",
+        "order_state:100",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+    ]
+    if new_term:
+        assert kinds(events)[7:] == ["calendar:None", "order_state:1", "execution:2"]
+        assert last == 2
+    else:
+        assert kinds(events)[7:] == [
+            "calendar:None",
+            "ReportGap",
+            "order_state:103",
+            "execution:104",
+        ]
+        assert events[8] == ReportGap(101, 103)
+        assert last == 100  # the cursor never moves over the gap
+
+
+async def test_without_resume_a_calendar_too_late_to_check_still_forgets_an_old_term():
+    # The second session's calendar arrives only after the attempt has stopped waiting for
+    # it, so the cursor is kept at first, then forgotten when the calendar names a new term.
+    first = Scripted({"term": TERM, "after": [order_state(100)], "drop": True})
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 1:
+            await first(ws)
+            return
+        await ws.recv()
+        await ws.send(ack())
+        await asyncio.sleep(0.5)
+        payload = {**CALENDAR_PAYLOAD, "term_start": NEXT_TERM[0], "term_end": NEXT_TERM[1]}
+        await ws.send(calendar_frame(None, payload))
+        await ws.send(order_state(1))
+        await ws.wait_closed()
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url, synthetic_token(), resume=False, ack_timeout=0.2, sleep=Clock().sleep
+        )
+        async with rs:
+            events = await take(rs, 8)
+            last = rs.last_report_seq
+    assert kinds(events) == [
+        "Connected",
+        "calendar:None",
+        "order_state:100",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+        "calendar:None",
+        "order_state:1",
+    ]
+    assert last == 1
