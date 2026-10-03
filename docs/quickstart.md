@@ -26,12 +26,44 @@ This installs the `qte_sdk` package only. The worked examples (step 11) are not 
 
 ## 2. Set the exchange address and your token
 
-The SDK reads your token from the `QTE_TOKEN` environment variable, and the examples read the exchange address from `QTE_URL`. Read the token without echoing it, so it stays out of your screen and your shell history:
+The SDK reads your token from the `QTE_TOKEN` environment variable or, when that is unset or empty, from the file named by `QTE_TOKEN_FILE`. The examples read the exchange address from `QTE_URL`.
+
+To try the SDK in one terminal, set the exchange address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and read the token without echoing it, so it stays out of your screen and your shell history. Run the second line, paste the token (nothing is shown) and press Enter:
 
 ```sh
-export QTE_URL=ws://127.0.0.1:8080/ws   # or the address the course team gives you
-read -rs QTE_TOKEN && export QTE_TOKEN   # paste the token, then press Enter
+export QTE_URL=ws://127.0.0.1:8080/ws
+read -rs QTE_TOKEN && export QTE_TOKEN
 ```
+
+An exported variable lasts only for that shell and the programs it starts. A new terminal does not have it, and closing the terminal loses it, so a program run from a new terminal raises `MissingToken` until you set the token there again.
+
+### Keep the token across terminal sessions
+
+The recommended way is to keep the token in a file outside any repository, readable only by you, and to name that file in `QTE_TOKEN_FILE`. The first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
+
+```sh
+(umask 077 && mkdir -p "$HOME/.qte" && chmod 700 "$HOME/.qte" && read -rs T && rm -f "$HOME/.qte/token" && printf '%s\n' "$T" > "$HOME/.qte/token")
+ls -l "$HOME/.qte/token"
+```
+
+The parentheses run it in a subshell, so the `umask` and the variable `T` end with it.
+
+Then add this line to your shell profile, which is `~/.zshrc` for zsh (the macOS default) or `~/.bashrc` for bash (`~/.bash_profile` on macOS):
+
+```sh
+export QTE_TOKEN_FILE="$HOME/.qte/token"
+```
+
+Run the same line in your current terminal too, so you can carry on there. Every new terminal then has it, but not `QTE_URL` or your virtual environment: set `QTE_URL` again (or add its `export` line to your profile as well) and run `source .venv/bin/activate` from your project. The line holds a path, not the token. `QTE_TOKEN` takes precedence over the file, so run `unset QTE_TOKEN` in any terminal where you exported it, and remove any line that sets it from your shell profile.
+
+The SDK reads the file each time it needs the token, removing one trailing newline. If the file is missing, unreadable, empty or not UTF-8 text, it raises `MissingToken` with a message that says which, and never shows the file's contents.
+
+Other ways work too:
+
+- The macOS Keychain. Store the token once with `security add-generic-password -a "$USER" -s qte-token -w`, which prompts for it without echo, and load it with `export QTE_TOKEN="$(security find-generic-password -a "$USER" -s qte-token -w)"` in each terminal or in your shell profile.
+- A `.env` file loaded by python-dotenv, or a `.envrc` file loaded by direnv, in your own project. Add the file to that project's `.gitignore` before you put the token in it: this repository's `.gitignore` protects only a copy of this repository, not your project. The SDK does not read `.env` files itself.
+
+Whichever you choose, never put the token in a source file or a notebook.
 
 The SDK never logs your token or puts it in an exception message.
 
@@ -141,6 +173,8 @@ A `Book` is the state of one instrument at the end of an interval, not a stream 
 
 **Outside a session** you can still connect and subscribe, but there is no live market. A subscribe is answered once, not on the grid, with a `SessionState` whose `state` is `CLOSED`.
 
+That one `SessionState` can also name the next scheduled session in three optional fields: `next_session_date`, `next_open_time` and `next_close_time`. They are set together, only on this out-of-hours reply, never on the `SessionState` of a running session, and are absent when the term has no later session; an exchange from before these fields does not send them either, so write code that works without them. `until_next_open(state, session.info.server_time)` from `qte_sdk.market_data` gives the time until that open in exchange time units, or `None` when the fields are absent. `server_time` is the time your session was acknowledged; pass a later exchange timestamp instead if you have one. They are a convenience: the calendar is still where to read the full schedule.
+
 The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`, but **the exchange does not send it yet**. Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. When it is sent, `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. Write your code so it works with or without one. [Using the SDK outside session hours](out-of-hours.md) walks through a whole run when no session is open.
 
 No `Book`, `Trades` or `Mark` arrives until a session opens, so a loop that waits for a book waits until then.
@@ -234,13 +268,15 @@ except TimeoutError:
     print("no final outcome within 10 seconds: check your orders")
 ```
 
-Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it, and so does each `order_cancelled` that your cancel, amend or mass cancel causes. Match on it with `request_ref_of`.
+Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it. An `order_cancelled` carries it exactly when its `reason_code` is `CANCEL_REQUEST` (your cancel), `MASS_CANCEL` (your mass cancel) or `AMEND_CUT` (your amend cut the order to nothing), and echoes the `request_ref` of that message. This rule may still be refined, so keep a fallback: when `request_ref` is missing, match the cancellation by its strategy, instrument, side and price, as `examples/quote_both_sides.py` does. Match on `request_ref` with `request_ref_of`.
 
 An amend changes the orders at one level: `send_amend(session, instrument=..., side=..., price=..., new_size=...)`. `new_size` is the new total remaining size, not an amount to add. `send_mass_cancel(session)` cancels **every order your team has on the exchange**, including those of your teammates' strategies.
 
 Because a cancel or amend names a level, not an order, it acts on whichever of your team's orders rests at that level when the exchange applies it, after the order delay. If your order fills in the meantime and a teammate's strategy enters an order at the same price, your cancel removes theirs. Agree within your team who trades which instruments or prices.
 
 A send checks its identifiers before anything leaves your machine: `strat_id` and `request_ref` must be 1 to 32 bytes of UTF-8 and `instrument` at most 32 bytes. A send that breaks this raises `ValueError`.
+
+`send_new` also takes `parent_ticket_id`, which is for Execution desks only: it names the working parent ticket a child order works. Leave it out on any other team: the exchange rejects a `new` from any other team that carries it, with `PARENT_NOT_WORKING` (or `MALFORMED_MESSAGE` if the value itself is malformed).
 
 ## 7. Read your order events
 
@@ -343,8 +379,8 @@ Each example reads `QTE_URL` and `QTE_TOKEN` from the environment, runs for a bo
 | Example | What it shows |
 |---|---|
 | `examples/print_book.py` | Connect, subscribe and print the book, trades, mark and market session state, or the official close outside a session. Sends no orders. Stops after `--seconds` or `--max-messages`. |
-| `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Cancels its own orders when `--seconds` are up. |
-| `examples/take_liquidity.py` | Send one market order once the book shows the side it trades against, and report its fills. Stops when the order is finished or after `--seconds`. |
+| `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Keeps the latest book with `LatestBooks` and acts on it after each order event and on its own timer, not only when a new book arrives, since the exchange publishes a book only when it changes. Cancels its own orders when `--seconds` are up. |
+| `examples/take_liquidity.py` | Send one market order once the latest book shows the side it trades against, and report its fills. Sends at most one order and never retries. Stops when the order is finished or after `--seconds`. |
 
 ```sh
 python examples/print_book.py --instrument AAPL --seconds 10

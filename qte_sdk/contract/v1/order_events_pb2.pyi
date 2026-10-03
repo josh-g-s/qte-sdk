@@ -1,6 +1,8 @@
 from qte_sdk.contract.v1 import common_pb2 as _common_pb2
+from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
 from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
@@ -105,10 +107,86 @@ class OrderState(_message.Message):
     timestamp: int
     def __init__(self, strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., price: _Optional[int] = ..., state: _Optional[_Union[_common_pb2.OrderLifecycleState, str]] = ..., remaining_size: _Optional[int] = ..., stale_since: _Optional[int] = ..., timestamp: _Optional[int] = ...) -> None: ...
 
+class LimitUtilisation(_message.Message):
+    __slots__ = ("kind", "scope", "used", "cap")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    SCOPE_FIELD_NUMBER: _ClassVar[int]
+    USED_FIELD_NUMBER: _ClassVar[int]
+    CAP_FIELD_NUMBER: _ClassVar[int]
+    kind: _common_pb2.LimitKind
+    scope: str
+    used: int
+    cap: int
+    def __init__(self, kind: _Optional[_Union[_common_pb2.LimitKind, str]] = ..., scope: _Optional[str] = ..., used: _Optional[int] = ..., cap: _Optional[int] = ...) -> None: ...
+
+class AccountSummary(_message.Message):
+    __slots__ = ("equity", "cash", "previous_close_equity", "daily_pnl", "loss_warning_amount", "loss_halt_amount", "loss_level", "limits", "in_cure", "cure_deadline", "cure_paused", "timestamp")
+    EQUITY_FIELD_NUMBER: _ClassVar[int]
+    CASH_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_CLOSE_EQUITY_FIELD_NUMBER: _ClassVar[int]
+    DAILY_PNL_FIELD_NUMBER: _ClassVar[int]
+    LOSS_WARNING_AMOUNT_FIELD_NUMBER: _ClassVar[int]
+    LOSS_HALT_AMOUNT_FIELD_NUMBER: _ClassVar[int]
+    LOSS_LEVEL_FIELD_NUMBER: _ClassVar[int]
+    LIMITS_FIELD_NUMBER: _ClassVar[int]
+    IN_CURE_FIELD_NUMBER: _ClassVar[int]
+    CURE_DEADLINE_FIELD_NUMBER: _ClassVar[int]
+    CURE_PAUSED_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    equity: int
+    cash: int
+    previous_close_equity: int
+    daily_pnl: int
+    loss_warning_amount: int
+    loss_halt_amount: int
+    loss_level: _common_pb2.LossLevel
+    limits: _containers.RepeatedCompositeFieldContainer[LimitUtilisation]
+    in_cure: bool
+    cure_deadline: int
+    cure_paused: bool
+    timestamp: int
+    def __init__(self, equity: _Optional[int] = ..., cash: _Optional[int] = ..., previous_close_equity: _Optional[int] = ..., daily_pnl: _Optional[int] = ..., loss_warning_amount: _Optional[int] = ..., loss_halt_amount: _Optional[int] = ..., loss_level: _Optional[_Union[_common_pb2.LossLevel, str]] = ..., limits: _Optional[_Iterable[_Union[LimitUtilisation, _Mapping]]] = ..., in_cure: bool = ..., cure_deadline: _Optional[int] = ..., cure_paused: bool = ..., timestamp: _Optional[int] = ...) -> None: ...
+
+class ObligationState(_message.Message):
+    __slots__ = ("entries", "timestamp")
+    ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    entries: _containers.RepeatedCompositeFieldContainer[ObligationEntry]
+    timestamp: int
+    def __init__(self, entries: _Optional[_Iterable[_Union[ObligationEntry, _Mapping]]] = ..., timestamp: _Optional[int] = ...) -> None: ...
+
+class ObligationEntry(_message.Message):
+    __slots__ = ("instrument", "eligible", "qualifying", "spread_compliant", "size_compliant", "session_qualifying_seconds", "session_eligible_seconds", "in_tier_m", "tier_m_qualifying_seconds", "tier_m_eligible_seconds")
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    ELIGIBLE_FIELD_NUMBER: _ClassVar[int]
+    QUALIFYING_FIELD_NUMBER: _ClassVar[int]
+    SPREAD_COMPLIANT_FIELD_NUMBER: _ClassVar[int]
+    SIZE_COMPLIANT_FIELD_NUMBER: _ClassVar[int]
+    SESSION_QUALIFYING_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    SESSION_ELIGIBLE_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    IN_TIER_M_FIELD_NUMBER: _ClassVar[int]
+    TIER_M_QUALIFYING_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    TIER_M_ELIGIBLE_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    instrument: str
+    eligible: bool
+    qualifying: bool
+    spread_compliant: bool
+    size_compliant: bool
+    session_qualifying_seconds: int
+    session_eligible_seconds: int
+    in_tier_m: bool
+    tier_m_qualifying_seconds: int
+    tier_m_eligible_seconds: int
+    def __init__(self, instrument: _Optional[str] = ..., eligible: bool = ..., qualifying: bool = ..., spread_compliant: bool = ..., size_compliant: bool = ..., session_qualifying_seconds: _Optional[int] = ..., session_eligible_seconds: _Optional[int] = ..., in_tier_m: bool = ..., tier_m_qualifying_seconds: _Optional[int] = ..., tier_m_eligible_seconds: _Optional[int] = ...) -> None: ...
+
 class RiskNotice(_message.Message):
-    __slots__ = ("kind", "timestamp")
+    __slots__ = ("kind", "timestamp", "cure_deadline", "breached_limits")
     KIND_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    CURE_DEADLINE_FIELD_NUMBER: _ClassVar[int]
+    BREACHED_LIMITS_FIELD_NUMBER: _ClassVar[int]
     kind: _common_pb2.RiskNoticeKind
     timestamp: int
-    def __init__(self, kind: _Optional[_Union[_common_pb2.RiskNoticeKind, str]] = ..., timestamp: _Optional[int] = ...) -> None: ...
+    cure_deadline: int
+    breached_limits: _containers.RepeatedCompositeFieldContainer[LimitUtilisation]
+    def __init__(self, kind: _Optional[_Union[_common_pb2.RiskNoticeKind, str]] = ..., timestamp: _Optional[int] = ..., cure_deadline: _Optional[int] = ..., breached_limits: _Optional[_Iterable[_Union[LimitUtilisation, _Mapping]]] = ...) -> None: ...

@@ -1,6 +1,6 @@
 """Open an authenticated session on the exchange.
 
-    session = await open_session("ws://127.0.0.1:8080/ws")  # token from QTE_TOKEN
+    session = await open_session("ws://127.0.0.1:8080/ws")  # token from QTE_TOKEN(_FILE)
     async with session:
         print(session.info.team, session.info.unscored)
         async for event in session:
@@ -8,7 +8,8 @@
 
 A session is a `Connection` that has sent `auth` with your account's token and received
 `session_ack`. The token comes from the `token` argument or, failing that, the `QTE_TOKEN`
-environment variable. Keep it out of source files and out of the repository.
+environment variable or, failing that, the file named by the `QTE_TOKEN_FILE` environment
+variable (see `resolve_token`). Keep it out of source files and out of the repository.
 
 The token is sent once, in the `auth` message, and is not kept afterwards. The SDK never
 logs it or puts it in an exception: the connection drops the frame-level debug lines of
@@ -39,12 +40,15 @@ from qte_sdk.connection import (
 from qte_sdk.contract.v1.session_pb2 import Auth, Calendar, SessionAck
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
+TOKEN_FILE_ENV_VAR = "QTE_TOKEN_FILE"
 DEFAULT_ACK_TIMEOUT = 10.0
 DEFAULT_CALENDAR_TIMEOUT = 5.0
 
 
 class MissingToken(ValueError):
-    """No token was given and the `QTE_TOKEN` environment variable is unset or empty."""
+    """No token was given, `QTE_TOKEN` is unset or empty, and `QTE_TOKEN_FILE` is unset or
+    names a file that holds no readable token. The message says which; it never holds any
+    of the file's contents."""
 
 
 class SessionNotAcknowledged(Exception):
@@ -223,15 +227,61 @@ class Session:
 
 
 def resolve_token(token: str | None = None) -> str:
-    """The token to authenticate with: `token` if given, else `QTE_TOKEN`.
+    """The token to authenticate with, from the first of these that is present:
 
-    Raises `MissingToken` if neither is set to a non-empty value.
+    - `token`, when it is not None (an empty string raises `MissingToken`);
+    - the `QTE_TOKEN` environment variable, when it is set and not empty;
+    - the contents of the file named by the `QTE_TOKEN_FILE` environment variable, when it
+      is set and not empty, with one trailing newline removed.
+
+    The file is read only when neither of the first two is present, and is read on each
+    call. Raises `MissingToken` if there is no token, or if the file cannot be read, is not
+    UTF-8 text, or holds nothing but whitespace.
     """
     if token is None:
-        token = os.environ.get(TOKEN_ENV_VAR)
+        token = os.environ.get(TOKEN_ENV_VAR) or None
+    problem = None
+    if token is None:
+        token, problem = _token_from_file()
+    if problem is not None:
+        # Raised outside any handler, from a frame that holds neither the file's path nor
+        # its contents, so the exception carries neither.
+        raise MissingToken(f"no token: {TOKEN_FILE_ENV_VAR} names a file that {problem}")
     if not token:
-        raise MissingToken(f"no token: pass token= or set the {TOKEN_ENV_VAR} environment variable")
+        raise MissingToken(
+            f"no token: pass token=, set the {TOKEN_ENV_VAR} environment variable, or set "
+            f"{TOKEN_FILE_ENV_VAR} to the path of a file holding it"
+        )
     return token
+
+
+def _token_from_file() -> tuple[str | None, str | None]:
+    """The token in the file named by `QTE_TOKEN_FILE` and None, or None and what is wrong
+    with the file. (None, None) if the variable is unset or empty.
+
+    Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected and an
+    `OSError` keeps the path (which a mistaken setting could make the token itself), so
+    neither may reach the caller's exception as its cause or context.
+    """
+    path = os.environ.get(TOKEN_FILE_ENV_VAR)
+    if not path:
+        return None, None
+    try:
+        with open(path, "rb") as file:
+            data = file.read()
+    except OSError as error:
+        return None, f"cannot be read ({error.strerror or type(error).__name__})"
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "is not UTF-8 text"
+    if text.endswith("\r\n"):
+        text = text[:-2]
+    elif text.endswith("\n"):
+        text = text[:-1]
+    if not text.strip():
+        return None, "is empty or holds only whitespace"
+    return text, None
 
 
 async def open_session(
@@ -251,9 +301,11 @@ async def open_session(
     limit). The `websockets` option `open_timeout` still bounds the opening handshake on its
     own, and `close_timeout` bounds closing the connection (see `Connection.close`).
 
-    Raises `MissingToken` before connecting if there is no token. If the exchange refuses
-    the session, raises `SessionRejected` carrying the contract reason code, or
-    `ContractVersionMismatch` when the exchange does not serve this contract version.
+    `token` is your team token, or None to take it from the environment (see
+    `resolve_token`). Raises `MissingToken` before connecting if there is no token. If the
+    exchange refuses the session, raises `SessionRejected` carrying the contract reason
+    code, or `ContractVersionMismatch` when the exchange does not serve this contract
+    version.
     Raises `SessionNotAcknowledged` if the connection ends first, and `TimeoutError` if the
     session is not acknowledged within `ack_timeout` seconds. The connection is closed
     whenever no session is returned, which can take up to `close_timeout` seconds more.

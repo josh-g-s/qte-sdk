@@ -23,12 +23,16 @@ This installs the `qte_sdk` package only, not the [worked examples](examples/). 
 
 ## A first program
 
-Put the exchange address and your token in the environment. Read the token without echoing it, so it stays off your screen and out of your shell history:
+Put the exchange address and your token in the environment. Read the token without echoing it, so it stays off your screen and out of your shell history: run the second line, paste the token (nothing is shown) and press Enter.
 
 ```sh
 export QTE_URL="<the exchange address from the course team>"
-read -rs QTE_TOKEN && export QTE_TOKEN   # paste the token, then press Enter
+read -rs QTE_TOKEN && export QTE_TOKEN
 ```
+
+An exported `QTE_TOKEN` lasts only for that shell and the programs it starts. A new terminal does not have it, and closing the terminal loses it, so set it again in each new terminal.
+
+To keep the token across terminal sessions, the recommended way is a file readable only by you, outside any repository, with `QTE_TOKEN_FILE` set to its path in your shell profile. The SDK reads the token from that file when `QTE_TOKEN` is unset or empty, so unset any old `QTE_TOKEN`, which would otherwise take precedence. Step 2 of the [quickstart](docs/quickstart.md) gives the exact commands, and the alternatives.
 
 Then run this. It opens a session, subscribes to one instrument and prints the best bid and ask as the book updates, for ten seconds. A book shows two kinds of depth: the wall (`bid_levels`, `ask_levels`) and participants' resting orders (`student_bid_levels`, `student_ask_levels`), each best price first, so the best bid and ask are taken across both.
 
@@ -49,7 +53,7 @@ def best(book: Book) -> tuple[int | None, int | None]:
 
 
 async def main() -> None:
-    # The token comes from QTE_TOKEN; pass token=... to supply it another way.
+    # The token comes from QTE_TOKEN or QTE_TOKEN_FILE; pass token=... to supply it another way.
     async with await open_session(os.environ["QTE_URL"]) as session:
         print("connected as", session.info.team)
         await subscribe(session, ["XOM"])

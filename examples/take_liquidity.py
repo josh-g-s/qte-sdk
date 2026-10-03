@@ -1,13 +1,20 @@
 """Take liquidity with one market order and report how it filled.
 
-Set QTE_URL and QTE_TOKEN first (see docs/quickstart.md), then:
+Set QTE_URL and QTE_TOKEN (or QTE_TOKEN_FILE) first (see docs/quickstart.md), then:
 
     python examples/take_liquidity.py --instrument AAPL --strat-id <your strategy> --side buy
 
 The example waits for a book that shows the wall on the side it will trade against, sends
 one MARKET order of --size shares, prints the `accepted` or `reject`, every fill and any
 unfilled remainder the exchange cancels, and stops once the order is finished or after
---seconds, whichever comes first. It sends exactly one order.
+--seconds, whichever comes first. It sends at most one order, and none if no such book
+comes within --seconds. It never retries: a rejected order is printed and the example
+stops.
+
+The exchange publishes a book only when it changes, so the example keeps the latest book
+it has received with `qte_sdk.books.LatestBooks` and decides from that. Subscribing
+during a session brings the last book published at once, so in a quiet market the
+example can act on it straight away rather than wait for the book to change.
 
 Timing. The exchange holds every order message for its order delay before applying it,
 currently 150 ms, so the book you decided on is at least that old when your order
@@ -31,6 +38,7 @@ from collections.abc import AsyncIterator
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
+from qte_sdk.books import LatestBooks
 from qte_sdk.connection import SessionRejected
 from qte_sdk.contract.v1.common_pb2 import BUY, MARKET, SELL, Liquidity
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, Reject
@@ -86,9 +94,19 @@ class Taker:
         self.cost = 0  # micro-dollars
         self.done = False
         self.missed = False  # whether any message from the exchange was missed
+        # The latest book of each instrument: the exchange sends a book only when it changes.
+        self.books = LatestBooks()
 
     async def on_book(self, book: Book) -> None:
-        if self.ref is not None or book.instrument != self.instrument:
+        """Keep `book` if it is newer than the one held, and act on it if so."""
+        if self.books.update(book):
+            await self.act()
+
+    async def act(self) -> None:
+        """Send the order from the latest book held, unless one is already sent or that
+        book shows no wall on the side to trade against."""
+        book = self.books.get(self.instrument)
+        if self.ref is not None or book is None:
             return
         # A buy trades against the offer, a sell against the bid.
         levels = book.ask_levels if self.side == BUY else book.bid_levels
@@ -188,7 +206,7 @@ async def closing(session: Session) -> AsyncIterator[Session]:
 
 
 async def run(url: str, args: argparse.Namespace) -> int:
-    # The token comes from the QTE_TOKEN environment variable.
+    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE.
     session = await open_session(url)
     async with closing(session):
         print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
@@ -206,6 +224,7 @@ async def run(url: str, args: argparse.Namespace) -> int:
                     elif isinstance(item, SeqGap | DecodeFailed):
                         print("warning: a message from the exchange was missed or unreadable")
                         taker.missed = True
+                        taker.books.update(item)  # it may have been a book: now stale
                     elif is_order_event(event):
                         taker.on_order_event(event.message)
                     if taker.done:
@@ -234,8 +253,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return asyncio.run(run(url, args))
-    except MissingToken:
-        fail("set QTE_TOKEN to your practice token (see docs/quickstart.md)")
+    except MissingToken as error:
+        # The message names the variable and the problem, never the token.
+        fail(f"{error} (see docs/quickstart.md)")
         return 2
     except ValueError as error:
         return fail(f"not sent: {error}")
