@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.0
+**Version:** 1.1
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -32,7 +32,7 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 
 - There is no order ID. Your team's orders are addressed by instrument, side and price, and your team holds at most one resting order at each, across all of its strategies. A second new order at a level where you already rest is rejected; send an amend to change its size.
 - A cancel or amend acts on whichever of your team's orders holds that level when it is applied, which may be another strategy's. A mass cancel cancels every resting order your team has, on every instrument and for every strategy.
-- A new order carries a strategy ID registered for your team. Ask the course team how to register one.
+- A new order carries a strategy ID registered for your team. Ask the Head of Technology, Joshua, to register one.
 - Prices are whole numbers of micro-dollars (`199_970_000` is $199.97). Convert with `qte_sdk.units` (`to_micros`, `to_decimal`) and never use `float` for a price.
 - Send with the functions in `qte_sdk.orders` (`send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`) and the generated message types in `qte_sdk.contract.v1`. Do not build JSON by hand, and do not edit the generated files or the `.proto` files.
 
@@ -58,4 +58,4 @@ Run your program against the practice exchange the course team gives you, or a t
 ## Getting help
 
 - For a bug in the SDK or its docs, open an issue on this repository. It is public: never include your token, your team's account details or your strategy's code.
-- For tokens, strategy IDs, exchange addresses and access, ask the course team.
+- For tokens, strategy IDs, exchange addresses and access, ask the Head of Technology, Joshua.

@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.9
+**Version:** 0.10
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -8,9 +8,11 @@ This guide takes you from a fresh install to a program that connects to the exch
 
 - Python 3.11 or later.
 - A clone of this repository, but only to run or read the worked examples (step 11).
-- The address of the exchange you are trading on. The course team tells you the practice exchange's address; a test exchange you run on your own machine is usually `ws://127.0.0.1:8080/ws`.
-- Your team's practice token. The course team gives it to you. Treat it like a password: never put it in a source file, a notebook, a screenshot or a repository.
-- A strategy ID registered for your team, for any program that sends orders.
+- The address of the exchange you are trading on. The Head of Technology, Joshua, gives you the practice exchange's address; a test exchange you run on your own machine is usually `ws://127.0.0.1:8080/ws`.
+- Your team's practice token. The Head of Technology, Joshua, gives it to you. Treat it like a password: never put it in a source file, a notebook, a screenshot or a repository.
+- A strategy ID registered for your team, for any program that sends orders. Ask the Head of Technology, Joshua, to register one.
+
+The practice exchange keeps the hours in the calendar it sends after you authenticate (step 3), so read them there rather than from this guide.
 
 ## 1. Install
 
