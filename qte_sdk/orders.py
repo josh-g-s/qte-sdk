@@ -29,7 +29,8 @@ Before sending, every send checks each `request_ref`, `strat_id` and `instrument
 message carries: `request_ref` and `strat_id` must be 1 to 32 bytes of UTF-8, and
 `instrument` at most 32 bytes (0 to 32). Bytes are counted, not characters, so a
 character outside ASCII counts two to four, and none may contain the NUL character. A
-send that breaks this raises `ValueError` and sends nothing.
+send that breaks this raises `ValueError` and sends nothing. A `new` that carries
+`parent_ticket_id`, which only an Execution desk sends, is checked too: see `send_new`.
 """
 
 import uuid
