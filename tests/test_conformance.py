@@ -307,7 +307,6 @@ class Client:
         )
         if isinstance(reply, Reject):
             pytest.fail(f"request rejected: {reason_code_name(reply.reason_code)}")
-        check_release_time(reply)
         return reply
 
     async def rejection(self, ref: str, since: int) -> Reject:
@@ -353,10 +352,11 @@ class Client:
 
 
 def check_release_time(accepted: Accepted) -> None:
-    """`release_time` is `receipt_time` plus the order delay, the same on every `accepted`.
+    """`release_time` is `receipt_time` plus the order delay, the same on every `accepted`
+    the steps check (4, 5 and 13).
 
-    The delay is the exchange's setting, so it is learnt from the first `accepted` rather
-    than assumed.
+    The delay is the exchange's setting, so it is learnt from the first `accepted` checked
+    rather than assumed.
     """
     delay = accepted.release_time - accepted.receipt_time
     assert delay > 0, "release_time is not after receipt_time"
@@ -491,6 +491,7 @@ async def test_step_04_new_limit_order(market: Client):
     )
     accepted = await c.answer(ref, start)
     assert accepted.request_type == RequestType.NEW
+    check_release_time(accepted)
     state = await c.order_state(c.config.strat_a, BUY, price, start)
     assert state.state == RESTING
     assert state.remaining_size == c.config.size
@@ -517,14 +518,16 @@ async def test_step_05_early_cancel(market: Client):
     )
     assert reject.request_type == RequestType.CANCEL
     # Step 4's confirmations, checked only now.
-    await c.answer(new_ref, start)
+    check_release_time(await c.answer(new_ref, start))
     state = await c.order_state(c.config.strat_a, BUY, price, start)
     assert state.state == RESTING
 
 
+@pytest.mark.skipif(
+    os.environ.get("QTE_CONFORMANCE_COUNTERPARTY") != "1",
+    reason="precondition: a scripted counterparty (QTE_CONFORMANCE_COUNTERPARTY=1)",
+)
 async def test_step_06_partial_fill(market: Client):
-    if os.environ.get("QTE_CONFORMANCE_COUNTERPARTY") != "1":
-        pytest.skip("precondition: a scripted counterparty (QTE_CONFORMANCE_COUNTERPARTY=1)")
     c = market
     (price,) = inside_prices(c.books.get(c.config.instrument), c.config.tick, 1)
     start = c.mark()
@@ -678,11 +681,11 @@ async def test_step_10_collar(market: Client):
     assert reject.reason_code == ReasonCodes.PRICE_COLLAR, reason_code_name(reject.reason_code)
 
 
+@pytest.mark.skipif(
+    os.environ.get("QTE_CONFORMANCE_WALL_ONLY") != "1",
+    reason="precondition: only the wall trades against the order (QTE_CONFORMANCE_WALL_ONLY=1)",
+)
 async def test_step_11_wall_sweep_with_a_market_order(market: Client):
-    if os.environ.get("QTE_CONFORMANCE_WALL_ONLY") != "1":
-        pytest.skip(
-            "precondition: only the wall trades against the order (QTE_CONFORMANCE_WALL_ONLY=1)"
-        )
     c = market
     if len(c.books.get(c.config.instrument).ask_levels) != 10:
         pytest.skip("precondition: the instrument's book shows ten ask levels")
@@ -808,6 +811,7 @@ async def test_step_13_mass_cancel(market: Client):
     ref = await send_mass_cancel(c.session)
     accepted = await c.answer(ref, start)
     assert accepted.request_type == RequestType.MASS_CANCEL
+    check_release_time(accepted)
     first = await c.wait_for(
         lambda m: isinstance(m, OrderCancelled) and request_ref_of(m) == ref,
         "order_cancelled for the mass cancel",
@@ -829,12 +833,12 @@ async def test_step_13_mass_cancel(market: Client):
 # Steps 14 to 16: the close.
 
 
+@pytest.mark.skipif(
+    not os.environ.get("QTE_CONFORMANCE_CLOSE_WITHIN"),
+    reason="precondition: the exchange closes its session (QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>)",
+)
 async def test_step_14_close(market: Client):
-    within = os.environ.get("QTE_CONFORMANCE_CLOSE_WITHIN")
-    if not within:
-        pytest.skip(
-            "precondition: the exchange closes its session (QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>)"
-        )
+    within = os.environ["QTE_CONFORMANCE_CLOSE_WITHIN"]
     c = market
     (price,) = inside_prices(c.books.get(c.config.instrument), c.config.tick, 1)
     start = c.mark()
