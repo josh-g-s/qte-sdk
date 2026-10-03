@@ -893,13 +893,13 @@ async def test_the_fake_accepts_a_cut_to_nothing_at_the_wall_without_a_price_tes
     # amend that keeps the price is not price-tested, so cutting it to nothing is accepted.
     exchange = FakeExchange()
     exchange.resting[(INSTRUMENT, "BUY", BID)] = ("s", 5)
-    async with serve_local(exchange) as url:
+    received: list[Received] = []
+    async with asyncio.timeout(RUN_LIMIT), serve_local(exchange) as url:
         session = await open_session(url, token=synthetic_token())
         async with session:
             await send_amend(
                 session, instrument=INSTRUMENT, side=BUY, price=BID, new_price=BID, new_size=0
             )
-            received: list[Received] = []
             async for event in session:
                 if isinstance(event, Received) and event.type != "session_ack":
                     received.append(event)
