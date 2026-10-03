@@ -179,9 +179,10 @@ class _Reports:
             ):
                 self.answer = event
                 return [event, *self._finish(None)]
-        elif isinstance(event, SeqGap):
-            # A message was lost on the connection, perhaps one the resume needs to finish:
-            # stop waiting for it rather than hold later reports for good.
+        elif isinstance(event, SeqGap) or (isinstance(event, DecodeFailed) and event.type is None):
+            # A message was lost on the connection, or arrived unreadable, perhaps one the
+            # resume needs to finish: stop waiting for it rather than hold later reports
+            # for good.
             return [event, *self._finish(None)]
         elif (
             not ack.replayed

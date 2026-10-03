@@ -410,6 +410,21 @@ async def test_a_seq_gap_during_a_replay_stops_waiting_for_it():
     assert events[2] == SeqGap(4, 5) and events[3] == ReportGap(12, 13)
 
 
+async def test_an_unreadable_frame_during_a_snapshot_stops_waiting_for_it():
+    exchange = Scripted(
+        {
+            "before_resume": [order_state(10)],
+            "answer": [resume_ack(False, 9, 2), "not json", order_state(11)],
+        }
+    )
+    async with serve_local(exchange) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            await session.resume(0)
+            events = await take(session, 4)
+    # 10 was held and is released, with the gap from the cursor flagged; 11 then follows.
+    assert kinds(events) == ["resume_ack:None", "DecodeFailed", "ReportGap", "order_state:10"]
+
+
 async def test_a_rejected_resume_raises_and_releases_what_it_held():
     exchange = Scripted({"before_resume": [order_state(5)], "answer": [resume_reject()]})
     async with serve_local(exchange) as url:

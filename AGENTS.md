@@ -24,6 +24,7 @@ Never build these into code as constants. They are set by the exchange and can c
 - the minimum time an order must rest before it may be cancelled or amended;
 - the price collar;
 - your team's message budgets;
+- the heartbeat interval, and how long the exchange waits before it drops a silent connection (the SDK's `liveness_timeout` is a client-side setting, not one of these);
 - trading days, holidays and hours. Read them from the calendar the exchange sends after you authenticate (`session.wait_for_calendar()`, then `qte_sdk.calendar.next_open` and `next_close`).
 
 Act on what the exchange reports instead: cancel or amend after the order's `order_state` arrives rather than after a fixed sleep, trade only while `SessionState.state` is `OPEN`, and handle each reject by its reason.

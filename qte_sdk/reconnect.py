@@ -331,11 +331,13 @@ class ReconnectingSession:
         """The latest `calendar` message the exchange sent on the current session, or None
         if none has arrived on it yet.
 
-        The exchange sends one right after it acknowledges each session, so it usually
-        arrives, as an ordinary event too, just after each `Connected`. Each new session
-        starts with None here: the calendar's `next_open` was worked out from the
-        exchange's clock when the earlier session opened, so it is not carried over. An
-        exchange that predates the calendar message never sends one, and then this stays
+        The exchange sends one right after it acknowledges each session. It is delivered
+        as an ordinary event too, after `Connected`, but may already be set when
+        `Connected` arrives, since the session reads ahead while it waits for `resume_ack`.
+        Each new session starts with None here until its calendar is read: the calendar's
+        `next_open` was worked out from the exchange's clock when the earlier session
+        opened, so it is not carried over. An exchange that predates the calendar message
+        never sends one, and then this stays
         None.
         """
         return self._calendar
