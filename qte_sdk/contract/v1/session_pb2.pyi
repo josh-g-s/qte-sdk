@@ -78,32 +78,36 @@ class Heartbeat(_message.Message):
     def __init__(self) -> None: ...
 
 class Resume(_message.Message):
-    __slots__ = ("session_id", "last_seq_received")
-    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
-    LAST_SEQ_RECEIVED_FIELD_NUMBER: _ClassVar[int]
-    session_id: str
-    last_seq_received: int
-    def __init__(self, session_id: _Optional[str] = ..., last_seq_received: _Optional[int] = ...) -> None: ...
+    __slots__ = ("last_report_seq",)
+    LAST_REPORT_SEQ_FIELD_NUMBER: _ClassVar[int]
+    last_report_seq: int
+    def __init__(self, last_report_seq: _Optional[int] = ...) -> None: ...
+
+class ResumeAck(_message.Message):
+    __slots__ = ("replayed", "as_of_report_seq", "snapshot_count")
+    REPLAYED_FIELD_NUMBER: _ClassVar[int]
+    AS_OF_REPORT_SEQ_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOT_COUNT_FIELD_NUMBER: _ClassVar[int]
+    replayed: bool
+    as_of_report_seq: int
+    snapshot_count: int
+    def __init__(self, replayed: bool = ..., as_of_report_seq: _Optional[int] = ..., snapshot_count: _Optional[int] = ...) -> None: ...
 
 class OrderSnapshot(_message.Message):
-    __slots__ = ("strat_id", "instrument", "side", "price", "state", "remaining_size", "stale_since", "timestamp")
+    __slots__ = ("strat_id", "instrument", "side", "price", "remaining_size", "timestamp")
     STRAT_ID_FIELD_NUMBER: _ClassVar[int]
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
     SIDE_FIELD_NUMBER: _ClassVar[int]
     PRICE_FIELD_NUMBER: _ClassVar[int]
-    STATE_FIELD_NUMBER: _ClassVar[int]
     REMAINING_SIZE_FIELD_NUMBER: _ClassVar[int]
-    STALE_SINCE_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
     strat_id: str
     instrument: str
     side: _common_pb2.Side
     price: int
-    state: _common_pb2.OrderLifecycleState
     remaining_size: int
-    stale_since: int
     timestamp: int
-    def __init__(self, strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., price: _Optional[int] = ..., state: _Optional[_Union[_common_pb2.OrderLifecycleState, str]] = ..., remaining_size: _Optional[int] = ..., stale_since: _Optional[int] = ..., timestamp: _Optional[int] = ...) -> None: ...
+    def __init__(self, strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., price: _Optional[int] = ..., remaining_size: _Optional[int] = ..., timestamp: _Optional[int] = ...) -> None: ...
 
 class Subscribe(_message.Message):
     __slots__ = ("instruments",)
@@ -116,3 +120,9 @@ class Unsubscribe(_message.Message):
     INSTRUMENTS_FIELD_NUMBER: _ClassVar[int]
     instruments: _containers.RepeatedScalarFieldContainer[str]
     def __init__(self, instruments: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class AccountQuery(_message.Message):
+    __slots__ = ("request_ref",)
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    def __init__(self, request_ref: _Optional[str] = ...) -> None: ...

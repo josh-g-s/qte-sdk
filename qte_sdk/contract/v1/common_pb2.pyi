@@ -26,6 +26,8 @@ class RequestType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MASS_CANCEL: _ClassVar[RequestType]
     SUBSCRIBE: _ClassVar[RequestType]
     UNSUBSCRIBE: _ClassVar[RequestType]
+    RESUME: _ClassVar[RequestType]
+    ACCOUNT_QUERY: _ClassVar[RequestType]
 
 class Origin(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -62,6 +64,12 @@ class MarketSessionPhase(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MARKET_SESSION_PHASE_UNSPECIFIED: _ClassVar[MarketSessionPhase]
     OPEN: _ClassVar[MarketSessionPhase]
     CLOSED: _ClassVar[MarketSessionPhase]
+
+class ValuationBasis(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    VALUATION_BASIS_UNSPECIFIED: _ClassVar[ValuationBasis]
+    LIVE_MARK: _ClassVar[ValuationBasis]
+    LAST_OFFICIAL_CLOSE: _ClassVar[ValuationBasis]
 
 class LossLevel(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -112,6 +120,8 @@ AMEND: RequestType
 MASS_CANCEL: RequestType
 SUBSCRIBE: RequestType
 UNSUBSCRIBE: RequestType
+RESUME: RequestType
+ACCOUNT_QUERY: RequestType
 ORIGIN_UNSPECIFIED: Origin
 TEAM: Origin
 CURE_TRADE: Origin
@@ -133,6 +143,9 @@ PURGED: OrderLifecycleState
 MARKET_SESSION_PHASE_UNSPECIFIED: MarketSessionPhase
 OPEN: MarketSessionPhase
 CLOSED: MarketSessionPhase
+VALUATION_BASIS_UNSPECIFIED: ValuationBasis
+LIVE_MARK: ValuationBasis
+LAST_OFFICIAL_CLOSE: ValuationBasis
 LOSS_LEVEL_UNSPECIFIED: LossLevel
 LOSS_LEVEL_NONE: LossLevel
 LOSS_LEVEL_WARNING: LossLevel

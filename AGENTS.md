@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.2
+**Version:** 1.3
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -42,7 +42,7 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 
 - There is one conflated market-data feed, the same for everyone: books, trades and the session state on a 100 ms grid, and the mark on its own, slower grid. There is no faster or raw feed.
 - On the grid, a book is published only when it has changed, so a quiet instrument may send nothing for a long time. A subscribe during a session is answered at once with the last book published for each instrument that has one, which may be older than the latest grid point; an instrument with no book yet sends its first when it is published. Keep the latest book of each instrument (`qte_sdk.books.LatestBooks` does this) and do not make your program wait for a new book before it acts. During a session, `SessionState` arrives at every grid point.
-- Handle the warning events: `DecodeFailed` and `Unknown` (a message that could not be used) and `SeqGap` (messages were missed). After a gap or a dropped connection, your book, positions and resting orders are uncertain until you check them again.
+- Handle the warning events: `DecodeFailed` and `Unknown` (a message that could not be used) and `SeqGap` (messages were missed). After a gap or a dropped connection, your book, positions and resting orders are uncertain until you check them again. To check your positions and cash, send `qte_sdk.account.send_account_query` and read the `account_state` that answers it in your one loop (`qte_sdk.account.is_account_state`).
 
 ## Sessions
 

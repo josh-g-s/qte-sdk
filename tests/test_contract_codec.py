@@ -7,7 +7,7 @@ from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, TEAM, ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book, Trades
 from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 from qte_sdk.contract.v1.order_events_pb2 import Execution, Reject
-from qte_sdk.contract.v1.session_pb2 import Resume
+from qte_sdk.contract.v1.session_pb2 import ResumeAck
 
 BIG = 9_007_199_254_740_993  # 2**53 + 1: not exactly representable as a float
 
@@ -42,8 +42,8 @@ def test_typed_payload_round_trips_through_an_envelope_exactly():
 
 
 def test_int32_payload_fields_stay_json_integers():
-    wire = codec.encode("0.x", "resume", Resume(session_id="s-1", last_seq_received=42))
-    value = json.loads(wire)["payload"]["last_seq_received"]
+    wire = codec.encode("0.x", "resume_ack", ResumeAck(snapshot_count=42))
+    value = json.loads(wire)["payload"]["snapshot_count"]
     assert value == 42
     assert type(value) is int
 
