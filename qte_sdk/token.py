@@ -154,7 +154,7 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     if path.is_symlink():
         raise _Refused(f"{path} is a symbolic link; edit the file it points to by hand")
     lines = _existing_lines(path)
-    _refuse_if_tracked(path)
+    _refuse_if_tracked(_on_disk(path))
     address = _ask_address(url, ask)
     secret = _ask_token(ask_secret)
     _offer_gitignore(path, ask)
@@ -283,6 +283,29 @@ def _refuse_if_tracked(path: Path) -> None:
     )
 
 
+def _on_disk(path: Path) -> Path:
+    """`path` with its name spelled as the directory lists it. On a filesystem that ignores
+    case, `readme.md` may be the file git tracks as `README.md`, and git compares names
+    exactly, so it is asked about the listed spelling."""
+    if not path.exists():
+        return path
+    try:
+        names = os.listdir(path.parent)
+    except OSError:
+        return path
+    if path.name in names:
+        return path
+    for name in names:
+        if name.lower() == path.name.lower():
+            candidate = path.parent / name
+            try:
+                if os.path.samefile(candidate, path):
+                    return candidate
+            except OSError:
+                continue
+    return path
+
+
 def _untrack_command(path: Path) -> str:
     """The command that stops git tracking `path`, to run from the working directory."""
     if path.parent == Path.cwd():
@@ -379,9 +402,11 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             f"could not create {directory} ({error.strerror or type(error).__name__})"
         ) from None
     # The real directory, so a symbolic link on the way cannot hide a git working tree.
-    path = directory.resolve() / path.name
+    path = _on_disk(directory.resolve() / path.name)
     if path.is_symlink() or path.is_dir():
         raise _Refused(f"{path} is a directory or a symbolic link; choose another path")
+    if path.name.lower() == ".gitignore":
+        raise _Refused("the token cannot go in a .gitignore file; choose another path")
     _refuse_if_tracked(path)
     secret = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")

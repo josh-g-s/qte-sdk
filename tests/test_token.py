@@ -119,13 +119,15 @@ def test_the_file_is_private_before_the_token_is_written(monkeypatch):
 
 def test_an_existing_dotenv_keeps_its_other_lines():
     old = synthetic_token()
-    dotenv().write_text(
-        "# my project\n"
-        "DATABASE=postgres://localhost\n"
-        f"export QTE_TOKEN={old}\r\n"
-        "QTE_URL=ws://old.example.test/ws\n"
-        f"QTE_TOKEN='{old}'\n"
-        "OTHER='x y'"
+    dotenv().write_bytes(
+        (
+            "# my project\n"
+            "DATABASE=postgres://localhost\n"
+            f"export QTE_TOKEN={old}\r\n"
+            "QTE_URL=ws://old.example.test/ws\n"
+            f"QTE_TOKEN='{old}'\n"
+            "OTHER='x y'"
+        ).encode()
     )
     if POSIX:
         dotenv().chmod(0o644)
@@ -520,6 +522,24 @@ def test_stopping_at_the_gitignore_offer_says_the_token_was_saved(stop, capsys):
     out, err = capsys.readouterr()
     assert "the token was saved" in err and ".gitignore was not changed" in err
     assert_token_absent(token, out + err)
+
+
+def test_set_file_refuses_a_gitignore_destination(capsys):
+    assert run(["set", "--file", ".gitignore"]) == 1
+    assert run(["set", "--file", "sub/.GitIgnore"]) == 1
+    assert not Path(".gitignore").exists()
+
+
+@needs_git
+def test_a_tracked_file_named_in_another_case_is_still_refused(capsys):
+    git("init", "-q", ".")
+    Path("README.md").write_text("hello\n")
+    git("add", "README.md")
+    if not Path("readme.md").exists():
+        pytest.skip("this filesystem tells names apart by case")
+    assert run(["set", "--file", "readme.md"]) == 1
+    assert Path("README.md").read_text() == "hello\n"
+    assert "git tracks" in capsys.readouterr().err
 
 
 @needs_git
