@@ -178,7 +178,7 @@ An order message the exchange takes in is held for its order delay, currently 15
 | `MARKET_CLOSED` | Before the open, or on a day with no session at all, such as a weekend or an exchange holiday. |
 | `RELEASE_AFTER_CLOSE` | After the close, on a day that had a session. |
 
-Your account query is not an order message, so it works outside a session too. `send_account_query(session)` from `qte_sdk.account` returns your positions, and your cash if your account holds a cash balance, valued at the last official close. `session_date` names that session, even between terms, when positions carried over from the term before are returned too ([Query your account](quickstart.md#query-your-account)). It also needs an exchange that serves the query.
+Your account query is not an order message, so it works outside a session too. Send `send_account_query(session)` from `qte_sdk.account` and read the `account_state` that answers it in your one loop. Outside a session it values your positions, and your cash when the reply includes it, at the last official close, and `session_date` names that session, even between terms, when positions carried over from the term before are returned too ([Query your account](quickstart.md#query-your-account)). It also needs an exchange that serves the query.
 
 ## 5. Fetch the last closed session
 
