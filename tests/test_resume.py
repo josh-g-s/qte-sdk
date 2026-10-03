@@ -13,6 +13,7 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError
 
 import qte_sdk.connection
+import qte_sdk.reconnect
 from qte_sdk.connection import (
     DEFAULT_LIVENESS_TIMEOUT,
     HEARTBEAT_TIMEOUT_CLOSE_CODE,
@@ -1041,8 +1042,6 @@ def test_a_connected_with_a_resume_shows_the_view_incomplete_until_it_completes(
 
 
 def test_connected_is_still_importable_from_the_reconnect_module():
-    import qte_sdk.reconnect
-
     assert qte_sdk.reconnect.Connected is qte_sdk.connection.Connected
     assert "Connected" in qte_sdk.reconnect.__all__
 
@@ -1092,9 +1091,12 @@ async def test_without_resume_the_cursor_is_forgotten_only_in_a_new_term(new_ter
         assert last == 100  # the cursor never moves over the gap
 
 
-async def test_without_resume_a_calendar_too_late_to_check_still_forgets_an_old_term():
+async def test_without_resume_a_calendar_too_late_to_check_still_forgets_an_old_term(
+    monkeypatch: pytest.MonkeyPatch,
+):
     # The second session's calendar arrives only after the attempt has stopped waiting for
     # it, so the cursor is kept at first, then forgotten when the calendar names a new term.
+    monkeypatch.setattr(qte_sdk.reconnect, "DEFAULT_CALENDAR_TIMEOUT", 0.2)
     first = Scripted({"term": TERM, "after": [order_state(100)], "drop": True})
     connections = 0
 
@@ -1113,9 +1115,7 @@ async def test_without_resume_a_calendar_too_late_to_check_still_forgets_an_old_
         await ws.wait_closed()
 
     async with serve_local(exchange) as url:
-        rs = ReconnectingSession(
-            url, synthetic_token(), resume=False, ack_timeout=0.2, sleep=Clock().sleep
-        )
+        rs = ReconnectingSession(url, synthetic_token(), resume=False, sleep=Clock().sleep)
         async with rs:
             events = await take(rs, 8)
             last = rs.last_report_seq
