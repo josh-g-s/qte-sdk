@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.4
+**Version:** 1.6
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -26,6 +26,7 @@ Never build these into code as constants. They are set by the exchange and can c
 - the minimum time an order must rest before it may be cancelled or amended;
 - the price collar;
 - your team's message budgets;
+- the heartbeat interval, and how long the exchange waits before it drops a silent connection (the SDK's `liveness_timeout` is a client-side setting, not one of these);
 - trading days, holidays and hours. Read them from the calendar the exchange sends after you authenticate (`session.wait_for_calendar()`, then `qte_sdk.calendar.next_open` and `next_close`).
 
 Act on what the exchange reports instead: cancel or amend after the order's `order_state` arrives rather than after a fixed sleep, trade only while `SessionState.state` is `OPEN`, and handle each reject by its reason.
@@ -42,12 +43,12 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 
 - There is one conflated market-data feed, the same for everyone: books, trades and the session state on a 100 ms grid, and the mark on its own, slower grid. There is no faster or raw feed.
 - On the grid, a book is published only when it has changed, so a quiet instrument may send nothing for a long time. A subscribe during a session is answered at once with the last book published for each instrument that has one, which may be older than the latest grid point; an instrument with no book yet sends its first when it is published. Keep the latest book of each instrument (`qte_sdk.books.LatestBooks` does this) and do not make your program wait for a new book before it acts. During a session, `SessionState` arrives at every grid point.
-- Handle the warning events: `DecodeFailed` and `Unknown` (a message that could not be used) and `SeqGap` (messages were missed). After a gap or a dropped connection, your book, positions and resting orders are uncertain until you check them again. To check your positions and cash, send `qte_sdk.account.send_account_query` and read the `account_state` that answers it in your one loop (`qte_sdk.account.is_account_state`).
+- Handle the warning events: `DecodeFailed` and `Unknown` (a message that could not be used) and `SeqGap` (messages were missed). After a gap or a dropped connection, your book, positions and resting orders are uncertain until you check them again. To check your positions and cash, send `qte_sdk.account.send_account_query` and read the `account_state` that answers it in your one loop (`qte_sdk.account.is_account_state`). If you keep your own positions from fills, query with `qte_sdk.account.AccountReports` instead and apply only what its `update` returns: a fill can arrive after a reply that already counts it, or before a reply that does not, and adding fills to a reply by hand counts some twice and loses others.
 
 ## Sessions
 
 - Open one session with `qte_sdk.session.open_session`, send on it, and have one loop read its events by iterating the session itself. Two loops reading the same session each get only some of the events, or fail. In that one loop, pick out market data with `qte_sdk.market_data.as_market_data` and order events with `qte_sdk.orders.is_order_event`. `market_data(session)` yields market data only and drops order events, so use it only in a program that sends no orders.
-- A session from `open_session` does not reconnect. Iterating it ends when the exchange closes the connection and raises `websockets.exceptions.ConnectionClosedError` if the connection drops. `qte_sdk.reconnect.ReconnectingSession` reconnects for you and reports a drop as a `Disconnected` event, but cannot recover what was sent while you were disconnected.
+- A session from `open_session` does not reconnect. Iterating it ends when the exchange closes the connection and raises `websockets.exceptions.ConnectionClosedError` if the connection drops. `qte_sdk.reconnect.ReconnectingSession` reconnects for you, reports a drop as a `Disconnected` event, and resumes the new session: your team's private order reports sent while you were disconnected are replayed, or replaced by a snapshot of your resting orders. Market data sent while you were disconnected is not recovered, and an order in flight when the connection dropped is never sent again.
 
 ## Past market data
 

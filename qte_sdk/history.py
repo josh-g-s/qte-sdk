@@ -90,7 +90,7 @@ from qte_sdk.connection import DecodeFailed, Unknown, _decode_error
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import INBOUND
 from qte_sdk.market_data import MarketData
-from qte_sdk.session import _Secret, resolve_token
+from qte_sdk.session import _holds_token, _redact, _Secret, resolve_token
 
 __all__ = [
     "DEFAULT_MAX_RESUMES",
@@ -1027,9 +1027,9 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
         # Server text: an echoed token is redacted, and text that still shares a run of
         # characters with it (a fragment, say from an echoed header) is withheld.
         if isinstance(body.get("status"), str):
-            status = _screened(body["status"].replace(secret.value, repr(secret)), secret)
+            status = _screened(_redact(body["status"], secret), secret)
         if isinstance(body.get("message"), str):
-            message = _screened(body["message"].replace(secret.value, repr(secret)), secret)
+            message = _screened(_redact(body["message"], secret), secret)
     cls, meaning = _ERRORS.get(reply.status, (HistoryError, "unexpected response"))
     text = f"{meaning} (HTTP {reply.status})" + (f": {message}" if message else "")
     details: dict[str, Any] = {"http_status": reply.status, "status": status, "message": message}
@@ -1049,7 +1049,9 @@ def _sanitised(error: BaseException, secret: _Secret) -> BaseException:
     """
     if isinstance(error, Exception) and not isinstance(error, OSError):
         return HistoryError(f"the request failed ({type(error).__name__}); details withheld")
-    if isinstance(error, OSError) and (secret.value in str(error) or secret.value in repr(error)):
+    # Read in its arguments and attributes too, decoded: str() and repr() escape a token
+    # with a backslash (and the filename of an OSError is shown only as its repr).
+    if isinstance(error, OSError) and _holds_token(error, secret):
         return HistoryError(f"{type(error).__name__}; details withheld")
     error = error.with_traceback(None)
     error.__cause__ = error.__context__ = None

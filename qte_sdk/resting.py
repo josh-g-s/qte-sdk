@@ -19,6 +19,13 @@ sends changes the view; only what the exchange reports does:
   mass-cancel (one `order_cancelled` per order), the purge of a STALE order, the close.
 - `accepted` and `reject` change nothing. `accepted` carries no level key, and a rejected
   amend leaves the order unchanged.
+- A snapshot after a resume (a `resume_ack` with `replayed` False, its `order_snapshot`
+  events, then `ResumeComplete`) replaces the whole view with the orders it lists and
+  makes the view complete. Until the `ResumeComplete`, the view is left as it was. An
+  entry from a snapshot reads RESTING, since a snapshot does not say whether an order is
+  STALE.
+- Any `resume_ack`, replay or snapshot, marks the view incomplete until its
+  `ResumeComplete`.
 
     view = RestingOrders()
     async for event in view.follow(conn):
@@ -29,19 +36,34 @@ What the view cannot know:
 
 - An order becoming STALE is never reported to its owner, so an entry can read RESTING
   while the exchange holds it STALE. The purge that follows is reported and removes it.
+- If the exchange fails to turn one of its records into a report, it skips that record
+  without giving it a number and carries on, so the numbering stays without gaps and no
+  `ReportGap` is delivered. The view cannot tell, does not set `incomplete`, and a
+  replay does not put it right. Only a snapshot does: a resume answered with one, which
+  you can ask for with `Session.resume(0)`, replaces the view with the orders resting
+  now. The skipped report itself (a fill, for example) is never delivered.
 - An older exchange that does not send `old_price` gives no event naming the price an
   amend moved an order away from. The view then keeps the entry at the old price: an
   `order_state` at the new price adds the new entry beside it, and an amend that fills
   in full leaves it alone. `incomplete` is not set. Against such an exchange, cancel and
   re-enter instead of amending the price if you need an accurate view. Size-only amends
-  are tracked correctly either way.
+  are tracked correctly either way. A snapshot clears any such leftover entry.
 - A new view starts empty, which is right only if the team has no resting orders when it
-  starts. If orders may already rest (for example on a reconnect), call
-  `mark_incomplete()`: nothing yet reports the orders already on the book.
-- Events missed on a sequence gap, a frame that could not be decoded, or a disconnect can
-  leave the view wrong. It is then marked `incomplete` and stays so, since there is no
-  resume yet. Following a `ReconnectingSession`, its `Disconnected` event marks the view
-  incomplete too.
+  starts. A `ReconnectingSession` resumes every session, its first included, so a view
+  that follows one from the start, or is passed to it as `resting`, reads incomplete from
+  its first `Connected` and is loaded from a snapshot. Otherwise, if orders may already
+  rest, call `mark_incomplete()`, then `Session.resume(0)`, and follow the session: the
+  snapshot that answers it replaces the view and makes it complete. Without
+  `mark_incomplete()`, the view reads complete and empty until the `resume_ack` reaches
+  it, and other events, such as the calendar, can come first.
+- Events missed on a sequence gap (`SeqGap` or `ReportGap`), or a frame that could not be
+  decoded, can leave the view wrong. It is then marked `incomplete` until a snapshot
+  replaces it. A `Disconnected` marks it incomplete too, but only until the next session's
+  replay is complete, provided nothing else made the view uncertain meanwhile: the replay
+  delivers every report the view missed, in order.
+- A session you open yourself delivers no `Disconnected`. When it ends, `follow` marks
+  the view incomplete, and only a snapshot clears that: resume the next session from 0 to
+  have the view complete again, or use a `ReconnectingSession`.
 """
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator
@@ -50,14 +72,31 @@ from typing import Any
 
 from google.protobuf.message import Message
 
-from qte_sdk.connection import DataUncertain, DecodeFailed, Disconnected, Event, Received
+from qte_sdk.connection import (
+    Connected,
+    DataUncertain,
+    DecodeFailed,
+    Disconnected,
+    Event,
+    Received,
+    ResumeComplete,
+)
 from qte_sdk.contract.v1.common_pb2 import RESTING, STALE
 from qte_sdk.contract.v1.order_events_pb2 import Execution, OrderCancelled, OrderState
+from qte_sdk.contract.v1.session_pb2 import OrderSnapshot, ResumeAck
 
 # Message types that can change the view. A frame of one of these, or of no readable
 # type, that could not be decoded may have carried a change the view has now missed.
 _ORDER_EVENT_TYPES = frozenset(
-    {"accepted", "reject", "execution", "order_cancelled", "order_state"}
+    {
+        "accepted",
+        "reject",
+        "execution",
+        "order_cancelled",
+        "order_state",
+        "order_snapshot",
+        "resume_ack",
+    }
 )
 
 
@@ -94,6 +133,12 @@ class RestingOrders:
     def __init__(self) -> None:
         self._orders: dict[LevelKey, RestingOrder] = {}
         self._incomplete = False
+        # True while the view is incomplete only because of disconnects, which a replay
+        # of the missed reports puts right.
+        self._replay_restores = False
+        # The orders of a snapshot being received, which replace the view once complete.
+        self._snapshot: dict[LevelKey, RestingOrder] | None = None
+        self._snapshot_damaged = False
 
     @property
     def incomplete(self) -> bool:
@@ -101,8 +146,10 @@ class RestingOrders:
         return self._incomplete
 
     def mark_incomplete(self) -> None:
-        """Mark the view incomplete, for example after a disconnect."""
+        """Mark the view incomplete, for example after a disconnect. Only a snapshot makes
+        it complete again."""
         self._incomplete = True
+        self._replay_restores = False
 
     def get(self, instrument: str, side: int, price: int) -> RestingOrder | None:
         return self._orders.get(LevelKey(instrument, side, price))
@@ -116,19 +163,41 @@ class RestingOrders:
     def __len__(self) -> int:
         return len(self._orders)
 
-    def apply(self, event: Event | Disconnected | Message | object) -> None:
+    def apply(self, event: Event | Connected | Disconnected | Message | object) -> None:
         """Update the view from one connection event or one decoded exchange message.
 
-        A `SeqGap` or `Disconnected` (any `DataUncertain`) marks the view incomplete. Events
-        the view has no use for, such as a reconnecting session's `Connected`, are ignored.
+        A `SeqGap`, `ReportGap` or `Disconnected` (any `DataUncertain`) marks the view
+        incomplete. A reconnecting session's `Connected` whose `resume` is set marks it
+        incomplete until that resume's `ResumeComplete`, since the replay or snapshot it
+        announces has not arrived yet. Events the view has no use for, such as a
+        `Connected` without a resume, are ignored.
         """
-        if isinstance(event, DataUncertain):
+        if isinstance(event, Disconnected):
+            self._on_disconnected()
+        elif isinstance(event, Connected):
+            if event.resume is not None:
+                self._await_resume()
+        elif isinstance(event, DataUncertain):
             self.mark_incomplete()
         elif isinstance(event, DecodeFailed):
             if event.type is None or event.type in _ORDER_EVENT_TYPES:
                 self.mark_incomplete()
+                if self._snapshot is not None:
+                    self._snapshot_damaged = True
+        elif isinstance(event, ResumeComplete):
+            self._on_resume_complete(event)
         elif isinstance(event, Received):
             self.apply(event.message)
+        elif isinstance(event, ResumeAck):
+            if not event.replayed:
+                self._snapshot = {}
+                self._snapshot_damaged = False
+            # Uncertain until the replay or snapshot is complete. The view itself is
+            # untouched meanwhile, so a replay could still put it right if a snapshot is
+            # cut short.
+            self._await_resume()
+        elif isinstance(event, OrderSnapshot):
+            self._on_order_snapshot(event)
         elif isinstance(event, OrderState):
             self._on_order_state(event)
         elif isinstance(event, Execution):
@@ -150,6 +219,41 @@ class RestingOrders:
                 yield event
         finally:
             self.mark_incomplete()
+
+    def _await_resume(self) -> None:
+        """Mark the view incomplete until the coming resume's `ResumeComplete`: a session
+        is up, but the replay or snapshot it was answered with has not arrived yet."""
+        if not self._incomplete:
+            self._incomplete = True
+            self._replay_restores = True
+
+    def _on_disconnected(self) -> None:
+        # A snapshot cut short is dropped; the view it would have replaced is untouched.
+        self._snapshot = None
+        if not self._incomplete:
+            self._incomplete = True
+            self._replay_restores = True
+
+    def _on_resume_complete(self, event: ResumeComplete) -> None:
+        if not event.replayed:
+            if self._snapshot is None:
+                return  # its resume_ack was not seen, so the snapshot cannot be trusted
+            self._orders = self._snapshot
+            self._snapshot = None
+            if self._snapshot_damaged:
+                self.mark_incomplete()
+            else:
+                self._incomplete = False
+                self._replay_restores = False
+        elif self._replay_restores:
+            self._incomplete = False
+            self._replay_restores = False
+
+    def _on_order_snapshot(self, msg: OrderSnapshot) -> None:
+        if self._snapshot is None:
+            return  # not part of a snapshot this view saw begin
+        key = LevelKey(msg.instrument, msg.side, msg.price)
+        self._snapshot[key] = RestingOrder(key, msg.strat_id, msg.remaining_size, RESTING, None)
 
     def _on_order_state(self, msg: OrderState) -> None:
         key = LevelKey(msg.instrument, msg.side, msg.price)
