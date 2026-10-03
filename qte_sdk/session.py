@@ -27,7 +27,6 @@ import asyncio
 import os
 from collections import deque
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 
 from google.protobuf.message import Message
@@ -41,6 +40,7 @@ from qte_sdk.connection import (
     ReportGap,
     ResumeComplete,
     SeqGap,
+    SessionInfo,
     SessionRejected,
 )
 from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
@@ -89,27 +89,6 @@ class ResumeRejected(SessionRejected):
     The connection stays open and the session goes on, but no report is replayed and no
     snapshot is sent.
     """
-
-
-@dataclass(frozen=True)
-class SessionInfo:
-    """The exchange's acknowledgement of a session, field for field as `session_ack` carries it."""
-
-    session_id: str
-    team: str
-    server_time: int
-    contract_version: str
-    unscored: bool
-
-    @classmethod
-    def from_ack(cls, ack: SessionAck) -> "SessionInfo":
-        return cls(
-            session_id=ack.session_id,
-            team=ack.team,
-            server_time=ack.server_time,
-            contract_version=ack.contract_version,
-            unscored=ack.unscored,
-        )
 
 
 def _report_seq(event: Event) -> int | None:

@@ -578,10 +578,11 @@ class ReconnectingSession:
             # even without a resume.
             self._reports.restore(saved)
             session._reports = self._reports
-            if not self._reports.cursor:
-                # Whatever the cursor becomes from here on (the first report read, or a
-                # snapshot's as_of) is counted in this session's term, which its calendar
-                # names when it arrives.
+            if not (self._reports.cursor or self._reports.above):
+                # Nothing is counted that another term could make wrong (a cursor of 0
+                # means the same in every term). Whatever the cursor becomes from here on,
+                # the first report read or a snapshot's as_of, is counted in this session's
+                # term, which its calendar names when it arrives.
                 self._reports_term = None
             elif (self._resume or self._reports_term is not None) and not self._closed:
                 # report_seq starts again each term, so a cursor counted in another term
@@ -659,9 +660,12 @@ class ReconnectingSession:
         counted in, unless `term` names one."""
         reports = self._reports
         counted_in = self._reports_term
-        if reports.resume is None and reports.cursor is not None and term != counted_in:
-            if strict or (term is not None and counted_in is not None):
-                reports.restore((None, frozenset()))
+        if strict:
+            stale = term is None or term != counted_in
+        else:
+            stale = term is not None and counted_in is not None and term != counted_in
+        if stale and reports.resume is None and reports.cursor is not None:
+            reports.restore((None, frozenset()))
         if term is not None or reports.cursor is None:
             self._reports_term = term
 

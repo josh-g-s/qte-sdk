@@ -24,6 +24,8 @@ sends changes the view; only what the exchange reports does:
   makes the view complete. Until the `ResumeComplete`, the view is left as it was. An
   entry from a snapshot reads RESTING, since a snapshot does not say whether an order is
   STALE.
+- Any `resume_ack`, replay or snapshot, marks the view incomplete until its
+  `ResumeComplete`.
 
     view = RestingOrders()
     async for event in view.follow(conn):
@@ -59,6 +61,9 @@ What the view cannot know:
   replaces it. A `Disconnected` marks it incomplete too, but only until the next session's
   replay is complete, provided nothing else made the view uncertain meanwhile: the replay
   delivers every report the view missed, in order.
+- A session you open yourself delivers no `Disconnected`. When it ends, `follow` marks
+  the view incomplete, and only a snapshot clears that: resume the next session from 0 to
+  have the view complete again, or use a `ReconnectingSession`.
 """
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator
@@ -187,11 +192,10 @@ class RestingOrders:
             if not event.replayed:
                 self._snapshot = {}
                 self._snapshot_damaged = False
-                # Uncertain until the snapshot is complete. The view itself is untouched
-                # meanwhile, so a replay could still put it right if the snapshot is cut short.
-                if not self._incomplete:
-                    self._incomplete = True
-                    self._replay_restores = True
+            # Uncertain until the replay or snapshot is complete. The view itself is
+            # untouched meanwhile, so a replay could still put it right if a snapshot is
+            # cut short.
+            self._await_resume()
         elif isinstance(event, OrderSnapshot):
             self._on_order_snapshot(event)
         elif isinstance(event, OrderState):
