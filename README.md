@@ -29,9 +29,9 @@ Put the exchange address and your token in a `.env` file in your project folder,
 python -m qte_sdk.token set
 ```
 
-If your project is a git repository, it offers to add `.env` to `.gitignore`; say yes. `python -m qte_sdk.token check` then says where the SDK will find each, without showing the token.
+If your project is a git repository, it offers to add `.env` to `.gitignore`; say yes. If git already tracks a `.env`, it says so and tells you to run `git rm --cached .env`, since `.gitignore` alone does not stop git committing a file it tracks. `python -m qte_sdk.token check` then says where the SDK will find each, without showing the token.
 
-The SDK reads `QTE_URL` and `QTE_TOKEN` from `./.env` itself, only when they are not passed in or set as real environment variables, which always take precedence. For the token the order is `token=`, then `QTE_TOKEN`, then the file named by `QTE_TOKEN_FILE`, then `.env`. It refuses a `.env` holding the token that other users can read, and warns if git does not ignore it. Step 2 of the [quickstart](docs/quickstart.md) explains the details and the alternatives: writing `.env` by hand, environment variables, or a private token file named by `QTE_TOKEN_FILE` (`python -m qte_sdk.token set --file` makes one).
+The SDK reads `QTE_URL` and `QTE_TOKEN` from `./.env` itself, only when they are not passed in or set as real environment variables, which always take precedence. For the token the order is `token=`, then `QTE_TOKEN`, then the file named by `QTE_TOKEN_FILE`, then `.env`. It refuses a `.env` holding the token that other users can read, and warns if git tracks it or does not ignore it. Step 2 of the [quickstart](docs/quickstart.md) explains the details and the alternatives: writing `.env` by hand, environment variables, or a private token file named by `QTE_TOKEN_FILE` (`python -m qte_sdk.token set --file` makes one).
 
 Then run this. It opens a session, subscribes to one instrument and prints the best bid and ask as the book updates, for ten seconds. A book shows two kinds of depth: the wall (`bid_levels`, `ask_levels`) and participants' resting orders (`student_bid_levels`, `student_ask_levels`), each best price first, so the best bid and ask are taken across both.
 
