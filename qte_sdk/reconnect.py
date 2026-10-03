@@ -615,21 +615,27 @@ class ReconnectingSession:
             if self._instruments and not self._closed:
                 subscription = Subscribe(instruments=list(self._instruments))
                 await session.connection.send("subscribe", subscription)
-        except ConnectionClosed as error:
-            # A send found the connection closed. If the exchange rejected the session
-            # just before, that rejection, not the retryable close, is the error.
-            failure = error
-            if session is not None:
-                failure = await session._failure_after_close(_CLOSE_READ_TIMEOUT) or error
-            failure = self._safe(failure)
         except Exception as error:
             failure = self._safe(error)
+        except BaseException:
+            # Cancelled or interrupted: what this attempt read ahead will not be delivered,
+            # so the cursor goes back. Whoever handles the cancellation closes the session.
+            self._reports.restore(saved)
+            self._reports_term = saved_term
+            raise
         if session is not None and (failure is not None or self._closed):
+            # Restored before anything else is awaited, so a cancellation cannot skip it.
+            self._reports.restore(saved)
+            self._reports_term = saved_term
+            if isinstance(failure, ConnectionClosed):
+                # A send found the connection closed. If the exchange rejected the session
+                # just before, that rejection, not the retryable close, is the error.
+                drained = await session._failure_after_close(_CLOSE_READ_TIMEOUT)
+                if drained is not None:
+                    failure = self._safe(drained)
             await _close(session)
             self._session = None
             session = None
-            self._reports.restore(saved)
-            self._reports_term = saved_term
         return session, failure, acknowledged, resumed
 
     async def _unless_closed(self, awaitable: Awaitable[Any]) -> Any:

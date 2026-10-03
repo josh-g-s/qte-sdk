@@ -475,10 +475,14 @@ class Session:
         `timeout` seconds, and return the error it ended with, if any. The exchange may
         have rejected the session just before it closed, and that rejection, still unread,
         says why. Used by a `ReconnectingSession`; what is read is not delivered."""
+        loop = asyncio.get_running_loop()
+        end = loop.time() + timeout
         deadline = asyncio.timeout(timeout)
         try:
             async with deadline:
-                while not self._ended:
+                # Checked between reads too: queued frames are read without the event
+                # loop running, so the timeout alone might not fire.
+                while not self._ended and loop.time() < end:
                     await self._read_one()
         except TimeoutError:
             if not deadline.expired():

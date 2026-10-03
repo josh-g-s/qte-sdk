@@ -1282,11 +1282,28 @@ async def test_a_session_rejected_while_waiting_for_the_calendar_is_not_retried(
 @pytest.mark.parametrize("resume_on", [True, False])
 @pytest.mark.parametrize("instruments", [[], ["AAPL"]])
 async def test_a_session_rejected_before_the_first_send_is_not_retried(
-    resume_on: bool, instruments: list[str]
+    resume_on: bool, instruments: list[str], monkeypatch: pytest.MonkeyPatch
 ):
     # No calendar wait here: the exchange acknowledges, rejects and closes before the
     # client sends `resume` or `subscribe`. The send finds the connection closed, and the
     # rejection still unread on it is what is reported.
+    send = Connection.send
+    drained: list[object] = []
+    failure_after_close = qte_sdk.session.Session._failure_after_close
+
+    async def send_once_closed(self: Connection, type_: str, payload: object) -> None:
+        if type_ != "auth":
+            # Made certain rather than left to scheduling: the close has arrived.
+            await self._open_ws().wait_closed()
+        await send(self, type_, payload)  # type: ignore[arg-type]
+
+    async def counted(self: qte_sdk.session.Session, timeout: float) -> object:
+        result = await failure_after_close(self, timeout)
+        drained.append(result)
+        return result
+
+    monkeypatch.setattr(Connection, "send", send_once_closed)
+    monkeypatch.setattr(qte_sdk.session.Session, "_failure_after_close", counted)
     connections = 0
 
     async def exchange(ws: ServerConnection) -> None:
@@ -1313,6 +1330,57 @@ async def test_a_session_rejected_before_the_first_send_is_not_retried(
     assert not isinstance(caught.value, ResumeRejected)
     assert caught.value.reason_name == "TEAM_DISABLED"
     assert connections == 1
+    # Found by reading what the closed connection held, whenever there was a send to fail.
+    sends = resume_on or bool(instruments)
+    assert [type(d).__name__ for d in drained] == (["SessionRejected"] if sends else [])
+
+
+async def test_an_attempt_cancelled_after_its_resume_puts_the_cursor_back(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The second session's resume completes at once and counts live report 2, which is not
+    # delivered: the attempt is cancelled at its next step, the subscription. The cursor
+    # goes back to 1, so a later resume from it asks for report 2 again.
+    send = Connection.send
+    subscriptions = 0
+
+    async def cancelled_on_resubscribe(self: Connection, type_: str, payload: object) -> None:
+        nonlocal subscriptions
+        if type_ == "subscribe":
+            subscriptions += 1
+            if subscriptions == 2:
+                raise asyncio.CancelledError
+        await send(self, type_, payload)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Connection, "send", cancelled_on_resubscribe)
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await ws.recv()
+        await ws.send(ack())
+        await ws.send(term_calendar(TERM))
+        if connections == 1:
+            await ws.recv()
+            await ws.send(EMPTY)
+            await ws.recv()  # the subscription
+            await ws.send(order_state(1))
+            await ws.close()
+            return
+        await ws.send(order_state(2))
+        await ws.recv()
+        await ws.send(resume_ack(True, 1))
+        await ws.wait_closed()
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), instruments=["AAPL"], sleep=Clock().sleep)
+        with pytest.raises(asyncio.CancelledError):
+            async with rs, asyncio.timeout(5):
+                async for _ in rs:
+                    pass
+        assert rs.last_report_seq == 1
+    assert connections == 2
 
 
 async def test_a_cursor_of_unknown_term_is_not_sent_into_a_known_one():
