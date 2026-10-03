@@ -325,12 +325,12 @@ The exchange sends these events about your team's own orders:
 |---|---|
 | `accepted` | Your message was applied. Echoes your `request_ref`. |
 | `reject` | Your message was refused. `reason_code` says why; use `reason_code_name` to print it. |
-| `order_state` | The state of one of your resting orders: its instrument, side, price, strategy and remaining size. |
+| `order_state` | The state of one of your orders: its instrument, side, price, strategy and remaining size. It is sent when an order rests and for every amend the exchange accepts. An amend's `order_state` also carries `old_price`, the order's price before the amend, and reads `FILLED` or `CANCELLED` with a remaining size of 0 when the amend ended the order. |
 | `execution` | A fill: price, size, remaining size, fee or rebate. A fill of a limit order carries the order's price as `order_price`; a fill of a market order has none. |
 | `order_cancelled` | One of your orders left the book unfilled, with the reason (your cancel, a mass cancel, the close, and others). |
 | `risk_notice` | A risk warning for your team. |
 
-`qte_sdk.resting.RestingOrders` keeps a view of your team's resting orders built only from these events. Read its docstring for what it cannot know. In particular, after an amend that changes an order's price, the entry at the old price stays in the view, so cancel and re-enter instead of amending the price if you rely on it.
+`qte_sdk.resting.RestingOrders` keeps a view of your team's resting orders built only from these events. Read its docstring for what it cannot know. When an amend's `order_state` arrives, the view removes the order from `old_price` and, if it still rests, records it at `price` with its remaining size. So an amend that moves the price moves the entry to the new level, a size-only amend (where `old_price` equals `price`) updates it in place, and an amend that fills the order completely or ends it some other way leaves nothing at either price. An older exchange that does not send `old_price` leaves the entry at the old price in the view; against one, cancel and re-enter instead of amending the price if you rely on the view.
 
 ## 8. Values the exchange sets
 
