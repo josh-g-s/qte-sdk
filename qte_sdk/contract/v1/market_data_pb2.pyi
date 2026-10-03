@@ -96,20 +96,26 @@ class Mark(_message.Message):
     def __init__(self, instrument: _Optional[str] = ..., sampled_at: _Optional[int] = ..., value: _Optional[int] = ..., condition: _Optional[_Union[InstrumentCondition, str]] = ...) -> None: ...
 
 class SessionState(_message.Message):
-    __slots__ = ("state", "session_date", "open_time", "close_time", "grid_time", "outage_active")
+    __slots__ = ("state", "session_date", "open_time", "close_time", "grid_time", "outage_active", "next_session_date", "next_open_time", "next_close_time")
     STATE_FIELD_NUMBER: _ClassVar[int]
     SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
     OPEN_TIME_FIELD_NUMBER: _ClassVar[int]
     CLOSE_TIME_FIELD_NUMBER: _ClassVar[int]
     GRID_TIME_FIELD_NUMBER: _ClassVar[int]
     OUTAGE_ACTIVE_FIELD_NUMBER: _ClassVar[int]
+    NEXT_SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
+    NEXT_OPEN_TIME_FIELD_NUMBER: _ClassVar[int]
+    NEXT_CLOSE_TIME_FIELD_NUMBER: _ClassVar[int]
     state: _common_pb2.MarketSessionPhase
     session_date: str
     open_time: int
     close_time: int
     grid_time: int
     outage_active: bool
-    def __init__(self, state: _Optional[_Union[_common_pb2.MarketSessionPhase, str]] = ..., session_date: _Optional[str] = ..., open_time: _Optional[int] = ..., close_time: _Optional[int] = ..., grid_time: _Optional[int] = ..., outage_active: bool = ...) -> None: ...
+    next_session_date: str
+    next_open_time: int
+    next_close_time: int
+    def __init__(self, state: _Optional[_Union[_common_pb2.MarketSessionPhase, str]] = ..., session_date: _Optional[str] = ..., open_time: _Optional[int] = ..., close_time: _Optional[int] = ..., grid_time: _Optional[int] = ..., outage_active: bool = ..., next_session_date: _Optional[str] = ..., next_open_time: _Optional[int] = ..., next_close_time: _Optional[int] = ...) -> None: ...
 
 class OfficialClose(_message.Message):
     __slots__ = ("instrument", "session_date", "value", "frozen")

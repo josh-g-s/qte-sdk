@@ -1,6 +1,6 @@
 // Outbound market data.
 //
-// **Version:** 1.9
+// **Version:** 1.10
 //
 // Message types on the envelope `type` field: `book`, `trades`, `mark`,
 // `session_state`, `official_close`. One feed for everyone (SPEC 4.3): the
@@ -14,7 +14,9 @@
 // Outside a session, everything but order entry is served: a `subscribe`
 // gets a `session_state` with `state = CLOSED` and, per instrument, an
 // `official_close` if one exists yet, in place of `book`, `trades` and
-// `mark`, which are never sent outside a session (SPEC 4.3, SPEC 8.1).
+// `mark`, which are never sent outside a session (SPEC 4.3, SPEC 8.1). That
+// `session_state` also says when the market next opens (next_session_date,
+// next_open_time, next_close_time).
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -203,6 +205,21 @@ message SessionState {
   // and carries no field here: it is that instrument's `Book.condition`
   // (ONE_SIDED or EMPTY) instead (SPEC 5.2, InstrumentCondition above).
   bool outage_active = 6;
+  // string, optional. The US session date (ISO 8601) of the next session
+  // scheduled to open after the moment this message is sent. Set only on the
+  // one session_state a subscribe outside a session gets; absent on a
+  // session_state published at a grid point, and absent when the term has no
+  // later session (after its last session, or between terms). SPEC 13.1,
+  // SPEC 13.2
+  optional string next_session_date = 7;
+  // timestamp, optional. The open of that next session: 09:30
+  // America/New_York on that date. Present exactly when next_session_date
+  // is. SPEC 13.1
+  optional int64 next_open_time = 8;
+  // timestamp, optional. The close of that next session: 16:00
+  // America/New_York, or 13:00 on an early-close day. Present exactly when
+  // next_session_date is. SPEC 13.1, SPEC 13.2
+  optional int64 next_close_time = 9;
 }
 
 // The last official close of one instrument: the time-weighted average of
