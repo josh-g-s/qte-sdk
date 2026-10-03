@@ -27,7 +27,9 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
+from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
 from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
+from qte_sdk.contract.v1.market_data_pb2 import SessionState as SessionStateMessage
 from qte_sdk.contract.v1.market_data_pb2 import WallLevel
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
 from qte_sdk.resting import RestingOrders
@@ -878,6 +880,10 @@ def book_event() -> Received:
     return Received("book", book, 1)
 
 
+def session_state_event(phase: int = MarketSessionPhase.OPEN) -> Received:
+    return Received("session_state", SessionStateMessage(state=phase), 1)
+
+
 async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short():
     # A send can stall after its message is written, for example on a full send buffer. A
     # Ctrl+C then must not make the example forget that message and send it again.
@@ -933,6 +939,7 @@ async def test_quote_both_sides_keeps_to_seconds_when_a_send_stalls_while_quotin
     view = RestingOrders()
     quoter = example.Quoter(StalledConnection(sent), view, args)
     queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(session_state_event())
     queue.put_nowait(book_event())
     loop = asyncio.get_running_loop()
     started = loop.time()
@@ -959,6 +966,7 @@ async def test_quote_both_sides_sends_nothing_from_a_book_that_may_be_stale():
     session = RecordingSession()
     args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
     quoter = example.Quoter(session, RestingOrders(), args)
+    quoter.market_open = True
     quoter.books.update(book_event().message)
     # A frame that may have been a newer book could not be read.
     example.handle(quoter, quoter.view, DecodeFailed("book", ValueError("unreadable")))
@@ -969,6 +977,7 @@ async def test_quote_both_sides_sends_nothing_from_a_book_that_may_be_stale():
     newer.grid_time = 5
     example.handle(quoter, quoter.view, Received("book", newer, 2))
     await quoter.act()
+    await quoter.act()  # one message per call
     assert session.sent == ["new", "new"]
 
 
@@ -989,11 +998,86 @@ async def test_quote_both_sides_applies_queued_events_before_it_sends(missed: ob
     args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
+    quoter.market_open = True
     quoter.books.update(book_event().message)
     queue: asyncio.Queue = asyncio.Queue()
     queue.put_nowait(missed)
     async with asyncio.timeout(RUN_LIMIT):
         assert await example.quote_until(quoter, view, queue, 0.2) == why
+    assert session.sent == []
+
+
+class YieldingSession:
+    """A session whose first send lets other tasks run before it returns, and during
+    which the reader queues `arrives`. Records each message's side."""
+
+    def __init__(self, queue: asyncio.Queue, arrives: object) -> None:
+        self.queue = queue
+        self.arrives = arrives
+        self.sent: list[int] = []
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append(payload.side)
+        if len(self.sent) == 1:
+            self.queue.put_nowait(self.arrives)
+        await asyncio.sleep(0)
+
+
+@pytest.mark.parametrize(
+    ("arrives", "why"),
+    [
+        (SeqGap(expected=2, received=3), "unreliable"),
+        (DecodeFailed("book", ValueError("unreadable")), "time"),
+        (session_state_event(MarketSessionPhase.CLOSED), "time"),
+    ],
+    ids=["seq-gap", "unreadable-book", "market-closed"],
+)
+async def test_quote_both_sides_applies_events_that_arrive_between_two_sends(
+    arrives: object, why: str
+):
+    # While the first new order is being sent, a sign that it is no longer safe to quote
+    # arrives. The second side must not be sent from what was known before.
+    example = load_example("quote_both_sides.py")
+    queue: asyncio.Queue = asyncio.Queue()
+    session = YieldingSession(queue, arrives)
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    view = RestingOrders()
+    quoter = example.Quoter(session, view, args)
+    queue.put_nowait(session_state_event())
+    queue.put_nowait(book_event())
+    async with asyncio.timeout(RUN_LIMIT):
+        assert await example.quote_until(quoter, view, queue, 0.2) == why
+    assert session.sent == [example.BUY]
+
+
+async def test_quote_both_sides_sends_no_second_cancel_after_a_gap_during_the_first():
+    example = load_example("quote_both_sides.py")
+    queue: asyncio.Queue = asyncio.Queue()
+    session = YieldingSession(queue, SeqGap(expected=2, received=3))
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    view = RestingOrders()
+    quoter = example.Quoter(session, view, args)
+    quoter.resting = lambda quote: quote.price is not None  # reported resting
+    quoter.quotes[example.BUY].price = BID + TICK
+    quoter.quotes[example.SELL].price = ASK - TICK
+    loop = asyncio.get_running_loop()
+    async with asyncio.timeout(RUN_LIMIT):
+        outcome = await example.cancel_own_orders(quoter, view, queue, loop.time() + 1)
+    assert outcome == "unreliable"
+    assert session.sent == [example.BUY]
+
+
+async def test_quote_both_sides_sends_nothing_while_the_market_is_closed():
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    view = RestingOrders()
+    quoter = example.Quoter(session, view, args)
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(session_state_event(MarketSessionPhase.CLOSED))
+    queue.put_nowait(book_event())  # a book held from before the close
+    async with asyncio.timeout(RUN_LIMIT):
+        assert await example.quote_until(quoter, view, queue, 0.2) == "time"
     assert session.sent == []
 
 
@@ -1028,6 +1112,7 @@ async def test_quote_both_sides_sends_nothing_once_time_is_up():
     args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
+    quoter.market_open = True
     quoter.books.update(book_event().message)  # a book held, and both sides free to send
     async with asyncio.timeout(RUN_LIMIT):
         why = await example.quote_until(quoter, view, asyncio.Queue(), 0)
@@ -1042,6 +1127,7 @@ async def test_quote_both_sides_reads_events_with_a_very_short_requote_interval(
     view = RestingOrders()
     quoter = example.Quoter(session, view, example.parse_args(argv))
     queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(session_state_event())
     queue.put_nowait(book_event())
     async with asyncio.timeout(RUN_LIMIT):
         why = await example.quote_until(quoter, view, queue, 0.2)
