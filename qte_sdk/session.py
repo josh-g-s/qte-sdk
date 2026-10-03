@@ -866,27 +866,37 @@ class _Secret:
     __str__ = __repr__
 
 
-def _token_forms(token: str) -> list[str]:
+def _token_forms(secret: _Secret) -> tuple[_Secret, ...]:
     """The token as written, and as the usual escapes write it: Python's repr of it as text
     or bytes (with a quote escaped or not) and JSON. Those escape a backslash, newline or
     tab, so text that holds an escaped copy does not hold the token as written. Longest
     first, so a redaction replaces a whole escaped copy rather than part of it. Never
     raises, even for a token that is not valid Unicode, such as one read from an
-    environment variable holding bytes that are not UTF-8."""
-    # surrogatepass: a lone surrogate would make a plain encode() raise an error that
-    # holds the token.
-    raw = token.encode("utf-8", "surrogatepass")
-    forms = {
-        token,
-        repr(token)[1:-1],
-        repr(token + "'\"")[1:-4],
-        json.dumps(token)[1:-1],
-        json.dumps(token, ensure_ascii=False)[1:-1],
-        token.encode("unicode_escape").decode("ascii"),
-        repr(raw)[2:-1],
-        repr(raw + b"'\"")[2:-4],
-    }
-    return sorted((form for form in forms if form), key=len, reverse=True)
+    environment variable holding bytes that are not UTF-8.
+
+    Each form is held like the token, in a `_Secret`, and nothing here keeps one in a plain
+    local once it returns or raises, so no traceback that shows locals reveals them."""
+    raw: bytes | None = None
+    texts: set[str] | None = None
+    try:
+        # surrogatepass: a lone surrogate would make a plain encode() raise an error that
+        # holds the token.
+        raw = secret.value.encode("utf-8", "surrogatepass")
+        texts = {
+            secret.value,
+            repr(secret.value)[1:-1],
+            repr(secret.value + "'\"")[1:-4],
+            json.dumps(secret.value)[1:-1],
+            json.dumps(secret.value, ensure_ascii=False)[1:-1],
+            secret.value.encode("unicode_escape").decode("ascii"),
+            repr(raw)[2:-1],
+            repr(raw + b"'\"")[2:-4],
+        }
+        texts.discard("")
+        # map and sorted run no Python frame that would hold a form as a local.
+        return tuple(map(_Secret, sorted(texts, key=len, reverse=True)))
+    finally:
+        raw = texts = None
 
 
 # Attributes an exception can keep its data in outside `args` and `__dict__`.
@@ -896,23 +906,28 @@ _EXCEPTION_FIELDS = ("filename", "filename2", "strerror", "object")
 def _holds_token(value: object, secret: _Secret) -> bool:
     """Whether `value` holds the token, as written or escaped (see `_token_forms`), in any
     text it carries: a str or bytes, the keys and values of a dict, the items of a list,
-    tuple or set, every field of a protobuf message, and an exception's text, arguments and
-    attributes. Text is read as it is held, decoded, not only as str() or repr() shows it,
-    since those escape a token with a backslash, newline or tab. Never raises."""
-    forms = _token_forms(secret.value)
-    seen: set[int] = set()
+    tuple or set, every field of a protobuf message, singular, repeated or map, and an
+    exception's text, arguments and attributes. Text is read as it is held, decoded, not
+    only as str() or repr() shows it, since those escape a token with a backslash, newline
+    or tab. Never raises."""
+    forms = _token_forms(secret)
+    # Every object scanned is kept here, not only its id(), until the scan ends: the upb
+    # protobuf backend makes a new wrapper for a sub-message on each access, and a freed
+    # wrapper's id() can be reused by the next, which would then be skipped.
+    seen: dict[int, object] = {}
     pending: list[object] = [value]
     while pending:
         item = pending.pop()
         if isinstance(item, bytes | bytearray):
             item = bytes(item).decode("utf-8", "replace")
         if isinstance(item, str):
-            if any(form in item for form in forms):
-                return True
+            for form in forms:
+                if form.value in item:
+                    return True
             continue
         if id(item) in seen:
             continue
-        seen.add(id(item))
+        seen[id(item)] = item
         try:
             if isinstance(item, dict):
                 pending.extend(item.keys())
@@ -920,14 +935,17 @@ def _holds_token(value: object, secret: _Secret) -> bool:
             elif isinstance(item, list | tuple | set | frozenset):
                 pending.extend(item)
             elif isinstance(item, Message):
-                for _, field_value in item.ListFields():
-                    if isinstance(field_value, str | bytes | Message):
-                        pending.append(field_value)
-                    elif hasattr(field_value, "items"):  # a map field
+                for field, field_value in item.ListFields():
+                    entry = field.message_type
+                    if entry is not None and entry.GetOptions().map_entry:
                         pending.extend(field_value.keys())
                         pending.extend(field_value.values())
-                    elif hasattr(field_value, "__iter__"):  # a repeated field
+                    elif field.is_repeated:
+                        # Known from the descriptor: upb's repeated containers have no
+                        # __iter__, though they iterate through the sequence protocol.
                         pending.extend(field_value)
+                    else:
+                        pending.append(field_value)
             elif isinstance(item, BaseException):
                 pending.extend((str(item), repr(item)))
                 pending.extend(item.args)
@@ -940,8 +958,8 @@ def _holds_token(value: object, secret: _Secret) -> bool:
 
 
 def _redact(text: str, secret: _Secret) -> str:
-    for form in _token_forms(secret.value):
-        text = text.replace(form, repr(secret))
+    for form in _token_forms(secret):
+        text = text.replace(form.value, repr(secret))
     return text
 
 
