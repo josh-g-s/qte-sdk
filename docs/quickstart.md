@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.16
+**Version:** 0.18
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -32,7 +32,23 @@ The SDK needs two things: the exchange address, `QTE_URL`, and your team token, 
 
 ### A `.env` file (recommended)
 
-From your project folder, first make sure git will never commit the file, then create it readable only by you:
+From your project folder, with your virtual environment active, run the SDK's setup helper:
+
+```sh
+python -m qte_sdk.token set
+```
+
+It asks for the exchange address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and then for the token: paste it and press Enter. Nothing is shown as you paste, and since the token is typed at a prompt rather than on the command line, it never reaches your shell history. The helper writes both to `.env` as `QTE_URL` and `QTE_TOKEN`, in a file created readable only by you, keeping any other lines already in it. If the folder is a git repository that does not ignore `.env`, it offers to add `.env` to `.gitignore`; say yes. If git already tracks a `.env`, it stops before asking for the token and tells you to run `git rm --cached .env`, since `.gitignore` alone does not stop git committing a file it tracks. Inside a git repository it also stops if it cannot ask git (git is not installed, say), rather than guess. Run it again whenever the token changes.
+
+On Windows the helper cannot make the file readable only by you: Windows does not apply the file's private mode, and the helper does not change Windows access lists. It says so when it saves the file. Keep your project, and any token file, in a folder only you can open, such as one inside your user profile, and do not share that folder. If `QTE_URL` is already set, press Enter at the address prompt to keep it.
+
+To see where the SDK will take the token and the address from, without showing the token, run:
+
+```sh
+python -m qte_sdk.token check
+```
+
+To set it up by hand instead, first make sure git will never commit the file, then create it readable only by you:
 
 ```sh
 printf '\n.env\n' >> .gitignore
@@ -48,14 +64,12 @@ git ls-files --error-unmatch .env
 
 An error saying `.env` did not match any file is what you want. If it prints `.env` instead, run `git rm --cached .env` and commit, before you put the token in.
 
-Open `.env` in your editor and put in the address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and your token:
+Open `.env` in your editor, put in the address and your token, and save it. The token never passes through your shell, so it stays out of your shell history:
 
 ```sh
 QTE_URL=ws://127.0.0.1:8080/ws
 QTE_TOKEN=paste-your-token-here
 ```
-
-Save it. The token never passes through your shell, so it stays out of your shell history.
 
 The SDK reads `.env` itself, with no extra package: `open_session()` takes the address and the token from it, and so do the worked examples. It reads only the `.env` in the working directory (not a parent folder), so run your programs from the folder that holds it. It reads only `QTE_URL` and `QTE_TOKEN`; other lines are left alone, and nothing is put in your environment. Blank lines, `#` comments, an `export ` prefix and single or double quotes around a value are fine.
 
@@ -88,7 +102,7 @@ read -rs QTE_TOKEN && export QTE_TOKEN
 
 An exported variable lasts only for that shell and the programs it starts. A new terminal does not have it, so a program run there falls back to `.env`, or raises `MissingToken` if there is none.
 
-To keep the token in one place for all your projects, put it in a file outside any repository, readable only by you, and name that file in `QTE_TOKEN_FILE`. The first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
+To keep the token in one place for all your projects, put it in a file outside any repository, readable only by you, and name that file in `QTE_TOKEN_FILE`. The helper does this with `python -m qte_sdk.token set --file`: it writes the token alone to `~/.qte/token` (or the path you give after `--file`) in a directory only you can open, and prints the `export QTE_TOKEN_FILE=...` line to add to your shell profile. If the path you give is inside a git repository, it applies the same checks as for `.env`: it stops if git tracks the file or cannot be asked, and offers to add the file to `.gitignore`. To do it by hand, the first command below makes a directory only you can open, then creates the file readable only by you before the token is written, replacing any old one. It reads the token without echo, so the token never appears on screen or in your shell history: run it, paste the token (nothing is shown) and press Enter. It works in zsh and bash, and running it again replaces the token. The second command checks the result, which should start with `-rw-------`.
 
 ```sh
 (umask 077 && mkdir -p "$HOME/.qte" && chmod 700 "$HOME/.qte" && read -rs T && rm -f "$HOME/.qte/token" && printf '%s\n' "$T" > "$HOME/.qte/token")
@@ -144,23 +158,23 @@ Right after it acknowledges your session, at any hour, the exchange sends a `cal
 
 ```python
 from qte_sdk.calendar import next_close, next_open
+from qte_sdk.units import to_datetime, to_timedelta
 
 calendar = await session.wait_for_calendar(timeout=5)
 if calendar is None:
     print("no calendar from this exchange")
 else:
-    now = session.info.server_time
+    now = session.info.server_time  # the exchange's clock, not your computer's
     opens, closes = next_open(calendar, now), next_close(calendar, now)
-    # Differences of exchange timestamps, in the exchange's time units (see below).
     if opens is not None:
-        print("until the next open:", opens - now)
+        print("next open:", to_datetime(opens), "in", to_timedelta(opens - now))
     if closes is not None:
-        print("until the next close:", closes - now)
+        print("next close:", to_datetime(closes), "in", to_timedelta(closes - now))
 ```
 
 - `wait_for_calendar` keeps every event it reads while it waits, so iterating the session afterwards still delivers all of them, the calendar included. Call it from the loop that reads the session, not from a second task.
 - It returns `None` if no calendar arrives in time. An older exchange never sends one, so your program must still work without it.
-- The times are the exchange's own timestamps, like `session.info.server_time`. A timestamp is a signed 64-bit count of time units since the Unix epoch, in UTC. The contract has not fixed the resolution yet, so do not assume what one unit is. Compare and subtract timestamps only with other timestamps from the exchange, never with your computer's clock, and do not convert them with time zone rules of your own.
+- The times are the exchange's own timestamps, like `session.info.server_time`. A timestamp is a signed 64-bit count of milliseconds since the Unix epoch, in UTC, so the difference of two is a number of milliseconds. `qte_sdk.units` converts them exactly: `to_datetime` gives a timezone-aware `datetime` in UTC, `to_timedelta` turns a difference into a `timedelta`, and `to_timestamp` turns a `datetime` that has a time zone back into a timestamp. For "now", use `session.info.server_time` or a later timestamp from the exchange, never your computer's clock: the exchange's clock is the one that opens and closes the market. Show a time in New York time if you like, but take the trading hours from the calendar, never from time zone rules of your own.
 - `next_open` skips days with no session. It returns `None` once the term's last session has opened, and `next_close` returns `None` once it has closed.
 - The calendar is the schedule. Whether the market is open right now is what `SessionState` reports (step 4).
 - A `ReconnectingSession` (step 9) keeps the calendar of its current session in its `calendar` attribute, which is `None` again after each reconnect until the new session's calendar arrives.
@@ -212,7 +226,7 @@ A `Book` is the state of one instrument at the end of an interval, not a stream 
 
 **Outside a session** you can still connect and subscribe, but there is no live market. A subscribe is answered once, not on the grid, with a `SessionState` whose `state` is `CLOSED`.
 
-That one `SessionState` can also name the next scheduled session in three optional fields: `next_session_date`, `next_open_time` and `next_close_time`. They are set together, only on this out-of-hours reply, never on the `SessionState` of a running session, and are absent when the term has no later session; an exchange from before these fields does not send them either, so write code that works without them. `until_next_open(state, session.info.server_time)` from `qte_sdk.market_data` gives the time until that open in exchange time units, or `None` when the fields are absent. `server_time` is the time your session was acknowledged; pass a later exchange timestamp instead if you have one. They are a convenience: the calendar is still where to read the full schedule.
+That one `SessionState` can also name the next scheduled session in three optional fields: `next_session_date`, `next_open_time` and `next_close_time`. They are set together, only on this out-of-hours reply, never on the `SessionState` of a running session, and are absent when the term has no later session; an exchange from before these fields does not send them either, so write code that works without them. `until_next_open(state, session.info.server_time)` from `qte_sdk.market_data` gives the time until that open in milliseconds (`to_timedelta` turns it into a `timedelta`), or `None` when the fields are absent. `server_time` is the time your session was acknowledged; pass a later exchange timestamp instead if you have one. They are a convenience: the calendar is still where to read the full schedule.
 
 The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`, but **the exchange does not send it yet**. Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. When it is sent, `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. Write your code so it works with or without one. [Using the SDK outside session hours](out-of-hours.md) walks through a whole run when no session is open.
 
@@ -372,7 +386,31 @@ except TimeoutError:
 
 The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session, at each instrument's latest official close, a break day's close included. An option is named by its 21-character OCC option symbol. `session_date` is the date of the current session inside one. Outside a session it is the date of the last session with an official close, whose profit and loss `daily_pnl` then shows, even between terms, when positions carried over from the term before are returned too. It names a session, not the close the values use. It is always there inside a session, and outside one it is absent while no session has an official close yet. `summary` is absent for an Execution desk and the house, and `cash` is absent only for an Execution desk, so check `HasField("summary")` and `HasField("cash")` first. A refused query is a `reject` with `request_type` `ACCOUNT_QUERY` that echoes your `request_ref` whenever the exchange could read it. Read the `qte_sdk.account` docstring for every field.
 
-The reply also carries `as_of_report_seq`: the newest of your private order reports it already reflects. Each private report (`accepted`, a delayed `reject`, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a `report_seq` on its envelope. The cut is for your account only: an `execution` or `risk_notice` at or below `as_of_report_seq` is already in the reply's cash, positions and summary, so do not add its effect again, while `accepted`, `reject`, `order_cancelled` and `order_state` still apply to your view of your resting orders whatever their `report_seq`. `as_of_report_seq` is absent when your team has had no private report this term, and then every report applies. Every event this SDK delivers for such a report carries it as `event.report_seq` (None on other messages), so you can compare it with `as_of_report_seq` yourself: skip the effect of an `execution` or `risk_notice` whose `report_seq` is at or below it. The SDK does not yet apply this cut for you.
+The reply also carries `as_of_report_seq`: the newest of your private order reports it already reflects. Each private report (`accepted`, a delayed `reject`, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a report number, `event.report_seq` (None on other messages). The cut is for your account only: an `execution` or `risk_notice` at or below `as_of_report_seq` is already in the reply's cash, positions and summary, while `accepted`, `reject`, `order_cancelled` and `order_state` still apply to your view of your resting orders whatever their `report_seq`. `as_of_report_seq` is absent when your team has had no private report this term, and then every report applies.
+
+Where a fill arrives in the stream does not tell you whether the reply counts it; only its number does. A fill the reply already counts can arrive after the reply, and would be counted twice if you added it to the reply's positions. A fill the reply does not count can arrive between your query and the reply, and would be lost when you replace your positions with the reply's. `qte_sdk.account.AccountReports` applies the cut for you and handles both. Send the query with it, pass it every event, and apply what it returns, in order:
+
+```python
+from qte_sdk.account import AccountReports, is_account_state
+from qte_sdk.contract.v1.common_pb2 import BUY
+
+account = AccountReports()
+positions: dict[str, int] = {}
+await account.query(session)
+async for event in session:
+    for item in account.update(event):  # every event, before you act on it
+        if is_account_state(item):
+            positions = {p.instrument: p.quantity for p in item.message.positions}
+        elif item.type == "execution":
+            fill = item.message
+            change = fill.fill_size if fill.side == BUY else -fill.fill_size
+            positions[fill.instrument] = positions.get(fill.instrument, 0) + change
+    # a real program handles market data and order events here too
+```
+
+For the reply to your query, `update` returns the reply itself, then the reports that arrived while you waited and that the reply does not include: replace your positions with the reply's, then apply those again on top, as above. For an `execution` or `risk_notice`, it returns the event unless the latest reply already includes it. It returns nothing for anything else, so apply `accepted`, `reject`, `order_cancelled` and `order_state` to your resting orders as usual. That includes a reply to a query sent with `send_account_query`, or to an earlier query that a later one replaced: only the latest query sent with `account.query` is waited for, so wait for its answer before you query again, and take a reply as your positions only when `update` returns it. If you keep the reply yourself, `qte_sdk.account.covers(state, event)` says whether it already includes an event.
+
+Report numbers start again each term, so a reply from the term before would take a new term's first reports for ones it already includes: before you trade in a new term, query again and wait for the reply, or start a new `AccountReports`. An exchange that does not number its reports sends no `as_of_report_seq`, and then every report applies; a reply can then be ordered against your fills only by when they arrive, which that exchange does not promise, so a fill close to a reply can be counted twice or missed.
 
 The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
 
@@ -432,13 +470,13 @@ It is a separate service with its own address, which the course team gives you. 
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.history import HistoryClient, HistoryPending, HistoryUnavailable
 from qte_sdk.market_data import Book
-from qte_sdk.units import to_decimal
+from qte_sdk.units import to_datetime, to_decimal
 
 client = HistoryClient()  # address from QTE_HISTORY_URL, token from QTE_TOKEN
 try:
     async for item in client.fetch("2026-01-05", "AAPL", "book"):
         if isinstance(item, Book) and item.bid_levels:
-            print(item.grid_time, to_decimal(item.bid_levels[0].price))
+            print(to_datetime(item.grid_time), to_decimal(item.bid_levels[0].price))
         elif isinstance(item, (Unknown, DecodeFailed)):
             print("could not use a message:", item)
 except HistoryUnavailable:
@@ -457,9 +495,11 @@ except HistoryPending as error:
 
   ```python
   from contextlib import aclosing
+  from datetime import UTC, datetime
   from qte_sdk.books import LatestBooks
+  from qte_sdk.units import to_timestamp
 
-  t = ...  # a grid_time in the session, as an int like the wire carries
+  t = to_timestamp(datetime(2026, 1, 5, 15, 0, tzinfo=UTC))  # 15:00 UTC, 10:00 in New York
   books = LatestBooks()
   async with aclosing(client.fetch("2026-01-05", "AAPL", "book")) as items:
       async for item in items:

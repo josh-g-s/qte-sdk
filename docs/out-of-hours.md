@@ -1,6 +1,6 @@
 # Using the SDK outside session hours
 
-**Version:** 0.4
+**Version:** 0.5
 
 You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market, query your account and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 
@@ -38,23 +38,26 @@ Right after it acknowledges you, at any hour, the exchange sends its calendar: e
 
 ```python
 from qte_sdk.calendar import next_session
+from qte_sdk.units import to_datetime, to_timedelta
 
 last_closed = None  # the date of the last session that has closed, if any
 calendar = await session.wait_for_calendar(timeout=5)
 if calendar is None:
     print("no calendar from this exchange")
 else:
-    now = session.info.server_time
+    now = session.info.server_time  # the exchange's clock, not your computer's
     closed = [entry for entry in calendar.sessions if entry.close_time <= now]
     if closed:
         last_closed = closed[-1].session_date
         print("last closed session:", last_closed)
     upcoming = next_session(calendar, now)
     if upcoming is not None:
-        print("next session:", upcoming.session_date)
+        opens = to_datetime(upcoming.open_time)
+        wait = to_timedelta(upcoming.open_time - now)
+        print("next session:", upcoming.session_date, "opens", opens, "in", wait)
 ```
 
-The times are exchange timestamps: compare and subtract them only with other exchange timestamps, such as `session.info.server_time`, never with your computer's clock. `last_closed` is the session date step 5 asks the history service for. It stays `None` with no calendar, or before the term's first session has closed.
+The times are exchange timestamps: milliseconds since the Unix epoch, in UTC. `to_datetime` turns one into a `datetime` in UTC and `to_timedelta` turns the difference of two into a `timedelta`. For "now", use `session.info.server_time` or a later exchange timestamp, never your computer's clock. `last_closed` is the session date step 5 asks the history service for. It stays `None` with no calendar, or before the term's first session has closed.
 
 ## 3. Subscribe and see the closed market
 
@@ -69,7 +72,7 @@ from qte_sdk.market_data import (
     subscribe,
     until_next_open,
 )
-from qte_sdk.units import to_decimal
+from qte_sdk.units import to_decimal, to_timedelta
 
 await subscribe(session, ["AAPL"])
 try:
@@ -79,7 +82,7 @@ try:
                 print("market session:", MarketSessionPhase.Name(item.state))
                 if item.HasField("next_session_date"):
                     wait = until_next_open(item, session.info.server_time)
-                    print("next session:", item.next_session_date, "opens in", wait)
+                    print("next session:", item.next_session_date, "opens in", to_timedelta(wait))
             elif isinstance(item, OfficialClose):
                 print("official close:", item.instrument, to_decimal(item.value))
 except TimeoutError:
@@ -92,7 +95,7 @@ On this out-of-hours reply the `SessionState` fields mean:
 - `grid_time` is not a publication time: it equals `close_time`, so it can be in the future. Never use it as "now".
 - `next_session_date`, `next_open_time` and `next_close_time` name the next scheduled session. They are set together, only on this reply, and are absent when the term has no later session, or from an exchange that predates them, so your code must work without them.
 
-For "now", use the exchange's current time: `session.info.server_time`, the time your session was acknowledged, or a later exchange timestamp. `until_next_open(state, now)` gives `next_open_time - now` in the exchange's time units, or `None` when the next session is not named. These fields are a convenience; the calendar from step 2 is still the full schedule.
+For "now", use the exchange's current time: `session.info.server_time`, the time your session was acknowledged, or a later exchange timestamp. `until_next_open(state, now)` gives `next_open_time - now` in milliseconds, or `None` when the next session is not named. These fields are a convenience; the calendar from step 2 is still the full schedule.
 
 The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`. **The exchange does not send it yet.** Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. Write your code so it works with or without one.
 
@@ -197,7 +200,7 @@ else:
         async with aclosing(states) as items:  # closes the download when you stop early
             async for item in items:
                 if isinstance(item, SessionState):
-                    print(item.grid_time, MarketSessionPhase.Name(item.state))
+                    print(to_datetime(item.grid_time), MarketSessionPhase.Name(item.state))
                     break  # the first one is enough here
     except HistoryUnavailable:
         print("there is no such data")

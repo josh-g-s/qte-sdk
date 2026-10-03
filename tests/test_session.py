@@ -15,6 +15,7 @@ from fake_exchange import CONTRACT_VERSION, frame, serve_local, silent_server
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
+import qte_sdk.session
 from qte_sdk.connection import Connection, ContractVersionMismatch, Received, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
@@ -703,3 +704,76 @@ async def test_a_failed_send_on_the_session_keeps_the_message_out_of_the_traceba
         with pytest.raises(Exception) as caught:
             await session.send("auth", Auth(token=token))
     assert_token_absent(token, shown(caught.value))
+
+
+# A token that str() and repr() write escaped: one with a backslash, newline or tab
+
+escaping = pytest.mark.parametrize(
+    "special", ["\\", "\n", "\t"], ids=["backslash", "newline", "tab"]
+)
+
+
+def assert_no_form_of(token: str, text: str) -> None:
+    assert_token_absent(token, text)
+    for form in qte_sdk.session._token_forms(qte_sdk.session._Secret(token)):
+        assert form.value not in text
+
+
+@escaping
+@pytest.mark.parametrize(
+    "make",
+    [
+        KeyError,  # whose str() is the repr of its key
+        lambda token: OSError(2, "No such file", token),  # the filename shown as a repr
+        lambda token: ValueError(f"bad value {token!r}"),  # text that quotes it escaped
+    ],
+    ids=["key-error", "os-error-filename", "quoted-escaped"],
+)
+def test_an_error_holding_a_token_that_str_escapes_is_replaced(special, make):
+    token = synthetic_token() + special + synthetic_token()
+    safe = qte_sdk.session._without_token(make(token), qte_sdk.session._Secret(token))
+    assert isinstance(safe, SessionNotAcknowledged)
+    assert_no_form_of(token, shown(safe))
+
+
+@escaping
+def test_a_rejection_quoting_the_token_escaped_is_redacted(special):
+    token = synthetic_token() + special + synthetic_token()
+    rejected = SessionRejected(ReasonCodes.NOT_AUTHENTICATED, f"bad token {token!r}")
+    safe = qte_sdk.session._without_token(rejected, qte_sdk.session._Secret(token))
+    assert isinstance(safe, SessionRejected)
+    assert safe.detail == "bad token '<token withheld>'"
+    assert_no_form_of(token, shown(safe))
+
+
+def test_a_token_that_is_not_valid_unicode_is_still_found_and_withheld():
+    # A lone surrogate, as from an environment variable holding bytes that are not UTF-8:
+    # looking for the token must not itself raise an error that holds it.
+    token = synthetic_token() + "\udc80" + synthetic_token()
+    secret = qte_sdk.session._Secret(token)
+    error = UnicodeEncodeError("utf-8", f"auth {token}", 50, 51, "surrogates not allowed")
+    assert qte_sdk.session._holds_token(error, secret)
+    safe = qte_sdk.session._without_token(error, secret)
+    assert isinstance(safe, SessionNotAcknowledged)
+    assert_no_form_of(token, shown(safe))
+
+
+async def test_auth_with_a_token_that_is_not_valid_unicode_fails_without_showing_it():
+    token = synthetic_token() + "\udc80" + synthetic_token()
+    async with serve_local(Server(ack())) as url:
+        with pytest.raises(qte_sdk.session.AuthNotSent) as caught:
+            await open_session(url, token)
+    assert_no_form_of(token, shown(caught.value))
+
+
+@escaping
+async def test_auth_that_cannot_be_sent_withholds_a_token_it_quotes_escaped(special):
+    token = synthetic_token() + special + synthetic_token()
+
+    class Refusing:
+        async def send(self, type_: str, payload: Auth) -> None:
+            raise ValueError(f"cannot encode {payload.token!r}")
+
+    with pytest.raises(qte_sdk.session.AuthNotSent) as caught:
+        await qte_sdk.session._send_auth(Refusing(), qte_sdk.session._Secret(token))  # type: ignore[arg-type]
+    assert_no_form_of(token, shown(caught.value))

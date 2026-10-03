@@ -23,29 +23,15 @@ This installs the `qte_sdk` package only, not the [worked examples](examples/). 
 
 ## A first program
 
-Put the exchange address and your token in a `.env` file in your project folder, the folder you run your programs from. First make sure git will never commit it, and create it readable only by you:
+Put the exchange address and your token in a `.env` file in your project folder, the folder you run your programs from. The SDK's setup helper asks for both, reads the token without showing it, and writes the file. On macOS and Linux it makes the file readable only by you. On Windows it cannot, so before you run it, make sure your project folder is private: inside a folder only you can open, such as your user profile.
 
 ```sh
-printf '\n.env\n' >> .gitignore
-touch .env && chmod 600 .env
+python -m qte_sdk.token set
 ```
 
-If your project is a git repository, also check that git does not already track a `.env`, since adding it to `.gitignore` does not stop git committing a file it already tracks:
+If your project is a git repository, it offers to add `.env` to `.gitignore`; say yes. If git already tracks a `.env`, it stops before asking for the token and tells you to run `git rm --cached .env`, since `.gitignore` alone does not stop git committing a file it tracks. `python -m qte_sdk.token check` then says where the SDK will find each, without showing the token.
 
-```sh
-git ls-files --error-unmatch .env
-```
-
-An error saying `.env` did not match any file is what you want. If it prints `.env` instead, run `git rm --cached .env` and commit, before you put the token in.
-
-Then open `.env` in your editor and add the two lines, with the address and token from the course team:
-
-```sh
-QTE_URL=<the exchange address from the course team>
-QTE_TOKEN=<your team token>
-```
-
-The SDK reads `QTE_URL` and `QTE_TOKEN` from `./.env` itself, only when they are not passed in or set as real environment variables, which always take precedence. For the token the order is `token=`, then `QTE_TOKEN`, then the file named by `QTE_TOKEN_FILE`, then `.env`. It refuses a `.env` holding the token that other users can read, and warns if git tracks it or does not ignore it. Step 2 of the [quickstart](docs/quickstart.md) explains the details and the alternatives: environment variables, or a private token file named by `QTE_TOKEN_FILE`.
+The SDK reads `QTE_URL` and `QTE_TOKEN` from `./.env` itself, only when they are not passed in or set as real environment variables, which always take precedence. For the token the order is `token=`, then `QTE_TOKEN`, then the file named by `QTE_TOKEN_FILE`, then `.env`. It refuses a `.env` holding the token that other users can read, and warns if git tracks it or does not ignore it. Step 2 of the [quickstart](docs/quickstart.md) explains the details and the alternatives: writing `.env` by hand, environment variables, or a private token file named by `QTE_TOKEN_FILE` (`python -m qte_sdk.token set --file` makes one).
 
 Then run this. It opens a session, subscribes to one instrument and prints the best bid and ask as the book updates, for ten seconds. A book shows two kinds of depth: the wall (`bid_levels`, `ask_levels`) and participants' resting orders (`student_bid_levels`, `student_ask_levels`), each best price first, so the best bid and ask are taken across both.
 
@@ -104,10 +90,10 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.calendar`](qte_sdk/calendar.py) | `next_open`, `next_close`: when the market next opens and closes, from the exchange's calendar |
 | [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
-| [`qte_sdk.account`](qte_sdk/account.py) | `send_account_query`, `is_account_state`: your team's positions, cash, equity and limit use |
+| [`qte_sdk.account`](qte_sdk/account.py) | `send_account_query`, `is_account_state`: your team's positions, cash, equity and limit use; `AccountReports`: count each fill once against a reply |
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |
-| [`qte_sdk.units`](qte_sdk/units.py) | `to_decimal`, `to_micros`: exact conversion between prices and micro-dollars |
+| [`qte_sdk.units`](qte_sdk/units.py) | `to_decimal`, `to_micros`: exact conversion between prices and micro-dollars; `to_datetime`, `to_timedelta`, `to_timestamp`: exchange timestamps (milliseconds since the epoch, UTC) as `datetime` and `timedelta` |
 
 ## Things to know before you trade
 
