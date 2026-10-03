@@ -470,6 +470,21 @@ class Session:
         if self._ended and self._failure is not None:
             raise self._failure
 
+    async def _failure_after_close(self, timeout: float) -> Exception | None:
+        """Read what is left on a connection that a send found closed, for at most
+        `timeout` seconds, and return the error it ended with, if any. The exchange may
+        have rejected the session just before it closed, and that rejection, still unread,
+        says why. Used by a `ReconnectingSession`; what is read is not delivered."""
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                while not self._ended:
+                    await self._read_one()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+        return self._failure
+
     def _withhold_in_answer(self, secret: "_Secret") -> None:
         """Replace the `reject` that refused the resume, if it repeats the token, with a
         copy that does not. Used by a `ReconnectingSession`, which holds the token and goes

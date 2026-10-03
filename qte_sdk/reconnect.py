@@ -615,6 +615,13 @@ class ReconnectingSession:
             if self._instruments and not self._closed:
                 subscription = Subscribe(instruments=list(self._instruments))
                 await session.connection.send("subscribe", subscription)
+        except ConnectionClosed as error:
+            # A send found the connection closed. If the exchange rejected the session
+            # just before, that rejection, not the retryable close, is the error.
+            failure = error
+            if session is not None:
+                failure = await session._failure_after_close(_CLOSE_READ_TIMEOUT) or error
+            failure = self._safe(failure)
         except Exception as error:
             failure = self._safe(error)
         if session is not None and (failure is not None or self._closed):
@@ -688,6 +695,10 @@ class ReconnectingSession:
 
 
 _CLOSED = object()
+
+# Seconds to spend reading what a connection that a send found closed still holds. The
+# frames it received before closing are already queued, so this is only a bound.
+_CLOSE_READ_TIMEOUT = 1.0
 
 
 def _calendar_wait(ack_timeout: float | None) -> float:

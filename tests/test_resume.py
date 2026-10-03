@@ -1279,6 +1279,42 @@ async def test_a_session_rejected_while_waiting_for_the_calendar_is_not_retried(
     assert connections == 2
 
 
+@pytest.mark.parametrize("resume_on", [True, False])
+@pytest.mark.parametrize("instruments", [[], ["AAPL"]])
+async def test_a_session_rejected_before_the_first_send_is_not_retried(
+    resume_on: bool, instruments: list[str]
+):
+    # No calendar wait here: the exchange acknowledges, rejects and closes before the
+    # client sends `resume` or `subscribe`. The send finds the connection closed, and the
+    # rejection still unread on it is what is reported.
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await ws.recv()
+        await ws.send(ack())
+        await ws.send(session_reject("TEAM_DISABLED"))
+        await ws.close()
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url,
+            synthetic_token(),
+            instruments=instruments,
+            resume=resume_on,
+            backoff=Backoff(max_attempts=3),
+            sleep=Clock().sleep,
+        )
+        with pytest.raises(SessionRejected) as caught:
+            async with rs, asyncio.timeout(5):
+                async for _ in rs:
+                    pass
+    assert not isinstance(caught.value, ResumeRejected)
+    assert caught.value.reason_name == "TEAM_DISABLED"
+    assert connections == 1
+
+
 async def test_a_cursor_of_unknown_term_is_not_sent_into_a_known_one():
     # The first session sends no calendar, so the cursor's term is unknown; the next one's
     # calendar names a term. That may not be the cursor's, so the session asks from 0.
