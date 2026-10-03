@@ -23,13 +23,13 @@ This installs the `qte_sdk` package only, not the [worked examples](examples/). 
 
 ## A first program
 
-Put the exchange address and your token in a `.env` file in your project folder, the folder you run your programs from. The SDK's setup helper asks for both, reads the token without showing it, and writes the file readable only by you:
+Put the exchange address and your token in a `.env` file in your project folder, the folder you run your programs from. The SDK's setup helper asks for both, reads the token without showing it, and writes the file. On macOS and Linux it makes the file readable only by you. On Windows it cannot, so before you run it, make sure your project folder is private: inside a folder only you can open, such as your user profile.
 
 ```sh
 python -m qte_sdk.token set
 ```
 
-If your project is a git repository, it offers to add `.env` to `.gitignore`; say yes. If git already tracks a `.env`, it says so and tells you to run `git rm --cached .env`, since `.gitignore` alone does not stop git committing a file it tracks. `python -m qte_sdk.token check` then says where the SDK will find each, without showing the token.
+If your project is a git repository, it offers to add `.env` to `.gitignore`; say yes. If git already tracks a `.env`, it stops before asking for the token and tells you to run `git rm --cached .env`, since `.gitignore` alone does not stop git committing a file it tracks. `python -m qte_sdk.token check` then says where the SDK will find each, without showing the token.
 
 The SDK reads `QTE_URL` and `QTE_TOKEN` from `./.env` itself, only when they are not passed in or set as real environment variables, which always take precedence. For the token the order is `token=`, then `QTE_TOKEN`, then the file named by `QTE_TOKEN_FILE`, then `.env`. It refuses a `.env` holding the token that other users can read, and warns if git tracks it or does not ignore it. Step 2 of the [quickstart](docs/quickstart.md) explains the details and the alternatives: writing `.env` by hand, environment variables, or a private token file named by `QTE_TOKEN_FILE` (`python -m qte_sdk.token set --file` makes one).
 
