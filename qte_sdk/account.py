@@ -79,21 +79,21 @@ the reply includes it; only its `report_seq` does. So a fill the reply already c
 arrive after the reply, and would be counted twice, and one the reply does not count can
 arrive between the query and the reply, and would be lost when the reply replaces it.
 `AccountReports` handles both. Send the query with it, pass it every event, and apply what
-it returns:
+it returns, in order:
 
     account = AccountReports()
-    ref = await account.query(session)
+    await account.query(session)
     async for event in session:
-        to_apply = account.update(event)
-        if is_account_state(event):
-            ...  # take the reply's cash and positions as your account
-        for report in to_apply:
-            ...  # then apply each report's effect: a fill's size, a risk notice
+        for item in account.update(event):
+            if is_account_state(item):
+                ...  # replace your account with the reply's cash and positions
+            else:
+                ...  # apply the report: a fill's size, a risk notice
 
 `covers(state, event)` is the rule on its own, for a program that keeps the reply itself.
 Report numbers start again each term, so a reply says nothing about a later term's
-reports: query again in each new term (the calendar's `term_start` and `term_end` name
-it).
+reports: before you trade in a new term (the calendar's `term_start` and `term_end` name
+it), query again and wait for the reply.
 """
 
 from typing import TypeGuard
@@ -190,54 +190,60 @@ class AccountReports:
     replies, so that a program that keeps its own account applies each report once.
 
     Send the query with `query` and pass every event of your one loop to `update`, which
-    returns the reports whose effect to apply now:
+    returns what to apply to your account now, in order:
 
-    - for an `execution` or `risk_notice`: the event itself, unless the latest reply
-      already includes it (see `covers`), and nothing if it does;
-    - for an `account_state`: the reports that arrived while the query was outstanding and
-      that the reply does not include, in the order they arrived. Take the reply's cash
-      and positions as your account first, then apply these again: you applied them once
-      already, to the account the reply replaces. The reply becomes `state`;
-    - for anything else: nothing. Apply `accepted`, `reject`, `order_cancelled` and
-      `order_state` to your resting orders as usual (`qte_sdk.resting.RestingOrders` does).
+    - for the reply to your latest query: the reply itself, then the reports that arrived
+      while you waited for it and that it does not include, in the order they arrived.
+      Replace your account with the reply's cash and positions, then apply those reports
+      again: you applied them once already, to the account the reply replaces. The reply
+      becomes `state`;
+    - for an `execution` or `risk_notice`: the event itself, unless `state` already
+      includes it (see `covers`), and nothing if it does;
+    - for anything else: nothing. That includes any other `account_state`: a reply to an
+      earlier query that a later one replaced, or to a query sent with
+      `send_account_query`. Take a reply as your account only when `update` returns it.
+      Apply `accepted`, `reject`, `order_cancelled` and `order_state` to your resting
+      orders as usual (`qte_sdk.resting.RestingOrders` does).
 
-    Reports are held from `query` until the reply to that query, a `reject` of it, or a
-    `Disconnected`, after which the answer never comes. Only the latest query is waited
-    for: a second `query` before the first is answered takes its place. A query sent with
-    `send_account_query` instead is not waited for, so a report that arrives before its
-    reply and is not in it is lost when you take the reply.
+    Only the latest query is waited for, so wait for its answer before you query again.
+    Reports are held from the moment it is sent until its reply, a `reject` of it, or a
+    `Disconnected`, after which its answer never comes. Within a term, a report that
+    arrived before the query was sent is always in the reply, so none from before is held.
 
     Only numbered reports are held. Against an exchange that does not number its reports,
     a reply is taken to include every report that arrived before it and none that arrive
     after it, which that exchange does not promise. After a `SeqGap`, a `ReportGap`, a
     `Disconnected` or a report that could not be decoded, your account may be wrong, so
-    query again. Report numbers start again each term, so query again in each new term too.
+    query again. Report numbers start again each term, and a reply from the term before
+    would take a new term's first reports for ones it includes: before you trade in a new
+    term, query and wait for the reply, or start a new `AccountReports`.
     """
 
     def __init__(self) -> None:
         self.state: AccountState | None = None
-        """The latest `account_state` passed to `update`, or None before the first."""
+        """The latest reply `update` returned, or None before the first."""
         self._awaiting: str | None = None
         self._held: list[Received] = []
 
     async def query(self, conn: Sender, *, request_ref: str | None = None) -> str:
-        """Send `account_query` as `send_account_query` does, and hold the reports that
-        arrive until it is answered. Returns its `request_ref`."""
+        """Send `account_query` as `send_account_query` does, and wait for its answer in
+        place of any earlier query. Returns its `request_ref`.
+
+        If the send fails, no query is waited for until the next one."""
         ref = _ref(request_ref)
-        previous = self._awaiting
         # Waited for from before the send, so no report that arrives meanwhile is missed.
         self._awaiting = ref
+        self._held = []
         try:
             await send_account_query(conn, request_ref=ref)
         except BaseException:
-            self._awaiting = previous
-            if previous is None:
-                self._held = []
+            if self._awaiting == ref:  # unless a later query has taken its place
+                self._stop_waiting()
             raise
         return ref
 
     def update(self, event: object) -> list[Received]:
-        """Take in one event of the session; return the reports whose effect to apply now."""
+        """Take in one event of the session; return what to apply to your account now."""
         if isinstance(event, Disconnected):
             self._stop_waiting()
             return []
@@ -245,11 +251,12 @@ class AccountReports:
             return []
         state = event.message
         if isinstance(state, AccountState):
+            if self._awaiting is None or state.request_ref != self._awaiting:
+                return []
             self.state = state
             again = [report for report in self._held if not covers(state, report)]
-            if state.request_ref == self._awaiting:
-                self._stop_waiting()
-            return again
+            self._stop_waiting()
+            return [event, *again]
         if event.type == "reject":
             if self._refuses_query(event):
                 self._stop_waiting()

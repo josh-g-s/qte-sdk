@@ -374,7 +374,7 @@ The reply, `account_state`, echoes your `request_ref` and arrives on the same st
 
 The reply also carries `as_of_report_seq`: the newest of your private order reports it already reflects. Each private report (`accepted`, a delayed `reject`, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a report number, `event.report_seq` (None on other messages). The cut is for your account only: an `execution` or `risk_notice` at or below `as_of_report_seq` is already in the reply's cash, positions and summary, while `accepted`, `reject`, `order_cancelled` and `order_state` still apply to your view of your resting orders whatever their `report_seq`. `as_of_report_seq` is absent when your team has had no private report this term, and then every report applies.
 
-Where a fill arrives in the stream does not tell you whether the reply counts it; only its number does. A fill the reply already counts can arrive after the reply, and would be counted twice if you added it to the reply's positions. A fill the reply does not count can arrive between your query and the reply, and would be lost when you replace your positions with the reply's. `qte_sdk.account.AccountReports` applies the cut for you and handles both. Send the query with it, pass it every event, and apply what it returns:
+Where a fill arrives in the stream does not tell you whether the reply counts it; only its number does. A fill the reply already counts can arrive after the reply, and would be counted twice if you added it to the reply's positions. A fill the reply does not count can arrive between your query and the reply, and would be lost when you replace your positions with the reply's. `qte_sdk.account.AccountReports` applies the cut for you and handles both. Send the query with it, pass it every event, and apply what it returns, in order:
 
 ```python
 from qte_sdk.account import AccountReports, is_account_state
@@ -384,18 +384,19 @@ account = AccountReports()
 positions: dict[str, int] = {}
 await account.query(session)
 async for event in session:
-    to_apply = account.update(event)  # every event, before you act on it
-    if is_account_state(event):
-        positions = {p.instrument: p.quantity for p in event.message.positions}
-    for report in to_apply:
-        if report.type == "execution":
-            fill = report.message
+    for item in account.update(event):  # every event, before you act on it
+        if is_account_state(item):
+            positions = {p.instrument: p.quantity for p in item.message.positions}
+        elif item.type == "execution":
+            fill = item.message
             change = fill.fill_size if fill.side == BUY else -fill.fill_size
             positions[fill.instrument] = positions.get(fill.instrument, 0) + change
     # a real program handles market data and order events here too
 ```
 
-`update` returns an `execution` or `risk_notice` unless the latest reply already includes it. On a reply, it returns the reports that arrived while your query was outstanding and that the reply does not include: take the reply's positions first, then apply these again on top, as above. It returns nothing for any other event, so apply `accepted`, `reject`, `order_cancelled` and `order_state` to your resting orders as usual. A query sent with `send_account_query` instead is not waited for, so send it with `account.query` when you keep your own positions. If you keep the reply yourself, `qte_sdk.account.covers(state, event)` says whether it already includes an event. Report numbers start again each term, so query again in each new term. An exchange that does not number its reports sends no `as_of_report_seq`, and then every report applies.
+For the reply to your query, `update` returns the reply itself, then the reports that arrived while you waited and that the reply does not include: replace your positions with the reply's, then apply those again on top, as above. For an `execution` or `risk_notice`, it returns the event unless the latest reply already includes it. It returns nothing for anything else, so apply `accepted`, `reject`, `order_cancelled` and `order_state` to your resting orders as usual. That includes a reply to a query sent with `send_account_query`, or to an earlier query that a later one replaced: only the latest query sent with `account.query` is waited for, so wait for its answer before you query again, and take a reply as your positions only when `update` returns it. If you keep the reply yourself, `qte_sdk.account.covers(state, event)` says whether it already includes an event.
+
+Report numbers start again each term, so a reply from the term before would take a new term's first reports for ones it already includes: before you trade in a new term, query again and wait for the reply, or start a new `AccountReports`. An exchange that does not number its reports sends no `as_of_report_seq`, and then every report applies; a reply can then be ordered against your fills only by when they arrive, which that exchange does not promise, so a fill close to a reply can be counted twice or missed.
 
 The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
 

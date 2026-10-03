@@ -245,11 +245,12 @@ async def test_a_report_before_any_reply_applies_once():
     assert reports.state is None
 
 
-async def test_a_covered_report_after_the_reply_is_skipped():
+async def test_the_reply_comes_first_and_a_covered_report_after_it_is_skipped():
     reports = AccountReports()
     ref = await reports.query(Recorder())
-    assert reports.update(answer(ref, 5)) == []
-    assert reports.state is not None and reports.state.as_of_report_seq == 5
+    the_reply = answer(ref, 5)
+    assert reports.update(the_reply) == [the_reply]
+    assert reports.state is the_reply.message
     assert reports.update(execution(5, 10)) == []
     later = execution(6, 10)
     assert reports.update(later) == [later]
@@ -262,9 +263,10 @@ async def test_a_report_between_query_and_reply_that_the_reply_misses_is_applied
     assert reports.update(in_it) == [in_it]
     assert reports.update(not_in_it) == [not_in_it]
     # The reply replaces the account both were applied to, and includes only the first.
-    assert reports.update(answer(ref, 3)) == [not_in_it]
-    # Answered, so nothing is held any longer.
-    assert reports.update(answer("other", 3)) == []
+    the_reply = answer(ref, 3)
+    assert reports.update(the_reply) == [the_reply, not_in_it]
+    # Answered, so another reply to it is not taken.
+    assert reports.update(answer(ref, 3)) == []
 
 
 async def test_with_no_as_of_report_seq_every_held_report_is_applied_again():
@@ -273,7 +275,9 @@ async def test_with_no_as_of_report_seq_every_held_report_is_applied_again():
     held = [execution(1, 10), execution(2, 20)]
     for report in held:
         reports.update(report)
-    assert reports.update(answer(ref, None)) == held
+    the_reply = answer(ref, None)
+    assert reports.update(the_reply) == [the_reply, *held]
+    assert reports.update(execution(3, 10)) == [execution(3, 10)]
 
 
 async def test_reports_that_do_not_change_the_account_are_never_returned():
@@ -282,7 +286,17 @@ async def test_reports_that_do_not_change_the_account_are_never_returned():
     events = await decoded(accepted(1), order_state(2), cancelled(3), delayed_reject(4), book())
     for event in events:
         assert reports.update(event) == []
-    assert reports.update(answer(ref, None)) == []
+    the_reply = answer(ref, None)
+    assert reports.update(the_reply) == [the_reply]
+
+
+async def test_a_reply_to_a_query_not_waited_for_is_not_taken():
+    # For example one sent with send_account_query: update returns nothing for it.
+    reports = AccountReports()
+    report = execution(4, 10)
+    assert reports.update(answer("elsewhere", 1)) == []
+    assert reports.state is None
+    assert reports.update(report) == [report]
 
 
 async def test_a_refused_query_stops_the_wait():
@@ -291,8 +305,9 @@ async def test_a_refused_query_stops_the_wait():
     reports.update(execution(4, 10))
     [refusal] = await decoded(query_reject(ref))
     assert reports.update(refusal) == []
-    # Nothing is held any longer, so a later reply returns nothing again.
-    assert reports.update(answer("other", 1)) == []
+    # No longer waited for, so a reply to it would not be taken.
+    assert reports.update(answer(ref, 1)) == []
+    assert reports.state is None
 
 
 async def test_a_reject_of_another_request_does_not_stop_the_wait():
@@ -308,7 +323,8 @@ async def test_a_reject_of_another_request_does_not_stop_the_wait():
     ]
     for event in [other, *await decoded(*same_ref)]:
         assert reports.update(event) == []
-    assert reports.update(answer(ref, 1)) == [held]
+    the_reply = answer(ref, 1)
+    assert reports.update(the_reply) == [the_reply, held]
 
 
 async def test_a_refusal_that_names_no_request_type_stops_the_wait():
@@ -320,35 +336,75 @@ async def test_a_refusal_that_names_no_request_type_stops_the_wait():
         frame("reject", {"request_ref": ref, "reason_code": "MALFORMED_MESSAGE"})
     )
     assert reports.update(refusal) == []
-    assert reports.update(answer("other", 1)) == []
+    assert reports.update(answer(ref, 1)) == []
 
 
 async def test_a_disconnect_stops_the_wait_but_keeps_the_reply():
     reports = AccountReports()
     ref = await reports.query(Recorder())
-    assert reports.update(answer(ref, 5)) == []
-    await reports.query(Recorder())
+    first_reply = answer(ref, 5)
+    assert reports.update(first_reply) == [first_reply]
+    second = await reports.query(Recorder())
     held = execution(6, 10)
     assert reports.update(held) == [held]
     assert reports.update(Disconnected(None)) == []
     # The reply still covers what it included, a report replayed after a reconnect too.
     assert reports.update(execution(5, 10)) == []
-    # The second query's answer never comes, and nothing is held for it any longer.
-    assert reports.update(answer("other", 5)) == []
+    # The second query's answer never comes, and is not taken if it does.
+    assert reports.update(answer(second, 5)) == []
+    assert reports.state is first_reply.message
 
 
 async def test_a_second_query_takes_the_place_of_the_first():
     reports = AccountReports()
     first = await reports.query(Recorder())
     early = execution(2, 10)
-    reports.update(early)
+    assert reports.update(early) == [early]
     second = await reports.query(Recorder())
     late = execution(3, 20)
-    reports.update(late)
-    # The first query's reply is still a reply, but the wait goes on for the second.
-    assert reports.update(answer(first, 1)) == [early, late]
-    assert reports.update(answer(second, 2)) == [late]
+    assert reports.update(late) == [late]
+    # The first query's reply, even arriving first, is not taken.
+    assert reports.update(answer(first, 1)) == []
+    assert reports.state is None
+    # The second's is, with only what arrived since it was sent: the report before it
+    # is in it.
+    second_reply = answer(second, 2)
+    assert reports.update(second_reply) == [second_reply, late]
     assert reports.update(answer("third", 0)) == []
+
+
+async def test_a_late_reply_to_a_replaced_query_cannot_undo_a_fill():
+    # Query A, a fill, query B: B's reply includes the fill. A's reply, read before the
+    # fill and arriving last, must not be taken, or the fill would be lost.
+    reports = AccountReports()
+    a = await reports.query(Recorder())
+    reports.update(execution(2, 10))
+    b = await reports.query(Recorder())
+    b_reply = answer(b, 2)
+    assert reports.update(b_reply) == [b_reply]
+    assert reports.update(answer(a, 1)) == []
+    assert reports.state is b_reply.message
+
+    # The same when B is refused before A's reply arrives.
+    reports = AccountReports()
+    a = await reports.query(Recorder())
+    reports.update(execution(2, 10))
+    b = await reports.query(Recorder())
+    [refusal] = await decoded(query_reject(b))
+    assert reports.update(refusal) == []
+    assert reports.update(answer(a, 1)) == []
+    assert reports.state is None
+
+
+async def test_a_new_query_holds_nothing_from_before_it():
+    # A report held for an unanswered query, perhaps from a session that ended in the term
+    # before, is not applied again on a later query's reply.
+    reports = AccountReports()
+    await reports.query(Recorder())
+    reports.update(execution(100, 10))
+    ref = await reports.query(Recorder())
+    new_term_reply = answer(ref, None)
+    assert reports.update(new_term_reply) == [new_term_reply]
 
 
 async def test_unnumbered_reports_are_not_held():
@@ -357,48 +413,71 @@ async def test_unnumbered_reports_are_not_held():
     unnumbered = execution(None, 10)
     assert reports.update(unnumbered) == [unnumbered]
     # Taken to be in the reply that follows it, the only order such an exchange gives.
-    assert reports.update(answer(ref, None)) == []
+    the_reply = answer(ref, None)
+    assert reports.update(the_reply) == [the_reply]
+
+
+class Broken:
+    async def send(self, type_, payload):
+        raise ConnectionError("gone")
 
 
 async def test_a_query_that_fails_to_send_waits_for_nothing():
-    class Broken:
-        async def send(self, type_, payload):
-            raise ConnectionError("gone")
-
     reports = AccountReports()
     with pytest.raises(ConnectionError):
-        await reports.query(Broken())
+        await reports.query(Broken(), request_ref="acct-1")
     reports.update(execution(4, 10))
-    assert reports.update(answer("any", 1)) == []
+    assert reports.update(answer("acct-1", 1)) == []
 
-    # A failed second query leaves the first one waited for.
+    # A failed query that took another's place leaves none waited for.
     first = await reports.query(Recorder())
-    held = execution(5, 10)
-    reports.update(held)
+    reports.update(execution(5, 10))
     with pytest.raises(ConnectionError):
         await reports.query(Broken())
-    assert reports.update(answer(first, 4)) == [held]
+    assert reports.update(answer(first, 4)) == []
+    assert reports.state is None
+
+
+async def test_a_query_that_fails_after_a_later_one_was_sent_leaves_the_later_one():
+    class FirstFails:
+        """Holds the first send until a second has gone out, then fails it."""
+
+        def __init__(self) -> None:
+            self.sends = 0
+            self.second_sent = asyncio.Event()
+
+        async def send(self, type_, payload):
+            self.sends += 1
+            if self.sends == 1:
+                await self.second_sent.wait()
+                raise ConnectionError("gone")
+            self.second_sent.set()
+
+    sender = FirstFails()
+    reports = AccountReports()
+    first = asyncio.create_task(reports.query(sender))
+    await asyncio.sleep(0)  # the first query is now waiting to send
+    second = await reports.query(sender)
+    held = execution(4, 10)
+    reports.update(held)
+    with pytest.raises(ConnectionError):
+        await first
+    second_reply = answer(second, 3)
+    assert reports.update(second_reply) == [second_reply, held]
 
 
 # Against a scripted exchange: each report counted once, wherever it falls.
 
 
-def apply(positions: dict[str, int], report: Received) -> None:
-    if report.type == "execution":
-        message = report.message
-        change = message.fill_size if message.side == BUY else -message.fill_size
-        positions[message.instrument] = positions.get(message.instrument, 0) + change
-
-
-async def run_program(script) -> tuple[dict[str, int], list[int]]:
-    """Run the quickstart's loop against an exchange that sends a fill, waits for the
-    account query and then follows `script(ref)`. Returns the positions the program ends
-    with and the report numbers it applied, in order."""
+async def run_program(script) -> tuple[dict[str, int], list[int | str]]:
+    """Run the quickstart's loop against an exchange that answers the session, waits for
+    the account query the program sends first and then follows `script(ref)`. Returns the
+    positions the program ends with and what it applied, in order: "reply" for a reply,
+    a report's number for a report."""
 
     async def handler(ws: ServerConnection) -> None:
         await ws.recv()  # auth
         await ws.send(ack())
-        await ws.send(fill(1, 1))
         query = json.loads(await ws.recv())
         assert query["type"] == "account_query"
         for f in script(query["payload"]["request_ref"]):
@@ -406,47 +485,72 @@ async def run_program(script) -> tuple[dict[str, int], list[int]]:
         await ws.close()
 
     positions: dict[str, int] = {}
-    applied: list[int] = []
+    applied: list[int | str] = []
     async with serve_local(handler) as url:
         session = await open_session(url, synthetic_token())
         async with session, asyncio.timeout(5):
             account = AccountReports()
+            await account.query(session)
             async for event in session:
-                to_apply = account.update(event)
-                if is_account_state(event):
-                    positions = {p.instrument: p.quantity for p in event.message.positions}
-                for report in to_apply:
-                    apply(positions, report)
-                    applied.append(report.report_seq)
-                if isinstance(event, Received) and event.report_seq == 1:
-                    await account.query(session)
+                for item in account.update(event):
+                    if is_account_state(item):
+                        positions = {p.instrument: p.quantity for p in item.message.positions}
+                        applied.append("reply")
+                    else:
+                        if item.type == "execution":
+                            fill_ = item.message
+                            change = fill_.fill_size if fill_.side == BUY else -fill_.fill_size
+                            positions[fill_.instrument] = (
+                                positions.get(fill_.instrument, 0) + change
+                            )
+                        applied.append(item.report_seq)
     return positions, applied
 
 
+# Fills of size n for report n, so a position shows which fills it counts.
+
+
 async def test_a_fill_the_reply_counts_that_arrives_after_it_is_not_counted_twice():
-    # Fills of size n for report n: the reply counts 1 to 3, and 2 and 3 arrive after it.
+    # The reply counts 1 to 3; 2 and 3 arrive after it.
     def script(ref: str) -> list[str]:
-        return [reply(ref, 3, aapl=1 + 2 + 3), fill(2, 2), fill(3, 3), fill(4, 4)]
+        return [fill(1, 1), reply(ref, 3, aapl=1 + 2 + 3), fill(2, 2), fill(3, 3), fill(4, 4)]
 
     positions, applied = await run_program(script)
     assert positions == {"AAPL": 1 + 2 + 3 + 4}
-    assert applied == [1, 4]
+    assert applied == [1, "reply", 4]
 
 
 async def test_a_fill_the_reply_misses_that_arrives_before_it_is_not_lost():
-    # The reply counts 1 and 2; 3 arrived after the query but before the reply.
+    # The reply counts 1 and 2; 3 arrives before the reply but is not in it.
     def script(ref: str) -> list[str]:
-        return [fill(2, 2), fill(3, 3), reply(ref, 2, aapl=1 + 2), fill(4, 4)]
+        return [fill(1, 1), fill(2, 2), fill(3, 3), reply(ref, 2, aapl=1 + 2), fill(4, 4)]
 
     positions, applied = await run_program(script)
     assert positions == {"AAPL": 1 + 2 + 3 + 4}
-    assert applied == [1, 2, 3, 3, 4]
+    assert applied == [1, 2, 3, "reply", 3, 4]
 
 
-async def test_a_sell_and_a_risk_notice_cross_the_reply():
+async def test_a_reply_with_no_as_of_report_seq_counts_no_fill():
+    # Read before the team's first report of the term, so every report applies.
     def script(ref: str) -> list[str]:
-        return [risk_notice(2), reply(ref, 2, aapl=1), risk_notice(3), fill(4, 1, "SELL")]
+        return [fill(1, 1), reply(ref, None), fill(2, 2)]
+
+    positions, applied = await run_program(script)
+    assert positions == {"AAPL": 1 + 2}
+    assert applied == [1, "reply", 1, 2]
+
+
+async def test_a_sell_and_risk_notices_cross_the_reply():
+    def script(ref: str) -> list[str]:
+        # The reply includes the notice numbered 2, which arrives after it.
+        return [
+            fill(1, 1),
+            reply(ref, 2, aapl=1),
+            risk_notice(2),
+            risk_notice(3),
+            fill(4, 1, "SELL"),
+        ]
 
     positions, applied = await run_program(script)
     assert positions == {"AAPL": 0}
-    assert applied == [1, 2, 3, 4]
+    assert applied == [1, "reply", 3, 4]
