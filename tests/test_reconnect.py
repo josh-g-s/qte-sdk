@@ -38,7 +38,13 @@ from qte_sdk.reconnect import (
     is_retryable,
 )
 from qte_sdk.resting import RestingOrders
-from qte_sdk.session import TOKEN_ENV_VAR, AuthNotSent, MissingToken, SessionNotAcknowledged
+from qte_sdk.session import (
+    TOKEN_ENV_VAR,
+    TOKEN_FILE_ENV_VAR,
+    AuthNotSent,
+    MissingToken,
+    SessionNotAcknowledged,
+)
 
 # The fake exchange. Each connection runs the next script in turn; the last one repeats.
 
@@ -168,6 +174,7 @@ def subscription(*instruments: str) -> dict:
 @pytest.fixture(autouse=True)
 def no_token_in_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
+    monkeypatch.delenv(TOKEN_FILE_ENV_VAR, raising=False)
 
 
 # A disconnect, in order: uncertainty, then a fresh session, auth and subscription

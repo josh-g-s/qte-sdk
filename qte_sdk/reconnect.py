@@ -209,10 +209,11 @@ class ReconnectingSession:
     and the `instruments` given here, are made again on every new session. Close it, or use
     it with `async with`, when done.
 
-    `token` is used as `open_session` uses it, falling back to `QTE_TOKEN`. `resting`, if
-    given, is updated from every event and marked incomplete on every disconnect.
-    `backoff=None` turns reconnecting off: the first failure to connect is raised, and
-    iteration ends after the first `Disconnected`. `sleep` and `rng` wait and draw the
+    `token` is used as `open_session` uses it, falling back to `QTE_TOKEN` and then
+    `QTE_TOKEN_FILE` (see `qte_sdk.session.resolve_token`), and is resolved once, here.
+    `resting`, if given, is updated from every event and marked incomplete on every
+    disconnect. `backoff=None` turns reconnecting off: the first failure to connect is
+    raised, and iteration ends after the first `Disconnected`. `sleep` and `rng` wait and draw the
     jitter; replace them in tests. `ack_timeout` and `connection_options` are passed to
     `open_session` for every connection, so `ack_timeout` bounds each attempt to open one.
 

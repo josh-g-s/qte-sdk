@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.6
+**Version:** 0.7
 
 This guide takes you from a fresh checkout to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -24,12 +24,14 @@ pip install .
 
 ## 2. Set the exchange address and your token
 
-The SDK reads your token from the `QTE_TOKEN` environment variable, and the examples read the exchange address from `QTE_URL`. Read the token without echoing it, so it stays out of your screen and your shell history:
+The SDK reads your token from the `QTE_TOKEN` environment variable or, when that is not set, from the file named by `QTE_TOKEN_FILE`. The examples read the exchange address from `QTE_URL`. Read the token without echoing it, so it stays out of your screen and your shell history:
 
 ```sh
 export QTE_URL=ws://127.0.0.1:8080/ws   # or the address the course team gives you
 read -rs QTE_TOKEN && export QTE_TOKEN   # paste the token, then press Enter
 ```
+
+To keep the token across terminal sessions, the recommended way is `QTE_TOKEN_FILE`: put the token in a file readable only by you, outside any repository, and set `QTE_TOKEN_FILE` to that file's path in your shell profile. The SDK reads the file, removing one trailing newline, and raises `MissingToken` if it is missing, unreadable, empty or not UTF-8 text. `QTE_TOKEN` takes precedence over the file, so unset any old one with `unset QTE_TOKEN`.
 
 The SDK never logs your token or puts it in an exception message.
 

@@ -1,6 +1,6 @@
 """Fetch past published market data from the exchange's history service.
 
-    client = HistoryClient()  # address from QTE_HISTORY_URL, token from QTE_TOKEN
+    client = HistoryClient()  # address from QTE_HISTORY_URL, token from QTE_TOKEN(_FILE)
     async for item in client.fetch("2026-09-29", "AAPL", "book"):
         match item:
             case Book():
@@ -292,7 +292,8 @@ class HistoryClient:
     """A client for the exchange's history service.
 
     `url` is the service's address (`https://...`), or None to read `QTE_HISTORY_URL`.
-    `token` is your team token, or None to read `QTE_TOKEN`. Raises `MissingHistoryURL` or
+    `token` is your team token, or None to read `QTE_TOKEN` or `QTE_TOKEN_FILE` (see
+    `qte_sdk.session.resolve_token`). Raises `MissingHistoryURL` or
     `qte_sdk.session.MissingToken` if either is missing.
 
     `timeout` bounds each network operation (connecting, or one read), in seconds; a

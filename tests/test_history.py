@@ -737,8 +737,18 @@ def test_the_address_comes_from_the_environment_and_has_no_default(monkeypatch):
     assert HistoryClient().url == "https://history.example.test"
 
 
+def test_the_token_can_come_from_qte_token_file(monkeypatch, tmp_path):
+    token = synthetic_token()
+    path = tmp_path / "token"
+    path.write_text(token + "\n")
+    monkeypatch.delenv("QTE_TOKEN", raising=False)
+    monkeypatch.setenv("QTE_TOKEN_FILE", str(path))
+    assert HistoryClient("https://history.example.test")._secret.value == token
+
+
 def test_a_token_is_required(monkeypatch):
     monkeypatch.delenv("QTE_TOKEN", raising=False)
+    monkeypatch.delenv("QTE_TOKEN_FILE", raising=False)
     with pytest.raises(MissingToken):
         HistoryClient("https://history.example.test")
 
