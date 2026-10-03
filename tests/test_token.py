@@ -589,6 +589,28 @@ def test_a_tracked_file_under_a_directory_renamed_in_case_is_refused(capsys):
 
 
 @needs_git
+@pytest.mark.parametrize("tracked", ["\u00c9.txt", "E\u0301.txt"])
+def test_a_deleted_tracked_name_differing_in_unicode_case_is_refused(tracked: str, capsys):
+    git("init", "-q", ".")
+    Path(tracked).write_text("hello\n")
+    git("add", "--", tracked)
+    Path(tracked).unlink()
+    assert run(["set", "--file", "\u00e9.txt"]) == 1  # the token is never asked for
+    assert "git tracks" in capsys.readouterr().err
+
+
+def test_a_repository_whose_top_ends_in_a_space_still_works(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("git is not on the PATH")
+    top = tmp_path / "project "
+    top.mkdir()
+    monkeypatch.chdir(top)
+    git("init", "-q", ".")
+    token = synthetic_token()
+    assert run(["set", "--file", "qte-token"], ask=answers("n"), ask_secret=answers(token)) == 0
+
+
+@needs_git
 def test_an_untracked_name_that_differs_from_a_tracked_one_is_allowed():
     git("init", "-q", ".")
     Path("README.md").write_text("hello\n")

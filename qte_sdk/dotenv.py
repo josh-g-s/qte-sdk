@@ -39,6 +39,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import unicodedata
 import warnings
 from pathlib import Path
 
@@ -272,28 +273,37 @@ def is_tracked_by_git(path: Path) -> bool | None:
 
 def tracked_ignoring_case(path: Path) -> list[str] | None:
     """The paths in git's index, relative to the working tree's top, that name `path` when
-    case is ignored in every part of it (the index, so a tracked file deleted from disk is
-    included); or None if that cannot be told. `path`'s directory must exist.
+    case and Unicode normalization are ignored in every part of it (the index, so a tracked
+    file deleted from disk is included); or None if that cannot be told. `path`'s directory
+    must exist.
 
     On a filesystem that ignores case, `config/readme.md` is the file git tracks as
     `Config/README.md`, even after a rename, and git compares paths exactly, so the whole
-    path relative to the top is matched with git's `icase` pathspec."""
+    index is listed and each path compared after Unicode normalization and case folding."""
     directory = path.parent.resolve()
     top = _run_git(directory, "rev-parse", "--show-toplevel", capture=True)
     if top is None or top.returncode != 0:
         return None
-    root = Path(top.stdout.decode("utf-8", "surrogateescape").strip()).resolve()
+    # Only git's terminating newline is removed: spaces may belong to the path.
+    printed = top.stdout.decode("utf-8", "surrogateescape").removesuffix("\n")
+    if not printed:
+        return None
+    root = Path(printed).resolve()
     try:
         relative = (directory / path.name).relative_to(root)
     except ValueError:
         return None
-    result = _run_git(
-        root, "ls-files", "-z", "--", f":(icase,literal){relative.as_posix()}", capture=True
-    )
+    result = _run_git(root, "ls-files", "-z", capture=True)
     if result is None or result.returncode != 0:
         return None
+    wanted = _fold(relative.as_posix())
     entries = result.stdout.decode("utf-8", "surrogateescape").split("\0")
-    return [entry for entry in entries if entry]
+    return [entry for entry in entries if entry and _fold(entry) == wanted]
+
+
+def _fold(text: str) -> str:
+    """`text` as a filesystem that ignores case and Unicode normalization compares it."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFD", text).casefold())
 
 
 def _git(path: Path, *args: str) -> int | None:
