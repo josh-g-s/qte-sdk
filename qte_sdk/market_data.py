@@ -55,6 +55,7 @@ from qte_sdk.connection import (
     Disconnected,
     Event,
     Received,
+    ReportGap,
     SeqGap,
 )
 from qte_sdk.contract.v1.common_pb2 import RequestType
@@ -142,7 +143,8 @@ def as_market_data(event: Event | Disconnected | object) -> MarketDataEvent | No
     Use this in your own loop over a connection when you also handle order events there.
     Returns the message for `book`, `trades`, `mark`, `session_state` and
     `official_close`; a `Reject` of a `subscribe` or `unsubscribe`; every `SeqGap` and
-    `Disconnected` (any `DataUncertain`), since messages may have been missed; and every
+    `Disconnected` (any `DataUncertain` but `ReportGap`, which concerns only the team's
+    private order reports), since messages may have been missed; and every
     `DecodeFailed`, since a message that could not be decoded may have been market data
     or a refused subscription, and sequence tracking has already counted it, so no later
     gap will report it.
@@ -159,6 +161,8 @@ def as_market_data(event: Event | Disconnected | object) -> MarketDataEvent | No
         return None
     if isinstance(event, SeqGap | Disconnected | DecodeFailed):
         return event
+    if isinstance(event, ReportGap):
+        return None  # private order reports only: no market data was missed
     if isinstance(event, DataUncertain):
         return cast(MarketDataEvent, event)  # a kind added later, passed on all the same
     return None

@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.3
+**Version:** 1.4
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -26,6 +26,7 @@ Never build these into code as constants. They are set by the exchange and can c
 - the minimum time an order must rest before it may be cancelled or amended;
 - the price collar;
 - your team's message budgets;
+- the heartbeat interval, and how long the exchange waits before it drops a silent connection (the SDK's `liveness_timeout` is a client-side setting, not one of these);
 - trading days, holidays and hours. Read them from the calendar the exchange sends after you authenticate (`session.wait_for_calendar()`, then `qte_sdk.calendar.next_open` and `next_close`).
 
 Act on what the exchange reports instead: cancel or amend after the order's `order_state` arrives rather than after a fixed sleep, trade only while `SessionState.state` is `OPEN`, and handle each reject by its reason.
@@ -47,7 +48,7 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 ## Sessions
 
 - Open one session with `qte_sdk.session.open_session`, send on it, and have one loop read its events by iterating the session itself. Two loops reading the same session each get only some of the events, or fail. In that one loop, pick out market data with `qte_sdk.market_data.as_market_data` and order events with `qte_sdk.orders.is_order_event`. `market_data(session)` yields market data only and drops order events, so use it only in a program that sends no orders.
-- A session from `open_session` does not reconnect. Iterating it ends when the exchange closes the connection and raises `websockets.exceptions.ConnectionClosedError` if the connection drops. `qte_sdk.reconnect.ReconnectingSession` reconnects for you and reports a drop as a `Disconnected` event, but cannot recover what was sent while you were disconnected.
+- A session from `open_session` does not reconnect. Iterating it ends when the exchange closes the connection and raises `websockets.exceptions.ConnectionClosedError` if the connection drops. `qte_sdk.reconnect.ReconnectingSession` reconnects for you, reports a drop as a `Disconnected` event, and resumes the new session: your team's private order reports sent while you were disconnected are replayed, or replaced by a snapshot of your resting orders. Market data sent while you were disconnected is not recovered, and an order in flight when the connection dropped is never sent again.
 
 ## Past market data
 
