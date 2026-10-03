@@ -24,7 +24,7 @@ pip install .
 
 ## 2. Set the exchange address and your token
 
-The SDK reads your token from the `QTE_TOKEN` environment variable or, when that is not set, from the file named by `QTE_TOKEN_FILE`. The examples read the exchange address from `QTE_URL`. Read the token without echoing it, so it stays out of your screen and your shell history:
+The SDK reads your token from the `QTE_TOKEN` environment variable or, when that is unset or empty, from the file named by `QTE_TOKEN_FILE`. The examples read the exchange address from `QTE_URL`. Read the token without echoing it, so it stays out of your screen and your shell history:
 
 ```sh
 export QTE_URL=ws://127.0.0.1:8080/ws   # or the address the course team gives you

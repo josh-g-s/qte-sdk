@@ -26,7 +26,7 @@ export QTE_URL="<the exchange address from the course team>"
 read -rs QTE_TOKEN && export QTE_TOKEN   # paste the token, then press Enter
 ```
 
-To keep the token across terminal sessions, the recommended way is a file readable only by you, outside any repository, with `QTE_TOKEN_FILE` set to its path in your shell profile. The SDK reads the token from that file when `QTE_TOKEN` is not set, so unset any old `QTE_TOKEN`, which would otherwise take precedence. Step 2 of the [quickstart](docs/quickstart.md) has the details.
+To keep the token across terminal sessions, the recommended way is a file readable only by you, outside any repository, with `QTE_TOKEN_FILE` set to its path in your shell profile. The SDK reads the token from that file when `QTE_TOKEN` is unset or empty, so unset any old `QTE_TOKEN`, which would otherwise take precedence. Step 2 of the [quickstart](docs/quickstart.md) has the details.
 
 Then run this. It opens a session, subscribes to one instrument and prints the best bid and ask as the book updates, for ten seconds. A book shows two kinds of depth: the wall (`bid_levels`, `ask_levels`) and participants' resting orders (`student_bid_levels`, `student_ask_levels`), each best price first, so the best bid and ask are taken across both.
 
