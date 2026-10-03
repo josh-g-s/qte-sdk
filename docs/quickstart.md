@@ -173,6 +173,8 @@ A `Book` is the state of one instrument at the end of an interval, not a stream 
 
 **Outside a session** you can still connect and subscribe, but there is no live market. A subscribe is answered once, not on the grid, with a `SessionState` whose `state` is `CLOSED`.
 
+That one `SessionState` can also name the next scheduled session in three optional fields: `next_session_date`, `next_open_time` and `next_close_time`. They are set together, only on this out-of-hours reply, never on the `SessionState` of a running session, and are absent when the term has no later session; an exchange from before these fields does not send them either, so write code that works without them. `until_next_open(state, session.info.server_time)` from `qte_sdk.market_data` gives the time until that open in exchange time units, or `None` when the fields are absent. `server_time` is the time your session was acknowledged; pass a later exchange timestamp instead if you have one. They are a convenience: the calendar is still where to read the full schedule.
+
 The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`, but **the exchange does not send it yet**. Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. When it is sent, `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. Write your code so it works with or without one.
 
 No `Book`, `Trades` or `Mark` arrives until a session opens, so a loop that waits for a book waits until then.
