@@ -1,0 +1,230 @@
+# Conformance steps
+
+**Version:** 1.0
+
+The scripted checks a client and an exchange are run against, end to end. Each step names
+the messages it exercises and the rule it proves, citing `SPEC.md` sections and naming
+the `.proto` messages and fields of the published contract. A client that cannot produce
+or consume every named message with every Required field has not met the contract.
+
+There are two scripts: a WebSocket session (steps 1 to 16) and the read-only history
+service (steps H1 to H19). The history service is a separate, stateless HTTP interface:
+it has no `auth`, no `subscribe` and no step in the numbered session script.
+
+## How to read the steps
+
+Several steps depend on something only the exchange under test controls: a counterparty
+that trades against the client, the close of a session, the state of a history archive.
+Each is written as a **Precondition**: something the exchange under test provides for
+that step. A precondition is not an instruction to the client, and these steps do not say
+how an exchange provides one.
+
+Message names are the lower-case `type` tokens of the envelope, and each is the
+`.proto` message of the same name in CamelCase: `auth` is `Auth`, `session_ack` is
+`SessionAck`, `calendar` is `Calendar`, `subscribe` is `Subscribe`, `heartbeat` is
+`Heartbeat`, `resume` is `Resume`, `new` is `NewOrder`, `cancel` is `CancelOrder`,
+`amend` is `AmendOrder`, `mass_cancel` is `MassCancel`, `accepted` is `Accepted`,
+`reject` is `Reject`, `execution` is `Execution`, `order_cancelled` is `OrderCancelled`,
+`order_state` is `OrderState`, `book` is `Book`, `trades` is `Trades`, `session_state`
+is `SessionState` and `official_close` is `OfficialClose`. Reason codes are the values
+of the `ReasonCode` enum.
+
+The session-layer parts of steps 1 to 3 and 16 (authentication, subscription and the
+calendar) may change before the contract is frozen.
+
+## WebSocket session
+
+**Preconditions for the whole script.** The exchange under test has one team with two
+registered strategies, `strat-a` and `strat-b`, and one instrument with a two-sided live
+quote. A team holds at most one resting order per instrument, side and price, across all
+of its strategies (SPEC 8.2), so the script never rests two of the team's orders at one
+price and side; step 8 checks that the exchange refuses to.
+
+1. **Connect and authenticate.** `auth`, then `session_ack` naming the team, then
+   `calendar` listing the term's own sessions and holidays (the `Calendar` message).
+2. **Subscribe.** `subscribe` for the instrument.
+3. **First book.** The subscribe snapshot, a `book` carrying its original `grid_time`
+   (or, if the instrument has no book yet this session, its first published book), with
+   ten `bid_levels` and ten `ask_levels`, level 1 of each being the wall edge (SPEC 4.3,
+   SPEC 5.3; the `Book` message).
+4. **New limit order.** `new` for `strat-a`, a buy strictly inside the band. Step 5's
+   cancel is sent immediately after this `new` is sent, without waiting for a response;
+   step 4's own confirmations are checked only once step 5's reject has been checked.
+   `accepted` with `release_time` equal to `receipt_time` plus δ_oe (SPEC 8.1).
+   `order_state` shows `RESTING`.
+5. **Early cancel.** A `cancel` at that price and side, sent immediately after step 4's
+   `new` is sent (step 4's `accepted` and `order_state` arrive no sooner than
+   `receipt_time` plus δ_oe = 150 ms, so waiting for them would put the cancel past the
+   50 ms window). `reject` with `reason_code = MIN_REST_VIOLATION` (SPEC 8.1).
+6. **Partial fill.** Precondition: a scripted counterparty aggresses part of the order.
+   `execution` with `fill_kind = STUDENT_TO_STUDENT`, `liquidity = MAKER`, a positive
+   `fee` (the rebate) and a non-zero `remaining_size` (SPEC 9.1, SPEC 12.1). `trades` at
+   the next grid boundary carries a `STUDENT_TO_STUDENT` print with no counterparty
+   (SPEC 10).
+7. **Amend down.** `amend` at the same level with a smaller `new_size` and
+   `new_price` equal to `price`. `accepted`; `order_state` shows `remaining_size` equal to
+   `new_size`, the new remaining size (SPEC 8.2).
+8. **Second strategy at the same price.** `new` for `strat-b` at the same price and side
+   as `strat-a`'s resting order. `reject` with `reason_code = DUPLICATE_ORDER_AT_LEVEL`,
+   logged at release (SPEC 8.2, SPEC 9.4.3 release step 4). `strat-a`'s order is
+   unchanged, and nothing rests for `strat-b`: a script that sees an `accepted` for this
+   `new`, or an `order_state` for a `strat-b` order at that price and side, fails this
+   step.
+9. **Cancel the level.** `cancel` at that price and side. One `order_cancelled`, for
+   `strat-a`'s order, with `reason_code = CANCEL_REQUEST`, the cancel's `request_ref` and
+   `cancelled_size` equal to the `remaining_size` step 7's `order_state` showed (SPEC 8.2).
+10. **Collar.** `new` for `strat-a`, a buy limit above mark x 1.05. `reject` with
+    `reason_code = PRICE_COLLAR` (SPEC 8.1).
+11. **Wall sweep with a market order.** Precondition: the instrument's book shows ten ask
+    levels, and no counterparty trades against the order other than the wall. `new` for `strat-a`, `order_type = MARKET`,
+    larger than the ten displayed ask levels. `execution` rows with
+    `fill_kind = STUDENT_TO_WALL`, `liquidity = TAKER`, a negative `fee`, each at its
+    level's price; then `order_cancelled` with `reason_code = MARKET_REMAINDER` (SPEC 5.3,
+    SPEC 6.3). The next `book` shows a full rebuilt ladder at the shifted band (SPEC 5.4),
+    and `trades` shows one `STUDENT_TO_WALL` print per wall fill (SPEC 10).
+12. **Self-trade prevention.** Precondition: `strat-b` has a resting sell on the
+    instrument. Then `strat-a` sends a buy that would trade with it. `order_cancelled` on
+    the resting sell with `reason_code = SELF_TRADE`, and no print for it on `trades`
+    (SPEC 8.1).
+13. **Mass-cancel.** Rest one order for `strat-a` and one for `strat-b`, each at a price
+    and side where the team has no other resting order (SPEC 8.2), then
+    `mass_cancel`. One `order_cancelled` per order with `reason_code = MASS_CANCEL`,
+    released δ_oe after receipt, and no budget consumed (SPEC 8.2).
+14. **Close.** Precondition: the exchange under test runs a single configured session and
+    closes it after step 13's cancellations. After step 13's cancellations, `new` for
+    `strat-a`, a buy strictly inside the band, and wait for `order_state` showing
+    `RESTING`, so at least one order rests into the close. `session_state` with
+    `state = CLOSED`; that order, and every other order still resting, gets
+    `order_cancelled` with `reason_code = SESSION_CLOSE`. A script that sees no
+    `SESSION_CLOSE` cancellation fails this step. A later `new`, sent on the same session
+    day, is rejected with `reason_code = RELEASE_AFTER_CLOSE`, not `MARKET_CLOSED`, since
+    its δ_oe delay would release it after a close that has already happened, not before an
+    open that has not (SPEC 8.1, SPEC 9.4.3 receipt step 4). A script that expects
+    `MARKET_CLOSED` here fails this step: that reason is for a receipt before the open or
+    on a day with no session, see step 16.
+15. **Heartbeat and resume.** Not yet specified. The `heartbeat` and `resume` behaviour
+    of the session layer is undecided, so this step has no checks until it is specified.
+16. **Subscribe outside a session.** Precondition: the exchange under test closed the
+    instrument's session in step 14 and has not restarted since. After step 14's close, a
+    `subscribe` naming the instrument, sent on a new connection authenticated after the
+    close (`auth`, `session_ack` and `calendar` are still served outside a session).
+    `calendar.next_open` names the next scheduled session, absent if the script's one
+    configured session was the term's last. Then, from the `subscribe`: one
+    `session_state` with `state = CLOSED`, `session_date`, `open_time` and `close_time`
+    naming the session step 14 just closed, and `grid_time` equal to `close_time`; no
+    `book`, `trades` or `mark`. One `official_close` for the instrument, since the
+    exchange itself closed it.
+
+## Not scripted yet
+
+- **STALE and purge.** A STALE transition is not reported to the owner, and the purge that
+  ends the order is, as `order_cancelled` with `reason_code = PURGE_STALE` (SPEC 4.3,
+  SPEC 8.4). Scripting it needs a band move under a resting order, which the scripted
+  session does not drive yet.
+- **Trade-based matching and residual prints.** Need a scripted live print stream with
+  the classifier and carry (SPEC 9.3); deferred to the golden fixtures.
+- **Amend price tests.** The rejects of an amend's new price (`DUPLICATE_ORDER_AT_LEVEL`
+  where the team already has another resting order at the new price and side,
+  `AMEND_PRICE_AT_OR_BEYOND_WALL` and `AMEND_WOULD_MAKE_STALE_MARKETABLE`) are settled
+  (SPEC 8.2); scripting them needs two of the team's orders resting at different prices
+  on one side, and a band move under a resting order, which the scripted session does not
+  drive yet. An amend acts on the team's one resting order at its price.
+
+## History service
+
+The history service lets a team fetch the exchange's own past published market data and,
+for its own team only, its own past private reports (SPEC 20.3). These steps use plain
+HTTP GETs, no WebSocket session, one step per server MUST in its response rules and
+client rules.
+
+**Preconditions for the whole script.** The service under test provides a token it
+recognises for team A, a closed session that is cached, a closed session that is not yet
+cached and a session that has not closed. Steps H1 to H13 send no `Accept-Encoding`
+header (a client library that adds `Accept-Encoding: gzip` on its own is configured not to),
+so every body they check is identity; steps H14 to H17 cover the gzip behaviour.
+
+H1. **`Retry-After` on `202`.** GET the single-object endpoint for the closed,
+    not-yet-cached session. `202`, `status = "pending"`, and a `Retry-After` header that
+    is a non-negative decimal integer, not an HTTP-date.
+H2. **`Retry-After` on `429`.** Precondition: the token's rate limit is exhausted when the
+    step starts. `429`, `status = "rate_limited"`, `Retry-After` a non-negative decimal
+    integer.
+H3. **No `Retry-After` on `409`.** GET a single object of the session that has not
+    closed. `409`, `status = "not_closed"`, no `Retry-After` header.
+H4. **`ETag` on every `200` and `206`** (the `ETag` of the representation sent, here
+    identity). Steps H4 to H6 use a cached object of at least
+    10 bytes, such as a non-empty book channel. GET it with no `Range`: `200`,
+    `ETag` present. GET it with `Range: bytes=0-9` and `If-Range` set to that `ETag`:
+    `206`, `ETag` present and equal to the first. Repeat both on
+    `GET /v1/history/range` for the same object.
+H5. **`Content-Range` total.** The `206` of step H4 carries
+    `Content-Range: bytes 0-9/<total>`, `<total>` a decimal integer equal to the
+    `Content-Length` of the step's `200`, never `*`.
+H6. **No `416`.** GET a cached object with `Range: bytes=<n>-`, `<n>` at or beyond the object's `Content-Length`, and `If-Range` set
+    to its `ETag`, then with `Range: bytes=-5`, then with `Range: bytes=0-1,4-5`: each is a
+    `200` with the whole object and its `ETag`, never `416` or `206`.
+H7. **`200` to a resume request.** GET a cached object with `Range: bytes=10-` and no
+    `If-Range`, then with an `If-Range` that is not its `ETag`: each is a `200` with the
+    whole object and the object's `ETag`.
+H8. **Lowercase hex.** The `ETag` of steps H4 and H7, and every `sha256` in a
+    `GET /v1/history/range` manifest `ready` entry, match `[0-9a-f]{64}` (the `ETag`
+    inside its quotes).
+H9. **Limits are server-side.** `GET /v1/history/range` with a `from`/`to` span above
+    the service's configured session-date limit: `400`, `status = "malformed_request"`.
+H10. **First value of a repeated key.** `GET /v1/history/range` with
+    `channels=book&channels=mark`: the manifest names `book` only, as for `channels=book`.
+H11. **Range `Retry-After` and `ETag` transition.** `GET /v1/history/range` naming a
+    `pending` triple: `200` with `Retry-After` an integer. Naming only a `not_closed`
+    triple: no `Retry-After`. Precondition: the session that has not closed closes between
+    two requests of this step, as observed by the service. Take the `ETag` of a range
+    naming a triple of that session before its close and repeat after it: the `ETag`
+    differs (`not_closed` to `pending`).
+H12. **Unbuilt endpoints.** A service that does not yet build an endpoint it documents
+    answers it `501`, `status = "not_implemented"`, never `404`. A service that builds
+    every documented endpoint has nothing to exercise in this step.
+H13. **Unknown range channel.** `GET /v1/history/range` with `channels=book,foo`: `200`,
+    with one `unavailable` entry per date and instrument for `foo`, after `book`.
+H14. **Which requests get gzip.** GET a cached object with no `Range` and
+    `Accept-Encoding: gzip`: `200`, `Content-Encoding: gzip`, an `ETag` equal to the
+    identity `ETag` of step H4 with `-gzip` appended inside the quotes, and a body that
+    gunzips to the bytes of the identity `200`. Repeat with `x-gzip`. Then with no
+    `Accept-Encoding`, with `*`, with `identity`, with `gzip;q=0` and with `gzip;q=x`:
+    each is an identity `200` with no `Content-Encoding` header. Repeat on
+    `GET /v1/history/range` and on the `session_state` endpoint.
+H15. **`Vary`.** Every `200` and `206` of step H14 and of steps H4 to H7, identity or
+    gzip, carries `Vary: Accept-Encoding`. A `202`, a `409`, a `404` and the
+    `GET /v1/history/sessions` `200` carry no `Vary`, and none is ever gzip-encoded, even
+    with `Accept-Encoding: gzip`.
+H16. **Identity signal.** GET a cached object with `Accept-Encoding: gzip`, `Range: bytes=0-9`
+    and `If-Range` set to its identity `ETag`: `206`, `Content-Encoding: identity`, the
+    identity `ETag`. With no `If-Range`: `200`, the whole identity object,
+    `Content-Encoding: identity`, never gzip.
+H17. **Gzip framing.** The gzip `200` of step H14 carries no `Content-Length` unless it
+    equals the encoded body's byte length, and its body ends with an intact gzip trailer
+    (CRC and ISIZE check, ISIZE equal to the identity length).
+H18. **Private reports.** Precondition: the service holds private reports for team A and
+    for a second team B in the same closed session. With team A's token, GET
+    `/v1/history/{session_date}/A/reports`
+    for a closed session of the token's term: `200`, `application/x-ndjson`, every line a
+    report of team A and none of any other team, `seq` running 1, 2, 3 and so on, and each
+    payload the bytes A's connection received live. With the same token, GET the same
+    path for team B: `403`, `status = "forbidden"`, with none of B's bytes in the body,
+    whether or not B holds a token, and also for a `session_date` that does not exist,
+    that has not closed, or that lies outside the token's term. For A's own reports of a
+    session that has not closed: `409`, `status = "not_closed"`; of a scheduled, closed
+    session not yet rebuilt: `202`, `status = "pending"`, with `Retry-After`; of a date
+    inside the term's range that is not a session day: `404`, `status = "unavailable"`.
+H19. **Private reports range.** Precondition: as for step H18, over several closed
+    sessions of the token's term. With team A's token, GET
+    `/v1/history/range/A/reports?from=D1&to=D2`: `200`, `application/x-ndjson`, one
+    manifest line naming each calendar
+    day from D1 to D2 by `session_date` and `status`, then the `ready` sessions' bytes
+    back to back; slicing the body by the manifest, each slice's SHA-256 equals its
+    `sha256` and its bytes equal the body of GET `/v1/history/{date}/A/reports` for that
+    date. A scheduled, closed, not yet rebuilt session is `pending` with `Retry-After`
+    on the response, an unclosed one `not_closed`, a weekend inside the term
+    `unavailable`. With the same token and team B in the path: `403`,
+    `status = "forbidden"`, none of B's bytes. With `from` or `to` outside the token's
+    term (for example the day before the term's first date): `403` for the whole request,
+    no manifest. `from` after `to`, or a span over the session-date limit: `400`. Range
+    resume and gzip behave as in H14 and H16.

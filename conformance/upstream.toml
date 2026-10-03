@@ -1,0 +1,11 @@
+# The one place that records where the vendored conformance steps came from.
+# Written by scripts/vendor_contract.py; bump `commit` deliberately and re-run it.
+# Each blob is the git blob hash of that file at `commit`, and CI checks the vendored
+# bytes against it.
+
+repo = "qte-platform"
+commit = "1e07b04f3b5b2b5dafa73597c18408778b9b3979"
+path = "schemas/public"
+
+[blobs]
+"CONFORMANCE.md" = "1eb739157a80c97cda3f563fee98a90177889b04"

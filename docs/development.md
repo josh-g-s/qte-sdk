@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.6
+**Version:** 0.7
 
 ## Requirements
 
@@ -72,4 +72,33 @@ python scripts/vendor_contract.py /path/to/qte-platform
 python scripts/generate_contract.py
 ```
 
-and commit the protos, the manifest and the generated code together. The vendor script rewrites the blob hashes itself. `python scripts/vendor_contract.py /path/to/qte-platform --check` confirms that the recorded hashes belong to the pinned commit without changing anything.
+and commit the protos, the manifest and the generated code together. The vendor script rewrites the blob hashes itself. `python scripts/vendor_contract.py /path/to/qte-platform --check` confirms that the recorded hashes belong to the pinned commits without changing anything.
+
+## Conformance steps
+
+`conformance/CONFORMANCE.md` is the exchange's published conformance script, vendored byte for byte like the protos. `conformance/upstream.toml` is its own manifest, with its own pinned qte-platform commit, path and blob hash. The vendor script copies and checks both sets, so the commands above cover it: bump `commit` in `conformance/upstream.toml` to move to a newer version. The tests fail if the file's bytes do not hash to the recorded blob, or if anything else appears in `conformance/`. It has no generated code, so the regeneration check in CI does not apply to it. Never edit it by hand, and never add other platform files.
+
+## Running the conformance session
+
+`tests/test_conformance.py` runs the WebSocket session of `conformance/CONFORMANCE.md` (steps 1 to 16) against an exchange, through the SDK's public API, one test per step. It does not run the history service steps. It is skipped unless the exchange URL, a token and the instrument are all set, so CI and a plain `pytest` skip it. Run it against a test exchange on your own machine:
+
+```sh
+export QTE_CONFORMANCE_URL=ws://127.0.0.1:8080/ws
+export QTE_CONFORMANCE_INSTRUMENT=TEST
+read -rs QTE_CONFORMANCE_TOKEN && export QTE_CONFORMANCE_TOKEN
+pytest tests/test_conformance.py -v
+```
+
+`read -rs` takes the token without echoing it or keeping it in your shell history. The token is read from `QTE_CONFORMANCE_TOKEN` only, never from `QTE_TOKEN`. A URL whose host is not this machine is refused unless `QTE_CONFORMANCE_ALLOW_REMOTE=1` is also set, because the steps send real orders.
+
+The exchange under test must provide what the script's preconditions name: one team with two registered strategies (`strat-a` and `strat-b` unless `QTE_CONFORMANCE_STRAT_A` and `QTE_CONFORMANCE_STRAT_B` name others), and the instrument with a two-sided live quote during an open session. Steps 1 to 13 are skipped while the session is not open. Other settings are the instrument's tick (`QTE_CONFORMANCE_TICK`, in dollars, default 0.01), the size of each resting order (`QTE_CONFORMANCE_SIZE`, default 10) and how long to wait for each message (`QTE_CONFORMANCE_TIMEOUT`, in seconds, default 10).
+
+Each step opens its own session, and steps 4 to 13 first mass cancel the team's orders, so a failing or skipped step does not affect the next. The steps whose preconditions need the exchange's operators run only when you declare them:
+
+| Variable | Step | What the exchange under test does |
+| --- | --- | --- |
+| `QTE_CONFORMANCE_COUNTERPARTY=1` | 6 | A scripted counterparty aggresses part of the step's resting buy. |
+| `QTE_CONFORMANCE_WALL_ONLY=1` | 11 | Nothing but the wall trades against the step's market buy. The team's risk limits must allow buying through ten ask levels, and the position is left open. |
+| `QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>` | 14 | It runs a single configured session and closes it within that many seconds of the step resting its order. |
+
+Step 16 runs only once the session has closed, so run the whole file in order with step 14 enabled to cover it. Step 15 (heartbeat and resume) is reported as an expected failure until it is specified (issue #12).
