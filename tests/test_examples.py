@@ -447,6 +447,21 @@ async def test_print_book_stops_after_its_message_count():
     assert token not in out + err
 
 
+async def test_an_example_reads_the_address_and_token_from_dotenv_in_its_working_directory():
+    exchange = FakeExchange()
+    token = synthetic_token()
+    async with serve_local(exchange) as url:
+        dotenv = Path.cwd() / ".env"  # the conftest makes the working directory a fresh one
+        dotenv.write_text(f"QTE_URL={url}\nQTE_TOKEN='{token}'\n")
+        dotenv.chmod(0o600)
+        code, out, err = await run_example(
+            "print_book.py", None, None, "--instrument", INSTRUMENT, "--max-messages", "2"
+        )
+    assert code == 0, err
+    assert exchange.received[0]["payload"] == {"token": token}
+    assert token not in out + err
+
+
 async def test_print_book_stops_after_its_duration():
     async with serve_local(FakeExchange()) as url:
         code, out, err = await run_example(
