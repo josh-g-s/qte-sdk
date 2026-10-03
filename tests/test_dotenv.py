@@ -221,6 +221,8 @@ def test_a_reconnecting_session_resolves_its_address_once():
         "QTE_TOKEN='{t}'",
         'QTE_TOKEN="{t}"',
         "QTE_TOKEN={t} # the practice token",
+        "QTE_TOKEN={t}   # several spaces before the comment",
+        "QTE_TOKEN={t}\t# a tab before the comment",
         "QTE_TOKEN='{t}' # quoted, then a comment",
         'export QTE_TOKEN="{t}"#no space before the comment',
     ],
@@ -314,8 +316,21 @@ def test_a_dotenv_that_is_not_utf8_is_refused_without_its_contents(where: str):
 
 def test_a_dotenv_that_is_a_directory_is_refused():
     (Path.cwd() / ".env").mkdir()
-    with pytest.raises(MissingToken, match=r"\.env cannot be read"):
+    with pytest.raises(MissingToken, match=r"\.env (cannot be read|is not a regular file)"):
         resolve_token()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_a_fifo_is_refused_without_waiting_for_a_writer():
+    os.mkfifo(Path.cwd() / ".env")
+    with pytest.raises(MissingURL, match="not a regular file"):
+        resolve_url()
+
+
+def test_a_very_large_dotenv_is_refused():
+    write_dotenv(f"QTE_URL={URL}\n" + "# padding\n" * 10_000)
+    with pytest.raises(MissingURL, match="larger than"):
+        resolve_url()
 
 
 @pytest.mark.skipif(not POSIX or os.geteuid() == 0, reason="needs POSIX permissions")
@@ -361,12 +376,22 @@ def test_a_readable_dotenv_without_a_token_still_gives_the_address(monkeypatch):
 
 
 @pytest.mark.skipif(not POSIX, reason="POSIX permissions")
-def test_a_readable_dotenv_is_not_read_for_the_token_when_another_source_has_it(monkeypatch):
-    write_dotenv(f"QTE_TOKEN={synthetic_token()}\nQTE_URL={URL}\n", mode=0o644)
+def test_a_readable_dotenv_holding_a_token_is_refused_for_the_address_too(monkeypatch):
+    in_file = synthetic_token()
+    write_dotenv(f"QTE_TOKEN={in_file}\nQTE_URL={URL}\n", mode=0o644)
     token = synthetic_token()
     monkeypatch.setenv(TOKEN_ENV_VAR, token)
-    assert resolve_token() == token
-    assert resolve_url() == URL
+    assert resolve_token() == token  # .env is not read for the token
+    with pytest.raises(MissingURL, match="chmod 600 .env") as caught:
+        resolve_url()
+    assert_clean(caught.value, in_file)
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX permissions")
+def test_a_malformed_token_line_still_counts_as_holding_a_token():
+    write_dotenv(f"QTE_TOKEN='{synthetic_token()}\nQTE_URL={URL}\n", mode=0o644)
+    with pytest.raises(MissingURL, match="chmod 600"):
+        resolve_url()
 
 
 @pytest.mark.skipif(not POSIX, reason="POSIX permissions")
@@ -450,6 +475,36 @@ def test_no_warning_outside_a_repository_and_git_is_not_run(monkeypatch):
     assert warned(lambda: resolve_url()) == []
 
 
+def fake_git(monkeypatch: pytest.MonkeyPatch, run) -> list[tuple]:
+    """Pretend git is on the PATH and answers with `run`; return the calls it gets."""
+    calls: list[tuple] = []
+
+    def recording(args, **kwargs):
+        calls.append((args, kwargs))
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(dotenv.shutil, "which", lambda name: "/usr/bin/git")
+    monkeypatch.setattr(dotenv.subprocess, "run", recording)
+    return calls
+
+
+def not_ignored(args, **kwargs):
+    return subprocess.CompletedProcess(args, 1)
+
+
+def test_each_dotenv_is_checked_once_so_a_later_one_still_warns(monkeypatch, tmp_path):
+    calls = fake_git(monkeypatch, not_ignored)
+    write_dotenv(f"QTE_URL={URL}\n")
+    assert warned(lambda: resolve_url()) == []  # no .git here
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.chdir(project)
+    write_dotenv(f"QTE_URL={URL}\n")
+    assert len(warned(lambda: resolve_url())) == 1
+    assert warned(lambda: resolve_url()) == []
+    assert len(calls) == 1
+
+
 def test_no_warning_and_no_failure_without_git(monkeypatch):
     (Path.cwd() / ".git").mkdir()
     monkeypatch.setattr(dotenv.shutil, "which", lambda name: None)
@@ -469,52 +524,45 @@ def test_a_failing_git_neither_warns_nor_blocks(monkeypatch, failure: str):
             raise subprocess.TimeoutExpired(args, 5)
         return subprocess.CompletedProcess(args, 128)
 
-    monkeypatch.setattr(dotenv.subprocess, "run", broken)
+    calls = fake_git(monkeypatch, broken)
     write_dotenv(f"QTE_URL={URL}\n")
     assert warned(lambda: resolve_url()) == []
     assert resolve_url() == URL
+    assert len(calls) == 1
 
 
-def test_git_is_never_given_the_token(monkeypatch):
+def test_git_is_given_neither_the_token_nor_other_variables(monkeypatch):
     (Path.cwd() / ".git").mkdir()
     token = synthetic_token()
     monkeypatch.setenv(TOKEN_ENV_VAR, token)
-    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, "")
-    calls: list[tuple] = []
-
-    def record(args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, 1)
-
-    monkeypatch.setattr(dotenv.subprocess, "run", record)
+    monkeypatch.setenv("MY_TEAM_TOKEN", token)  # a token kept under another name
+    calls = fake_git(monkeypatch, not_ignored)
     write_dotenv(f"QTE_URL={URL}\n")
     assert len(warned(lambda: resolve_url())) == 1
     ((args, kwargs),) = calls
-    assert token not in " ".join(args)
-    assert not any(name.startswith("QTE_") for name in kwargs["env"])
-    assert token not in repr(kwargs)
+    assert set(kwargs["env"]) <= dotenv._GIT_ENV
+    assert_token_absent(token, repr(args) + repr(kwargs))
 
 
-def test_the_warning_as_an_error_carries_no_token(monkeypatch):
+def test_a_warning_made_an_error_is_logged_and_does_not_block(monkeypatch, caplog):
     (Path.cwd() / ".git").mkdir()
-    monkeypatch.setattr(
-        dotenv.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 1)
-    )
+    fake_git(monkeypatch, not_ignored)
     token = synthetic_token()
     write_dotenv(f"QTE_TOKEN={token}\n")
     with warnings.catch_warnings():
         warnings.simplefilter("error", DotenvNotIgnored)
-        with pytest.raises(DotenvNotIgnored) as caught:
-            resolve_token()
-    assert_token_absent(token, shown(caught.value))
+        with caplog.at_level(logging.WARNING, logger="qte_sdk.dotenv"):
+            assert resolve_token() == token
+    (record,) = caplog.records
+    assert ".gitignore" in record.getMessage()
+    assert_token_absent(token, record.getMessage())
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths")
 def test_the_warning_names_the_file(monkeypatch):
     (Path.cwd() / ".git").mkdir()
-    monkeypatch.setattr(
-        dotenv.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 1)
-    )
+    fake_git(monkeypatch, not_ignored)
     path = write_dotenv(f"QTE_URL={URL}\n")
     (warning,) = warned(lambda: resolve_url())
     assert str(path) in str(warning.message)
+    assert warning.filename == __file__  # pointed at the caller, not the SDK

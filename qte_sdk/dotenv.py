@@ -20,21 +20,24 @@ wins. Lines for other names are not read, so the rest of the file may use any sy
 Two safeguards apply:
 
 - On POSIX, a `.env` that holds `QTE_TOKEN` and that other users can read is refused, and
-  the token is not used (`chmod 600 .env` fixes it).
+  nothing in it is used (`chmod 600 .env` fixes it).
 - If the `.env` is inside a git working tree and git does not ignore it, a
   `DotenvNotIgnored` warning is issued, once per process, since the file could be
-  committed. It never stops the SDK. The check runs `git check-ignore` when git is on the
-  PATH and is skipped otherwise; no `QTE_` variable is passed to git.
+  committed. It never stops the SDK: if a warnings filter makes it an error, it is logged
+  instead. The check runs `git check-ignore` when git is on the PATH and is skipped
+  otherwise; git is given only the environment variables it needs, never the token.
 
 Nothing here raises for a bad file, logs, or returns any of the file's text other than the
 one value asked for: a problem is described by line number and name only.
 """
 
+import logging
 import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import warnings
 from pathlib import Path
 
@@ -43,8 +46,15 @@ __all__ = ["DOTENV_NAME", "DotenvNotIgnored", "parse_assignment"]
 DOTENV_NAME = ".env"
 _GIT_TIMEOUT = 5.0
 _INLINE_COMMENT = re.compile(r"(?:^|\s)#")
+_MAX_SIZE = 64 * 1024
+_TOKEN_NAME = "QTE_TOKEN"
+# What git needs to run and find your git configuration: nothing else is passed to it.
+_GIT_ENV = frozenset(
+    {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "XDG_CONFIG_HOME", "LANG", "LC_ALL", "TMPDIR"}
+)
 
-_git_checked = False
+_log = logging.getLogger(__name__)
+_git_checked: set[str] = set()  # the .env files already checked, so each warns once
 
 
 class DotenvNotIgnored(UserWarning):
@@ -84,7 +94,7 @@ def _parse_value(rest: str) -> tuple[str | None, str | None]:
         return rest[1:end], None
     comment = _INLINE_COMMENT.search(rest)
     if comment is not None:
-        rest = rest[: comment.start()]
+        rest = rest[: comment.start()].rstrip()
     if any(c.isspace() for c in rest):
         return None, "has whitespace in a value without quotes"
     if "'" in rest or '"' in rest:
@@ -107,70 +117,106 @@ def _parse(text: str, name: str) -> tuple[str | None, str | None]:
     return value, problem
 
 
-def read_value(name: str, *, private: bool = False) -> tuple[str | None, str | None]:
+def read_value(name: str) -> tuple[str | None, str | None]:
     """The value of `name` in `./.env`, and None; or None and what is wrong.
 
     (None, None) if there is no `./.env` or it does not assign `name`, or assigns it an
-    empty value. With `private`, a file other users can read is refused on POSIX when it
-    assigns `name`, and the value is not returned.
+    empty value. On POSIX, a file that assigns `QTE_TOKEN` and that other users can read is
+    refused whichever name is asked for, and no value is returned.
 
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected, so
     neither it nor an `OSError` may reach the caller's exception as its cause or context.
     """
     path = dotenv_path()
+    _warn_if_not_ignored(path)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
-        file = open(path, "rb")
+        descriptor = os.open(path, flags)
     except FileNotFoundError:
         return None, None
     except OSError as error:
         return None, f"cannot be read ({error.strerror or type(error).__name__})"
+    problem = None
+    data = b""
     try:
-        with file:
-            _warn_if_not_ignored(path)
+        with os.fdopen(descriptor, "rb") as file:
+            # Checked on the open file, before reading it: a symbolic link is judged by
+            # the file it points to, and a FIFO or device is never read.
             mode = os.fstat(file.fileno()).st_mode
-            data = file.read()
+            if not stat.S_ISREG(mode):
+                problem = "is not a regular file"
+            else:
+                data = file.read(_MAX_SIZE + 1)
     except OSError as error:
-        return None, f"cannot be read ({error.strerror or type(error).__name__})"
-    if not stat.S_ISREG(mode):
-        return None, "is not a regular file"
+        problem = f"cannot be read ({error.strerror or type(error).__name__})"
+    if problem is not None:
+        return None, problem
+    if len(data) > _MAX_SIZE:
+        return None, f"is larger than {_MAX_SIZE // 1024} KiB"
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
-        return None, "is not UTF-8 text"
+        text = None
     del data
+    if text is None:
+        return None, "is not UTF-8 text"
+    if os.name == "posix" and stat.S_IMODE(mode) & 0o044 and _assigns_token(text):
+        return None, (
+            f"holds {_TOKEN_NAME} but other users can read it; run `chmod 600 {DOTENV_NAME}` "
+            "so only you can"
+        )
     value, problem = _parse(text, name)
     del text
     if problem is not None:
         return None, problem
-    if not value:
-        return None, None
-    if private and os.name == "posix" and stat.S_IMODE(mode) & 0o044:
-        return None, (
-            f"holds {name} but other users can read it; run `chmod 600 {DOTENV_NAME}` "
-            "so only you can"
-        )
-    return value, None
+    return value or None, None
+
+
+def _assigns_token(text: str) -> bool:
+    """Whether some line of `text` gives `QTE_TOKEN` a value, well formed or not."""
+    for line in text.splitlines():
+        assignment = parse_assignment(line)
+        if assignment is not None and assignment[0] == _TOKEN_NAME:
+            if assignment[1].strip() not in ("", "''", '""'):
+                return True
+    return False
 
 
 def _warn_if_not_ignored(path: Path) -> None:
-    """Warn, once per process, if `path` is inside a git working tree and git does not
-    ignore it. Called before the file is read, so no frame on the stack holds the token
-    should a warnings filter turn the warning into an error."""
-    global _git_checked
-    if _git_checked:
+    """Warn, once per process for each `.env`, if `path` is inside a git working tree and
+    git does not ignore it. Called before the file is read, so no frame on the stack holds
+    the token. If a warnings filter turns the warning into an error, it is logged instead,
+    since this check must never stop the SDK."""
+    key = str(path)
+    if key in _git_checked or not path.exists():
         return
-    _git_checked = True
+    _git_checked.add(key)
     if not is_inside_git_work_tree(path.parent):
         return
-    if is_ignored_by_git(path) is False:
-        warnings.warn(
-            f"{path} is inside a git working tree and git does not ignore it, so it could "
-            f"be committed with your token. Add {DOTENV_NAME} to .gitignore. If you did not "
-            "create this file (in a repository you cloned, say), check the exchange "
-            "address in it before you use it.",
-            DotenvNotIgnored,
-            stacklevel=2,
-        )
+    if is_ignored_by_git(path) is not False:
+        return
+    message = (
+        f"{path} is inside a git working tree and git does not ignore it, so it could "
+        f"be committed with your token. Add {DOTENV_NAME} to .gitignore. If you did not "
+        "create this file (in a repository you cloned, say), check the exchange "
+        "address in it before you use it."
+    )
+    try:
+        warnings.warn(message, DotenvNotIgnored, stacklevel=_caller_level())
+    except Warning:
+        _log.warning("%s", message)
+
+
+def _caller_level() -> int:
+    """The `stacklevel` that points a warning issued by the caller of this function at the
+    first frame outside the SDK."""
+    package = str(Path(__file__).resolve().parent) + os.sep
+    level = 1
+    frame = sys._getframe(1)
+    while frame is not None and str(Path(frame.f_code.co_filename).resolve()).startswith(package):
+        level += 1
+        frame = frame.f_back
+    return level
 
 
 def is_inside_git_work_tree(directory: Path) -> bool:
@@ -182,11 +228,12 @@ def is_ignored_by_git(path: Path) -> bool | None:
     """True if git ignores `path`, False if it does not (a tracked file counts as not
     ignored), or None if that cannot be told, for example when git is not on the PATH.
 
-    No `QTE_` environment variable is passed to git."""
+    Git is given only the few environment variables it needs to find itself and your git
+    configuration, so no token held in another variable reaches it."""
     git = shutil.which("git")
     if git is None:
         return None
-    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env = {k: v for k, v in os.environ.items() if k in _GIT_ENV}
     try:
         result = subprocess.run(
             [git, "check-ignore", "-q", "--", path.name],

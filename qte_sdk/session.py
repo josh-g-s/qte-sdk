@@ -248,8 +248,8 @@ def resolve_token(token: str | None = None) -> str:
     Each file is read only when nothing before it is present, and is read on each call.
     Raises `MissingToken` if there is no token; if the file named by `QTE_TOKEN_FILE`
     cannot be read, is not UTF-8 text, or holds nothing but whitespace (the `.env` is then
-    not tried); or if the `.env` cannot be read or parsed, or, on POSIX, other users can
-    read it.
+    not tried); or if the `.env` cannot be read or parsed, or, on POSIX, holds the token
+    and other users can read it.
     """
     if token is None:
         token = os.environ.get(TOKEN_ENV_VAR) or None
@@ -259,7 +259,7 @@ def resolve_token(token: str | None = None) -> str:
         token, problem = _token_from_file()
     if token is None and problem is None:
         source = DOTENV_NAME
-        token, problem = read_value(TOKEN_ENV_VAR, private=True)
+        token, problem = read_value(TOKEN_ENV_VAR)
     if problem is not None:
         # Raised outside any handler, from a frame that holds neither the file's path nor
         # its contents, so the exception carries neither.
@@ -280,7 +280,8 @@ def resolve_url(url: str | None = None) -> str:
     - the `QTE_URL` environment variable, when it is set and not empty;
     - `QTE_URL` in the `.env` file in the working directory (see `qte_sdk.dotenv`).
 
-    Raises `MissingURL` if there is none, or if the `.env` cannot be read or parsed.
+    Raises `MissingURL` if there is none, or if the `.env` cannot be read or parsed, or, on
+    POSIX, holds `QTE_TOKEN` and other users can read it.
     """
     if url is None:
         url = os.environ.get(URL_ENV_VAR) or None
