@@ -374,7 +374,9 @@ class Session:
           has no resting order, as is always so outside a session.
 
         Then a `ResumeComplete` is delivered, and after it any report that arrived
-        meanwhile, in order. Market data is not replayed: subscribe again for it. If a
+        meanwhile, in order. Reports can arrive from the moment the connection opens, so
+        every report not yet read when `resume` is called waits too; those the replay or
+        snapshot covers are dropped. Market data is not replayed: subscribe again for it. If a
         message is lost on the connection (a `SeqGap`) before the resume is complete, the
         session stops waiting for it and delivers what it held. If the connection ends
         first, what it held is not delivered and `last_report_seq` does not move past it,

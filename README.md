@@ -106,7 +106,7 @@ The main modules, each documented in its docstrings:
 
 ## Status
 
-Working today: session authentication, the market calendar, market data, order entry and order events, the resting-order view, reconnect, past market data from the history service, the quickstart and the worked examples. Planned: the closed market's official close price, which the exchange does not send yet, a query for your team's positions and cash, and heartbeats with session resume. Progress is tracked in [the issues](https://github.com/josh-g-s/qte-sdk/issues).
+Working today: session authentication, the market calendar, market data, order entry and order events, the resting-order view, reconnect with heartbeats and session resume, past market data from the history service, the quickstart and the worked examples. Planned: the closed market's official close price, which the exchange does not send yet, and a query for your team's positions and cash. Progress is tracked in [the issues](https://github.com/josh-g-s/qte-sdk/issues).
 
 ## Licence
 

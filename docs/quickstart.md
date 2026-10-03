@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.10
+**Version:** 0.11
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -321,7 +321,19 @@ A reason from a newer contract than your SDK knows decodes as `REASON_CODE_UNSPE
 
 Iterating a session ends normally when the exchange closes the connection, and raises `websockets.exceptions.ConnectionClosedError` if it drops. A session from `open_session` does not reconnect, and neither do the worked examples: open a new session yourself. Your orders may still be resting after a drop, so check before you trade again.
 
-`qte_sdk.reconnect.ReconnectingSession` does reconnect for you: it opens a new session, authenticates and subscribes again, and delivers a `Disconnected` event first. It cannot recover what you missed. The exchange does not yet resume a session, so fills, order events and market data sent while you were disconnected are not recovered. An order in flight when the connection dropped may or may not have reached the exchange, and the SDK never sends it again. A `RestingOrders` view you pass it, or that follows it, is marked incomplete and stays incomplete after the reconnect, because no event reports the orders already resting when a session starts. Treat `Disconnected` as the moment your positions, resting orders and book became uncertain.
+The exchange sends a heartbeat at a regular interval, at any hour, so a working connection is never silent for long. The SDK absorbs heartbeats: they never appear among your events, and you send nothing back. If nothing at all arrives for `liveness_timeout` seconds, the SDK treats the link as dead, drops it and raises `qte_sdk.connection.LivenessTimeout`. The default, 45 seconds, is the SDK's own choice, not a value the exchange sends; pass `liveness_timeout=` to `open_session` or `ReconnectingSession` to change it, or `None` to turn the check off.
+
+Each of your team's private order reports (`accepted`, a `reject` sent once the order delay is over, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a report number, `event.report_seq`, which counts up by one for each report your team receives. A session delivers reports in that order and keeps `session.last_report_seq`, the number up to which it has delivered every one. If a number is skipped, a `ReportGap` event comes first.
+
+`qte_sdk.reconnect.ReconnectingSession` reconnects for you and resumes each new session, so the reports you missed are not lost:
+
+1. On a drop it delivers `Disconnected`. Treat it as the moment your positions, resting orders and book became uncertain.
+2. It opens a new session, authenticates, and sends `resume` with the last report number it delivered. The exchange answers with `resume_ack`, and the new session subscribes again. You get `Connected`, whose `resume` is that answer.
+3. The exchange then either replays every report you missed, exactly as first sent, or, if it no longer holds them all, sends one `order_snapshot` event per resting order of your team instead. Either way a `ResumeComplete` event follows, and then the reports that arrived meanwhile. A snapshot with no orders means your team has none resting, which is always so outside a session.
+
+The first session resumes too, from 0, so it always starts with a snapshot of your resting orders. A `RestingOrders` view you pass as `resting=`, or that follows the session, is loaded from that snapshot, is marked incomplete on `Disconnected`, and is complete again at `ResumeComplete`.
+
+Market data is not replayed: what was published while you were disconnected is lost, and the new session's subscription delivers the latest books from then on. An order in flight when the connection dropped may or may not have reached the exchange, and the SDK never sends it again; if it arrived, the resumed reports tell you what became of it. To resume a session you opened yourself, call `await session.resume(last_report_seq)` right after `open_session`, before reading events, passing the previous session's `last_report_seq` (or 0 for a snapshot).
 
 ## 10. Past market data (history)
 
