@@ -25,7 +25,7 @@ An `account_state` carries:
 - `summary`, the team's equity, cash, daily profit and loss and limit use, as an
   `AccountSummary`. It is absent for an Execution desk and for the house, so check
   `state.HasField("summary")` before reading it. The exchange never sends an
-  `account_summary` unprompted: it is sent only in reply to an `account_query`;
+  account summary unprompted: it is sent only inside this reply;
 - `positions`, one `PositionValue` (instrument, signed quantity, price) for every
   instrument the team holds a nonzero position in, in ascending order of instrument, and
   empty when it holds no nonzero net position, whether or not it has traded. A position
@@ -41,9 +41,10 @@ An `account_state` carries:
   the date of the last session that has an official close, even across the break
   between terms, when positions carried over from the term before are returned too. It
   names a session only and does not date the close the values use: on a break day that
-  day's close is later. It is absent whenever no session has an official close yet, so
-  check `state.HasField("session_date")`. Outside a session, `summary.daily_pnl` is the
-  profit and loss of the session just finished;
+  day's close is later. Inside a session it is always present. Outside one it is absent
+  while no session has an official close yet, so check `state.HasField("session_date")`.
+  Outside a session, `summary.daily_pnl` is the profit and loss of the session just
+  finished;
 - `as_of`, the exchange's timestamp of the state the reply reads. It does not order the
   reply against your private order reports; `as_of_report_seq` does;
 - `cash`, the team's cash balance, equal to `summary.cash` when `summary` is present.
@@ -52,10 +53,13 @@ An `account_state` carries:
 - `as_of_report_seq`, the highest report sequence number the team had been assigned
   when the state was read. Each private order report (`accepted`, a delayed `reject`,
   `execution`, `order_cancelled`, `order_state`, `risk_notice`) carries a `report_seq`
-  on its envelope. After an `account_state`, apply only the private reports whose
-  `report_seq` is higher than `as_of_report_seq`; the others are already in the reply.
-  It is absent when the team has had no private report this term, and then every report
-  applies. This SDK does not yet surface `report_seq` on the events it delivers.
+  on its envelope. The cut is for account effects only: an `execution` or `risk_notice`
+  whose `report_seq` is at or below `as_of_report_seq` is already in the cash, positions
+  and summary of the reply, so do not apply its account effect again, while `accepted`,
+  `reject`, `order_cancelled` and `order_state` still apply whatever their `report_seq`,
+  since the reply holds no resting-order state. It is absent when the team has had no
+  private report this term, and then every report applies. This SDK does not yet
+  surface `report_seq` on the events it delivers.
 
 Prices, cash and equity are whole numbers of micro-dollars; convert them with
 `qte_sdk.units.to_decimal`. A query the exchange refuses is answered with a `reject`

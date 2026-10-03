@@ -123,7 +123,12 @@ async def test_reply_summary_keeps_limits_and_optional_fields():
     [event] = await received(
         frame(
             "account_state",
-            {"request_ref": "acct-5", "summary": summary, "valuation_basis": "LIVE_MARK"},
+            {
+                "request_ref": "acct-5",
+                "summary": summary,
+                "valuation_basis": "LIVE_MARK",
+                "session_date": "2026-10-02",
+            },
             1,
         )
     )
@@ -260,7 +265,7 @@ async def test_reply_with_reports_but_no_official_close_yet():
             "account_state",
             {
                 "request_ref": "acct-11",
-                "valuation_basis": "LIVE_MARK",
+                "valuation_basis": "LAST_OFFICIAL_CLOSE",
                 "as_of": str(big),
                 "cash": "1000000000",
                 "as_of_report_seq": str(big),
@@ -332,6 +337,7 @@ async def test_an_option_position_is_named_by_its_occ_symbol():
                 "request_ref": "acct-10",
                 "positions": [{"instrument": occ, "quantity": "-3", "price": "4150000"}],
                 "valuation_basis": "LIVE_MARK",
+                "session_date": "2026-10-02",
                 "as_of": "1",
                 "cash": "0",
             },
@@ -340,3 +346,22 @@ async def test_an_option_position_is_named_by_its_occ_symbol():
     )
     [position] = event.message.positions
     assert (position.instrument, position.quantity) == (occ, -3)
+
+
+async def test_reply_inside_the_first_session_has_its_date_before_any_close():
+    [event] = await received(
+        frame(
+            "account_state",
+            {
+                "request_ref": "acct-12",
+                "valuation_basis": "LIVE_MARK",
+                "session_date": "2026-09-01",
+                "as_of": "1",
+                "cash": "1000000000",
+            },
+            1,
+        )
+    )
+    state = event.message
+    assert state.valuation_basis == LIVE_MARK
+    assert state.HasField("session_date") and state.session_date == "2026-09-01"

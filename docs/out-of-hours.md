@@ -1,6 +1,6 @@
 # Using the SDK outside session hours
 
-**Version:** 0.3
+**Version:** 0.4
 
 You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market, query your account and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 

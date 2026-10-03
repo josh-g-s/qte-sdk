@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.11
+// **Version:** 1.13
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -154,9 +154,9 @@ message LimitUtilisation {
 // A team's own account state: equity, cash, the day's profit and loss, where it
 // stands against its daily loss limits, how much of each Table 3 limit of its
 // arm it uses, and its exposure cure. Private to the team; it carries only the
-// team's own information (SPEC 4.3, SPEC 15.4). When it is sent is not yet
-// specified. The message is self-contained so another message can carry it
-// whole.
+// team's own information (SPEC 4.3, SPEC 15.4). It is sent only inside the
+// `account_state` reply to an `account_query`, never unprompted. The message is
+// self-contained so another message can carry it whole.
 message AccountSummary {
   int64 equity = 1; // int64-micro. Live equity: cash plus positions at the official mark. SPEC 11.1
   int64 cash = 2;   // int64-micro. The team's cash balance. SPEC 12.2
@@ -313,9 +313,10 @@ message AccountState {
   // official close, including across the break between terms: a Fundamentals
   // pod that queries before a term's first session, holding positions carried
   // over from the term before, gets the date of that term's last session.
-  // Absent whenever no session has an official close yet: before the
-  // platform's first session, and after a first session that ended with no
-  // official close (SPEC 7.2). This date names a
+  // Inside a session it is the current session's date even if no official
+  // close exists yet. Outside a session it is absent while no session has an
+  // official close: before the platform's first session, and after a first
+  // session that ended with no official close (SPEC 7.2). This date names a
   // session only: it does not date the close the values use. Positions and
   // `summary` are valued at the latest official close, which on a break day
   // is that day's close, not this session's. SPEC 7.1, SPEC 13.1, SPEC 13.4
@@ -326,12 +327,17 @@ message AccountState {
   int64 as_of = 6;
   // int64-micro. The account's cash balance. Present only for an account that
   // holds a cash balance, and equal to `summary.cash` when `summary` is
-  // present. Absent for an Execution desk, which holds no cash balance of its
-  // own. SPEC 12.2, SPEC 24
+  // present. The house's reply carries it; only an Execution desk's reply
+  // omits it, because a desk holds no cash balance of its own. SPEC 12.2,
+  // SPEC 24
   optional int64 cash = 7;
   // integer. The team's report_seq this reply reflects: the highest one the
-  // team had been assigned when the state was read. A client applies only the
-  // private reports with a higher report_seq after this reply. Absent when the
+  // team had been assigned when the state was read. The cut is for account
+  // effects only: an execution or risk_notice at or below it is already in
+  // cash, positions and summary, so its account effect is not applied again,
+  // while accepted, reject, order_cancelled and order_state are still applied
+  // whatever their report_seq (the reply holds no resting-order state). The
+  // client's contiguous cursor and resume rules are unchanged. Absent when the
   // team has had no private report in this term, so a client applies every
   // one. The reply itself carries no report_seq.
   optional int64 as_of_report_seq = 8;
