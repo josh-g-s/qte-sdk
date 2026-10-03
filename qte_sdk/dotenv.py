@@ -193,17 +193,14 @@ def _warn_if_not_ignored(path: Path) -> None:
     if key in _git_checked or not path.exists():
         return
     _git_checked.add(key)
-    message = None
     candidates = [path]
     if path.is_symlink():
         candidates.append(path.resolve())
-    for candidate in candidates:
-        message = _git_exposure(candidate)
-        if message is not None:
-            break
-    if message is None:
+    # Every remedy is given: fixing the link alone would leave a tracked target exposed.
+    exposures = [m for m in map(_git_exposure, candidates) if m is not None]
+    if not exposures:
         return
-    message += (
+    message = " ".join(exposures) + (
         " If you did not create this file (in a repository you cloned, say), check the "
         "exchange address in it before you use it."
     )

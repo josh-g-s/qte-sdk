@@ -497,6 +497,20 @@ def test_a_symlinked_dotenv_warns_when_its_target_is_not_ignored(repository):
 
 @needs_git
 @pytest.mark.skipif(not POSIX, reason="symbolic links")
+def test_an_unignored_link_to_a_tracked_target_gets_both_remedies(repository):
+    target = repository / "real.env"
+    target.write_text(f"QTE_URL={URL}\n")
+    target.chmod(0o600)
+    git("add", "real.env")
+    (repository / ".env").symlink_to(target)
+    (warning,) = warned(lambda: resolve_url())
+    message = str(warning.message)
+    assert "Add .env to .gitignore" in message
+    assert "git rm --cached real.env" in message
+
+
+@needs_git
+@pytest.mark.skipif(not POSIX, reason="symbolic links")
 def test_a_symlinked_dotenv_whose_target_is_ignored_does_not_warn(repository):
     (repository / ".gitignore").write_text(".env\nreal.env\n")
     target = repository / "real.env"
