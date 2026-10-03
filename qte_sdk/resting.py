@@ -7,6 +7,12 @@ sends changes the view; only what the exchange reports does:
 
 - `order_state` (RESTING or STALE) adds or replaces the entry at its level key. This is how
   an order that rests, and the result of an amend that leaves it resting, are reported.
+- An amend's `order_state` carries `old_price`, the order's price before the amend. The
+  entry at `old_price` is removed first, so an amend that moves the price re-keys the
+  entry from the old level to the new one, and one that changes only the size (where
+  `old_price` equals `price`) replaces it in place. When the amend ended the order, its
+  `order_state` reads FILLED or CANCELLED with `remaining_size` 0, and nothing is left at
+  either price.
 - `execution` with an `order_price` sets the entry's remaining size from
   `remaining_size`, and removes the entry when that reaches 0.
 - `order_cancelled` with a `price` removes the entry, whatever the reason: a cancel, a
@@ -28,13 +34,12 @@ What the view cannot know:
 
 - An order becoming STALE is never reported to its owner, so an entry can read RESTING
   while the exchange holds it STALE. The purge that follows is reported and removes it.
-- Known limitation, pending a contract change: no event names the price an amend moved an
-  order away from. If the order still rests, an `order_state` at the new price adds the
-  new entry; if it executed in full at the new price, nothing names it at all. Either way
-  the entry at the old price stays in the view, and `incomplete` is not set. If you need
-  an accurate view, cancel and re-enter instead of amending the price, or reconcile the
-  old level yourself. Size-only amends are tracked correctly. A snapshot clears any such
-  leftover entry.
+- An older exchange that does not send `old_price` gives no event naming the price an
+  amend moved an order away from. The view then keeps the entry at the old price: an
+  `order_state` at the new price adds the new entry beside it, and an amend that fills
+  in full leaves it alone. `incomplete` is not set. Against such an exchange, cancel and
+  re-enter instead of amending the price if you need an accurate view. Size-only amends
+  are tracked correctly either way. A snapshot clears any such leftover entry.
 - A new view starts empty, which is right only if the team has no resting orders when it
   starts. A `ReconnectingSession` resumes every session, its first included, so a view
   that follows one from the start is loaded from a snapshot. Otherwise, if orders may
@@ -105,9 +110,9 @@ class RestingOrder:
 class RestingOrders:
     """The team's resting orders, keyed by level key, updated only from exchange events.
 
-    Known limitation: after an amend that changes an order's price, the entry at the old
-    price is not removed, because no exchange event names that price yet. Cancel and
-    re-enter instead of amending the price if you rely on this view.
+    An amend that moves an order's price re-keys its entry, using the `old_price` the
+    exchange reports on the amend's `order_state`. An older exchange that does not send
+    `old_price` leaves the entry at the old price in place; see the module docstring.
     """
 
     def __init__(self) -> None:
@@ -225,9 +230,16 @@ class RestingOrders:
         self._snapshot[key] = RestingOrder(key, msg.strat_id, msg.remaining_size, RESTING, None)
 
     def _on_order_state(self, msg: OrderState) -> None:
-        if msg.state not in (RESTING, STALE):
-            return  # order_state only ever reports a resting order
         key = LevelKey(msg.instrument, msg.side, msg.price)
+        if msg.HasField("old_price"):
+            # An amend: whatever it did, the order no longer rests at its old price.
+            self._orders.pop(LevelKey(msg.instrument, msg.side, msg.old_price), None)
+            if msg.state not in (RESTING, STALE):
+                # The amend ended the order (FILLED or CANCELLED): nothing rests at price.
+                self._orders.pop(key, None)
+                return
+        if msg.state not in (RESTING, STALE):
+            return  # without old_price, only a resting order is reported
         stale_since = msg.stale_since if msg.HasField("stale_since") else None
         self._orders[key] = RestingOrder(
             key, msg.strat_id, msg.remaining_size, msg.state, stale_since

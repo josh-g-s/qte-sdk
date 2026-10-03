@@ -105,30 +105,48 @@ message Heartbeat {
 }
 
 // Inbound. Optional. Sent once on a connection, after `auth`, to ask for the
-// private order reports the team has not yet seen. Live reports can arrive
-// from connection open, before this is sent: a client that resumes buffers
-// every private report from connection open until ResumeAck (a client that
-// does not resume applies them on session_ack). The server answers with
+// private order reports the team has not yet seen. The server answers with
 // ResumeAck.
+//
+// The client rule. Live reports can arrive from connection open, before this
+// is sent, so:
+//   1. Buffer every private report from connection open.
+//   2. On ResumeAck, drop the buffered reports whose report_seq is at or
+//      below as_of_report_seq and keep those above.
+//   3. Process the replay in report_seq order.
+//   4. Keep buffering reports above as_of_report_seq until the replay or the
+//      snapshot completes. A replay completes on processing the report whose
+//      report_seq equals as_of_report_seq (at once if the cursor already
+//      equals it); a snapshot completes when all snapshot_count
+//      OrderSnapshot messages have arrived.
+//   5. Then apply the kept reports in report_seq order, skipping any whose
+//      report_seq is not above the cursor.
+// A client that does not resume applies the buffered reports on session_ack.
 message Resume {
   reserved 1, 2;
   reserved "session_id", "last_seq_received";
   // integer. The client's cursor: the highest contiguous report_seq (see the
-  // envelope) it has processed with no gap, or the as_of_report_seq of a
-  // completed snapshot if higher, or 0 if neither. It is not the highest
-  // seen, and not a report that is buffered but not yet applied. A
-  // 64-bit value, so on the wire it is a decimal string. Must not be
-  // negative.
+  // envelope) it has processed with no gap in this term, or 0 if none. A
+  // completed snapshot sets it to exactly as_of_report_seq, not "if higher",
+  // so it can fall at a term change: report_seq restarts each term, so a
+  // stored cursor is meaningful only within its term, and the snapshot path
+  // resets it. Example: cursor 1000, new term with head 3, snapshot, cursor
+  // becomes 3, and the kept reports 4 and up apply. It is not the highest
+  // seen, and not a report that is buffered but not yet applied. A 64-bit
+  // value, so on the wire it is a decimal string. Must not be negative.
   int64 last_report_seq = 3;
 }
 
 // Outbound. The answer to Resume. On it the client drops the reports it
 // buffered from connection open whose report_seq is at or below
-// as_of_report_seq and keeps those above. When `replayed` is true, the reports the
-// client missed follow, in report_seq order, each identical to the original,
-// and live reports continue after them. When `replayed` is false, nothing is
-// replayed: `snapshot_count` OrderSnapshot messages follow, then live reports
-// from the report after `as_of_report_seq`.
+// as_of_report_seq and keeps those above (the full client rule is on Resume).
+// When `replayed` is true, the reports the client missed follow, in
+// report_seq order, each identical to the original; live reports above
+// as_of_report_seq may arrive before the replay finishes, and the client keeps
+// them buffered until it does, then applies them in order. When `replayed` is
+// false, nothing is replayed: `snapshot_count` OrderSnapshot messages follow,
+// the client's cursor becomes `as_of_report_seq`, and the reports above it,
+// live or buffered, apply in order.
 message ResumeAck {
   // bool. True if every report after the client's last_report_seq is being
   // replayed; false if a snapshot of the team's resting orders is sent

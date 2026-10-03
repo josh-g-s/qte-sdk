@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.8
+// **Version:** 1.9
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -91,21 +91,36 @@ message OrderCancelled {
   int64 timestamp = 9; // timestamp. Sequencer timestamp of the cancellation. SPEC 9.2
 }
 
-// The current state of one resting order, identified by its instrument,
-// side and price (a team holds at most one there, SPEC 8.2).
+// The current state of one order, identified by its instrument, side and
+// price (a team holds at most one resting order there, SPEC 8.2). Sent when a
+// new order's remainder rests, and for every amend the exchange accepts: one
+// for each order the amend acts on, whether the amend leaves it resting or
+// ends it. An amend's message carries old_price, so a client can remove the
+// order from the price it left and, where it still rests, add it at price.
 message OrderState {
   string strat_id = 1;   // id. SPEC 2.5
   string instrument = 2; // id. SPEC 8.2
   Side side = 3;          // SPEC 8.2
-  int64 price = 4;        // int64-micro. SPEC 8.2
-  // RESTING or STALE. A STALE transition is never reported to the owner, who
-  // recognises the band move from the book; the purge that ends the order is
-  // reported as an OrderCancelled with PURGE_STALE (SPEC 4.3, SPEC 8.4).
+  // int64-micro. The order's price; after an amend, the amend's new price.
+  // SPEC 8.2
+  int64 price = 4;
+  // RESTING or STALE while the order rests. After an amend that ends the
+  // order: FILLED when the amend's execution at its new price filled it
+  // completely, CANCELLED when the amend ended it any other way (the
+  // matching order_cancelled gives the reason); remaining_size is then 0 and
+  // nothing rests at price or at old_price. A STALE transition is never
+  // reported to the owner, who recognises the band move from the book; the
+  // purge that ends the order is reported as an OrderCancelled with
+  // PURGE_STALE (SPEC 4.3, SPEC 8.4). PURGED is never sent here.
   OrderLifecycleState state = 5; // SPEC 8.4
   int64 remaining_size = 6;      // int64-qty. SPEC 8.2
   // Present iff state = STALE: when the order became STALE. SPEC 8.4
   optional int64 stale_since = 7; // timestamp
   int64 timestamp = 8; // timestamp. SPEC 9.2
+  // Present iff this message reports an amend: the order's price before the
+  // amend. Equal to price for an amend that changed only the size. When it
+  // differs from price, the order no longer rests at old_price. SPEC 8.2
+  optional int64 old_price = 9; // int64-micro
 }
 
 // One limit of the team's arm and how much of it is used (SPEC 11.1, Table 3).
