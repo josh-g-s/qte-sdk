@@ -86,7 +86,6 @@ import ipaddress
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NoReturn
 from urllib.parse import urlsplit
 
 import pytest
@@ -1196,20 +1195,13 @@ async def test_step_15_heartbeat_and_resume():
     raise NotImplementedError
 
 
-def unknown_unquoted(reject: Reject) -> bool:
-    """Whether `reject` refuses a subscription to one of step 16's unquoted instruments
-    because the exchange does not know it."""
+def unknown_among(reject: Reject, names: tuple[str, ...]) -> bool:
+    """Whether `reject` refuses a subscription because the exchange does not know one of
+    `names`."""
     return (
         reject.reason_code == ReasonCodes.UNKNOWN_INSTRUMENT
         and reject.HasField("instrument")
-        and reject.instrument in STEP_16_UNQUOTED
-    )
-
-
-def skip_for_unknown(unknown: list[str]) -> NoReturn:
-    pytest.skip(
-        "precondition: the exchange knows QTEB and QTEC, which step 16's recorded session "
-        f"never quotes; rejected as unknown: {', '.join(unknown)}"
+        and reject.instrument in names
     )
 
 
@@ -1222,14 +1214,26 @@ async def test_step_16_subscribe_outside_a_session(client: Client):
     # The step's expected value is for the one instrument its recorded session quotes, and
     # the subscribe then also names the two it never quotes, which must get no official close.
     expected_value = instrument == STEP_16_QUOTED
+    unquoted = STEP_16_UNQUOTED if expected_value else ()
+    unknown: list[str] = []
     start = c.mark()
-    await subscribe(c.session, [instrument, *STEP_16_UNQUOTED] if expected_value else [instrument])
-    try:
-        state = await c.next_session_state(start)
-    except NoMessage:
-        if unknown := [m.instrument for m in c.since(start, Reject) if unknown_unquoted(m)]:
-            skip_for_unknown(unknown)
-        raise
+    await subscribe(c.session, [instrument, *unquoted])
+    reply = await c.wait_for(
+        lambda m: isinstance(m, SessionState | Reject), "session_state for the subscribe", start
+    )
+    if isinstance(reply, Reject) and unknown_among(reply, unquoted):
+        # A rejected subscribe is not applied at all, so the exchange, which does not know
+        # QTEB or QTEC, is asked again for the instrument alone, for the step's other checks.
+        unknown.append(reply.instrument)
+        start = c.mark()
+        await subscribe(c.session, [instrument])
+        reply = await c.wait_for(
+            lambda m: isinstance(m, SessionState | Reject), "session_state for the subscribe", start
+        )
+    assert not isinstance(reply, Reject), (
+        f"subscribe rejected: {reason_code_name(reply.reason_code)}"
+    )
+    state = reply
     assert state.state == CLOSED, "the session is open again since step 14 closed it"
     assert (state.session_date, state.open_time, state.close_time) == (
         closed.session_date,
@@ -1252,8 +1256,8 @@ async def test_step_16_subscribe_outside_a_session(client: Client):
     assert official.session_date == closed.session_date
     await c.drain(min(2.0, c.config.timeout))
     after = c.seen[start:]
-    unknown = [m.instrument for m in c.since(start, Reject) if unknown_unquoted(m)]
-    rejected = [m for m in c.since(start, Reject) if not unknown_unquoted(m)]
+    unknown += [m.instrument for m in c.since(start, Reject) if unknown_among(m, unquoted)]
+    rejected = [m for m in c.since(start, Reject) if not unknown_among(m, unquoted)]
     assert not rejected, f"subscribe rejected: {reason_code_name(rejected[0].reason_code)}"
     assert len([m for m in after if isinstance(m, SessionState)]) == 1
     assert not [m for m in after if isinstance(m, Book | Trades | Mark)]
@@ -1274,4 +1278,7 @@ async def test_step_16_subscribe_outside_a_session(client: Client):
         f"{STEP_16_QUOTED}'s official close is {official.value}, not {STEP_16_OFFICIAL_CLOSE}"
     )
     if unknown:
-        skip_for_unknown(unknown)
+        pytest.skip(
+            "precondition: the exchange knows QTEB and QTEC, which step 16's recorded session "
+            f"never quotes; rejected as unknown: {', '.join(unknown)}"
+        )
