@@ -34,11 +34,15 @@ the session asks from 0 instead and gets a snapshot.
 
 When one term ends and the next begins, the exchange closes every connection open at that
 moment with close code `qte_sdk.connection.TERM_CHANGE_CLOSE_CODE` (4001) and reason
-`term change`, after every message already queued for it, so no session carries
-reports of two terms. That close is retried like any other drop, and the new session's
-calendar names the new term, so its cursor starts again as described here. A client that
-was not connected when the term changed is not sent the close; the same check of the new
-session's calendar resets its cursor, and without a resume only when both terms are known.
+`term change`, after every message already queued for it, so no session carries reports
+of two terms. The close itself says the term changed, so the report number is forgotten
+at once, with or without a resume and whether or not either term is known, without
+waiting for the next calendar: the next session asks from 0 and gets a snapshot, or, with
+`resume=False`, counts the new term's reports from the first it reads, as a first session
+does. The same holds when the exchange closes an attempt to connect with 4001 before it is
+up. The close is retried like any other drop. A client that was not connected when the
+term changed is not sent the close; for it, the check of the new session's calendar,
+described here and below, is what forgets the number.
 
 With `resume=False` the report number is carried over too, so that a report missed while
 disconnected is noticed (see below). It is forgotten when the new session's calendar names
@@ -132,6 +136,7 @@ from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import (
+    TERM_CHANGE_CLOSE_CODE,
     Connected,
     DataUncertain,
     Disconnected,
@@ -369,7 +374,8 @@ class ReconnectingSession:
         """The `report_seq` up to which every private report has been read with no gap,
         across all sessions so far, or None before the first. The next session resumes
         from it if its calendar names the same term; report numbers start again each term,
-        so in a new term it resumes from 0 instead."""
+        so in a new term it resumes from 0 instead. It is forgotten, and reads None again,
+        when the exchange closes the connection at a term change."""
         return self._reports.cursor
 
     @property
@@ -483,6 +489,10 @@ class ReconnectingSession:
                         yield event
                 except Exception as error:
                     failure = self._safe(error)
+                    if _closed_at_term_change(error):
+                        # Nothing more is read from this session, so no report can be
+                        # counted against the old term's cursor after this.
+                        self._forget_cursor()
                 # Uncertainty is flagged before anything else, the close included.
                 self._up = False
                 disconnected = Disconnected(failure)
@@ -647,6 +657,10 @@ class ReconnectingSession:
             await _close(session)
             self._session = None
             session = None
+        if _closed_at_term_change(failure):
+            # Whatever the attempt read is not delivered, and the cursor it was given back
+            # belongs to the old term.
+            self._forget_cursor()
         return session, failure, acknowledged, resumed
 
     async def _unless_closed(self, awaitable: Awaitable[Any]) -> Any:
@@ -696,6 +710,12 @@ class ReconnectingSession:
         if term is not None or reports.cursor is None:
             self._reports_term = term
 
+    def _forget_cursor(self) -> None:
+        """Forget the report cursor and its term, as at the start: the exchange closed the
+        connection because a term ended, and report numbers start again in the next."""
+        self._reports.restore((None, frozenset()))
+        self._reports_term = None
+
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):
             return True
@@ -716,6 +736,17 @@ _CLOSED = object()
 # Seconds to spend reading what a connection that a send found closed still holds. The
 # frames it received before closing are already queued, so this is only a bound.
 _CLOSE_READ_TIMEOUT = 1.0
+
+
+def _closed_at_term_change(error: BaseException | None) -> bool:
+    """Whether `error` says the exchange closed the connection because a term ended."""
+    if isinstance(error, ConnectionClosed):
+        code = error.rcvd.code if error.rcvd is not None else None
+    elif isinstance(error, SessionNotAcknowledged):
+        code = error.close_code
+    else:
+        return False
+    return code == TERM_CHANGE_CLOSE_CODE
 
 
 def _calendar_wait(ack_timeout: float | None) -> float:

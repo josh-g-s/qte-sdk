@@ -195,6 +195,14 @@ def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
     return type(error)(withheld(error.rcvd), withheld(error.sent), error.rcvd_then_sent)
 
 
+def _received_close_code(error: BaseException | None) -> int | None:
+    """The close code the peer sent, if `error` is a closed connection and the peer sent
+    one; otherwise None. A code is a number, so it cannot carry the token."""
+    if isinstance(error, ConnectionClosed) and error.rcvd is not None:
+        return error.rcvd.code
+    return None
+
+
 def _close_detail(error: ConnectionClosed) -> str:
     """The close the peer sent, for an error message that replaces `error`: its code, and
     its reason only if it is in `_KNOWN_CLOSE_REASONS`, for example

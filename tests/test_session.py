@@ -360,6 +360,7 @@ async def test_an_abnormal_close_before_the_ack_is_an_error(code: int, reason: s
         with pytest.raises(SessionNotAcknowledged) as caught:
             await open_session(url, synthetic_token())
     assert str(caught.value) == f"the connection closed before session_ack{shown}"
+    assert caught.value.close_code == code
 
 
 async def test_an_undecodable_ack_is_an_error():

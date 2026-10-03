@@ -13,6 +13,7 @@ from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 import qte_sdk.connection
 import qte_sdk.reconnect
@@ -47,6 +48,7 @@ from qte_sdk.session import (
     ResumeNotAcknowledged,
     ResumeRejected,
     SessionInfo,
+    SessionNotAcknowledged,
     _Reports,
     open_session,
 )
@@ -485,6 +487,7 @@ async def test_a_resume_cut_off_by_the_connection_raises_not_acknowledged():
             with pytest.raises(ResumeNotAcknowledged) as caught:
                 await session.resume(0)
     assert str(caught.value) == "the connection closed before resume_ack"
+    assert caught.value.close_code is None  # dropped, with no close frame
 
 
 @pytest.mark.parametrize(
@@ -503,6 +506,7 @@ async def test_a_resume_cut_off_by_a_term_change_says_so(reason: str, shown: str
                 await session.resume(0)
     assert str(caught.value) == f"the connection closed before resume_ack{shown}"
     assert is_retryable(caught.value)
+    assert caught.value.close_code == TERM_CHANGE_CLOSE_CODE
 
 
 async def test_resume_is_sent_once_with_a_valid_cursor():
@@ -933,6 +937,167 @@ async def test_a_term_change_close_is_shown_and_retried_and_the_new_term_starts_
     assert terms == [TERM, NEXT_TERM]
     sent = [e for e in exchange.received if e["type"] != "auth"]
     assert sent == ([resume(0), resume(0)] if resume_on else [])
+
+
+async def test_without_resume_or_any_term_a_term_change_close_starts_the_count_afresh():
+    # No calendar ever names a term, so the calendar check cannot tell that the term
+    # changed; the close code alone must keep the old cursor of 7 from dropping the new
+    # term's reports 1 and 2 as duplicates.
+    exchange = Scripted(
+        {
+            "after": [order_state(6), order_state(7)],
+            "close": (TERM_CHANGE_CLOSE_CODE, "term change"),
+        },
+        {"after": [order_state(1), execution(2, 90)]},
+    )
+    cursors: list[int | None] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resume=False, sleep=Clock().sleep)
+        async with rs:
+            events = []
+            async with asyncio.timeout(5):
+                async for event in rs:
+                    events.append(event)
+                    cursors.append(rs.last_report_seq)
+                    if isinstance(event, Received) and event.report_seq == 2:
+                        break
+    assert kinds(events) == [
+        "Connected",
+        "order_state:6",
+        "order_state:7",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+        "order_state:1",
+        "execution:2",
+    ]
+    # Forgotten by the time the disconnect is delivered, then counted afresh.
+    assert cursors == [None, 6, 7, None, None, None, 1, 2]
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [(TERM_CHANGE_CLOSE_CODE, "term change"), (HEARTBEAT_TIMEOUT_CLOSE_CODE, "heartbeat timeout")],
+)
+async def test_only_a_term_change_close_forgets_the_cursor_whatever_the_calendar_says(
+    monkeypatch: pytest.MonkeyPatch, code: int, reason: str
+):
+    # The new session's calendar names the same term as the old one, so the calendar check
+    # alone would keep the cursor: only the close code makes the session ask from 0.
+    term_change = code == TERM_CHANGE_CLOSE_CODE
+    calendar_waits: list[object] = []
+    wait_for_calendar = qte_sdk.session.Session.wait_for_calendar
+
+    async def counted(self: qte_sdk.session.Session, *args: typing.Any, **kwargs: typing.Any):
+        calendar_waits.append(self)
+        return await wait_for_calendar(self, *args, **kwargs)
+
+    monkeypatch.setattr(qte_sdk.session.Session, "wait_for_calendar", counted)
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "answer": [resume_ack(False, 5, 0)],
+            "after": [order_state(6), order_state(7)],
+            "close": (code, reason),
+        },
+        {"term": TERM, "answer": [EMPTY if term_change else resume_ack(True, 7)]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs:
+            completed = 0
+            async with asyncio.timeout(5):
+                async for event in rs:
+                    if isinstance(event, ResumeComplete):
+                        completed += 1
+                        if completed == 2:
+                            break
+            last = rs.last_report_seq
+    resumes = [e for e in exchange.received if e["type"] == "resume"]
+    if term_change:
+        # Asked from 0 at once, without waiting for the calendar to check the term.
+        assert resumes == [resume(0), resume(0)]
+        assert calendar_waits == []
+        assert last == 0
+    else:
+        # Any other close keeps the cursor, which the calendar check lets through.
+        assert resumes == [resume(0), resume(7)]
+        assert len(calendar_waits) == 1
+        assert last == 7
+
+
+@pytest.mark.parametrize("cut_off", ["session_ack", "resume_ack"])
+async def test_a_term_change_close_that_cuts_off_a_reconnect_forgets_the_cursor(cut_off: str):
+    # The first session counts to 7 and drops. The exchange then closes the next attempt
+    # with 4001 before it is up, and the third session's calendar names the same term as
+    # the first, so only that close can make it ask from 0.
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "answer": [resume_ack(False, 5, 0)],
+            "after": [order_state(6), order_state(7)],
+            "drop": True,
+        },
+        {"term": TERM, "answer": [EMPTY]},
+    )
+    connections = 0
+
+    async def handler(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        if connections != 2:
+            await exchange(ws)
+            return
+        exchange.received.append(json.loads(await ws.recv()))
+        if cut_off == "resume_ack":
+            await ws.send(ack())
+            await ws.send(
+                calendar_frame(
+                    None, {**CALENDAR_PAYLOAD, "term_start": TERM[0], "term_end": TERM[1]}
+                )
+            )
+            exchange.received.append(json.loads(await ws.recv()))
+        await ws.close(TERM_CHANGE_CLOSE_CODE, "term change")
+
+    async with serve_local(handler) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs:
+            events = []
+            completed = 0
+            async with asyncio.timeout(5):
+                async for event in rs:
+                    events.append(event)
+                    if isinstance(event, ResumeComplete):
+                        completed += 1
+                        if completed == 2:
+                            break
+            last = rs.last_report_seq
+    resumes = [e for e in exchange.received if e["type"] == "resume"]
+    if cut_off == "resume_ack":
+        # The cut-off attempt was in the cursor's term, so it sent the cursor.
+        assert resumes == [resume(0), resume(7), resume(0)]
+    else:
+        assert resumes == [resume(0), resume(0)]
+    assert last == 0
+    failed = [e for e in events if isinstance(e, Retrying) and e.error is not None]
+    assert len(failed) == 1
+    error = failed[0].error
+    assert isinstance(error, SessionNotAcknowledged)
+    assert isinstance(error, ResumeNotAcknowledged) is (cut_off == "resume_ack")
+    assert error.close_code == TERM_CHANGE_CLOSE_CODE
+
+
+def test_a_replacement_for_an_error_that_repeats_the_token_keeps_the_close_code():
+    token = synthetic_token()
+    secret = qte_sdk.session._Secret(token)
+    for error in (
+        ResumeNotAcknowledged(f"echoed {token}", close_code=TERM_CHANGE_CLOSE_CODE),
+        ConnectionClosedError(Close(TERM_CHANGE_CLOSE_CODE, token), None),
+    ):
+        replacement = qte_sdk.session._without_token(error, secret)
+        assert isinstance(replacement, SessionNotAcknowledged)
+        assert replacement.close_code == TERM_CHANGE_CLOSE_CODE
+        assert_token_absent(token, f"{replacement} {replacement!r}")
 
 
 async def test_a_heartbeat_between_the_ack_and_the_calendar_or_after_it_changes_nothing():

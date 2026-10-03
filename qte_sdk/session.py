@@ -44,6 +44,7 @@ from qte_sdk.connection import (
     SessionInfo,
     SessionRejected,
     _close_detail,
+    _received_close_code,
 )
 from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import Reject
@@ -70,7 +71,15 @@ class MissingURL(ValueError):
 
 class SessionNotAcknowledged(Exception):
     """The connection ended, or the acknowledgement could not be read, before the session
-    was acknowledged."""
+    was acknowledged.
+
+    `close_code` is the close code the exchange sent, when it closed the connection, for
+    example `qte_sdk.connection.TERM_CHANGE_CLOSE_CODE`; otherwise None.
+    """
+
+    def __init__(self, *args: object, close_code: int | None = None) -> None:
+        super().__init__(*args)
+        self.close_code = close_code
 
 
 class AuthNotSent(SessionNotAcknowledged):
@@ -453,7 +462,10 @@ class Session:
                 raise self._failure
             failure = self._failure
             detail = _close_detail(failure) if isinstance(failure, ConnectionClosed) else ""
-            raise ResumeNotAcknowledged(f"the connection closed before resume_ack{detail}")
+            raise ResumeNotAcknowledged(
+                f"the connection closed before resume_ack{detail}",
+                close_code=_received_close_code(failure),
+            )
         if isinstance(answer, DecodeFailed):
             raise ResumeNotAcknowledged(f"resume_ack could not be decoded: {answer.error}")
         assert isinstance(answer, Received)
@@ -815,7 +827,7 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
             text = f"could not send auth: {type(error).__name__}; details withheld"
         else:
             text = f"could not send auth: {type(error).__name__}: {error}"
-        replacement: BaseException = kind(text)
+        replacement: BaseException = kind(text, close_code=_received_close_code(error))
     except BaseException as error:
         # Cancellation and interrupts keep their type, so they behave as they otherwise would.
         replacement = type(error)(*error.args)
@@ -828,6 +840,7 @@ async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
     early: list[Event] = []
     events = conn.events()
     detail = ""
+    close_code: int | None = None
     try:
         async for event in events:
             if isinstance(event, Received):
@@ -850,9 +863,12 @@ async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
         # Only the code and a known reason are kept: any other close reason is server text
         # and could echo the token.
         detail = _close_detail(error)
+        close_code = _received_close_code(error)
     finally:
         await events.aclose()
-    raise SessionNotAcknowledged(f"the connection closed before session_ack{detail}")
+    raise SessionNotAcknowledged(
+        f"the connection closed before session_ack{detail}", close_code=close_code
+    )
 
 
 class _Secret:
@@ -1018,5 +1034,5 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
         return type(error)(error.reason_code, detail, reason_name=name)
     withheld = f"{type(error).__name__}; details withheld, since they repeated the token"
     if isinstance(error, SessionNotAcknowledged):
-        return type(error)(withheld)
-    return SessionNotAcknowledged(withheld)
+        return type(error)(withheld, close_code=error.close_code)
+    return SessionNotAcknowledged(withheld, close_code=_received_close_code(error))
