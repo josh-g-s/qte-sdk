@@ -67,14 +67,15 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Outside market hours the exchange still accepts the connection and the subscription, but sends the market's closed state instead of a live book, so this prints nothing after "connected as".
+Outside market hours the exchange still accepts the connection and the subscription, but sends the market's closed state instead of a live book, so this prints nothing after "connected as". [Outside session hours](docs/out-of-hours.md) shows what you can do then.
 
 ## Documentation
 
 | Where | What |
 |---|---|
 | [Quickstart](docs/quickstart.md) | Step by step: connect, read the calendar and market data, place and cancel an order, read order events, what each reject means, and fetch past market data |
-| [Worked examples](examples/) | Runnable programs: print the book, quote both sides and manage the quotes, take liquidity with a market order |
+| [Outside session hours](docs/out-of-hours.md) | What works when no session is running, with a runnable walk-through: the calendar, the closed market, an order's reject, past market data |
+| [Worked examples](examples/) | Runnable programs: print the book, quote both sides and manage the quotes, take liquidity with a market order, see the closed market outside a session |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
 The main modules, each documented in its docstrings:
