@@ -1,6 +1,6 @@
 // Session and subscription messages.
 //
-// **Version:** 1.6
+// **Version:** 1.7
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `session_reject`, `heartbeat`, `resume`, `resume_ack`,
@@ -10,6 +10,10 @@
 // Calendar, Heartbeat, Resume, ResumeAck and OrderSnapshot are decided. The
 // other messages are a working proposal, so clients have something to build
 // against; their shape may change.
+//
+// Every `timestamp` field is a signed 64-bit count of milliseconds since the
+// Unix epoch, UTC (SPEC 8.1, SPEC 9.2, SPEC 13.1), carried on the wire as a
+// decimal string like every 64-bit field.
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -31,7 +35,7 @@ message Auth {
 message SessionAck {
   string session_id = 1;      // id. Not yet specified
   string team = 2;             // id. The team the authenticated account trades for. SPEC 2.1, SPEC 2.5
-  int64 server_time = 3;       // timestamp. Not yet specified
+  int64 server_time = 3;       // timestamp. Milliseconds since the Unix epoch, UTC. Its other rules are not yet specified
   string contract_version = 4; // string. Not yet specified
   // bool. True when this is an unscored recorded session: no metric, score or
   // leaderboard counts it. False in a scored session. Always present, false

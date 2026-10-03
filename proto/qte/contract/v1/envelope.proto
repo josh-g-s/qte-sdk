@@ -1,6 +1,6 @@
 // The envelope that wraps every message on the wire.
 //
-// **Version:** 1.2
+// **Version:** 1.3
 //
 // Status: PROVISIONAL. The session layer is partly specified: the sequence
 // numbers, heartbeats and resume are decided, while the rest of the envelope
@@ -36,8 +36,10 @@ message Envelope {
   // ordinary JSON number rather than the decimal string the JSON mapping
   // uses for 64-bit fields.
   optional int32 seq = 3;
-  // timestamp. Required on outbound: the server's send time. Part of the
-  // session layer, not yet specified.
+  // timestamp. Required on outbound: the server's send time, a signed 64-bit
+  // count of milliseconds since the Unix epoch, UTC (SPEC 8.1, SPEC 13.1),
+  // carried as a decimal string. Part of the session layer, whose rules are
+  // not otherwise specified yet.
   optional int64 sent_at = 4;
   // The type-specific body. `google.protobuf.Struct` stands in for a JSON
   // object while the session layer, and so the typed union this might

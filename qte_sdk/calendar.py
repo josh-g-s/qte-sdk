@@ -5,7 +5,7 @@
         now = session.info.server_time
         opens = next_open(calendar, now)
         if opens is not None:
-            print("until the next open:", opens - now)  # in exchange time units
+            print("next open:", to_datetime(opens), "in", to_timedelta(opens - now))
 
 The exchange sends a `calendar` message right after it acknowledges a session, at any hour:
 every session of the term with its open and close time, the named holidays inside the term,
@@ -14,12 +14,12 @@ trading hours, holidays or early closes is built into the SDK, so never hard-cod
 your own code either.
 
 Times are the exchange's timestamps, the integers `session_ack.server_time` and every other
-timestamp field carry. A timestamp is a signed 64-bit count of time units since the Unix
-epoch, in UTC; the contract has not fixed the resolution yet, so do not assume what one
-unit is. `now` must be one of those, for example `session.info.server_time` or a timestamp
-from a later message, never your own machine's clock: the answer is then a simple
-subtraction, with no time zone to handle. Compare and subtract exchange timestamps only
-with each other.
+timestamp field carry. A timestamp is a signed 64-bit count of milliseconds since the Unix
+epoch, in UTC, so the difference of two is a number of milliseconds.
+`qte_sdk.units.to_datetime` turns a timestamp into a `datetime` in UTC, and `to_timedelta`
+turns a difference into a `timedelta`. `now` must be an exchange timestamp, for example
+`session.info.server_time` or a timestamp from a later message, never your own machine's
+clock: the exchange's clock is the one that opens and closes the market.
 
 An exchange that predates the calendar message never sends one, so code that uses these
 helpers must also work without a calendar.
