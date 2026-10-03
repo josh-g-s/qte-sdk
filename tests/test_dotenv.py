@@ -388,6 +388,13 @@ def test_a_readable_dotenv_holding_a_token_is_refused_for_the_address_too(monkey
 
 
 @pytest.mark.skipif(not POSIX, reason="POSIX permissions")
+@pytest.mark.parametrize("empty", ["", " # later", "'' # later", '""'])
+def test_an_empty_token_placeholder_does_not_need_a_private_file(empty: str):
+    write_dotenv(f"QTE_TOKEN={empty}\nQTE_URL={URL}\n", mode=0o644)
+    assert resolve_url() == URL
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX permissions")
 def test_a_malformed_token_line_still_counts_as_holding_a_token():
     write_dotenv(f"QTE_TOKEN='{synthetic_token()}\nQTE_URL={URL}\n", mode=0o644)
     with pytest.raises(MissingURL, match="chmod 600"):
