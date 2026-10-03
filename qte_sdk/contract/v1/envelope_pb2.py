@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import struct_pb2 as google_dot_protobuf_dot_struct__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1eqte/contract/v1/envelope.proto\x12\x0fqte.contract.v1\x1a\x1cgoogle/protobuf/struct.proto\"\x8f\x01\n\x08\x45nvelope\x12\x0f\n\x07version\x18\x01 \x01(\t\x12\x0c\n\x04type\x18\x02 \x01(\t\x12\x10\n\x03seq\x18\x03 \x01(\x05H\x00\x88\x01\x01\x12\x14\n\x07sent_at\x18\x04 \x01(\x03H\x01\x88\x01\x01\x12(\n\x07payload\x18\x05 \x01(\x0b\x32\x17.google.protobuf.StructB\x06\n\x04_seqB\n\n\x08_sent_atB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1eqte/contract/v1/envelope.proto\x12\x0fqte.contract.v1\x1a\x1cgoogle/protobuf/struct.proto\"\xb7\x01\n\x08\x45nvelope\x12\x0f\n\x07version\x18\x01 \x01(\t\x12\x0c\n\x04type\x18\x02 \x01(\t\x12\x10\n\x03seq\x18\x03 \x01(\x05H\x00\x88\x01\x01\x12\x14\n\x07sent_at\x18\x04 \x01(\x03H\x01\x88\x01\x01\x12(\n\x07payload\x18\x05 \x01(\x0b\x32\x17.google.protobuf.Struct\x12\x17\n\nreport_seq\x18\x06 \x01(\x03H\x02\x88\x01\x01\x42\x06\n\x04_seqB\n\n\x08_sent_atB\r\n\x0b_report_seqB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,5 +34,5 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1'
   _globals['_ENVELOPE']._serialized_start=82
-  _globals['_ENVELOPE']._serialized_end=225
+  _globals['_ENVELOPE']._serialized_end=265
 # @@protoc_insertion_point(module_scope)

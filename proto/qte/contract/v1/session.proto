@@ -1,15 +1,15 @@
 // Session and subscription messages.
 //
-// **Version:** 1.4
+// **Version:** 1.5
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
-// `calendar`, `session_reject`, `heartbeat`, `resume`, `order_snapshot`,
-// `subscribe`, `unsubscribe`.
+// `calendar`, `session_reject`, `heartbeat`, `resume`, `resume_ack`,
+// `order_snapshot`, `subscribe`, `unsubscribe`.
 //
-// Status: PROVISIONAL. The session layer is not yet specified; SPEC.md does
-// not define it. These messages are a working proposal, so clients have
-// something to build against; they are not in force and their shape may
-// change. The exceptions are Auth.token and Calendar, which are decided.
+// Status: PROVISIONAL. The session layer is partly specified. Auth.token,
+// Calendar, Heartbeat, Resume, ResumeAck and OrderSnapshot are decided. The
+// other messages are a working proposal, so clients have something to build
+// against; their shape may change.
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -22,8 +22,7 @@ option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
 // means of authentication. The exchange's web frontend asks for the token on
 // its connect screen and keeps it in memory only, never persisted to
 // storage. Everything else in the session layer (which roles of a team may
-// send orders, request_ref and exec_id, sequence numbers, heartbeats,
-// subscription, resume) is not yet specified.
+// send orders, request_ref and exec_id, subscription) is not yet specified.
 message Auth {
   string token = 1; // string. The account's token.
 }
@@ -98,29 +97,61 @@ message SessionReject {
   optional string reason_detail = 2; // string. Not yet specified
 }
 
-// Outbound. Envelope only: no payload fields. Not yet specified.
+// Outbound. Envelope only: no payload fields. The server sends one every 15
+// seconds, from the moment the connection opens, at any hour. A client that
+// has received no message of any kind for 45 seconds treats the link as dead
+// and reconnects.
 message Heartbeat {
 }
 
-// Inbound.
+// Inbound. Sent once on a connection, after `auth`, to ask for the private
+// order reports the team has not yet seen. The server answers with
+// ResumeAck.
 message Resume {
-  string session_id = 1;        // id. Not yet specified
-  int32 last_seq_received = 2;  // integer. Not yet specified
+  reserved 1, 2;
+  reserved "session_id", "last_seq_received";
+  // integer. The client's cursor: the highest contiguous report_seq (see the
+  // envelope) it has processed with no gap, or 0 if none. It is not the
+  // highest seen, and not a report that is buffered but not yet applied. A
+  // 64-bit value, so on the wire it is a decimal string. Must not be
+  // negative.
+  int64 last_report_seq = 3;
 }
 
-// Outbound. One per resting order of the team after a resume that cannot
-// replay: the fields of `order_state`, flattened directly onto this message
-// rather than nested, so this mirrors `order_events.proto`'s OrderState
-// field for field, including its field numbers. Not yet specified.
+// Outbound. The answer to Resume. When `replayed` is true, the reports the
+// client missed follow, in report_seq order, each identical to the original,
+// and live reports continue after them. When `replayed` is false, nothing is
+// replayed: `snapshot_count` OrderSnapshot messages follow, then live reports
+// from the report after `as_of_report_seq`.
+message ResumeAck {
+  // bool. True if every report after the client's last_report_seq is being
+  // replayed; false if a snapshot of the team's resting orders is sent
+  // instead.
+  bool replayed = 1;
+  // integer. The report_seq of the newest report that the replay or the
+  // snapshot covers. Live reports that follow have a greater report_seq. A
+  // 64-bit value, so on the wire it is a decimal string.
+  int64 as_of_report_seq = 2;
+  // integer. The number of OrderSnapshot messages that follow. Always 0 when
+  // `replayed` is true. 0 when `replayed` is false means the team has no
+  // resting order.
+  int32 snapshot_count = 3;
+}
+
+// Outbound. One per resting order of the team, sent only after a ResumeAck
+// whose `replayed` is false. A team has at most one resting order at each
+// instrument, side and price. They arrive sorted by instrument (ascending
+// byte order of the instrument symbol), then side (BUY before SELL), then
+// price (ascending). The order is identified by that instrument, side and
+// price: there is no order id.
 message OrderSnapshot {
-  string strat_id = 1;   // id. SPEC 2.5
+  reserved 5, 7;
+  reserved "state", "stale_since";
+  string strat_id = 1;   // id. The strategy that holds the order. SPEC 2.5
   string instrument = 2; // id. SPEC 8.2
   Side side = 3;          // SPEC 8.2
   int64 price = 4;        // int64-micro. SPEC 8.2
-  OrderLifecycleState state = 5; // RESTING or STALE. SPEC 8.4
   int64 remaining_size = 6;      // int64-qty. SPEC 8.2
-  // Present iff state = STALE: when the order became STALE. SPEC 8.4
-  optional int64 stale_since = 7; // timestamp
   int64 timestamp = 8; // timestamp. SPEC 9.2
 }
 

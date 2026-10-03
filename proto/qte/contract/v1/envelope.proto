@@ -1,14 +1,13 @@
 // The envelope that wraps every message on the wire.
 //
-// **Version:** 1.1
+// **Version:** 1.2
 //
-// Status: PROVISIONAL. The session layer (the envelope, the handshake,
-// sequence numbers, heartbeats and resume) is not yet specified; SPEC.md
-// does not define it. The transport and encoding are decided: WebSocket,
-// JSON messages, with these `.proto` files as the schema source and the
-// canonical protobuf JSON mapping. This message is a working proposal, so
-// clients have something to build against; it is not in force and its shape
-// may change.
+// Status: PROVISIONAL. The session layer is partly specified: the sequence
+// numbers, heartbeats and resume are decided, while the rest of the envelope
+// and the handshake are still a working proposal that may change. The
+// transport and encoding are decided: WebSocket, JSON messages, with these
+// `.proto` files as the schema source and the canonical protobuf JSON
+// mapping.
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -30,11 +29,12 @@ message Envelope {
   // breaking one. The contract's versioning rules are not yet specified.
   string type = 2;
   // Required on outbound; absent on inbound. Strictly increasing per
-  // connection, for gap detection and resume. Unrelated to the exchange's
-  // own event ordering (SPEC 20.2). Deliberately int32, not int64: it is a
-  // transport counter, so it stays an ordinary JSON number rather than the
-  // decimal string the JSON mapping uses for 64-bit fields. Sequence
-  // numbering is not yet specified.
+  // connection, for gap detection only: a client uses it to notice a
+  // message it has missed on that connection, never to resume (see
+  // report_seq). Unrelated to the exchange's own event ordering (SPEC 20.2).
+  // Deliberately int32, not int64: it is a transport counter, so it stays an
+  // ordinary JSON number rather than the decimal string the JSON mapping
+  // uses for 64-bit fields.
   optional int32 seq = 3;
   // timestamp. Required on outbound: the server's send time. Part of the
   // session layer, not yet specified.
@@ -45,4 +45,15 @@ message Envelope {
   // (NewOrder, Accepted, Book, and so on, in the sibling `.proto` files)
   // defines its shape; this field does not itself enforce that shape.
   google.protobuf.Struct payload = 5;
+  // integer. The team's report sequence number: present if and only if the
+  // message is one of the team's private order reports that a resume can
+  // replay (`accepted`, a `reject` sent after the order's delay, `execution`,
+  // `order_cancelled`, `order_state` and `risk_notice`), and absent on every
+  // other message. Per team, starting at 1 for the term, increasing by
+  // exactly one for each such report, with no gaps. A replayed report carries
+  // the number it was first sent with. Carried on the envelope, not in the
+  // payload, so a replayed payload is identical to the original. A 64-bit
+  // value, so on the wire it is the decimal string the JSON mapping uses for
+  // 64-bit fields.
+  optional int64 report_seq = 6;
 }

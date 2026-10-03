@@ -26,6 +26,7 @@ class RequestType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MASS_CANCEL: _ClassVar[RequestType]
     SUBSCRIBE: _ClassVar[RequestType]
     UNSUBSCRIBE: _ClassVar[RequestType]
+    RESUME: _ClassVar[RequestType]
 
 class Origin(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -112,6 +113,7 @@ AMEND: RequestType
 MASS_CANCEL: RequestType
 SUBSCRIBE: RequestType
 UNSUBSCRIBE: RequestType
+RESUME: RequestType
 ORIGIN_UNSPECIFIED: Origin
 TEAM: Origin
 CURE_TRADE: Origin
@@ -178,6 +180,7 @@ class ReasonCodes(_message.Message):
         OUTSIDE_DECLARED_SCOPE: _ClassVar[ReasonCodes.ReasonCode]
         INSTRUMENT_NOT_PERMITTED: _ClassVar[ReasonCodes.ReasonCode]
         INSTRUMENT_SUSPENDED: _ClassVar[ReasonCodes.ReasonCode]
+        INSTRUMENT_DISABLED: _ClassVar[ReasonCodes.ReasonCode]
         MALFORMED_MESSAGE: _ClassVar[ReasonCodes.ReasonCode]
         UNKNOWN_INSTRUMENT: _ClassVar[ReasonCodes.ReasonCode]
         TICK_VIOLATION: _ClassVar[ReasonCodes.ReasonCode]
@@ -231,6 +234,7 @@ class ReasonCodes(_message.Message):
     OUTSIDE_DECLARED_SCOPE: ReasonCodes.ReasonCode
     INSTRUMENT_NOT_PERMITTED: ReasonCodes.ReasonCode
     INSTRUMENT_SUSPENDED: ReasonCodes.ReasonCode
+    INSTRUMENT_DISABLED: ReasonCodes.ReasonCode
     MALFORMED_MESSAGE: ReasonCodes.ReasonCode
     UNKNOWN_INSTRUMENT: ReasonCodes.ReasonCode
     TICK_VIOLATION: ReasonCodes.ReasonCode
