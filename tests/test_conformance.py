@@ -573,11 +573,19 @@ async def test_step_06_partial_fill(market: Client):
     assert fill.liquidity == MAKER
     assert fill.fee > 0, "the maker's fee is not a rebate"
     assert fill.remaining_size > 0, "the fill was not partial"
-    after = c.after(fill)
+    # The print belongs on the first grid point at or after the fill. Its `trades` and
+    # `session_state` may arrive in either order, so both are looked for from the start.
+    start = c.after(fill) - 1
+    boundary = await c.wait_for(
+        lambda m: isinstance(m, SessionState) and m.grid_time >= fill.timestamp,
+        "session_state at the grid point after the fill",
+        0,
+    )
     await c.wait_for(
         lambda m: (
             isinstance(m, Trades)
             and m.instrument == c.config.instrument
+            and m.grid_time == boundary.grid_time
             and any(
                 p.kind == STUDENT_TO_STUDENT
                 and p.price == fill.fill_price
@@ -585,8 +593,8 @@ async def test_step_06_partial_fill(market: Client):
                 for p in m.prints
             )
         ),
-        "trades print for the fill",
-        after,
+        "trades print for the fill at the next grid point",
+        start,
     )
 
 
@@ -903,12 +911,20 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         ),
         "session_state after the market order's release",
     )
-    books = [m for m in c.seen if isinstance(m, Book) and m.instrument == c.config.instrument]
+    # Only books received before the `accepted`: a book after it may already show the
+    # sweep's own rebuilt ladder, which is checked below, not taken as a moved quote.
+    books = [
+        m
+        for m in c.seen[: c.after(accepted)]
+        if isinstance(m, Book) and m.instrument == c.config.instrument
+    ]
     at_receipt = [m for m in books if m.grid_time <= accepted.receipt_time][-1]
     meanwhile = [m for m in books if accepted.receipt_time < m.grid_time <= accepted.release_time]
     if any(list(m.ask_levels) != list(at_receipt.ask_levels) for m in meanwhile):
         pytest.skip("precondition: the quote holds steady while the market order is delayed")
     met = meanwhile[-1] if meanwhile else at_receipt
+    if size <= sum(level.size for level in met.ask_levels):
+        pytest.skip("precondition: the market order is larger than the ten ask levels it met")
     released = [m for m in marks() if m.sampled_at <= accepted.release_time]
     if not within_guard(met, released[-1] if released else marks()[-1]):
         pytest.skip("precondition: all ten ask levels lie within mark x 1.05, the market guard")
