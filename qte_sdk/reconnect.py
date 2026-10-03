@@ -641,14 +641,23 @@ class ReconnectingSession:
             self._reports.restore(saved)
             self._reports_term = saved_term
             raise
+        # A close for a term change leaves the cursor meaningless, whatever error is
+        # reported in the end: noted now, before a drained rejection can replace it.
+        term_changed = _closed_at_term_change(failure)
         if session is not None and (failure is not None or self._closed):
             # Restored before anything else is awaited, so a cancellation cannot skip it.
             self._reports.restore(saved)
             self._reports_term = saved_term
+            if term_changed:
+                # What the attempt read is not delivered, and the cursor it was given back
+                # belongs to the old term.
+                self._forget_cursor()
             if isinstance(failure, ConnectionClosed):
                 # A send found the connection closed. If the exchange rejected the session
                 # just before, that rejection, not the retryable close, is the error.
                 drained = await session._failure_after_close(_CLOSE_READ_TIMEOUT)
+                if _closed_at_term_change(drained):
+                    self._forget_cursor()
                 if drained is not None:
                     failure = self._safe(drained)
                 # It may repeat the token, so it is not kept in this frame while the close
@@ -657,9 +666,8 @@ class ReconnectingSession:
             await _close(session)
             self._session = None
             session = None
-        if _closed_at_term_change(failure):
-            # Whatever the attempt read is not delivered, and the cursor it was given back
-            # belongs to the old term.
+        elif term_changed:
+            # Closed before the session was acknowledged: the cursor is the old term's.
             self._forget_cursor()
         return session, failure, acknowledged, resumed
 

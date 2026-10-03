@@ -1623,6 +1623,57 @@ async def test_a_session_rejected_before_the_first_send_is_not_retried(
     assert [type(d).__name__ for d in drained] == (["SessionRejected"] if sends else [])
 
 
+async def test_a_term_change_close_forgets_the_cursor_even_when_a_rejection_is_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The first session counts to 7 and drops. On the next, the exchange acknowledges,
+    # rejects and closes with 4001 before the client subscribes: the subscribe finds the
+    # connection closed, and the rejection read after it is the error raised. The close
+    # still said the term changed, so the old term's cursor is not kept.
+    send = Connection.send
+    reconnecting = False
+
+    async def send_once_closed(self: Connection, type_: str, payload: object) -> None:
+        if reconnecting and type_ != "auth":
+            # Made certain rather than left to scheduling: the close has arrived.
+            await self._open_ws().wait_closed()
+        await send(self, type_, payload)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Connection, "send", send_once_closed)
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await ws.recv()
+        if connections == 1:
+            await ws.send(ack())
+            await ws.recv()  # the subscription, so the session is up before it drops
+            await ws.send(order_state(6))
+            await ws.send(order_state(7))
+            ws.transport.abort()
+            return
+        await ws.send(ack())
+        await ws.send(session_reject("TEAM_DISABLED"))
+        await ws.close(TERM_CHANGE_CLOSE_CODE, "term change")
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url, synthetic_token(), instruments=["AAPL"], resume=False, sleep=Clock().sleep
+        )
+        cursors: list[int | None] = []
+        with pytest.raises(SessionRejected) as caught:
+            async with rs, asyncio.timeout(5):
+                async for event in rs:
+                    if isinstance(event, Disconnected):
+                        cursors.append(rs.last_report_seq)
+                        reconnecting = True
+    assert caught.value.reason_name == "TEAM_DISABLED"
+    # A drop keeps the cursor; the failed attempt, closed with 4001, forgets it.
+    assert cursors == [7, None]
+    assert rs.last_report_seq is None
+
+
 async def test_a_rejection_that_repeats_the_token_stays_out_of_a_cancelled_close(
     monkeypatch: pytest.MonkeyPatch,
 ):
