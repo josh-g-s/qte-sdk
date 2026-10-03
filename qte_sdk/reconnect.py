@@ -596,6 +596,9 @@ class ReconnectingSession:
                 calendar = await session.wait_for_calendar(
                     timeout=_calendar_wait(self._ack_timeout)
                 )
+                # wait_for_calendar never raises: a rejection or drop it read is raised
+                # here, before a send could hide it behind a retryable closed connection.
+                session._raise_if_failed()
                 self._enter_term(_term_of(calendar), strict=self._resume)
             if self._resume and not self._closed:
                 resumed = None

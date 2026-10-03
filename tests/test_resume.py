@@ -32,7 +32,13 @@ from qte_sdk.contract.v1.common_pb2 import BUY, RESTING, SELL, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import OrderState, Reject
 from qte_sdk.contract.v1.session_pb2 import OrderSnapshot, ResumeAck
 from qte_sdk.market_data import as_market_data
-from qte_sdk.reconnect import Connected, Disconnected, ReconnectingSession, is_retryable
+from qte_sdk.reconnect import (
+    Backoff,
+    Connected,
+    Disconnected,
+    ReconnectingSession,
+    is_retryable,
+)
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     ResumeNotAcknowledged,
@@ -1214,4 +1220,125 @@ async def test_without_resume_a_calendar_too_late_to_check_still_forgets_an_old_
         "calendar:None",
         "order_state:1",
     ]
+    assert last == 1
+
+
+# A rejection read while waiting for the calendar, and the term check's other edges
+
+
+def term_calendar(term: tuple[str, str]) -> str:
+    return calendar_frame(None, {**CALENDAR_PAYLOAD, "term_start": term[0], "term_end": term[1]})
+
+
+@pytest.mark.parametrize("resume_on", [True, False])
+@pytest.mark.parametrize("instruments", [[], ["AAPL"]])
+async def test_a_session_rejected_while_waiting_for_the_calendar_is_not_retried(
+    resume_on: bool, instruments: list[str]
+):
+    # The first session leaves a cursor counted in a known term, so the next one waits for
+    # its calendar. Instead the exchange acknowledges it, rejects it and closes: the
+    # rejection must stop the session, not hide behind the closed connection that the next
+    # send would find, which would be retried.
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await ws.recv()
+        await ws.send(ack())
+        if connections > 1:
+            await ws.send(session_reject("TEAM_DISABLED"))
+            await ws.close()
+            return
+        await ws.send(term_calendar(TERM))
+        if resume_on:
+            await ws.recv()
+            await ws.send(EMPTY)
+        if instruments:
+            await ws.recv()  # the subscription, so the session is up before it ends
+        await ws.send(order_state(1))
+        await ws.close()  # a normal close, so the report is read before it
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url,
+            synthetic_token(),
+            instruments=instruments,
+            resume=resume_on,
+            backoff=Backoff(max_attempts=3),
+            sleep=Clock().sleep,
+        )
+        events = []
+        with pytest.raises(SessionRejected) as caught:
+            async with rs, asyncio.timeout(5):
+                async for event in rs:
+                    events.append(event)
+    assert "order_state:1" in kinds(events)
+    assert not isinstance(caught.value, ResumeRejected)
+    assert caught.value.reason_name == "TEAM_DISABLED"
+    assert connections == 2
+
+
+async def test_a_cursor_of_unknown_term_is_not_sent_into_a_known_one():
+    # The first session sends no calendar, so the cursor's term is unknown; the next one's
+    # calendar names a term. That may not be the cursor's, so the session asks from 0.
+    exchange = Scripted(
+        {"answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"term": TERM, "answer": [EMPTY]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                if isinstance(event, Connected) and event.reconnected:
+                    break
+    assert [e for e in exchange.received if e["type"] == "resume"] == [resume(0), resume(0)]
+
+
+async def test_without_resume_a_new_terms_report_before_its_calendar_is_delivered():
+    # The new term's report 1 arrives between the ack and the calendar. The session waits
+    # for the calendar before counting it, so the old term's cursor of 100 is forgotten
+    # first and report 1 is delivered, not dropped as a duplicate.
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await ws.recv()
+        await ws.send(ack())
+        if connections == 1:
+            await ws.send(term_calendar(TERM))
+            await ws.send(order_state(100))
+            await ws.close()
+            return
+        await ws.send(order_state(1))
+        await ws.send(term_calendar(NEXT_TERM))
+        await ws.wait_closed()
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resume=False, sleep=Clock().sleep)
+        async with rs:
+            events = await take(rs, 8)
+            last = rs.last_report_seq
+    assert kinds(events)[-3:] == ["Connected", "order_state:1", "calendar:None"]
+    assert last == 1
+
+
+async def test_without_resume_a_calendar_that_does_not_come_keeps_the_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The cursor's term is known, but the next session sends no calendar in time. Without
+    # a resume the cursor is kept, so the reports missed meanwhile are flagged.
+    monkeypatch.setattr(qte_sdk.reconnect, "DEFAULT_CALENDAR_TIMEOUT", 0.2)
+    exchange = Scripted(
+        {"term": TERM, "after": [order_state(1)], "drop": True},
+        {"after": [order_state(4)]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resume=False, sleep=Clock().sleep)
+        async with rs:
+            events = await take(rs, 8)
+            last = rs.last_report_seq
+    assert kinds(events)[-3:] == ["Connected", "ReportGap", "order_state:4"]
+    assert events[-2] == ReportGap(2, 4)
     assert last == 1

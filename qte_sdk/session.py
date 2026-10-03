@@ -461,6 +461,15 @@ class Session:
         assert isinstance(answer.message, ResumeAck)
         return answer.message
 
+    def _raise_if_failed(self) -> None:
+        """Raise the error the connection ended with, if it has ended with one while the
+        session read ahead, such as a `SessionRejected` read while `wait_for_calendar`
+        waited. Used by a `ReconnectingSession` before it sends anything more: a send on
+        the closed connection would raise only that it is closed, which hides why, and is
+        retried where a rejection must not be."""
+        if self._ended and self._failure is not None:
+            raise self._failure
+
     def _withhold_in_answer(self, secret: "_Secret") -> None:
         """Replace the `reject` that refused the resume, if it repeats the token, with a
         copy that does not. Used by a `ReconnectingSession`, which holds the token and goes
