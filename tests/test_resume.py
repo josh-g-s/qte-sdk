@@ -832,3 +832,59 @@ async def test_a_loop_that_stops_reading_is_closed_by_the_keepalive_and_says_why
     assert caught.value.sent is not None
     assert (caught.value.sent.code, caught.value.sent.reason) == (1011, "keepalive ping timeout")
     assert is_retryable(caught.value)
+
+
+# The order and numbering the exchange's gateway produces
+
+
+async def test_a_snapshot_in_the_gateways_order_is_applied_before_later_live_reports():
+    # The gateway's order: live reports numbered before the resume (at or below as_of)
+    # may come first; then resume_ack; then every order_snapshot, written ahead of any
+    # queued live frame; then live reports above as_of.
+    exchange = Scripted(
+        {
+            "before_resume": [order_state(41), execution(42, 90)],
+            "answer": [
+                resume_ack(False, 42, 2),
+                snapshot("AAPL", "BUY", PRICE, 90),
+                snapshot("MSFT", "SELL", 400_000_000, 5),
+            ],
+            "after": [execution(43, 40), cancelled(44, price=PRICE)],
+        }
+    )
+    view = RestingOrders()
+    seen: list[tuple[str, bool, int]] = []
+    async with serve_local(exchange) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            await session.resume(0)
+            async for event in view.follow(session):
+                seen.append((kinds([event])[0], view.incomplete, len(view)))
+                if isinstance(event, Received) and event.type == "order_cancelled":
+                    break
+            assert session.last_report_seq == 44
+    assert seen == [
+        ("resume_ack:None", True, 0),  # 41 and 42 are covered by the snapshot: dropped
+        ("order_snapshot:None", True, 0),
+        ("order_snapshot:None", True, 0),
+        ("ResumeComplete", False, 2),
+        ("execution:43", False, 2),
+        ("order_cancelled:44", False, 1),
+    ]
+    assert view.get("AAPL", BUY, PRICE) is None
+    assert view.get("MSFT", SELL, 400_000_000) is not None
+
+
+async def test_a_record_the_exchange_cannot_map_leaves_no_gap():
+    # The gateway skips a record it cannot map without giving it a number, so the
+    # numbering the client sees stays contiguous: no ReportGap, and the view stays
+    # complete. Its effect on the team's orders is not reported at all.
+    exchange = Scripted({"after": [order_state(7), execution(8, 50)]})
+    view = RestingOrders()
+    seen: list[tuple[str, bool]] = []
+    async with serve_local(exchange) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            async for event in view.follow(session):
+                seen.append((kinds([event])[0], view.incomplete))
+                if len(seen) == 2:
+                    break
+    assert seen == [("order_state:7", False), ("execution:8", False)]

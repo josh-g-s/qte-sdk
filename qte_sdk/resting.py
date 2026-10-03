@@ -34,6 +34,10 @@ What the view cannot know:
 
 - An order becoming STALE is never reported to its owner, so an entry can read RESTING
   while the exchange holds it STALE. The purge that follows is reported and removes it.
+- If the exchange fails to turn one of its records into a report, it skips that record
+  without giving it a number and carries on, so the numbering stays without gaps and no
+  `ReportGap` is delivered. The view cannot tell, and does not set `incomplete`; the
+  next snapshot reflects the skipped record.
 - An older exchange that does not send `old_price` gives no event naming the price an
   amend moved an order away from. The view then keeps the entry at the old price: an
   `order_state` at the new price adds the new entry beside it, and an amend that fills
