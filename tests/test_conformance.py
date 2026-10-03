@@ -385,14 +385,21 @@ def check_release_time(accepted: Accepted) -> None:
 
 
 def assert_ladder(book: Book) -> None:
-    """Ten ask levels and ten bid levels, best first. The bid ladder of a low-priced
-    instrument stops at its last level with a positive price, so fewer bids are accepted
-    as long as there is at least one."""
+    """Ten ask levels and ten bid levels, best first.
+
+    The bid ladder of a low-priced instrument stops at its last level with a positive
+    price, so fewer bids are accepted only when the next level, one more step of the
+    ladder's own spacing below the last, would not be positive. The spacing is the gap
+    between the last two bids, or between the first two asks when there is one bid.
+    """
     bids = [level.price for level in book.bid_levels]
     asks = [level.price for level in book.ask_levels]
     assert len(asks) == 10, f"{len(asks)} ask levels, not ten"
     assert 1 <= len(bids) <= 10, f"{len(bids)} bid levels"
     assert all(price > 0 for price in bids)
+    if len(bids) < 10:
+        step = bids[-2] - bids[-1] if len(bids) >= 2 else asks[1] - asks[0]
+        assert bids[-1] - step <= 0, f"{len(bids)} bid levels, though the next would be positive"
     assert bids == sorted(bids, reverse=True) and len(set(bids)) == len(bids), "bids not best first"
     assert asks == sorted(asks) and len(set(asks)) == 10, "asks not best first"
     assert bids[0] < asks[0]
@@ -995,6 +1002,19 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         assert fill.fee < 0
     assert remainder.cancelled_size == size - sum(f.fill_size for f in fills)
     last_fill = max(f.timestamp for f in fills)
+
+    def wall_prints() -> list[tuple[int, int]]:
+        return [
+            (p.price, p.size)
+            for t in c.since(start, Trades)
+            if t.instrument == c.config.instrument
+            for p in t.prints
+            if p.kind == STUDENT_TO_WALL
+        ]
+
+    await c.until(lambda: len(wall_prints()) >= len(fills), "trades prints for the wall fills")
+    assert sorted(wall_prints()) == sorted((f.fill_price, f.fill_size) for f in fills)
+
     # A book is published only when it changes. If the sweep's impact was already at its
     # clamp, the rebuilt ladder can equal the one before and no new book is published; the
     # step's "shifted band" then cannot be observed, so it is a precondition.
@@ -1012,18 +1032,6 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         pytest.skip("precondition: the sweep shifts the band, so a rebuilt book is published")
     assert_ladder(rebuilt)
     assert rebuilt.ask_levels[0].price > met.ask_levels[0].price, "the band did not shift"
-
-    def wall_prints() -> list[tuple[int, int]]:
-        return [
-            (p.price, p.size)
-            for t in c.since(start, Trades)
-            if t.instrument == c.config.instrument
-            for p in t.prints
-            if p.kind == STUDENT_TO_WALL
-        ]
-
-    await c.until(lambda: len(wall_prints()) >= len(fills), "trades prints for the wall fills")
-    assert sorted(wall_prints()) == sorted((f.fill_price, f.fill_size) for f in fills)
 
 
 async def test_step_12_self_trade_prevention(market: Client):
