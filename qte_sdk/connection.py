@@ -35,8 +35,9 @@ promptly, and do slow work elsewhere. You can raise `max_queue` (a `websockets` 
 option) to absorb bursts, at the cost of memory.
 
 Term change: when one term ends and the next begins, the exchange closes every connection
-with close code `TERM_CHANGE_CLOSE_CODE` (4001) and reason `term change`, so no connection
-stays open across terms. Iteration raises a `ConnectionClosedError`, which
+open at that moment with close code `TERM_CHANGE_CLOSE_CODE` (4001) and reason
+`term change`, after everything it still owed that connection, so no connection carries
+reports of two terms. Iteration raises a `ConnectionClosedError`, which
 `ReconnectingSession` retries like any other drop. The new session's calendar names the
 new term, in which report numbers start again (see `qte_sdk.reconnect`).
 
@@ -169,9 +170,10 @@ too long, or when a connection has not authenticated in time. Its reason text is
 `heartbeat timeout`."""
 
 TERM_CHANGE_CLOSE_CODE = 4001
-"""The close code the exchange uses on every connection when one term ends and the next
-begins. Its reason text is `term change`. Reconnect: the new session's calendar names the
-new term, in which report numbers start again."""
+"""The close code the exchange sends on every connection open when one term ends and the
+next begins, after everything it still owed that connection. Its reason text is
+`term change`. Reconnect: the new session's calendar names the new term, in which report
+numbers start again."""
 
 # Close reasons whose exact text is fixed by the contract or by `websockets` itself, so
 # they cannot carry the token and are kept. Any other reason is withheld.
