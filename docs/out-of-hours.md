@@ -1,8 +1,8 @@
 # Using the SDK outside session hours
 
-**Version:** 0.2
+**Version:** 0.3
 
-You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
+You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market, query your account and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 
 `examples/out_of_hours.py` runs steps 1 to 3 for you, and sends no orders:
 
@@ -177,6 +177,8 @@ An order message the exchange takes in is held for its order delay, currently 15
 | `NO_MARKET_ACCESS` | Your team may not send orders. This is checked first, so such a team sees it at any hour. Only teams on the trading arms and Execution teams send orders. |
 | `MARKET_CLOSED` | Before the open, or on a day with no session at all, such as a weekend or an exchange holiday. |
 | `RELEASE_AFTER_CLOSE` | After the close, on a day that had a session. |
+
+Your account query is not an order message, so it works outside a session too. `send_account_query(session)` from `qte_sdk.account` returns your positions and cash, valued at the last official close, and `session_date` names that session ([Query your account](quickstart.md#query-your-account)). It also needs an exchange that serves the query.
 
 ## 5. Fetch the last closed session
 
