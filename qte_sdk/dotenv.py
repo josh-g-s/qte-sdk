@@ -39,6 +39,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import unicodedata
 import warnings
 from pathlib import Path
 
@@ -47,7 +48,7 @@ __all__ = ["DOTENV_NAME", "DotenvNotIgnored", "parse_assignment"]
 DOTENV_NAME = ".env"
 _GIT_TIMEOUT = 5.0
 _INLINE_COMMENT = re.compile(r"(?:^|\s)#")
-_MAX_SIZE = 64 * 1024
+MAX_DOTENV_SIZE = 64 * 1024
 _TOKEN_NAME = "QTE_TOKEN"
 # What git needs to run and find your git configuration: nothing else is passed to it.
 _GIT_ENV = frozenset(
@@ -147,13 +148,13 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             if not stat.S_ISREG(mode):
                 problem = "is not a regular file"
             else:
-                data = file.read(_MAX_SIZE + 1)
+                data = file.read(MAX_DOTENV_SIZE + 1)
     except OSError as error:
         problem = f"cannot be read ({error.strerror or type(error).__name__})"
     if problem is not None:
         return None, problem
-    if len(data) > _MAX_SIZE:
-        return None, f"is larger than {_MAX_SIZE // 1024} KiB"
+    if len(data) > MAX_DOTENV_SIZE:
+        return None, f"is larger than {MAX_DOTENV_SIZE // 1024} KiB"
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -270,25 +271,67 @@ def is_tracked_by_git(path: Path) -> bool | None:
     return None
 
 
+def tracked_ignoring_case(path: Path) -> list[str] | None:
+    """The paths in git's index, relative to the working tree's top, that name `path` when
+    case and Unicode normalization are ignored in every part of it (the index, so a tracked
+    file deleted from disk is included); or None if that cannot be told. `path`'s directory
+    must exist.
+
+    On a filesystem that ignores case, `config/readme.md` is the file git tracks as
+    `Config/README.md`, even after a rename, and git compares paths exactly, so the whole
+    index is listed and each path compared after Unicode normalization and case folding."""
+    directory = path.parent.resolve()
+    top = _run_git(directory, "rev-parse", "--show-toplevel", capture=True)
+    if top is None or top.returncode != 0:
+        return None
+    # Only git's terminating newline is removed: spaces may belong to the path.
+    printed = top.stdout.decode("utf-8", "surrogateescape").removesuffix("\n")
+    if not printed:
+        return None
+    root = Path(printed).resolve()
+    try:
+        relative = (directory / path.name).relative_to(root)
+    except ValueError:
+        return None
+    result = _run_git(root, "ls-files", "-z", capture=True)
+    if result is None or result.returncode != 0:
+        return None
+    wanted = _fold(relative.as_posix())
+    entries = result.stdout.decode("utf-8", "surrogateescape").split("\0")
+    return [entry for entry in entries if entry and _fold(entry) == wanted]
+
+
+def _fold(text: str) -> str:
+    """`text` as a filesystem that ignores case and Unicode normalization compares it."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFD", text).casefold())
+
+
 def _git(path: Path, *args: str) -> int | None:
     """Run git with `args` in the directory of `path` and return its exit status, or None if
-    git is not on the PATH or could not be run. Git is given only the environment variables
-    in `_GIT_ENV`."""
+    git is not on the PATH or could not be run."""
+    result = _run_git(path.parent, *args)
+    return None if result is None else result.returncode
+
+
+def _run_git(
+    directory: Path, *args: str, capture: bool = False
+) -> "subprocess.CompletedProcess[bytes] | None":
+    """Run git with `args` in `directory`, or return None if git is not on the PATH or could
+    not be run. Git is given only the environment variables in `_GIT_ENV`."""
     git = shutil.which("git")
     if git is None:
         return None
     env = {k: v for k, v in os.environ.items() if k in _GIT_ENV}
     try:
-        result = subprocess.run(
+        return subprocess.run(
             [git, *args],
-            cwd=path.parent,
+            cwd=directory,
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=_GIT_TIMEOUT,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.returncode

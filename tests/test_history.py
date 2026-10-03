@@ -1067,6 +1067,17 @@ def test_an_error_quoting_the_token_escaped_is_withheld():
     assert_token_absent(token, shown(safe))
 
 
+def test_a_network_error_holding_a_token_with_a_backslash_is_withheld():
+    # An OSError shows its filename only as a repr, which doubles a backslash, so the
+    # token is looked for in its attributes, as held.
+    token = synthetic_token() + "\\" + synthetic_token()
+    secret = history._Secret(token)
+    safe = history._sanitised(OSError(2, "No such file", token), secret)
+    assert isinstance(safe, HistoryError)
+    assert_token_absent(token, shown(safe))
+    assert repr(token)[1:-1] not in shown(safe)
+
+
 def test_the_client_repr_holds_no_token():
     token = synthetic_token()
     client = HistoryClient("https://history.example.test", token)

@@ -596,6 +596,9 @@ class ReconnectingSession:
                 calendar = await session.wait_for_calendar(
                     timeout=_calendar_wait(self._ack_timeout)
                 )
+                # wait_for_calendar never raises: a rejection or drop it read is raised
+                # here, before a send could hide it behind a retryable closed connection.
+                session._raise_if_failed()
                 self._enter_term(_term_of(calendar), strict=self._resume)
             if self._resume and not self._closed:
                 resumed = None
@@ -614,12 +617,28 @@ class ReconnectingSession:
                 await session.connection.send("subscribe", subscription)
         except Exception as error:
             failure = self._safe(error)
+        except BaseException:
+            # Cancelled or interrupted: what this attempt read ahead will not be delivered,
+            # so the cursor goes back. Whoever handles the cancellation closes the session.
+            self._reports.restore(saved)
+            self._reports_term = saved_term
+            raise
         if session is not None and (failure is not None or self._closed):
+            # Restored before anything else is awaited, so a cancellation cannot skip it.
+            self._reports.restore(saved)
+            self._reports_term = saved_term
+            if isinstance(failure, ConnectionClosed):
+                # A send found the connection closed. If the exchange rejected the session
+                # just before, that rejection, not the retryable close, is the error.
+                drained = await session._failure_after_close(_CLOSE_READ_TIMEOUT)
+                if drained is not None:
+                    failure = self._safe(drained)
+                # It may repeat the token, so it is not kept in this frame while the close
+                # below is awaited, where a cancellation would show it in the traceback.
+                del drained
             await _close(session)
             self._session = None
             session = None
-            self._reports.restore(saved)
-            self._reports_term = saved_term
         return session, failure, acknowledged, resumed
 
     async def _unless_closed(self, awaitable: Awaitable[Any]) -> Any:
@@ -685,6 +704,10 @@ class ReconnectingSession:
 
 
 _CLOSED = object()
+
+# Seconds to spend reading what a connection that a send found closed still holds. The
+# frames it received before closing are already queued, so this is only a bound.
+_CLOSE_READ_TIMEOUT = 1.0
 
 
 def _calendar_wait(ack_timeout: float | None) -> float:

@@ -24,6 +24,7 @@ keeps it, in a wrapper no repr shows, to authenticate each new session.
 """
 
 import asyncio
+import json
 import os
 from collections import deque
 from collections.abc import AsyncIterator
@@ -461,6 +462,34 @@ class Session:
         assert isinstance(answer.message, ResumeAck)
         return answer.message
 
+    def _raise_if_failed(self) -> None:
+        """Raise the error the connection ended with, if it has ended with one while the
+        session read ahead, such as a `SessionRejected` read while `wait_for_calendar`
+        waited. Used by a `ReconnectingSession` before it sends anything more: a send on
+        the closed connection would raise only that it is closed, which hides why, and is
+        retried where a rejection must not be."""
+        if self._ended and self._failure is not None:
+            raise self._failure
+
+    async def _failure_after_close(self, timeout: float) -> Exception | None:
+        """Read what is left on a connection that a send found closed, for at most
+        `timeout` seconds, and return the error it ended with, if any. The exchange may
+        have rejected the session just before it closed, and that rejection, still unread,
+        says why. Used by a `ReconnectingSession`; what is read is not delivered."""
+        loop = asyncio.get_running_loop()
+        end = loop.time() + timeout
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                # Checked between reads too: queued frames are read without the event
+                # loop running, so the timeout alone might not fire.
+                while not self._ended and loop.time() < end:
+                    await self._read_one()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+        return self._failure
+
     def _withhold_in_answer(self, secret: "_Secret") -> None:
         """Replace the `reject` that refused the resume, if it repeats the token, with a
         copy that does not. Used by a `ReconnectingSession`, which holds the token and goes
@@ -468,13 +497,16 @@ class Session:
         answer = self._reports.answer
         if not isinstance(answer, Received) or not isinstance(answer.message, Reject):
             return
-        if secret.value not in str(answer.message) and secret.value not in str(answer.payload):
+        # Read field by field: str() of the message or the payload escapes a token with a
+        # backslash, newline or tab, so it could not be found there.
+        if not _holds_token(answer.message, secret) and not _holds_token(answer.payload, secret):
             return
         message = Reject()
         message.CopyFrom(answer.message)
         if message.HasField("reason_detail"):
             message.reason_detail = _redact(message.reason_detail, secret)
-        if secret.value in str(message):
+        if _holds_token(message, secret):
+            # Still in another field (request_ref or instrument): keep only the reason.
             message = Reject(reason_code=message.reason_code)
         safe = Received(answer.type, message, answer.seq, None, answer.report_seq)
         self._buffer = deque(safe if e is answer else e for e in self._buffer)
@@ -575,26 +607,52 @@ def resolve_token(token: str | None = None) -> str:
     not tried); or if the `.env` cannot be read or parsed, or, on POSIX, holds the token
     and other users can read it.
     """
-    if token is None:
-        token = os.environ.get(TOKEN_ENV_VAR) or None
-    problem = None
-    source = TOKEN_FILE_ENV_VAR + " names a file that"
-    if token is None:
-        token, problem = _token_from_file()
-    if token is None and problem is None:
-        source = DOTENV_NAME
-        token, problem = read_value(TOKEN_ENV_VAR)
+    token, _, problem = _find_token(token)
     if problem is not None:
         # Raised outside any handler, from a frame that holds neither the file's path nor
         # its contents, so the exception carries neither.
-        raise MissingToken(f"no token: {source} {problem}")
+        raise MissingToken(problem)
+    assert token is not None
+    return token
+
+
+def token_source() -> str:
+    """Where `resolve_token()` would take the token from, without reading it out: the name
+    `QTE_TOKEN`, `QTE_TOKEN_FILE` or `.env`. Raises `MissingToken` as `resolve_token` does."""
+    token, source, problem = _find_token(None)
+    del token
+    if problem is not None:
+        raise MissingToken(problem)
+    assert source is not None
+    return source
+
+
+def _find_token(token: str | None) -> tuple[str | None, str | None, str | None]:
+    """The token, the name of its source and None; or None, None and the message for
+    `MissingToken`. Never raises, so no exception carries a frame that holds the token."""
+    source = None
+    if token is None:
+        token = os.environ.get(TOKEN_ENV_VAR) or None
+        source = TOKEN_ENV_VAR
+    problem = None
+    if token is None:
+        source = TOKEN_FILE_ENV_VAR
+        token, problem = _token_from_file()
+        if problem is not None:
+            return None, None, f"no token: {TOKEN_FILE_ENV_VAR} names a file that {problem}"
+    if token is None:
+        source = DOTENV_NAME
+        token, problem = read_value(TOKEN_ENV_VAR)
+        if problem is not None:
+            return None, None, f"no token: {DOTENV_NAME} {problem}"
     if not token:
-        raise MissingToken(
+        problem = (
             f"no token: pass token=, set the {TOKEN_ENV_VAR} environment variable, set "
             f"{TOKEN_FILE_ENV_VAR} to the path of a file holding it, or put {TOKEN_ENV_VAR} "
             f"in a {DOTENV_NAME} file in the working directory"
         )
-    return token
+        return None, None, problem
+    return token, source, None
 
 
 def resolve_url(url: str | None = None) -> str:
@@ -607,10 +665,19 @@ def resolve_url(url: str | None = None) -> str:
     Raises `MissingURL` if there is none, or if the `.env` cannot be read or parsed, or, on
     POSIX, holds `QTE_TOKEN` and other users can read it.
     """
+    return url_source(url)[1]
+
+
+def url_source(url: str | None = None) -> tuple[str, str]:
+    """Where `resolve_url(url)` takes the address from, and the address: the source is
+    `url`, `QTE_URL` or `.env`. Raises `MissingURL` as `resolve_url` does."""
+    source = "url"
     if url is None:
         url = os.environ.get(URL_ENV_VAR) or None
+        source = URL_ENV_VAR
     problem = None
     if url is None:
+        source = DOTENV_NAME
         url, problem = read_value(URL_ENV_VAR)
     if problem is not None:
         raise MissingURL(f"no exchange address: {DOTENV_NAME} {problem}")
@@ -619,7 +686,7 @@ def resolve_url(url: str | None = None) -> str:
             f"no exchange address: pass url=, set the {URL_ENV_VAR} environment variable, "
             f"or put {URL_ENV_VAR} in a {DOTENV_NAME} file in the working directory"
         )
-    return url
+    return source, url
 
 
 def _token_from_file() -> tuple[str | None, str | None]:
@@ -740,9 +807,12 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
         return
     except Exception as error:
         kind = SessionNotAcknowledged if isinstance(error, ConnectionClosed) else AuthNotSent
-        replacement: BaseException = kind(
-            _redact(f"could not send auth: {type(error).__name__}: {error}", secret)
-        )
+        if _holds_token(error, secret):
+            # Its text may hold the token escaped, where a redaction would not find it.
+            text = f"could not send auth: {type(error).__name__}; details withheld"
+        else:
+            text = f"could not send auth: {type(error).__name__}: {error}"
+        replacement: BaseException = kind(text)
     except BaseException as error:
         # Cancellation and interrupts keep their type, so they behave as they otherwise would.
         replacement = type(error)(*error.args)
@@ -796,21 +866,98 @@ class _Secret:
     __str__ = __repr__
 
 
+def _token_forms(token: str) -> list[str]:
+    """The token as written, and as the usual escapes write it: Python's repr of it as text
+    or bytes (with a quote escaped or not) and JSON. Those escape a backslash, newline or
+    tab, so text that holds an escaped copy does not hold the token as written. Longest
+    first, so a redaction replaces a whole escaped copy rather than part of it. Never
+    raises, even for a token that is not valid Unicode, such as one read from an
+    environment variable holding bytes that are not UTF-8."""
+    # surrogatepass: a lone surrogate would make a plain encode() raise an error that
+    # holds the token.
+    raw = token.encode("utf-8", "surrogatepass")
+    forms = {
+        token,
+        repr(token)[1:-1],
+        repr(token + "'\"")[1:-4],
+        json.dumps(token)[1:-1],
+        json.dumps(token, ensure_ascii=False)[1:-1],
+        token.encode("unicode_escape").decode("ascii"),
+        repr(raw)[2:-1],
+        repr(raw + b"'\"")[2:-4],
+    }
+    return sorted((form for form in forms if form), key=len, reverse=True)
+
+
+# Attributes an exception can keep its data in outside `args` and `__dict__`.
+_EXCEPTION_FIELDS = ("filename", "filename2", "strerror", "object")
+
+
+def _holds_token(value: object, secret: _Secret) -> bool:
+    """Whether `value` holds the token, as written or escaped (see `_token_forms`), in any
+    text it carries: a str or bytes, the keys and values of a dict, the items of a list,
+    tuple or set, every field of a protobuf message, and an exception's text, arguments and
+    attributes. Text is read as it is held, decoded, not only as str() or repr() shows it,
+    since those escape a token with a backslash, newline or tab. Never raises."""
+    forms = _token_forms(secret.value)
+    seen: set[int] = set()
+    pending: list[object] = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, bytes | bytearray):
+            item = bytes(item).decode("utf-8", "replace")
+        if isinstance(item, str):
+            if any(form in item for form in forms):
+                return True
+            continue
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        try:
+            if isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, list | tuple | set | frozenset):
+                pending.extend(item)
+            elif isinstance(item, Message):
+                for _, field_value in item.ListFields():
+                    if isinstance(field_value, str | bytes | Message):
+                        pending.append(field_value)
+                    elif hasattr(field_value, "items"):  # a map field
+                        pending.extend(field_value.keys())
+                        pending.extend(field_value.values())
+                    elif hasattr(field_value, "__iter__"):  # a repeated field
+                        pending.extend(field_value)
+            elif isinstance(item, BaseException):
+                pending.extend((str(item), repr(item)))
+                pending.extend(item.args)
+                pending.extend(getattr(item, "__dict__", {}).values())
+                pending.extend(getattr(item, name, None) for name in _EXCEPTION_FIELDS)
+        except Exception:
+            # Something that cannot even be looked at is taken to hold the token.
+            return True
+    return False
+
+
 def _redact(text: str, secret: _Secret) -> str:
-    return text.replace(secret.value, repr(secret))
+    for form in _token_forms(secret.value):
+        text = text.replace(form, repr(secret))
+    return text
 
 
 def _without_token(error: BaseException, secret: _Secret) -> BaseException | None:
     """None if `error` and its chain never mention the token, else a replacement that does not.
 
     The exchange is not expected to echo a token back, but if a message from it did, it
-    would otherwise reach an exception message.
+    would otherwise reach an exception message. A rejection keeps its reason and detail,
+    with the token redacted from them; any other error keeps only its type, since its text
+    may hold the token in a form a redaction would not find.
     """
     seen: set[int] = set()
     link: BaseException | None = error
     while link is not None and id(link) not in seen:
         seen.add(id(link))
-        if secret.value in str(link) or secret.value in repr(link):
+        if _holds_token(link, secret):
             break
         link = link.__cause__ or link.__context__
     else:
@@ -819,6 +966,7 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
         detail = None if error.detail is None else _redact(error.detail, secret)
         name = _redact(error.reason_name, secret)
         return type(error)(error.reason_code, detail, reason_name=name)
+    withheld = f"{type(error).__name__}; details withheld, since they repeated the token"
     if isinstance(error, SessionNotAcknowledged):
-        return type(error)(_redact(str(error), secret))
-    return SessionNotAcknowledged(_redact(f"{type(error).__name__}: {error}", secret))
+        return type(error)(withheld)
+    return SessionNotAcknowledged(withheld)
