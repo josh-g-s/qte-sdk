@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.11
+**Version:** 0.12
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -297,7 +297,7 @@ The exchange sends these events about your team's own orders:
 
 ### Query your account
 
-You can ask the exchange for your team's own account at any hour, inside a session or not: its positions and, for most teams, its cash, equity, daily profit and loss and limit use. This needs an exchange that serves the query. Like step 6, it runs inside the `async with session:` block of step 3:
+You can ask the exchange for your team's own account at any hour, inside a session or not: its positions, its cash and, for most teams, its equity, daily profit and loss and limit use. This needs an exchange that serves the query. Like step 6, it runs inside the `async with session:` block of step 3:
 
 ```python
 import asyncio
@@ -333,7 +333,9 @@ except TimeoutError:
     print("no answer within 10 seconds")
 ```
 
-The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session. `session_date` is the date of the current session inside one. Outside a session it is the date of the last session with an official close, whose profit and loss `daily_pnl` then shows, even between terms: positions carried over from the term before are returned, valued at that close. It is absent only before the exchange's first session ever. `summary` is absent for an Execution desk and the house, and `cash` is absent for an Execution desk, so check `HasField("summary")` and `HasField("cash")` first. Read the `qte_sdk.account` docstring for every field.
+The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session, at each instrument's latest official close, a break day's close included. An option is named by its 21-character OCC option symbol. `session_date` is the date of the current session inside one. Outside a session it is the date of the last session with an official close, whose profit and loss `daily_pnl` then shows, even between terms, when positions carried over from the term before are returned too. It names a session, not the close the values use, and it is absent whenever no session has an official close yet. `summary` is absent for an Execution desk and the house, and `cash` is absent only for an Execution desk, so check `HasField("summary")` and `HasField("cash")` first. A refused query is a `reject` with `request_type` `ACCOUNT_QUERY` that echoes your `request_ref`. Read the `qte_sdk.account` docstring for every field.
+
+The reply also carries `as_of_report_seq`: the newest of your private order reports it already reflects. Each private report (`accepted`, a delayed `reject`, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a `report_seq` on its envelope, and after an `account_state` you apply only the reports with a higher `report_seq`. It is absent when your team has had no private report this term, and then every report applies. This SDK does not yet surface `report_seq` on its events.
 
 The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
 

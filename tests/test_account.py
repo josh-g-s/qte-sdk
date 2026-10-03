@@ -13,6 +13,7 @@ from qte_sdk.account import (
 )
 from qte_sdk.connection import Received
 from qte_sdk.contract.v1.common_pb2 import (
+    ACCOUNT_QUERY,
     LIMIT_GROSS,
     LIMIT_INSTRUMENT,
     LOSS_LEVEL_NONE,
@@ -159,7 +160,7 @@ async def test_reply_for_an_execution_desk_has_neither_summary_nor_cash():
     assert state.HasField("session_date")
 
 
-async def test_reply_without_summary_may_still_carry_cash():
+async def test_house_reply_has_cash_but_no_summary():
     [event] = await received(
         frame(
             "account_state",
@@ -216,33 +217,67 @@ async def test_reply_between_terms_carries_positions_valued_at_the_last_close():
     ]
 
 
-async def test_reply_before_the_first_session_ever_has_no_session_date():
+async def test_reply_before_any_official_close_has_no_session_date_or_report_seq():
     [event] = await received(
         frame(
             "account_state",
-            {"request_ref": "acct-3", "valuation_basis": "LAST_OFFICIAL_CLOSE", "as_of": "1"},
+            {
+                "request_ref": "acct-3",
+                "valuation_basis": "LAST_OFFICIAL_CLOSE",
+                "as_of": "1",
+                "cash": "1000000000",
+            },
             1,
         )
     )
     assert not event.message.HasField("session_date")
+    assert not event.message.HasField("as_of_report_seq")
 
 
-async def test_refused_query_is_a_reject_echoing_its_request_ref():
+async def test_reply_carries_the_report_seq_it_reflects():
+    [event] = await received(
+        frame(
+            "account_state",
+            {
+                "request_ref": "acct-9",
+                "valuation_basis": "LIVE_MARK",
+                "session_date": "2026-10-02",
+                "as_of": "1",
+                "cash": "1000000000",
+                "as_of_report_seq": "1234",
+            },
+            1,
+        )
+    )
+    assert event.message.HasField("as_of_report_seq")
+    assert event.message.as_of_report_seq == 1234
+
+
+@pytest.mark.parametrize("reason", ["NOT_AUTHENTICATED", "MALFORMED_MESSAGE", "TEAM_DISABLED"])
+async def test_refused_query_is_a_reject_echoing_its_request_ref(reason):
     [event] = await received(
         frame(
             "reject",
-            {"request_ref": "acct-4", "reason_code": "TEAM_DISABLED", "receipt_time": "5"},
+            {
+                "request_ref": "acct-4",
+                "request_type": "ACCOUNT_QUERY",
+                "reason_code": reason,
+                "receipt_time": "5",
+            },
             1,
         )
     )
     assert is_order_event(event)
     assert not is_account_state(event)
     assert event.message == Reject(
-        request_ref="acct-4", reason_code=ReasonCodes.TEAM_DISABLED, receipt_time=5
+        request_ref="acct-4",
+        request_type=ACCOUNT_QUERY,
+        reason_code=ReasonCodes.ReasonCode.Value(reason),
+        receipt_time=5,
     )
+    assert event.unknown_enum_names() == {}
     assert request_ref_of(event.message) == "acct-4"
-    assert not event.message.HasField("request_type")
-    assert reason_code_name(event.message.reason_code) == "TEAM_DISABLED"
+    assert reason_code_name(event.message.reason_code) == reason
 
 
 async def test_account_summary_and_obligation_state_decode_typed():
@@ -258,3 +293,29 @@ async def test_account_summary_and_obligation_state_decode_typed():
     assert not summary.HasField("cure_deadline")
     assert isinstance(obligations, ObligationState)
     assert obligations.entries[0].instrument == "AAPL"
+
+
+async def test_query_accepts_a_request_ref_of_exactly_32_bytes():
+    sender = Recorder()
+    ref = await send_account_query(sender, request_ref="x" * 32)
+    assert sender.sent == [("account_query", AccountQuery(request_ref=ref))]
+
+
+async def test_an_option_position_is_named_by_its_occ_symbol():
+    occ = "AAPL  261218C00200000"
+    assert len(occ) == 21
+    [event] = await received(
+        frame(
+            "account_state",
+            {
+                "request_ref": "acct-10",
+                "positions": [{"instrument": occ, "quantity": "-3", "price": "4150000"}],
+                "valuation_basis": "LIVE_MARK",
+                "as_of": "1",
+                "cash": "0",
+            },
+            1,
+        )
+    )
+    [position] = event.message.positions
+    assert (position.instrument, position.quantity) == (occ, -3)

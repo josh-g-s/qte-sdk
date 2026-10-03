@@ -22,31 +22,47 @@ it, including one whose account has no market access.
 An `account_state` carries:
 
 - `request_ref`, echoed from the query;
-- `summary`, the team's equity, cash, daily profit and loss and limit use, the same
-  `AccountSummary` the exchange sends on its own. It is absent for an Execution desk and
-  for the house, so check `state.HasField("summary")` before reading it;
+- `summary`, the team's equity, cash, daily profit and loss and limit use, as an
+  `AccountSummary`. It is absent for an Execution desk and for the house, so check
+  `state.HasField("summary")` before reading it. The exchange never sends an
+  `account_summary` unprompted: it is sent only in reply to an `account_query`;
 - `positions`, one `PositionValue` (instrument, signed quantity, price) for every
   instrument the team holds a nonzero position in, in ascending order of instrument, and
-  empty when it holds none. A position is the team's, not one strategy's;
+  empty when it holds no nonzero net position, whether or not it has traded. A position
+  is the team's, not one strategy's. An equity is named by its symbol and an option
+  contract by its 21-character OCC option symbol;
 - `valuation_basis`, which says what `summary` and every position's `price` are valued
   at: `LIVE_MARK` inside a session, `LAST_OFFICIAL_CLOSE` outside one. Under `LIVE_MARK`
   an instrument with no valid mark yet in the session is still valued at its last
-  official close, so a `LIVE_MARK` price is not always a mark;
+  official close, so a `LIVE_MARK` price is not always a mark. Under
+  `LAST_OFFICIAL_CLOSE` each instrument is valued at its latest official close, a break
+  day's close included;
 - `session_date`, the date of the current session inside one. Outside a session it is
-  the date of the last session that has an official close, which the values are taken
-  at, even across the break between terms: positions carried over from the term before
-  are returned, valued at that close. It is absent only before the exchange's first
-  session ever, so check `state.HasField("session_date")`. Outside a session,
-  `summary.daily_pnl` is the profit and loss of that session;
-- `as_of`, the exchange's timestamp of the state the reply reads;
-- `cash`, the team's cash balance, present only for an account that holds one and then
-  equal to `summary.cash` when `summary` is present. It is absent for an Execution desk,
-  which holds no cash balance of its own, so check `state.HasField("cash")`.
+  the date of the last session that has an official close, even across the break
+  between terms, when positions carried over from the term before are returned too. It
+  names a session only and does not date the close the values use: on a break day that
+  day's close is later. It is absent whenever no session has an official close yet, so
+  check `state.HasField("session_date")`. Outside a session, `summary.daily_pnl` is the
+  profit and loss of the session just finished;
+- `as_of`, the exchange's timestamp of the state the reply reads. It does not order the
+  reply against your private order reports; `as_of_report_seq` does;
+- `cash`, the team's cash balance, equal to `summary.cash` when `summary` is present.
+  Only an Execution desk, which holds no cash balance of its own, is sent none, so check
+  `state.HasField("cash")`;
+- `as_of_report_seq`, the highest report sequence number the team had been assigned
+  when the state was read. Each private order report (`accepted`, a delayed `reject`,
+  `execution`, `order_cancelled`, `order_state`, `risk_notice`) carries a `report_seq`
+  on its envelope. After an `account_state`, apply only the private reports whose
+  `report_seq` is higher than `as_of_report_seq`; the others are already in the reply.
+  It is absent when the team has had no private report this term, and then every report
+  applies. This SDK does not yet surface `report_seq` on the events it delivers.
 
 Prices, cash and equity are whole numbers of micro-dollars; convert them with
-`qte_sdk.units.to_decimal`. A query the exchange refuses (for example from a team that
-has been disabled) is answered with a `reject` that echoes its `request_ref`, which
-`qte_sdk.orders.is_order_event` and `request_ref_of` already pick out.
+`qte_sdk.units.to_decimal`. A query the exchange refuses is answered with a `reject`
+that echoes its `request_ref` and carries `request_type` `ACCOUNT_QUERY`, which
+`qte_sdk.orders.is_order_event` and `request_ref_of` already pick out. Its reason is
+`NOT_AUTHENTICATED` before the session authenticates, `MALFORMED_MESSAGE` for a
+malformed query, and `TEAM_DISABLED` for a team that has been disabled.
 
 A program that reads only `qte_sdk.market_data.market_data(session)` never sees the reply,
 because that drops everything that is not market data.
@@ -77,9 +93,8 @@ async def send_account_query(conn: Sender, *, request_ref: str | None = None) ->
 
     The exchange answers with one `account_state` echoing the `request_ref`, or with a
     `reject` echoing it. A fresh `request_ref` is made when none is given. A given one must
-    be 1 to 32 bytes of UTF-8 without the NUL character, or this raises `ValueError` and
-    sends nothing. The contract has not yet specified the rules for an account query's
-    `request_ref`, so this check is the SDK applying the rule its order messages follow.
+    be 1 to 32 bytes of UTF-8 without the NUL character, the limit the contract sets for
+    it as for the order messages, or this raises `ValueError` and sends nothing.
     """
     ref = _ref(request_ref)
     await conn.send("account_query", AccountQuery(request_ref=ref))
