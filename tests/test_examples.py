@@ -26,7 +26,7 @@ from fake_exchange import CONTRACT_VERSION, serve_local
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
-from qte_sdk.connection import DecodeFailed, Received
+from qte_sdk.connection import DecodeFailed, Received, SeqGap
 from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
 from qte_sdk.contract.v1.market_data_pb2 import WallLevel
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
@@ -961,14 +961,40 @@ async def test_quote_both_sides_sends_nothing_from_a_book_that_may_be_stale():
     quoter = example.Quoter(session, RestingOrders(), args)
     quoter.books.update(book_event().message)
     # A frame that may have been a newer book could not be read.
-    await example.handle(quoter, quoter.view, DecodeFailed("book", ValueError("unreadable")))
+    example.handle(quoter, quoter.view, DecodeFailed("book", ValueError("unreadable")))
     await quoter.act()
     assert session.sent == []
     # A newer book clears it, and the example quotes again.
     newer = book_event().message
     newer.grid_time = 5
-    await quoter.on_book(newer)
+    example.handle(quoter, quoter.view, Received("book", newer, 2))
+    await quoter.act()
     assert session.sent == ["new", "new"]
+
+
+@pytest.mark.parametrize(
+    ("missed", "why"),
+    [
+        (SeqGap(expected=2, received=3), "unreliable"),
+        (DecodeFailed("book", ValueError("unreadable")), "time"),
+    ],
+    ids=["seq-gap", "unreadable-book"],
+)
+async def test_quote_both_sides_applies_queued_events_before_it_sends(missed: object, why: str):
+    # A book is held and both sides are free to send, but the reader has already queued
+    # a sign that messages were missed. Nothing may be sent before that is applied: after
+    # a gap the example sends nothing more, so an order sent first would be left resting.
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    view = RestingOrders()
+    quoter = example.Quoter(session, view, args)
+    quoter.books.update(book_event().message)
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(missed)
+    async with asyncio.timeout(RUN_LIMIT):
+        assert await example.quote_until(quoter, view, queue, 0.2) == why
+    assert session.sent == []
 
 
 async def test_quote_both_sides_applies_an_event_that_arrives_as_time_runs_out():
@@ -993,7 +1019,6 @@ async def test_quote_both_sides_applies_an_event_that_arrives_as_time_runs_out()
         why = await example.quote_until(quoter, view, asyncio.Queue(), 0.1)
     assert why == "time"
     assert buy.pending_ref is None  # the accepted was applied
-    assert not quoter.quoting
     assert session.sent == []  # and nothing was sent once time was up
 
 

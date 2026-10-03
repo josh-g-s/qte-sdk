@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.7
+**Version:** 0.8
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at three worked examples in `examples/` that you can run and adapt.
 
@@ -234,7 +234,7 @@ except TimeoutError:
     print("no final outcome within 10 seconds: check your orders")
 ```
 
-Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it. An `order_cancelled` that your cancel, mass cancel or amend causes (reason `CANCEL_REQUEST`, `MASS_CANCEL`, or `AMEND_CUT` for an amend that cuts an order to nothing) may carry it too, but exactly when it does is not settled yet, so do not rely on it alone: when it is missing, match the cancellation by its strategy, instrument, side and price, as `examples/quote_both_sides.py` does. Match on `request_ref` with `request_ref_of`.
+Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it. An `order_cancelled` carries it exactly when its `reason_code` is `CANCEL_REQUEST` (your cancel), `MASS_CANCEL` (your mass cancel) or `AMEND_CUT` (your amend cut the order to nothing), and echoes the `request_ref` of that message. This rule may still be refined, so keep a fallback: when `request_ref` is missing, match the cancellation by its strategy, instrument, side and price, as `examples/quote_both_sides.py` does. Match on `request_ref` with `request_ref_of`.
 
 An amend changes the orders at one level: `send_amend(session, instrument=..., side=..., price=..., new_size=...)`. `new_size` is the new total remaining size, not an amount to add. `send_mass_cancel(session)` cancels **every order your team has on the exchange**, including those of your teammates' strategies.
 
