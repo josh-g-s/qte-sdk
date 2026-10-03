@@ -26,6 +26,8 @@ class RequestType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MASS_CANCEL: _ClassVar[RequestType]
     SUBSCRIBE: _ClassVar[RequestType]
     UNSUBSCRIBE: _ClassVar[RequestType]
+    RESUME: _ClassVar[RequestType]
+    ACCOUNT_QUERY: _ClassVar[RequestType]
 
 class Origin(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -118,6 +120,8 @@ AMEND: RequestType
 MASS_CANCEL: RequestType
 SUBSCRIBE: RequestType
 UNSUBSCRIBE: RequestType
+RESUME: RequestType
+ACCOUNT_QUERY: RequestType
 ORIGIN_UNSPECIFIED: Origin
 TEAM: Origin
 CURE_TRADE: Origin

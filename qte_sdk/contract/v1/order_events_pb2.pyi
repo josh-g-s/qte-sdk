@@ -88,7 +88,7 @@ class OrderCancelled(_message.Message):
     def __init__(self, origin: _Optional[_Union[_common_pb2.Origin, str]] = ..., strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., price: _Optional[int] = ..., cancelled_size: _Optional[int] = ..., reason_code: _Optional[_Union[_common_pb2.ReasonCodes.ReasonCode, str]] = ..., request_ref: _Optional[str] = ..., timestamp: _Optional[int] = ...) -> None: ...
 
 class OrderState(_message.Message):
-    __slots__ = ("strat_id", "instrument", "side", "price", "state", "remaining_size", "stale_since", "timestamp")
+    __slots__ = ("strat_id", "instrument", "side", "price", "state", "remaining_size", "stale_since", "timestamp", "old_price")
     STRAT_ID_FIELD_NUMBER: _ClassVar[int]
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
     SIDE_FIELD_NUMBER: _ClassVar[int]
@@ -97,6 +97,7 @@ class OrderState(_message.Message):
     REMAINING_SIZE_FIELD_NUMBER: _ClassVar[int]
     STALE_SINCE_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    OLD_PRICE_FIELD_NUMBER: _ClassVar[int]
     strat_id: str
     instrument: str
     side: _common_pb2.Side
@@ -105,7 +106,8 @@ class OrderState(_message.Message):
     remaining_size: int
     stale_since: int
     timestamp: int
-    def __init__(self, strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., price: _Optional[int] = ..., state: _Optional[_Union[_common_pb2.OrderLifecycleState, str]] = ..., remaining_size: _Optional[int] = ..., stale_since: _Optional[int] = ..., timestamp: _Optional[int] = ...) -> None: ...
+    old_price: int
+    def __init__(self, strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., price: _Optional[int] = ..., state: _Optional[_Union[_common_pb2.OrderLifecycleState, str]] = ..., remaining_size: _Optional[int] = ..., stale_since: _Optional[int] = ..., timestamp: _Optional[int] = ..., old_price: _Optional[int] = ...) -> None: ...
 
 class LimitUtilisation(_message.Message):
     __slots__ = ("kind", "scope", "used", "cap")
@@ -202,7 +204,7 @@ class PositionValue(_message.Message):
     def __init__(self, instrument: _Optional[str] = ..., quantity: _Optional[int] = ..., price: _Optional[int] = ...) -> None: ...
 
 class AccountState(_message.Message):
-    __slots__ = ("request_ref", "summary", "positions", "valuation_basis", "session_date", "as_of", "cash")
+    __slots__ = ("request_ref", "summary", "positions", "valuation_basis", "session_date", "as_of", "cash", "as_of_report_seq")
     REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
     SUMMARY_FIELD_NUMBER: _ClassVar[int]
     POSITIONS_FIELD_NUMBER: _ClassVar[int]
@@ -210,6 +212,7 @@ class AccountState(_message.Message):
     SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
     AS_OF_FIELD_NUMBER: _ClassVar[int]
     CASH_FIELD_NUMBER: _ClassVar[int]
+    AS_OF_REPORT_SEQ_FIELD_NUMBER: _ClassVar[int]
     request_ref: str
     summary: AccountSummary
     positions: _containers.RepeatedCompositeFieldContainer[PositionValue]
@@ -217,4 +220,5 @@ class AccountState(_message.Message):
     session_date: str
     as_of: int
     cash: int
-    def __init__(self, request_ref: _Optional[str] = ..., summary: _Optional[_Union[AccountSummary, _Mapping]] = ..., positions: _Optional[_Iterable[_Union[PositionValue, _Mapping]]] = ..., valuation_basis: _Optional[_Union[_common_pb2.ValuationBasis, str]] = ..., session_date: _Optional[str] = ..., as_of: _Optional[int] = ..., cash: _Optional[int] = ...) -> None: ...
+    as_of_report_seq: int
+    def __init__(self, request_ref: _Optional[str] = ..., summary: _Optional[_Union[AccountSummary, _Mapping]] = ..., positions: _Optional[_Iterable[_Union[PositionValue, _Mapping]]] = ..., valuation_basis: _Optional[_Union[_common_pb2.ValuationBasis, str]] = ..., session_date: _Optional[str] = ..., as_of: _Optional[int] = ..., cash: _Optional[int] = ..., as_of_report_seq: _Optional[int] = ...) -> None: ...
