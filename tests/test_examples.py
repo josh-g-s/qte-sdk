@@ -320,10 +320,13 @@ class FakeExchange:
                 }
                 await self.send(ws, "execution", fill)
         elif type_ == "amend":
-            key = (p["instrument"], p["side"], int(p["price"]))
+            old = (p["instrument"], p["side"], int(p["price"]))
+            key = (p["instrument"], p["side"], int(p["new_price"]))
             await self.send(ws, "accepted", accepted)
-            self.resting[key] = (self.resting[key][0], int(p["new_size"]))
-            await self.send(ws, "order_state", self.order_state(key))
+            strat_id, _ = self.resting.pop(old)
+            self.resting[key] = (strat_id, int(p["new_size"]))
+            # Every accepted amend's order_state names the price the order had before it.
+            await self.send(ws, "order_state", {**self.order_state(key), "old_price": str(old[2])})
         elif type_ == "cancel":
             key = (p["instrument"], p["side"], int(p["price"]))
             if self.reject_first_cancel_then_gap:
