@@ -59,7 +59,8 @@ An `account_state` carries:
 
 Prices, cash and equity are whole numbers of micro-dollars; convert them with
 `qte_sdk.units.to_decimal`. A query the exchange refuses is answered with a `reject`
-that echoes its `request_ref` and carries `request_type` `ACCOUNT_QUERY`, which
+that carries `request_type` `ACCOUNT_QUERY` and echoes its `request_ref` whenever the
+exchange could read one, which
 `qte_sdk.orders.is_order_event` and `request_ref_of` already pick out. Its reason is
 `NOT_AUTHENTICATED` before the session authenticates, `MALFORMED_MESSAGE` for a
 malformed query, and `TEAM_DISABLED` for a team that has been disabled.

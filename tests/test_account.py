@@ -253,6 +253,27 @@ async def test_reply_carries_the_report_seq_it_reflects():
     assert event.message.as_of_report_seq == 1234
 
 
+async def test_reply_with_reports_but_no_official_close_yet():
+    big = 2**53 + 1  # above what a JSON number holds exactly
+    [event] = await received(
+        frame(
+            "account_state",
+            {
+                "request_ref": "acct-11",
+                "valuation_basis": "LIVE_MARK",
+                "as_of": str(big),
+                "cash": "1000000000",
+                "as_of_report_seq": str(big),
+            },
+            1,
+        )
+    )
+    state = event.message
+    assert not state.HasField("session_date")
+    assert state.as_of_report_seq == big
+    assert state.as_of == big
+
+
 @pytest.mark.parametrize("reason", ["NOT_AUTHENTICATED", "MALFORMED_MESSAGE", "TEAM_DISABLED"])
 async def test_refused_query_is_a_reject_echoing_its_request_ref(reason):
     [event] = await received(
