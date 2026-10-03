@@ -7,7 +7,7 @@ This repository contains only participant-facing material. Exchange internals (t
 ## Requirements
 
 - Python 3.11 or later.
-- The address of the exchange you are trading on, and your team's practice token. The course team gives you both. Treat the token like a password: never put it in a source file, a notebook, a screenshot or a repository.
+- The address of the exchange you are trading on, your team's practice token and, for any program that sends orders, a strategy ID registered for your team. Contact the Head of Technology, Joshua, for all three. Treat the token like a password: never put it in a source file, a notebook, a screenshot or a repository.
 
 ## Install
 
