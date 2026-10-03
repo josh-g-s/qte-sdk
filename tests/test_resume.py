@@ -1005,6 +1005,24 @@ async def test_the_first_connected_shows_the_view_incomplete_until_the_snapshot_
     ]
 
 
+async def test_a_snapshots_cursor_belongs_to_the_term_of_its_own_session():
+    # The old term leaves a cursor of 0 (an empty snapshot). In the new term the snapshot
+    # sets it to 4, a number of the new term, which is kept rather than forgotten as the
+    # old term's.
+    exchange = Scripted(
+        {"term": TERM, "answer": [EMPTY], "drop": True},
+        {"term": NEXT_TERM, "answer": [resume_ack(False, 4, 0)]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs:
+            async for event in rs:
+                if isinstance(event, ResumeComplete) and event.as_of_report_seq == 4:
+                    break
+            assert rs.last_report_seq == 4
+    assert [e for e in exchange.received if e["type"] == "resume"] == [resume(0), resume(0)]
+
+
 def test_a_connected_with_a_resume_shows_the_view_incomplete_until_it_completes():
     info = SessionInfo("s-1", "team-a", 0, "0.x", False)
     view = RestingOrders()
