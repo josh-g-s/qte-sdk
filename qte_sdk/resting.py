@@ -36,8 +36,10 @@ What the view cannot know:
   while the exchange holds it STALE. The purge that follows is reported and removes it.
 - If the exchange fails to turn one of its records into a report, it skips that record
   without giving it a number and carries on, so the numbering stays without gaps and no
-  `ReportGap` is delivered. The view cannot tell, and does not set `incomplete`; the
-  next snapshot reflects the skipped record.
+  `ReportGap` is delivered. The view cannot tell, does not set `incomplete`, and a
+  replay does not put it right. Only a snapshot does: a resume answered with one, which
+  you can ask for with `Session.resume(0)`, replaces the view with the orders resting
+  now. The skipped report itself (a fill, for example) is never delivered.
 - An older exchange that does not send `old_price` gives no event naming the price an
   amend moved an order away from. The view then keeps the entry at the old price: an
   `order_state` at the new price adds the new entry beside it, and an amend that fills

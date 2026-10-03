@@ -854,11 +854,14 @@ async def test_a_snapshot_in_the_gateways_order_is_applied_before_later_live_rep
     )
     view = RestingOrders()
     seen: list[tuple[str, bool, int]] = []
+    sizes: list[int | None] = []
     async with serve_local(exchange) as url:
         async with await open_session(url, synthetic_token()) as session:
             await session.resume(0)
             async for event in view.follow(session):
                 seen.append((kinds([event])[0], view.incomplete, len(view)))
+                entry = view.get("AAPL", BUY, PRICE)
+                sizes.append(entry.remaining_size if entry is not None else None)
                 if isinstance(event, Received) and event.type == "order_cancelled":
                     break
             assert session.last_report_seq == 44
@@ -870,6 +873,8 @@ async def test_a_snapshot_in_the_gateways_order_is_applied_before_later_live_rep
         ("execution:43", False, 2),
         ("order_cancelled:44", False, 1),
     ]
+    # The snapshot's size at ResumeComplete, then execution 43 applied on top of it.
+    assert sizes == [None, None, None, 90, 40, None]
     assert view.get("AAPL", BUY, PRICE) is None
     assert view.get("MSFT", SELL, 400_000_000) is not None
 
