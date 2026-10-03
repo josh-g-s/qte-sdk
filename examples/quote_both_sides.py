@@ -203,6 +203,13 @@ class Quoter:
         self.market_open = False
         # How many order messages it has sent, so a caller can tell whether a step sent one.
         self.messages = 0
+        self.last_side: Side = SELL  # so BUY goes first
+
+    def in_turn(self) -> list[Quote]:
+        """Both sides, starting with the one that did not send last, so that with one
+        message per step neither side can keep the other waiting."""
+        first = BUY if self.last_side == SELL else SELL
+        return [self.quotes[first], self.quotes[SELL if first == BUY else BUY]]
 
     # Sending
 
@@ -239,6 +246,7 @@ class Quoter:
         ref = new_request_ref()
         quote.pending_ref, quote.pending_kind, quote.sent_at = ref, kind, time.monotonic()
         self.messages += 1
+        self.last_side = quote.side
         return ref
 
     def sent(self, quote: Quote) -> None:
@@ -291,7 +299,7 @@ class Quoter:
     async def cancel_own(self) -> bool:
         """Cancel this example's orders. Returns True once none are left or in flight."""
         done = True
-        for quote in self.quotes.values():
+        for quote in self.in_turn():
             if quote.pending_ref is not None:
                 done = False
             elif quote.price is not None:
@@ -339,11 +347,12 @@ class Quoter:
         ask = book.ask_levels[0].price - self.inside if book.ask_levels else None
         if bid is not None and ask is not None and bid >= ask:
             return  # the wall's spread is too narrow to quote inside
+        targets = {BUY: bid, SELL: ask}
         sent = self.messages
-        if bid is not None:
-            await self.manage(self.quotes[BUY], bid)
-        if ask is not None and self.messages == sent:
-            await self.manage(self.quotes[SELL], ask)
+        for quote in self.in_turn():
+            target = targets[quote.side]
+            if target is not None and self.messages == sent:
+                await self.manage(quote, target)
 
     def pending(self, ref: str | None) -> Quote | None:
         for quote in self.quotes.values():
@@ -476,6 +485,9 @@ def handle(quoter: Quoter, view: RestingOrders, event: Event) -> bool:
         return False
     elif isinstance(item, SeqGap | DecodeFailed):
         print("warning: a message from the exchange was missed or could not be read")
+        if isinstance(item, DecodeFailed) and item.type in (None, "session_state"):
+            # It may have said the market closed: quote again only after the next OPEN.
+            quoter.market_open = False
     elif is_order_event(event):
         quoter.on_order_event(event.message)
     return True

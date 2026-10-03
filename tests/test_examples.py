@@ -1067,6 +1067,57 @@ async def test_quote_both_sides_sends_no_second_cancel_after_a_gap_during_the_fi
     assert session.sent == [example.BUY]
 
 
+async def test_quote_both_sides_takes_the_two_sides_in_turn():
+    # One message per step: if the side that just sent were always tried first, a side
+    # whose replies come back quickly could keep the other from ever sending.
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    quoter = example.Quoter(session, RestingOrders(), args)
+    quoter.resting = lambda quote: quote.price is not None  # reported resting
+    buy = quoter.quotes[example.BUY]
+
+    def rejected_and_ready_again() -> None:
+        buy.pending_ref, buy.price, buy.sent_at = None, None, float("-inf")
+
+    example.handle(quoter, quoter.view, session_state_event())
+    example.handle(quoter, quoter.view, book_event())
+    await quoter.act()
+    rejected_and_ready_again()
+    await quoter.act()
+    assert session.sent == ["new", "new"]
+    assert quoter.quotes[example.SELL].pending_ref is not None  # the second was SELL's
+
+    # The same while cancelling at the end.
+    session.sent.clear()
+    quoter.quoting = False
+    for quote in quoter.quotes.values():
+        quote.pending_ref, quote.price, quote.sent_at = None, 1, float("-inf")
+    quoter.last_side = example.SELL
+    await quoter.cancel_own()
+    buy.pending_ref, buy.sent_at = None, float("-inf")  # rejected, and ready again
+    await quoter.cancel_own()
+    assert session.sent == ["cancel", "cancel"]
+    assert quoter.quotes[example.SELL].pending_ref is not None
+
+
+async def test_quote_both_sides_stops_quoting_after_an_unreadable_session_state():
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    quoter = example.Quoter(session, RestingOrders(), args)
+    example.handle(quoter, quoter.view, session_state_event())
+    example.handle(quoter, quoter.view, book_event())
+    # It may have said the market closed.
+    unreadable = DecodeFailed("session_state", ValueError("unreadable"))
+    example.handle(quoter, quoter.view, unreadable)
+    await quoter.act()
+    assert session.sent == []
+    example.handle(quoter, quoter.view, session_state_event())  # open again
+    await quoter.act()
+    assert session.sent == ["new"]
+
+
 async def test_quote_both_sides_sends_nothing_while_the_market_is_closed():
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
