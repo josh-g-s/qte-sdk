@@ -16,6 +16,8 @@ from qte_sdk.connection import (
 from qte_sdk.contract.v1.common_pb2 import (
     AMEND,
     BUY,
+    CANCELLED,
+    FILLED,
     LIMIT,
     MAKER,
     MASS_CANCEL,
@@ -39,15 +41,16 @@ from qte_sdk.resting import LevelKey, RestingOrder, RestingOrders
 
 PX = 199_970_000
 PX2 = 199_960_000
+PX3 = 200_020_000
 
 
-def rested(price=PX, size=100, side=BUY, instrument="AAPL", **kw) -> OrderState:
+def rested(price=PX, size=100, side=BUY, instrument="AAPL", state=RESTING, **kw) -> OrderState:
     return OrderState(
         strat_id="mm-1",
         instrument=instrument,
         side=side,
         price=price,
-        state=RESTING,
+        state=state,
         remaining_size=size,
         timestamp=1,
         **kw,
@@ -127,27 +130,127 @@ def test_a_market_order_fill_has_no_level_key_and_changes_nothing():
     assert view.get("AAPL", BUY, PX).remaining_size == 100
 
 
+def amended(price, old_price, state=RESTING, size=100, **kw) -> OrderState:
+    """The order_state an accepted amend sends: `price` is the amend's new price."""
+    return rested(price=price, size=size, state=state, old_price=old_price, **kw)
+
+
+AMEND_ACCEPTED = Accepted(request_ref="r-2", request_type=AMEND)
+
+
 def test_a_size_only_amend_sets_the_remaining_size():
-    view = view_of(
-        rested(size=100),
-        Accepted(request_ref="r-2", request_type=AMEND),
-        rested(size=80),
-    )
+    view = view_of(rested(size=100), AMEND_ACCEPTED, amended(PX, old_price=PX, size=80))
     assert view.get("AAPL", BUY, PX).remaining_size == 80
+    assert len(view) == 1
+    assert not view.incomplete
+
+
+def test_a_price_moving_amend_that_rests_re_keys_the_entry():
+    view = view_of(rested(price=PX), AMEND_ACCEPTED, amended(PX2, old_price=PX, size=70))
+    assert view.get("AAPL", BUY, PX) is None
+    assert view.get("AAPL", BUY, PX2) == RestingOrder(
+        LevelKey("AAPL", BUY, PX2), "mm-1", 70, RESTING, None
+    )
+    assert len(view) == 1
+    assert not view.incomplete
+
+
+def test_a_marketable_amend_that_fills_completely_removes_the_old_entry():
+    # The amend's execution at its new price comes first, then its order_state, FILLED.
+    view = view_of(
+        rested(price=PX, size=100),
+        AMEND_ACCEPTED,
+        fill(remaining=0, size=100, price=PX3, liquidity=TAKER),
+        amended(PX3, old_price=PX, state=FILLED, size=0),
+    )
+    assert len(view) == 0
+    assert not view.incomplete
+
+
+def test_a_marketable_amend_that_fills_in_part_rests_its_remainder_at_the_new_price():
+    view = view_of(
+        rested(price=PX, size=100),
+        AMEND_ACCEPTED,
+        fill(remaining=30, size=70, price=PX3, liquidity=TAKER),
+        amended(PX3, old_price=PX, size=30),
+    )
+    assert view.get("AAPL", BUY, PX) is None
+    assert view.get("AAPL", BUY, PX3).remaining_size == 30
     assert len(view) == 1
 
 
-def test_known_limitation_a_price_moving_amend_leaves_the_old_entry():
-    # Pinned on purpose: no event names the price an amend moved an order away from, so the
-    # old entry stays until the contract reports it. Update this when that changes.
+def test_an_amend_cut_to_nothing_reported_cancelled_removes_the_entry():
+    # The amend's order_cancelled comes first, then its order_state; either closes it.
+    for ending in (
+        [cancelled(ReasonCodes.AMEND_CUT, price=PX)],
+        [amended(PX, old_price=PX, state=CANCELLED, size=0)],
+    ):
+        view = view_of(rested(price=PX), AMEND_ACCEPTED, *ending)
+        assert len(view) == 0
+    view.apply(amended(PX, old_price=PX, state=CANCELLED, size=0))
+    assert len(view) == 0
+
+
+def test_an_ended_amend_alone_leaves_nothing_at_either_price():
+    # For example a remainder that could not rest. The order_state alone clears both levels,
+    # even an entry the view wrongly still holds at the new price.
+    view = view_of(rested(price=PX), rested(price=PX3, size=1))
+    view.apply(amended(PX3, old_price=PX, state=CANCELLED, size=0))
+    assert len(view) == 0
+    view.apply(cancelled(ReasonCodes.REMAINDER_OUTSIDE_BAND, price=PX3))
+    assert len(view) == 0
+
+
+def test_a_marketable_amend_that_fills_in_part_then_cannot_rest_leaves_nothing():
+    view = view_of(
+        rested(price=PX, size=100),
+        AMEND_ACCEPTED,
+        fill(remaining=30, size=70, price=PX3, liquidity=TAKER),
+        cancelled(ReasonCodes.REMAINDER_OUTSIDE_BAND, price=PX3, size=30),
+    )
+    assert view.get("AAPL", BUY, PX).remaining_size == 100  # not yet told it moved
+    view.apply(amended(PX3, old_price=PX, state=CANCELLED, size=0))
+    assert len(view) == 0
+
+
+def test_an_amend_keeps_a_stale_order_stale_at_its_new_price():
     view = view_of(
         rested(price=PX),
-        Accepted(request_ref="r-2", request_type=AMEND),
-        rested(price=PX2, size=70),
+        amended(PX2, old_price=PX, state=STALE, size=50, stale_since=1234),
     )
+    order = view.get("AAPL", BUY, PX2)
+    assert (order.state, order.stale_since, order.remaining_size) == (STALE, 1234, 50)
+    assert view.get("AAPL", BUY, PX) is None
+
+
+def test_an_amend_leaves_other_levels_alone():
+    view = view_of(
+        rested(price=PX),
+        rested(price=PX, side=SELL),
+        rested(price=PX, instrument="MSFT"),
+        amended(PX2, old_price=PX),
+    )
+    assert view.get("AAPL", BUY, PX) is None
+    assert view.get("AAPL", SELL, PX) is not None
+    assert view.get("MSFT", BUY, PX) is not None
+    assert view.get("AAPL", BUY, PX2) is not None
+
+
+def test_an_older_exchange_without_old_price_leaves_the_old_entry():
+    # Without old_price no event names the price an amend moved an order away from, so the
+    # old entry stays; the view is not marked incomplete.
+    view = view_of(rested(price=PX), AMEND_ACCEPTED, rested(price=PX2, size=70))
     assert view.get("AAPL", BUY, PX2).remaining_size == 70
     assert view.get("AAPL", BUY, PX) is not None
     assert not view.incomplete
+
+
+def test_an_ended_order_state_without_old_price_changes_nothing():
+    ended = OrderState(
+        strat_id="mm-1", instrument="AAPL", side=BUY, price=PX, state=FILLED, remaining_size=0
+    )
+    view = view_of(rested(price=PX), ended)
+    assert view.get("AAPL", BUY, PX).remaining_size == 100
 
 
 def test_a_rejected_amend_leaves_the_entry_unchanged():
@@ -311,6 +414,37 @@ async def test_events_decoded_from_the_wire_update_the_view():
     assert view.get("AAPL", BUY, PX).remaining_size == 60
     # The connection has ended, so later events can no longer reach the view.
     assert view.incomplete
+
+
+async def test_amends_decoded_from_the_wire_re_key_and_then_close_the_entry():
+    moved = {**_json_state(PX2), "old_price": str(PX)}
+    filled = {**_json_state(PX3), "state": "FILLED", "remaining_size": "0", "old_price": str(PX2)}
+    frames = [
+        frame("order_state", _json_state(PX), 1),
+        frame("accepted", {"request_ref": "r-2", "request_type": "AMEND"}, 2),
+        frame("order_state", moved, 3),
+        frame("accepted", {"request_ref": "r-3", "request_type": "AMEND"}, 4),
+        frame("order_state", filled, 5),
+    ]
+    sizes: list[tuple[int | None, int | None]] = []
+
+    def size_at(price: int) -> int | None:
+        order = view.get("AAPL", BUY, price)
+        return None if order is None else order.remaining_size
+
+    async def handler(ws: ServerConnection) -> None:
+        for f in frames:
+            await ws.send(f)
+        await ws.close()
+
+    view = RestingOrders()
+    async with serve_local(handler) as url:
+        async with Connection(url) as conn:
+            async for event in view.follow(conn):
+                if isinstance(event, Received) and event.seq == 3:
+                    sizes.append((size_at(PX), size_at(PX2)))
+    assert sizes == [(None, 100)]
+    assert len(view) == 0
 
 
 async def test_stopping_early_marks_the_view_incomplete_when_the_iterator_is_closed():

@@ -82,8 +82,11 @@ from qte_sdk.connection import Event, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     LIMIT,
+    RESTING,
     SELL,
+    STALE,
     MarketSessionPhase,
+    OrderLifecycleState,
     ReasonCodes,
     RiskNoticeKind,
     Side,
@@ -429,10 +432,11 @@ class Quoter:
                     quote.pending_ref = None
             case OrderState() if message.instrument == self.instrument:
                 side = SIDE_NAMES.get(message.side, "?")
-                print(
-                    f"resting {side} {message.remaining_size} @ {price_text(message.price)} "
-                    f"(strategy {message.strat_id})"
-                )
+                if message.state in (RESTING, STALE):
+                    status = f"resting {side} {message.remaining_size}"
+                else:  # an amend ended the order: FILLED or CANCELLED
+                    status = f"{OrderLifecycleState.Name(message.state)} {side}"
+                print(f"{status} @ {price_text(message.price)} (strategy {message.strat_id})")
             case Execution() if message.instrument == self.instrument:
                 side = SIDE_NAMES.get(message.side, "?")
                 print(
