@@ -9,6 +9,19 @@ A connection is single-use: it does not authenticate, reconnect or resubscribe. 
 ends when the server closes the connection normally and raises
 `websockets.exceptions.ConnectionClosedError` when it drops.
 
+Heartbeats: the exchange sends a `heartbeat` message at a regular interval, at any hour, so
+that a live link is never silent for long. A connection absorbs them: they count for
+sequence tracking and for liveness, and are never delivered as events. The client sends
+nothing in return. If nothing at all arrives for `liveness_timeout` seconds, the link is
+presumed dead: the connection is dropped and iteration raises `LivenessTimeout`. The
+default, `DEFAULT_LIVENESS_TIMEOUT`, is this SDK's choice, not a value the exchange sends;
+see its description.
+
+Report numbers: each of the team's private order reports that the exchange can replay
+carries a `report_seq` on its envelope, which is the event's `report_seq` here (None on
+every other message). A connection only reports it; `qte_sdk.session.Session` keeps the
+count and uses it to resume.
+
 Credentials: the SDK never itself writes the session token it holds into a log record, an
 exception message, attribute or chain, or a traceback local variable that it creates or
 lets escape. Text a server reflects back is withheld on these paths: close reasons, the
@@ -30,12 +43,20 @@ from typing import Any
 
 from google.protobuf.message import Message
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed, InvalidHandshake
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, InvalidHandshake
 from websockets.frames import Close, Frame
 
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import CONTRACT_VERSION, INBOUND
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+
+DEFAULT_LIVENESS_TIMEOUT = 45.0
+"""Seconds with no message from the exchange after which a connection presumes the link
+dead. This is a choice the SDK makes, not a value the exchange sends: it equals the silence
+after which the exchange's documentation currently says a client should give up, which is
+several of the exchange's heartbeat intervals, so a healthy link never stays quiet this
+long. Pass `liveness_timeout` to `Connection` (or through `open_session` and
+`ReconnectingSession`) to choose another, or None to turn the check off."""
 
 
 @dataclass(frozen=True)
@@ -158,6 +179,9 @@ class Received:
     message: Message
     seq: int | None
     payload: dict[str, Any] | None = field(default=None, compare=False, repr=False)
+    # The envelope's report_seq: set only on the team's private reports that a resume can
+    # replay, None on everything else.
+    report_seq: int | None = None
 
     def unknown_enum_names(self) -> dict[str, str]:
         """Enum names this SDK does not know, keyed by field path.
@@ -178,6 +202,7 @@ class Unknown:
     type: str
     payload: dict[str, Any]
     seq: int | None
+    report_seq: int | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +219,8 @@ class DecodeFailed:
 
     type: str | None
     error: Exception
+    # The envelope's report_seq, when the envelope could be read and carried one.
+    report_seq: int | None = None
 
 
 class DataUncertain:
@@ -218,15 +245,48 @@ class SeqGap(DataUncertain):
 class Disconnected(DataUncertain):
     """The data-uncertainty event: the session ended and events may have been missed.
 
-    Fills, order events and market data sent while disconnected are not recovered. `error`
-    is why the connection ended, or None when the exchange closed it normally. A
-    `Connection` never yields this itself; `qte_sdk.reconnect.ReconnectingSession` does.
+    Market data sent while disconnected is not recovered: the next session subscribes
+    again. The team's private order reports (fills, cancels, order states and the others a
+    resume replays) are recovered when the next session resumes, as `ReconnectingSession`
+    does by default; without a resume they are not recovered either. `error` is why the
+    connection ended, or None when the exchange closed it normally. A `Connection` never
+    yields this itself; `qte_sdk.reconnect.ReconnectingSession` does.
     """
 
     error: Exception | None
 
 
-Event = Received | Unknown | DecodeFailed | SeqGap
+@dataclass(frozen=True)
+class ReportGap(DataUncertain):
+    """Private order reports were missed: the next report number expected was `expected`
+    but `received` arrived. That report is delivered after this event.
+
+    Any state built from order reports, such as a `RestingOrders` view, is then uncertain.
+    The next resume (see `qte_sdk.session.Session.resume`) replays the missing reports if
+    the exchange still holds them. A `Connection` never yields this itself; a `Session`
+    does.
+    """
+
+    expected: int
+    received: int
+
+
+@dataclass(frozen=True)
+class ResumeComplete:
+    """A resume has caught up: every private report up to `as_of_report_seq` has been
+    delivered, either replayed (`replayed` True) or summed up by the `snapshot_count`
+    `order_snapshot` events before this one (`replayed` False). Later reports follow as
+    they arrive.
+
+    A `Connection` never yields this itself; a `Session` does, after `Session.resume`.
+    """
+
+    replayed: bool
+    as_of_report_seq: int
+    snapshot_count: int
+
+
+Event = Received | Unknown | DecodeFailed | SeqGap | ReportGap | ResumeComplete
 
 
 class SessionRejected(Exception):
@@ -258,6 +318,15 @@ class ContractVersionMismatch(SessionRejected):
     """
 
 
+class LivenessTimeout(TimeoutError):
+    """Nothing arrived from the exchange for `timeout` seconds, so the link was presumed
+    dead and dropped. A new connection may succeed."""
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__(f"no message from the exchange for {timeout} s; the link is presumed dead")
+        self.timeout = timeout
+
+
 class _connect(connect):
     """`connect` that never follows a redirect: the Location header is server text, and a
     redirect is reported as a failed handshake instead."""
@@ -283,10 +352,18 @@ class HandshakeFailed(InvalidHandshake):
 
 class Connection:
     def __init__(
-        self, url: str, *, contract_version: str = CONTRACT_VERSION, **connect_options: Any
+        self,
+        url: str,
+        *,
+        contract_version: str = CONTRACT_VERSION,
+        liveness_timeout: float | None = DEFAULT_LIVENESS_TIMEOUT,
+        **connect_options: Any,
     ) -> None:
+        if liveness_timeout is not None and not liveness_timeout > 0:
+            raise ValueError("liveness_timeout must be a positive number of seconds, or None")
         self.url = url
         self.contract_version = contract_version
+        self.liveness_timeout = liveness_timeout
         # Any logger the caller passes is wrapped too, so no route logs the token.
         logger = connect_options.pop("logger", None) or logging.getLogger("websockets.client")
         if isinstance(logger, str):
@@ -373,7 +450,12 @@ class Connection:
         event: Event | None = None
         failure: BaseException
         try:
-            async for frame in self._open_ws():
+            ws = self._open_ws()
+            while True:
+                try:
+                    frame = await self._receive(ws)
+                except ConnectionClosedOK:
+                    break
                 for event in self._handle(frame):
                     yield event
         except GeneratorExit:
@@ -388,6 +470,23 @@ class Connection:
             return
         frame = event = None
         raise failure
+
+    async def _receive(self, ws: ClientConnection) -> str | bytes:
+        """The next frame, or `LivenessTimeout` once nothing has arrived for
+        `liveness_timeout` seconds. Any frame restarts the clock, a heartbeat or one that
+        cannot be decoded included."""
+        if self.liveness_timeout is None:
+            return await ws.recv()
+        deadline = asyncio.timeout(self.liveness_timeout)
+        try:
+            async with deadline:
+                return await ws.recv()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+        # The link is presumed dead, so there is no closing handshake to wait for.
+        ws.transport.abort()
+        raise LivenessTimeout(self.liveness_timeout)
 
     def _open_ws(self) -> ClientConnection:
         if self._ws is None:
@@ -419,19 +518,24 @@ class Connection:
                 yield SeqGap(self._expected_seq, seq)
             self._expected_seq = seq + 1
 
+        if env.type == "heartbeat":
+            # Absorbed: it has counted for sequence tracking, and for liveness on arrival.
+            return
+        report_seq = env.report_seq if env.HasField("report_seq") else None
+
         cls = INBOUND.get(env.type)
         if cls is None:
-            yield Unknown(env.type, decoded.payload, seq)
+            yield Unknown(env.type, decoded.payload, seq, report_seq)
             return
         try:
             message = codec.unpack(decoded.payload, cls)
         except Exception as error:
             failure = _decode_error(error)
         if failure is not None:
-            yield DecodeFailed(env.type, failure)
+            yield DecodeFailed(env.type, failure, report_seq)
             return
 
-        event = Received(env.type, message, seq, decoded.payload)
+        event = Received(env.type, message, seq, decoded.payload, report_seq)
         if env.type in ("session_reject", "reject"):
             detail = message.reason_detail if message.HasField("reason_detail") else None
             if message.reason_code == ReasonCodes.VERSION_MISMATCH:

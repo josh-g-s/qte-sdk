@@ -11,7 +11,7 @@ from fake_exchange import frame, serve_local
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
-from websockets.exceptions import ConnectionClosedError
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 from websockets.protocol import State
 
 import qte_sdk.reconnect
@@ -21,6 +21,7 @@ from qte_sdk.connection import (
     DataUncertain,
     HandshakeFailed,
     Received,
+    ResumeComplete,
     SeqGap,
     SessionRejected,
 )
@@ -99,15 +100,47 @@ async def hold(ws: ServerConnection, exchange: Exchange) -> None:
     exchange.closed.set()
 
 
+def resume_ack(
+    replayed: bool = False, as_of: int = 0, snapshot_count: int = 0, seq: int | None = None
+) -> str:
+    """A `resume_ack`; by default the empty marker: no replay and no resting order. It
+    carries no seq unless given one, so the scripts' own numbering is unchanged."""
+    payload = {
+        "replayed": replayed,
+        "as_of_report_seq": str(as_of),
+        "snapshot_count": snapshot_count,
+    }
+    return frame("resume_ack", payload, seq)
+
+
+EMPTY = resume_ack()
+
+# What follows each `Connected` when the exchange answers with the empty marker: the
+# `resume_ack` itself, then the resume's completion.
+RESUMED = [Received, ResumeComplete]
+
+
 def session(
-    *frames: str, subscribed: bool = False, then: Script = hold, recv_after: int = 0
+    *frames: str,
+    subscribed: bool = False,
+    then: Script = hold,
+    recv_after: int = 0,
+    resumed: str | None = EMPTY,
 ) -> Script:
-    """Receive auth, acknowledge it, receive the subscription if one is expected, send
-    `frames`, receive `recv_after` more messages, then end with `then`."""
+    """Receive auth, acknowledge it, receive `resume` and answer it with `resumed` (unless
+    None, when the client is not expected to resume), receive the subscription if one is
+    expected, send `frames`, receive `recv_after` more messages, then end with `then`."""
 
     async def script(ws: ServerConnection, exchange: Exchange) -> None:
         await exchange.recv(ws)
         await ws.send(ack())
+        if resumed is not None:
+            try:
+                await exchange.recv(ws)
+            except ConnectionClosed:
+                exchange.closed.set()  # the client went away before it resumed
+                return
+            await ws.send(resumed)
         if subscribed:
             await exchange.recv(ws)
         for f in frames:
@@ -171,6 +204,14 @@ def subscription(*instruments: str) -> dict:
     return {"version": "0.x", "type": "subscribe", "payload": {"instruments": list(instruments)}}
 
 
+def resume(last_report_seq: int) -> dict:
+    return {
+        "version": "0.x",
+        "type": "resume",
+        "payload": {"last_report_seq": str(last_report_seq)},
+    }
+
+
 @pytest.fixture(autouse=True)
 def no_token_in_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
@@ -192,6 +233,7 @@ async def test_a_drop_flags_uncertainty_then_reconnects_with_fresh_seq_auth_and_
     )
     seen: list[object] = []
     at_disconnect: dict[str, object] = {}
+    after_resume: tuple[bool, int] | None = None
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(
             url, token, instruments=["AAPL"], resting=view, sleep=clock.sleep, rng=lambda: 0.0
@@ -208,21 +250,30 @@ async def test_a_drop_flags_uncertainty_then_reconnects_with_fresh_seq_auth_and_
                         "connections": exchange.connections,
                         "waits": list(clock.waits),
                     }
-                elif isinstance(event, Received) and len(exchange.received) == 5:
+                elif (
+                    isinstance(event, Received)
+                    and event.type == "book"
+                    and exchange.connections == 2
+                ):
+                    after_resume = (view.incomplete, len(view))
                     await rs.close()
         await asyncio.wait_for(exchange.closed.wait(), 5)
 
     kinds = [type(event).__name__ for event in seen]
     assert kinds == [
         "Connected",
-        "Received",
-        "Received",
+        "Received",  # resume_ack
+        "ResumeComplete",
+        "Received",  # book
+        "Received",  # order_state
         "Disconnected",
         "Retrying",
         "Connected",
-        "Received",
+        "Received",  # resume_ack
+        "ResumeComplete",
+        "Received",  # book
     ]
-    first, second = seen[0], seen[5]
+    first, second = seen[0], seen[7]
     assert isinstance(first, Connected) and first.instruments == ("AAPL",)
     assert first.reconnected is False
     # The data-uncertainty event came first: the view was already incomplete, and no new
@@ -233,26 +284,29 @@ async def test_a_drop_flags_uncertainty_then_reconnects_with_fresh_seq_auth_and_
         "connections": 1,
         "waits": [],
     }
-    disconnected = seen[3]
+    disconnected = seen[5]
     assert isinstance(disconnected, Disconnected)
     assert isinstance(disconnected.error, ConnectionClosedError)
-    assert seen[4] == Retrying(1, 0.5, None)
-    # Then a new session: authenticated again and subscribed to the same instruments.
+    assert seen[6] == Retrying(1, 0.5, None)
+    # Then a new session: authenticated, resumed and subscribed to the same instruments.
     assert exchange.received == [
         auth(token),
+        resume(0),
         subscription("AAPL"),
         subscription("MSFT"),
         auth(token),
+        resume(0),
         subscription("AAPL", "MSFT"),
     ]
     assert isinstance(second, Connected) and second.reconnected is True
     assert second.instruments == ("AAPL", "MSFT")
+    assert second.resume is not None and not second.resume.replayed
     # Sequence tracking started afresh: seq 2 on the new session is not a gap.
     assert not any(isinstance(event, SeqGap) for event in seen)
-    assert seen[6] == Received("book", seen[1].message, 2)  # type: ignore[attr-defined]
-    # The view saw the resting order and stays incomplete: no resume, no snapshot.
-    assert view.get("AAPL", BUY, 199_970_000) is not None
-    assert view.incomplete
+    assert seen[10] == Received("book", seen[3].message, 2)  # type: ignore[attr-defined]
+    # The second session's snapshot says the team has no resting order: it replaces the
+    # view, which is complete again (until the close).
+    assert after_resume == (False, 0)
 
 
 async def test_market_data_over_a_reconnecting_session_passes_the_disconnect_on():
@@ -304,6 +358,8 @@ async def test_a_session_lost_before_it_is_connected_is_reported_as_a_disconnect
         acknowledged = json.loads(ack())
         acknowledged["seq"] = 2
         await ws.send(json.dumps(acknowledged))
+        await exchange.recv(ws)  # resume
+        await ws.send(EMPTY)
         await hold(ws, exchange)
 
     monkeypatch.setattr(Connection, "send", subscribe_fails_once)
@@ -339,9 +395,9 @@ async def test_a_normal_close_by_the_exchange_is_a_disconnect_too():
                 events.append(event)
                 if isinstance(event, Connected) and event.reconnected:
                     await rs.close()
-    assert [type(e) for e in events] == [Connected, Disconnected, Retrying, Connected]
-    assert events[1] == Disconnected(None)
-    assert exchange.received == [auth(exchange.received[0]["payload"]["token"])] * 2
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected, Retrying, Connected]
+    assert events[3] == Disconnected(None)
+    assert exchange.received == [auth(exchange.received[0]["payload"]["token"]), resume(0)] * 2
 
 
 async def test_unsubscribed_instruments_are_not_subscribed_again():
@@ -504,7 +560,7 @@ async def test_with_reconnecting_off_iteration_ends_after_the_disconnect():
         )
         async with rs:
             events = [event async for event in rs]
-    assert [type(e) for e in events] == [Connected, Received, Disconnected]
+    assert [type(e) for e in events] == [Connected, *RESUMED, Received, Disconnected]
     assert view.incomplete
     assert exchange.connections == 1
     assert clock.waits == []
@@ -544,7 +600,7 @@ async def test_a_rejected_reconnect_is_raised_and_not_retried(reply: str, error_
             async with rs:
                 async for event in rs:
                     events.append(event)
-    assert [type(e) for e in events] == [Connected, Disconnected, Retrying]
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected, Retrying]
     assert exchange.connections == 2
     assert len(clock.waits) == 1
 
@@ -573,8 +629,8 @@ async def test_a_session_rejected_while_open_is_flagged_then_raised():
             async with rs:
                 async for event in rs:
                     events.append(event)
-    assert [type(e) for e in events] == [Connected, Disconnected]
-    assert events[1] == Disconnected(caught.value)
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected]
+    assert events[3] == Disconnected(caught.value)
     assert caught.value.reason_code == ReasonCodes.TEAM_DISABLED
     assert view.incomplete
     assert exchange.connections == 1
@@ -646,7 +702,7 @@ async def test_closing_during_a_backoff_wait_ends_iteration_without_another_atte
 
         rs._sleep = close_then_wait
         events = [event async for event in rs]
-    assert [type(e) for e in events] == [Connected, Disconnected, Retrying]
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected, Retrying]
     assert exchange.connections == 1
 
 
@@ -732,7 +788,7 @@ async def test_closing_while_handling_retrying_starts_no_wait():
                     await rs.close()
 
         await asyncio.wait_for(consume(), 5)
-    assert [type(e) for e in events] == [Connected, Disconnected, Retrying]
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected, Retrying]
     assert exchange.connections == 1
 
 
@@ -760,7 +816,7 @@ async def test_closing_ends_iteration_in_a_task_that_once_caught_a_cancellation(
         await started.wait()
         task.cancel()
         await asyncio.wait_for(task, 5)
-    assert [type(e) for e in events] == [Connected, Disconnected, Retrying]
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected, Retrying]
 
 
 async def test_cancelling_just_as_a_session_opens_closes_that_session(monkeypatch):
@@ -800,7 +856,7 @@ async def test_closing_cuts_a_backoff_wait_short():
                     asyncio.get_running_loop().call_soon(asyncio.ensure_future, rs.close())
 
         await asyncio.wait_for(consume(), 5)
-    assert [type(e) for e in events] == [Connected, Disconnected, Retrying]
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected, Retrying]
     assert exchange.connections == 1
 
 
@@ -848,6 +904,8 @@ async def test_no_event_is_delivered_or_applied_after_close():
         await exchange.recv(ws)
         await ws.send(resting_order(1))  # arrives before the ack, so it is buffered
         await ws.send(json.dumps(acknowledged))
+        await exchange.recv(ws)  # resume
+        await ws.send(EMPTY)
         await hold(ws, exchange)
 
     exchange = Exchange(order_then_ack)
@@ -981,7 +1039,7 @@ async def test_closing_while_handling_disconnected_delivers_nothing_more():
             events.append(event)
             if isinstance(event, Disconnected):
                 await rs.close()
-    assert [type(e) for e in events] == [Connected, Disconnected]
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected]
     assert exchange.connections == 1
 
 
@@ -1018,7 +1076,7 @@ async def test_the_token_is_resolved_once_from_the_environment(monkeypatch):
             async for event in rs:
                 if isinstance(event, Connected) and event.reconnected:
                     break
-    assert exchange.received == [auth(token), auth(token)]
+    assert exchange.received == [auth(token), resume(0), auth(token), resume(0)]
 
 
 async def test_the_session_object_never_shows_the_token():
@@ -1106,11 +1164,10 @@ async def test_a_token_echoed_in_a_rejection_while_open_is_withheld():
 # What the documentation promises
 
 
-def test_the_docstrings_say_fills_during_a_disconnect_are_not_recovered():
+def test_the_docstrings_say_reports_are_resumed_and_market_data_is_not():
     module_doc = " ".join((qte_sdk.reconnect.__doc__ or "").split())
-    assert "Fills, order events and market data sent while the connection was down are not " in (
-        module_doc
-    )
-    assert "recovered" in module_doc and "resume" in module_doc
+    assert "Every session it opens, the first included, is resumed" in module_doc
+    assert "Market data sent while the connection was down is not recovered" in module_doc
     disconnected_doc = " ".join((Disconnected.__doc__ or "").split())
-    assert "Fills" in disconnected_doc and "not recovered" in disconnected_doc
+    assert "Market data sent while disconnected is not recovered" in disconnected_doc
+    assert "private order reports" in disconnected_doc and "resumes" in disconnected_doc

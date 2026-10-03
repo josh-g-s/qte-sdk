@@ -18,7 +18,7 @@ from websockets.asyncio.server import ServerConnection
 from qte_sdk.connection import Connection, ContractVersionMismatch, Received, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
-from qte_sdk.contract.v1.session_pb2 import Auth, Heartbeat, Subscribe
+from qte_sdk.contract.v1.session_pb2 import Auth, Subscribe
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     TOKEN_FILE_ENV_VAR,
@@ -124,17 +124,15 @@ async def test_a_token_argument_takes_precedence_over_the_environment(monkeypatc
     assert server.received[0]["payload"] == {"token": token}
 
 
-async def test_iterating_the_session_delivers_events_from_before_and_after_the_ack():
+async def test_iterating_the_session_delivers_events_around_the_ack_but_no_heartbeat():
     book = frame("book", {"instrument": "AAPL", "grid_time": "2", "bid_levels": []}, 2)
     heartbeat = frame("heartbeat", {})
     server = Server(heartbeat, ack(), book, hold_open=False)
     async with serve_local(server) as url:
         async with await open_session(url, synthetic_token()) as session:
             events = [event async for event in session]
-    assert events == [
-        Received("heartbeat", Heartbeat(), None),
-        Received("book", Book(instrument="AAPL", grid_time=2), 2),
-    ]
+    # The heartbeat is absorbed, not delivered.
+    assert events == [Received("book", Book(instrument="AAPL", grid_time=2), 2)]
 
 
 async def test_closing_the_session_closes_the_connection():

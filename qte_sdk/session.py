@@ -35,9 +35,14 @@ from qte_sdk.connection import (
     DecodeFailed,
     Event,
     Received,
+    ReportGap,
+    ResumeComplete,
+    SeqGap,
     SessionRejected,
 )
-from qte_sdk.contract.v1.session_pb2 import Auth, Calendar, SessionAck
+from qte_sdk.contract.v1.common_pb2 import RESUME
+from qte_sdk.contract.v1.order_events_pb2 import Reject
+from qte_sdk.contract.v1.session_pb2 import Auth, Calendar, Resume, ResumeAck, SessionAck
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
 TOKEN_FILE_ENV_VAR = "QTE_TOKEN_FILE"
@@ -61,6 +66,18 @@ class AuthNotSent(SessionNotAcknowledged):
     connection closing, such as a bad `contract_version`. Trying again fails the same way."""
 
 
+class ResumeNotAcknowledged(SessionNotAcknowledged):
+    """The connection ended, or the `resume_ack` could not be decoded, before the exchange
+    answered a `resume`."""
+
+
+class ResumeRejected(SessionRejected):
+    """The exchange refused a `resume` with a `reject` whose `request_type` is `RESUME`.
+
+    The connection stays open, but no report is replayed and no snapshot is sent.
+    """
+
+
 @dataclass(frozen=True)
 class SessionInfo:
     """The exchange's acknowledgement of a session, field for field as `session_ack` carries it."""
@@ -82,6 +99,171 @@ class SessionInfo:
         )
 
 
+def _report_seq(event: Event) -> int | None:
+    return getattr(event, "report_seq", None)
+
+
+def _rejects_resume(event: Event) -> bool:
+    return (
+        isinstance(event, Received)
+        and isinstance(event.message, Reject)
+        and event.message.HasField("request_type")
+        and event.message.request_type == RESUME
+    )
+
+
+class _Resume:
+    """A resume in progress: waiting for `resume_ack`, then for the replay or snapshot."""
+
+    __slots__ = ("ack", "held", "snapshots_left")
+
+    def __init__(self) -> None:
+        self.ack: ResumeAck | None = None
+        self.snapshots_left = 0
+        # Reports that must wait until the resume is complete, by report_seq.
+        self.held: dict[int, Event] = {}
+
+
+class _Reports:
+    """The team's report cursor, and the resume in progress, if any.
+
+    The cursor is the highest report_seq up to which every report has been delivered with
+    no gap, or None before the first report or resume gives it a starting point. Reports
+    delivered beyond a gap are remembered in `above`, so a later replay does not deliver
+    them twice; the cursor never moves over a gap.
+    """
+
+    def __init__(self) -> None:
+        self.cursor: int | None = None
+        self.above: set[int] = set()
+        self.resume: _Resume | None = None
+        # What answered the latest resume: a `resume_ack`, a `reject` of it, or a
+        # `resume_ack` that could not be decoded.
+        self.answer: Event | None = None
+
+    def saved(self) -> tuple[int | None, frozenset[int]]:
+        return self.cursor, frozenset(self.above)
+
+    def restore(self, saved: tuple[int | None, frozenset[int]]) -> None:
+        self.cursor, above = saved
+        self.above = set(above)
+        self.resume = None
+
+    def begin(self, last_report_seq: int) -> None:
+        self.cursor = last_report_seq
+        self.above = {n for n in self.above if n > last_report_seq}
+        self._advance()
+        self.resume = _Resume()
+        self.answer = None
+
+    def abandon(self) -> list[Event]:
+        """End the resume in progress without completing it, releasing what it held."""
+        return self._finish(None) if self.resume is not None else []
+
+    def route(self, event: Event) -> list[Event]:
+        """The events to deliver, in order, now that `event` has arrived."""
+        if self.resume is not None:
+            return self._route_resuming(event, self.resume)
+        report_seq = _report_seq(event)
+        return [event] if report_seq is None else self._process(event, report_seq)
+
+    def _route_resuming(self, event: Event, resume: _Resume) -> list[Event]:
+        ack = resume.ack
+        if ack is None:
+            if isinstance(event, Received) and event.type == "resume_ack":
+                assert isinstance(event.message, ResumeAck)
+                self.answer = event
+                return [event, *self._on_ack(event.message, resume)]
+            if _rejects_resume(event) or (
+                isinstance(event, DecodeFailed) and event.type == "resume_ack"
+            ):
+                self.answer = event
+                return [event, *self._finish(None)]
+        elif isinstance(event, SeqGap):
+            # A message was lost on the connection, perhaps one the resume needs to finish:
+            # stop waiting for it rather than hold later reports for good.
+            return [event, *self._finish(None)]
+        elif (
+            not ack.replayed
+            and isinstance(event, Received | DecodeFailed)
+            and event.type == "order_snapshot"
+        ):
+            resume.snapshots_left -= 1
+            if resume.snapshots_left <= 0:
+                return [event, *self._complete(ack)]
+            return [event]
+        report_seq = _report_seq(event)
+        if report_seq is None:
+            return [event]
+        if ack is None or not ack.replayed or report_seq > ack.as_of_report_seq:
+            # A live report: it waits until the replay or snapshot is complete.
+            resume.held.setdefault(report_seq, event)
+            return []
+        routed = self._process(event, report_seq)
+        if report_seq == ack.as_of_report_seq:
+            routed += self._complete(ack)
+        return routed
+
+    def _on_ack(self, ack: ResumeAck, resume: _Resume) -> list[Event]:
+        resume.ack = ack
+        # The replay or the snapshot covers every report held so far at or below as_of.
+        resume.held = {n: e for n, e in resume.held.items() if n > ack.as_of_report_seq}
+        if ack.replayed:
+            if self._delivered(ack.as_of_report_seq):
+                return self._complete(ack)
+            return []
+        resume.snapshots_left = ack.snapshot_count
+        if ack.snapshot_count <= 0:
+            return self._complete(ack)
+        return []
+
+    def _complete(self, ack: ResumeAck) -> list[Event]:
+        if not ack.replayed:
+            # The snapshot describes the team's orders as of this report; the cursor never
+            # moves back.
+            self.cursor = max(self.cursor or 0, ack.as_of_report_seq)
+            self.above = {n for n in self.above if n > self.cursor}
+            self._advance()
+        done = ResumeComplete(ack.replayed, ack.as_of_report_seq, ack.snapshot_count)
+        return self._finish(done)
+
+    def _finish(self, done: ResumeComplete | None) -> list[Event]:
+        assert self.resume is not None
+        held = self.resume.held
+        self.resume = None
+        routed: list[Event] = [done] if done is not None else []
+        for report_seq in sorted(held):
+            routed += self._process(held[report_seq], report_seq)
+        return routed
+
+    def _delivered(self, report_seq: int) -> bool:
+        return self.cursor is not None and (report_seq <= self.cursor or report_seq in self.above)
+
+    def _process(self, event: Event, report_seq: int) -> list[Event]:
+        if self.cursor is None:
+            self.cursor = report_seq  # the starting point
+            return [event]
+        if self._delivered(report_seq):
+            return []  # a duplicate
+        routed: list[Event] = []
+        highest = max(self.above, default=self.cursor)
+        if report_seq > highest + 1:
+            routed.append(ReportGap(highest + 1, report_seq))
+        if report_seq == self.cursor + 1:
+            self.cursor = report_seq
+            self._advance()
+        else:
+            self.above.add(report_seq)
+        routed.append(event)
+        return routed
+
+    def _advance(self) -> None:
+        assert self.cursor is not None
+        while self.cursor + 1 in self.above:
+            self.cursor += 1
+            self.above.remove(self.cursor)
+
+
 class Session:
     """An acknowledged session: the open connection and what the exchange said about it.
 
@@ -92,13 +274,24 @@ class Session:
 
     `calendar` is the exchange's session calendar, once it has arrived; see
     `wait_for_calendar` and `qte_sdk.calendar`.
+
+    Private reports: each of the team's order reports that the exchange can replay carries
+    a `report_seq`, numbered per team without gaps. The session delivers them in that order
+    and keeps `last_report_seq`, the number up to which it has delivered every one. A
+    report numbered at or below it again is a duplicate and is dropped. When a number is
+    skipped, a `ReportGap` (a `DataUncertain`) is delivered before the report that skipped
+    it. `resume` asks the exchange for the reports a team missed.
     """
 
     def __init__(self, connection: Connection, info: SessionInfo, early: list[Event]) -> None:
         self.connection = connection
         self.info = info
         # Events read from the connection but not yet delivered: those that arrived before
-        # the ack, and any that `wait_for_calendar` read ahead.
+        # the ack, and any that `wait_for_calendar` or `resume` read ahead. They are kept
+        # as read in `_unrouted`, and pass through the report cursor (see `_Reports`) into
+        # `_buffer` only when delivered or when `resume` needs them, so that a resume
+        # holds every report from the moment the connection opened.
+        self._unrouted: deque[Event] = deque()
         self._buffer: deque[Event] = deque()
         self._calendar: Calendar | None = None
         self._calendar_unreadable = False
@@ -106,6 +299,8 @@ class Session:
         self._reading = False
         self._ended = False
         self._failure: Exception | None = None
+        self._reports = _Reports()
+        self._resumed = False
         for event in early:
             self._keep(event)
 
@@ -152,6 +347,86 @@ class Session:
                 raise
         return self._calendar
 
+    @property
+    def last_report_seq(self) -> int | None:
+        """The `report_seq` up to which this session has read every private report with no
+        gap, or None before the first report or `resume`. Pass it to the next session's
+        `resume` to have the exchange replay the reports that come after it."""
+        return self._reports.cursor
+
+    async def resume(
+        self, last_report_seq: int, *, timeout: float | None = DEFAULT_ACK_TIMEOUT
+    ) -> ResumeAck:
+        """Ask the exchange for the private reports after `last_report_seq`, and wait up to
+        `timeout` seconds (None for no limit) for its answer, the `resume_ack`.
+
+        Send it at most once, right after the session opens and before reading any
+        events. Pass the `last_report_seq` of the session this one replaces, or 0 to get a
+        snapshot of the team's resting orders instead.
+
+        The exchange then does one of two things, both delivered by iterating the session,
+        after the `resume_ack` itself:
+
+        - Replay (`replayed` True): the reports after `last_report_seq`, in order, exactly
+          as they were first sent. Reports this session already delivered are dropped.
+        - Snapshot (`replayed` False): `snapshot_count` `order_snapshot` events, one per
+          resting order of the team, in place of the reports. A count of 0 means the team
+          has no resting order, as is always so outside a session.
+
+        Then a `ResumeComplete` is delivered, and after it any report that arrived
+        meanwhile, in order. Market data is not replayed: subscribe again for it. If a
+        message is lost on the connection (a `SeqGap`) before the resume is complete, the
+        session stops waiting for it and delivers what it held. If the connection ends
+        first, what it held is not delivered and `last_report_seq` does not move past it,
+        so the next resume replays it.
+
+        Returns the `resume_ack`. Raises `ResumeRejected` if the exchange refuses the
+        resume, `ResumeNotAcknowledged` if the connection ends or the answer cannot be
+        decoded first, and `TimeoutError` if no answer arrives in time. Call it from the
+        task that iterates the session.
+        """
+        if (
+            isinstance(last_report_seq, bool)
+            or not isinstance(last_report_seq, int)
+            or last_report_seq < 0
+        ):
+            raise ValueError("last_report_seq must be a whole number, 0 or more")
+        if self._resumed:
+            raise RuntimeError("a session can be resumed only once")
+        self._resumed = True
+        await self.send("resume", Resume(last_report_seq=last_report_seq))
+        reports = self._reports
+        reports.begin(last_report_seq)
+        self._route_all()
+        timed_out = False
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                while reports.answer is None and not self._ended:
+                    await self._read_one()
+                    self._route_all()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            timed_out = True
+        answer = reports.answer
+        if answer is None:
+            self._buffer.extend(reports.abandon())
+        if timed_out:
+            raise TimeoutError(f"the exchange did not answer resume within {timeout} s")
+        if answer is None:
+            raise ResumeNotAcknowledged("the connection closed before resume_ack")
+        if isinstance(answer, DecodeFailed):
+            raise ResumeNotAcknowledged(f"resume_ack could not be decoded: {answer.error}")
+        assert isinstance(answer, Received)
+        if isinstance(answer.message, Reject):
+            message = answer.message
+            detail = message.reason_detail if message.HasField("reason_detail") else None
+            name = answer.unknown_enum_names().get("reason_code")
+            raise ResumeRejected(message.reason_code, detail, reason_name=name)
+        assert isinstance(answer.message, ResumeAck)
+        return answer.message
+
     def __aiter__(self) -> AsyncIterator[Event]:
         return self.events()
 
@@ -159,6 +434,8 @@ class Session:
         while True:
             if self._buffer:
                 yield self._buffer.popleft()
+            elif self._unrouted:
+                self._buffer.extend(self._reports.route(self._unrouted.popleft()))
             elif self._ended:
                 if self._failure is not None:
                     raise self._failure
@@ -194,8 +471,12 @@ class Session:
         finally:
             self._reading = False
 
+    def _route_all(self) -> None:
+        while self._unrouted:
+            self._buffer.extend(self._reports.route(self._unrouted.popleft()))
+
     def _keep(self, event: Event) -> None:
-        self._buffer.append(event)
+        self._unrouted.append(event)
         if isinstance(event, Received) and event.type == "calendar":
             assert isinstance(event.message, Calendar)
             self._calendar = event.message
