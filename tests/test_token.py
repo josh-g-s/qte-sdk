@@ -372,12 +372,24 @@ def test_a_symlinked_gitignore_is_not_followed(tmp_path, capsys):
 
 
 @needs_git
-def test_a_tracked_dotenv_is_explained(capsys):
+def test_a_tracked_dotenv_is_refused_before_the_token_is_asked_for(capsys):
     git("init", "-q", ".")
     dotenv().write_text("OTHER=1\n")
     git("add", ".env")
-    assert run(["set"], ask=answers(URL, "y"), ask_secret=answers(synthetic_token())) == 0
-    assert "git rm --cached .env" in capsys.readouterr().out
+    assert run(["set"]) == 1  # neither prompt is reached
+    assert dotenv().read_text() == "OTHER=1\n"
+    err = capsys.readouterr().err
+    assert "git tracks" in err and "git rm --cached .env" in err
+
+
+@needs_git
+def test_a_tracked_dotenv_that_gitignore_names_is_still_refused(capsys):
+    git("init", "-q", ".")
+    Path(".gitignore").write_text(".env\n")
+    dotenv().write_text("OTHER=1\n")
+    git("add", "-f", ".env")
+    assert run(["set"]) == 1
+    assert "git rm --cached .env" in capsys.readouterr().err
 
 
 # set --file

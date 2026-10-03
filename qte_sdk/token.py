@@ -8,7 +8,9 @@
 Enter at the address prompt to keep the address already set, in `QTE_URL` or in `./.env`.
 Both go into `./.env`, which is created readable only by you before anything is written;
 an existing `.env` is replaced in one step, keeping its other lines. If the `.env` is in a
-git working tree and git does not ignore it, `set` offers to add it to `.gitignore`.
+git working tree and git does not ignore it, `set` offers to add it to `.gitignore`; if git
+already tracks it, `set` stops before asking for the token and says to run
+`git rm --cached .env`, since `.gitignore` alone would not keep the token out of a commit.
 
 `set --file [PATH]` writes only the token, to `PATH` or by default `~/.qte/token` (in a
 directory only you can open), and prints the `export QTE_TOKEN_FILE=...` line to add to
@@ -40,6 +42,7 @@ from qte_sdk.dotenv import (
     dotenv_path,
     is_ignored_by_git,
     is_inside_git_work_tree,
+    is_tracked_by_git,
     parse_assignment,
     read_value,
 )
@@ -144,6 +147,7 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     if path.is_symlink():
         raise _Refused(f"{path} is a symbolic link; edit the file it points to by hand")
     lines = _existing_lines(path)
+    _refuse_if_tracked(path)
     address = _ask_address(url, ask)
     secret = _ask_token(ask_secret)
     _offer_gitignore(path, ask)
@@ -251,6 +255,18 @@ def _is_plain(value: str) -> bool:
     return value.isprintable() and not any(c.isspace() or c in "'\"#" for c in value)
 
 
+def _refuse_if_tracked(path: Path) -> None:
+    """Stop before the token is asked for if git tracks `path`: the token would then be
+    committed with it, and adding it to `.gitignore` would not prevent that."""
+    if not is_inside_git_work_tree(path.parent) or is_tracked_by_git(path) is not True:
+        return
+    raise _Refused(
+        f"git tracks {path}, so your token in it would be committed, and adding it to "
+        f".gitignore does not stop that. Run `git rm --cached {path.name}` and commit, then "
+        "run this command again. Nothing was changed."
+    )
+
+
 def _offer_gitignore(path: Path, ask: Prompt) -> None:
     """If git does not ignore `path`, offer to add it to the `.gitignore` beside it."""
     if not is_inside_git_work_tree(path.parent) or is_ignored_by_git(path) is not False:
@@ -284,8 +300,9 @@ def _offer_gitignore(path: Path, ask: Prompt) -> None:
         ) from None
     if is_ignored_by_git(path) is False:
         print(
-            f"Added {path.name} to {gitignore}, but git still does not ignore it. If git "
-            f"already tracks it, run `git rm --cached {path.name}` to stop tracking it."
+            f"Added {path.name} to {gitignore}, but git still does not ignore it: check "
+            f"{gitignore} and run `git check-ignore -v {path.name}`. If git tracks it, run "
+            f"`git rm --cached {path.name}`."
         )
     else:
         print(f"Added {path.name} to {gitignore}.")
