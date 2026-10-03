@@ -88,6 +88,7 @@ from qte_sdk.contract.v1.common_pb2 import (
     OPEN,
     RESTING,
     SELL,
+    STALE,
     STUDENT_TO_STUDENT,
     STUDENT_TO_WALL,
     TAKER,
@@ -135,17 +136,16 @@ pytestmark = pytest.mark.skipif(
 # from CONFORMANCE.md again whenever that file is re-vendored.
 STEP_10_MARK_FACTOR = (105, 100)
 
-# Steps 7 and 9a to 9c check `OrderState.old_price`, which the vendored contract does not
-# have yet. Reading it raises ValueError until it does; any other failure is a real one.
-OLD_PRICE_PENDING = pytest.mark.xfail(
-    raises=ValueError,
-    strict=False,
-    reason="OrderState.old_price is not in this SDK's contract yet; see issue #21",
-)
-
 
 def old_price(state: OrderState) -> int | None:
-    """The order's price before the amend this `order_state` reports, or None."""
+    """The order's price before the amend this `order_state` reports, or None.
+
+    Steps 7 and 9a to 9c check `OrderState.old_price`, which this SDK's contract does not
+    have yet. Until it does, this marks the step an expected failure, and only here: each
+    step makes every other check first, so any other failure is reported as one.
+    """
+    if "old_price" not in OrderState.DESCRIPTOR.fields_by_name:
+        pytest.xfail("OrderState.old_price is not in this SDK's contract yet; see issue #21")
     return state.old_price if state.HasField("old_price") else None
 
 
@@ -391,9 +391,10 @@ def check_release_time(accepted: Accepted) -> None:
 
 
 def inside_prices(book: Book, tick: int, count: int) -> list[int]:
-    """`count` buy prices strictly inside the band, from the best bid up. Skips the step
-    if the spread is too narrow."""
-    best_bid, best_ask = book.bid_levels[0].price, book.ask_levels[0].price
+    """`count` buy prices strictly inside the band, from the best bid up, and below every
+    resting sell, so none is marketable. Skips the step if the spread is too narrow."""
+    best_bid = book.bid_levels[0].price
+    best_ask = min([book.ask_levels[0].price] + [level.price for level in book.student_ask_levels])
     first = (best_bid // tick + 1) * tick
     prices = [first + k * tick for k in range(count)]
     if prices[-1] >= best_ask:
@@ -599,7 +600,6 @@ async def test_step_06_partial_fill(market: Client):
 
 
 @NEEDS_COUNTERPARTY
-@OLD_PRICE_PENDING
 async def test_step_07_amend_down(market: Client):
     # After step 6's partial fill, so that `new_size` read as the new total size and as the
     # new remaining size give different answers, and only the remaining size passes.
@@ -696,10 +696,53 @@ async def test_step_09_cancel_the_level(market: Client):
     assert len([m for m in c.since(start, OrderCancelled) if request_ref_of(m) == ref]) == 1
 
 
+class OwnOrders:
+    """The client's own view of its resting buys, kept by step 9's rule from outbound
+    messages alone: remove the order at `old_price`, then add it at `price` if it is
+    `RESTING` or `STALE`."""
+
+    def __init__(self) -> None:
+        self.prices: set[int] = set()
+
+    def apply(self, state: OrderState) -> None:
+        previous = old_price(state)
+        if previous is not None:
+            self.prices.discard(previous)
+        if state.state in (RESTING, STALE):
+            self.prices.add(state.price)
+        else:
+            self.prices.discard(state.price)
+
+
+async def amend_response(c: Client, ref: str, start: int) -> tuple[list[OrderState], list]:
+    """Everything the amend `ref` caused, read through the first grid point after the
+    `accepted`: the strategy's `order_state` messages and its executions, in order."""
+    accepted = await c.answer(ref, start)
+    assert accepted.request_type == RequestType.AMEND
+    await c.until(
+        lambda: any(
+            m.grid_time > accepted.release_time for m in c.since(c.after(accepted), SessionState)
+        ),
+        "session_state after the amend's release",
+    )
+    states = [
+        m
+        for m in c.since(start, OrderState)
+        if m.strat_id == c.config.strat_a and m.instrument == c.config.instrument
+    ]
+    events = [
+        m
+        for m in c.seen[start:]
+        if isinstance(m, OrderState | Execution)
+        and m.strat_id == c.config.strat_a
+        and m.instrument == c.config.instrument
+    ]
+    return states, events
+
+
 async def rest_and_move(c: Client, low: int, high: int) -> tuple[OrderState, OrderState]:
     """Steps 9a and 9b: rest a buy at `low`, then amend it to `high`. Returns the
-    `order_state` of each. Their `old_price` is left to the caller to check last, so every
-    other check runs even while the contract lacks it."""
+    `order_state` of each, leaving `old_price` for the caller to check last."""
     rested = await c.rest(c.config.strat_a, BUY, low)
     start = c.mark()
     ref = await send_amend(
@@ -710,18 +753,17 @@ async def rest_and_move(c: Client, low: int, high: int) -> tuple[OrderState, Ord
         new_price=high,
         new_size=c.config.size,
     )
-    accepted = await c.answer(ref, start)
-    assert accepted.request_type == RequestType.AMEND
-    moved = await c.order_state(c.config.strat_a, BUY, high, c.after(accepted))
+    states, events = await amend_response(c, ref, start)
+    assert len(states) == 1, f"the amend sent {len(states)} order_state messages, not one"
+    (moved,) = states
+    assert not [m for m in events if isinstance(m, Execution)], "the amend executed"
+    assert moved.price == high
+    assert moved.side == BUY
     assert moved.state == RESTING
     assert moved.remaining_size == c.config.size
-    assert not [m for m in c.since(start, Execution) if m.strat_id == c.config.strat_a], (
-        "the amend executed"
-    )
     return rested, moved
 
 
-@OLD_PRICE_PENDING
 async def test_step_09a_rest_for_the_amend(market: Client):
     c = market
     (low,) = inside_prices(c.books.get(c.config.instrument), c.config.tick, 1)
@@ -729,13 +771,16 @@ async def test_step_09a_rest_for_the_amend(market: Client):
     assert old_price(state) is None, "order_state for a new order carries old_price"
 
 
-@OLD_PRICE_PENDING
 async def test_step_09b_price_moving_amend_resting(market: Client):
     c = market
     low, high = inside_prices(c.books.get(c.config.instrument), c.config.tick, 2)
     rested, moved = await rest_and_move(c, low, high)
     assert old_price(rested) is None, "order_state for a new order carries old_price"
     assert old_price(moved) == low
+    own = OwnOrders()
+    own.apply(rested)
+    own.apply(moved)
+    assert own.prices == {high}
 
 
 @pytest.mark.skipif(
@@ -743,7 +788,6 @@ async def test_step_09b_price_moving_amend_resting(market: Client):
     reason="precondition: another team rests a sell for the amend to meet "
     "(QTE_CONFORMANCE_RESTING_SELL=1)",
 )
-@OLD_PRICE_PENDING
 async def test_step_09c_price_moving_amend_filling_completely(market: Client):
     c = market
     low, high = inside_prices(c.books.get(c.config.instrument), c.config.tick, 2)
@@ -778,38 +822,24 @@ async def test_step_09c_price_moving_amend_filling_completely(market: Client):
         new_price=target,
         new_size=c.config.size,
     )
-    await c.answer(ref, start)
-    filled = await c.wait_for(
-        lambda m: (
-            isinstance(m, OrderState)
-            and m.strat_id == c.config.strat_a
-            and m.instrument == c.config.instrument
-            and m.side == BUY
-            and m.price == target
-        ),
-        "order_state for the amend",
-        start,
-    )
-    fills = [
-        m
-        for m in c.seen[start : c.after(filled)]
-        if isinstance(m, Execution) and m.strat_id == c.config.strat_a and m.side == BUY
-    ]
-    assert fills, "no execution before the amend's order_state"
-    assert all(f.liquidity == TAKER for f in fills)
+    states, events = await amend_response(c, ref, start)
+    assert len(states) == 1, f"the amend sent {len(states)} order_state messages, not one"
+    (filled,) = states
+    fills = [m for m in events if isinstance(m, Execution)]
+    assert fills, "the amend did not execute"
+    assert events[-1] is filled, "an execution came after the amend's order_state"
+    assert all(f.side == BUY and f.liquidity == TAKER for f in fills)
     assert fills[-1].remaining_size == 0
+    assert filled.price == target
     assert filled.state == FILLED
     assert filled.remaining_size == 0
-    after = c.after(filled)
-    await c.next_session_state(after)
-    assert not [
-        m
-        for m in c.since(after, OrderState)
-        if m.strat_id == c.config.strat_a and m.state == RESTING and m.price in (high, target)
-    ], "an order of the team rests at the old or new price"
     assert old_price(rested) is None
     assert old_price(moved) == low
     assert old_price(filled) == high
+    own = OwnOrders()
+    for state in (rested, moved, filled):
+        own.apply(state)
+    assert not own.prices, "an order of the team rests at the old or new price"
 
 
 async def test_step_10_collar(market: Client):
@@ -845,15 +875,22 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
     c = market
     if len(c.books.get(c.config.instrument).ask_levels) != 10:
         pytest.skip("precondition: the instrument's book shows ten ask levels")
-    mark = await c.wait_for(
+    await c.wait_for(
         lambda m: isinstance(m, Mark) and m.instrument == c.config.instrument,
         "mark",
         0,
         timeout=3 * c.config.timeout,
     )
-    shown = c.books.get(c.config.instrument)
     numerator, denominator = STEP_10_MARK_FACTOR
-    if shown.ask_levels[-1].price * denominator > mark.value * numerator:
+
+    def marks() -> list[Mark]:
+        return [m for m in c.seen if isinstance(m, Mark) and m.instrument == c.config.instrument]
+
+    def within_guard(book: Book, mark: Mark) -> bool:
+        return book.ask_levels[-1].price * denominator <= mark.value * numerator
+
+    shown = c.books.get(c.config.instrument)
+    if not within_guard(shown, marks()[-1]):
         pytest.skip("precondition: all ten ask levels lie within mark x 1.05, the market guard")
     size = sum(level.size for level in shown.ask_levels) + 1
     start = c.mark()
@@ -866,6 +903,23 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         size=size,
     )
     accepted = await c.answer(ref, start)
+    # Read through the grid point of the release, so every book and mark published up to
+    # it is in hand, then settle the preconditions before checking what the order did.
+    await c.until(
+        lambda: any(
+            m.grid_time >= accepted.release_time for m in c.since(c.after(accepted), SessionState)
+        ),
+        "session_state at the market order's release",
+    )
+    books = [m for m in c.seen if isinstance(m, Book) and m.instrument == c.config.instrument]
+    at_receipt = [m for m in books if m.grid_time <= accepted.receipt_time][-1]
+    meanwhile = [m for m in books if accepted.receipt_time < m.grid_time <= accepted.release_time]
+    if any(list(m.ask_levels) != list(at_receipt.ask_levels) for m in meanwhile):
+        pytest.skip("precondition: the quote holds steady while the market order is delayed")
+    met = meanwhile[-1] if meanwhile else at_receipt
+    released = [m for m in marks() if m.sampled_at <= accepted.release_time]
+    if not within_guard(met, released[-1] if released else marks()[-1]):
+        pytest.skip("precondition: all ten ask levels lie within mark x 1.05, the market guard")
     remainder = await c.wait_for(
         lambda m: (
             isinstance(m, OrderCancelled)
@@ -885,14 +939,6 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         and m.side == BUY
         and not m.HasField("order_price")
     ]
-    # The ladder the order met: the latest book published by its release. The quote must
-    # hold steady while the order waits out its delay; if a book published meanwhile shows
-    # it moved, the fills cannot be checked against one ladder.
-    books = [m for m in c.seen if isinstance(m, Book) and m.instrument == c.config.instrument]
-    at_receipt = [m for m in books if m.grid_time <= accepted.receipt_time][-1]
-    met = [m for m in books if m.grid_time <= accepted.release_time][-1]
-    if list(met.ask_levels) != list(at_receipt.ask_levels):
-        pytest.skip("precondition: the quote holds steady while the market order is delayed")
     assert [f.fill_price for f in fills] == [level.price for level in met.ask_levels]
     assert [f.fill_size for f in fills] == [level.size for level in met.ask_levels]
     for fill in fills:
