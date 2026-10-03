@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.5
+**Version:** 1.6
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
