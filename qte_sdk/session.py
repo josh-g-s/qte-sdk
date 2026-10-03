@@ -890,7 +890,8 @@ def _token_forms(secret: _Secret) -> tuple[_Secret, ...]:
         return _make_token_forms(secret)
     except BaseException as error:
         failure = _detached(error)
-    # Raised outside the handler, so nothing is chained to it.
+    # Raised outside the handler, so its own traceback is not chained to it. An exception a
+    # caller is handling when this is called still becomes its context, as for any raise.
     raise failure
 
 
@@ -932,7 +933,8 @@ def _holds_token(value: object, secret: _Secret) -> bool:
         return _scan_for_token(value, secret)
     except BaseException as error:
         failure = _detached(error)
-    # Raised outside the handler, so nothing is chained to it.
+    # Raised outside the handler, so its own traceback is not chained to it. An exception a
+    # caller is handling when this is called still becomes its context, as for any raise.
     raise failure
 
 

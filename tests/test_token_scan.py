@@ -160,9 +160,15 @@ def test_the_scan_holds_under_the_pure_python_backend(monkeypatch: pytest.Monkey
         timeout=300,
     )
     assert run.returncode == 0, run.stdout[-4000:] + run.stderr[-4000:]
-    # Every other test in this module ran there and passed, the backend check included.
+    # Every case collected there passed, the backend check included, but this one, skipped;
+    # and every test function in this module was among them.
     this = "test_the_scan_holds_under_the_pure_python_backend"
-    others = [name for name in globals() if name.startswith("test_") and name != this]
-    outcomes = re.findall(r"::(test_\w+)(?:\[[^\]]*\])? (PASSED|FAILED|SKIPPED|ERROR)", run.stdout)
-    assert {name for name, outcome in outcomes if outcome == "PASSED"} == set(others)
-    assert [outcome for name, outcome in outcomes if outcome != "PASSED"] == ["SKIPPED"]
+    collected = re.search(r"collected (\d+) items", run.stdout)
+    assert collected is not None, run.stdout[-4000:]
+    outcomes = re.findall(r"::(test_\w+)(\[[^\]]*\])? (PASSED|FAILED|SKIPPED|ERROR)", run.stdout)
+    assert len(outcomes) == int(collected.group(1))
+    assert [(name, outcome) for name, _, outcome in outcomes if outcome != "PASSED"] == [
+        (this, "SKIPPED")
+    ]
+    functions = {name for name in globals() if name.startswith("test_")}
+    assert {name for name, _, _ in outcomes} == functions
