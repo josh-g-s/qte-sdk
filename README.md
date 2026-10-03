@@ -71,14 +71,15 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Outside market hours the exchange still accepts the connection and the subscription, but sends the market's closed state instead of a live book, so this prints nothing after "connected as".
+Outside market hours the exchange still accepts the connection and the subscription, but sends the market's closed state instead of a live book, so this prints nothing after "connected as". [Outside session hours](docs/out-of-hours.md) shows what you can do then.
 
 ## Documentation
 
 | Where | What |
 |---|---|
 | [Quickstart](docs/quickstart.md) | Step by step: connect, read the calendar and market data, place and cancel an order, read order events, what each reject means, and fetch past market data |
-| [Worked examples](examples/) | Runnable programs: print the book, quote both sides and manage the quotes, take liquidity with a market order |
+| [Outside session hours](docs/out-of-hours.md) | What works when no session is running, with a runnable walk-through: the calendar, the closed market, an order's reject, past market data |
+| [Worked examples](examples/) | Runnable programs: print the book, quote both sides and manage the quotes, take liquidity with a market order, see the closed market outside a session |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
 The main modules, each documented in its docstrings:
@@ -101,7 +102,7 @@ The main modules, each documented in its docstrings:
 - **Prices are whole numbers of micro-dollars** ($199.97 is `199_970_000`). Convert with `qte_sdk.units`; never use `float` for prices.
 - **There is no order ID.** Your team's orders are addressed by instrument, side and price, and your team holds at most one resting order at each price.
 - **One market-data feed for everyone.** Market data is published on a fixed 100 ms grid: during a session the market state at every grid point, and an instrument's book only when it has changed, so keep the last book you received for each instrument.
-- **Not every team sends orders.** Teams on the trading arms send orders; an order from a team without market access is rejected with a reason code that says so.
+- **Not every team sends orders.** Teams on the trading arms and Execution teams send orders; an order from a team without market access is rejected with a reason code that says so.
 
 ## Status
 

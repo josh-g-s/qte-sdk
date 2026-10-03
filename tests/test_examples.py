@@ -37,6 +37,7 @@ from qte_sdk.resting import RestingOrders
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
 QUICKSTART = EXAMPLES_DIR.parent / "docs" / "quickstart.md"
+OUT_OF_HOURS = EXAMPLES_DIR.parent / "docs" / "out-of-hours.md"
 SDK_INSTALL_URL = "git+https://github.com/josh-g-s/qte-sdk"
 INSTRUMENT = "TEST"
 BID, ASK = 99_950_000, 100_050_000
@@ -62,7 +63,7 @@ def test_each_example_compiles_and_imports_without_running(path: Path, tmp_path:
     assert module.__doc__, "each example opens with a docstring saying what it does"
 
 
-@pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART], ids=lambda p: p.name)
+@pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART, OUT_OF_HOURS], ids=lambda p: p.name)
 def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path):
     for url in re.findall(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\")]+", path.read_text()):
         if url == SDK_INSTALL_URL:
@@ -73,7 +74,7 @@ def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path)
         assert parts.username is None and parts.password is None, url
 
 
-@pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART], ids=lambda p: p.name)
+@pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART, OUT_OF_HOURS], ids=lambda p: p.name)
 def test_no_example_or_quickstart_reaches_past_the_session_to_its_connection(path: Path):
     # A session sends and is iterated itself; its connection is an internal layer.
     assert re.search(r"\bsession\.connection\b", path.read_text()) is None
@@ -100,14 +101,23 @@ class FakeExchange:
         closed: bool = False,
         book_once: bool = False,
         fill_first_buy: bool = False,
+        official_close: bool = True,
+        calendar: dict[str, Any] | None = None,
+        closed_state: dict[str, Any] | None = None,
     ) -> None:
+        # With `closed_state`, that is the session_state answering a subscribe when closed.
+        self.closed_state = closed_state
         self.book_once = book_once
         # With `fill_first_buy`, the first buy order to rest is at once filled completely.
         self.fill_first_buy = fill_first_buy
         self.books_sent = 0
         # With `closed`, the exchange is outside a session: it answers a subscribe once,
-        # with the closed state and each instrument's official close, and publishes nothing.
+        # with the closed state and, unless `official_close` is False (as on the exchange
+        # today), each instrument's official close, and publishes nothing.
         self.closed = closed
+        self.official_close = official_close
+        # With `calendar`, that calendar follows the session_ack.
+        self.calendar = calendar
         # With `confirm_cancels`, a cancel is accepted at once but its order_cancelled is
         # sent only once the test sets that event (never, if it does not).
         self.confirm_cancels = confirm_cancels
@@ -141,6 +151,8 @@ class FakeExchange:
             "unscored": True,
         }
         await self.send(ws, "session_ack", ack)
+        if self.calendar is not None:
+            await self.send(ws, "calendar", self.calendar)
         ticker: asyncio.Task | None = None
         try:
             async for raw in ws:
@@ -192,7 +204,12 @@ class FakeExchange:
         # As the out-of-hours reply does, it names the next scheduled session.
         state["next_session_date"] = "2026-01-06"
         state["next_open_time"], state["next_close_time"] = "100", "200"
-        await self.send(ws, "session_state", {**state, "grid_time": "2"})
+        if self.closed_state is not None:
+            await self.send(ws, "session_state", self.closed_state)
+        else:
+            await self.send(ws, "session_state", {**state, "grid_time": "2"})
+        if not self.official_close:
+            return
         for instrument in instruments:
             close = {"instrument": instrument, "session_date": "2026-01-05", "value": "100011000"}
             await self.send(ws, "official_close", close)
@@ -449,6 +466,102 @@ async def test_print_book_prints_the_official_close_outside_a_session():
     assert "close  TEST  100.011000 on 2026-01-05" in out
     assert "book " not in out
     assert "stopped after 0.5 seconds (2 messages)" in out
+
+
+CALENDAR = {
+    "term_first_session": "2026-01-02",
+    "term_last_session": "2026-01-05",
+    "sessions": [
+        {"session_date": "2026-01-02", "open_time": "-20", "close_time": "0"},
+        {"session_date": "2026-01-05", "open_time": "100", "close_time": "200"},
+    ],
+}
+
+
+async def test_out_of_hours_shows_the_calendar_and_the_closed_market_with_no_close():
+    # As on the exchange today: the closed state, and no official close after it. The state
+    # names the last closed session and the next one, as the calendar does.
+    state = {
+        "state": "CLOSED",
+        "session_date": "2026-01-02",
+        "open_time": "-20",
+        "close_time": "0",
+        "grid_time": "0",
+        "next_session_date": "2026-01-05",
+        "next_open_time": "100",
+        "next_close_time": "200",
+    }
+    exchange = FakeExchange(
+        closed=True, official_close=False, calendar=CALENDAR, closed_state=state
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
+        )
+    assert code == 0, err
+    assert "last closed session: 2026-01-02" in out
+    assert "next session: 2026-01-05" in out
+    assert "market session 2026-01-02: CLOSED" in out
+    # The fake acknowledges at server_time 1 and names a next open at 100.
+    assert "next open: session 2026-01-05, in 99 exchange time units" in out
+    assert "no official close: the exchange does not send it yet, as expected" in out
+    assert exchange.types() == ["auth", "subscribe"]
+
+
+async def test_out_of_hours_measures_the_next_open_from_server_time_not_a_future_grid_time():
+    # Before the exchange has closed any session, the reply names the next scheduled one,
+    # and its grid_time equals that session's close_time, in the future.
+    state = {
+        "state": "CLOSED",
+        "session_date": "2026-01-05",
+        "open_time": "100",
+        "close_time": "200",
+        "grid_time": "200",
+        "next_session_date": "2026-01-05",
+        "next_open_time": "100",
+        "next_close_time": "200",
+    }
+    exchange = FakeExchange(closed=True, official_close=False, closed_state=state)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
+        )
+    assert code == 0, err
+    # Measured from server_time 1, not from grid_time 200 (which would give -100).
+    assert "next open: session 2026-01-05, in 99 exchange time units" in out
+
+
+async def test_out_of_hours_works_when_the_state_names_no_next_session():
+    state = {"state": "CLOSED", "session_date": "2026-01-05", "close_time": "2", "grid_time": "2"}
+    exchange = FakeExchange(closed=True, official_close=False, closed_state=state)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
+        )
+    assert code == 0, err
+    assert "next open: not given in the session state" in out
+
+
+async def test_out_of_hours_prints_an_official_close_and_works_without_a_calendar():
+    async with serve_local(FakeExchange(closed=True)) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
+        )
+    assert code == 0, err
+    assert "calendar: none received" in out
+    assert "official close TEST: 100.011000" in out
+    assert "no official close" not in out
+
+
+async def test_out_of_hours_stops_at_once_during_a_session():
+    async with serve_local(FakeExchange(calendar=CALENDAR)) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "5"
+        )
+    assert code == 0, err
+    assert "market session 2026-01-05: OPEN" in out
+    assert "a session is under way: run this outside one" in out
+    assert "stopped after" not in out
 
 
 @pytest.mark.parametrize(
