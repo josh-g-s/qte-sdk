@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.8
+// **Version:** 1.9
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -97,8 +97,8 @@ enum MarketSessionPhase {
 // instrument with no valid mark yet in the session is valued at its last
 // official close.
 // LAST_OFFICIAL_CLOSE: outside a session, at each instrument's latest official
-// close, a break day's close included. `account_state.session_date` is
-// defined separately and does not date that close.
+// close, a break day's close included. `account_state.session_date` is the
+// trading date of that close.
 //
 // This enum is closed: adding a value later is a breaking change.
 enum ValuationBasis {

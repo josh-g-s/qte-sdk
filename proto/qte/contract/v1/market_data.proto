@@ -1,6 +1,6 @@
 // Outbound market data.
 //
-// **Version:** 1.10
+// **Version:** 1.11
 //
 // Message types on the envelope `type` field: `book`, `trades`, `mark`,
 // `session_state`, `official_close`. One feed for everyone (SPEC 4.3): the
@@ -8,8 +8,10 @@
 // `book`, `trades` and `session_state`; `mark` is published on its own
 // one-second grid (SPEC 4.3, SPEC 7.1). Engine state (the flow accumulators,
 // the impact offset, the carry, the Tier-M state) is not published and has
-// no field here (SPEC 6.1, SPEC 9.3.3, SPEC 9.3.5). Every `timestamp`
-// field's wire resolution and representation is not yet specified.
+// no field here (SPEC 6.1, SPEC 9.3.3, SPEC 9.3.5). Every `timestamp` field
+// is a signed 64-bit count of milliseconds since the Unix epoch, UTC (SPEC
+// 8.1, SPEC 9.2, SPEC 13.1), carried on the wire as a decimal string like
+// every 64-bit field.
 //
 // Outside a session, everything but order entry is served: a `subscribe`
 // gets a `session_state` with `state = CLOSED` and, per instrument, an
