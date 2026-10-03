@@ -7,7 +7,8 @@ Set QTE_URL and QTE_TOKEN first (see docs/quickstart.md), then:
 The example is the runnable part of docs/out-of-hours.md. It opens a session, waits for
 the exchange's calendar and prints the last session that has closed and the next one to
 open, then subscribes to one instrument and prints the market session state the exchange
-answers with. It stops after --seconds.
+answers with and, when that state names it, the wait until the next session opens. It
+stops after --seconds.
 
 Outside a session the state is CLOSED. The contract also provides each instrument's
 official close after it, but the exchange does not send that yet, so the example says so
@@ -29,7 +30,14 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 from qte_sdk.calendar import Calendar, next_session
 from qte_sdk.connection import SessionRejected
 from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
-from qte_sdk.market_data import OfficialClose, Reject, SessionState, market_data, subscribe
+from qte_sdk.market_data import (
+    OfficialClose,
+    Reject,
+    SessionState,
+    market_data,
+    subscribe,
+    until_next_open,
+)
 from qte_sdk.orders import reason_code_name
 from qte_sdk.session import MissingToken, Session, SessionNotAcknowledged, open_session
 from qte_sdk.units import to_decimal
@@ -63,6 +71,19 @@ def show_calendar(calendar: Calendar | None, now: int) -> None:
     # The session date is what the history service asks for.
     print("last closed session:", closed[-1].session_date if closed else "none this term")
     print("next session:", upcoming.session_date if upcoming else "none left this term")
+
+
+def show_next_open(state: SessionState, now: int) -> None:
+    """Print the next session the closed-market reply names, if it names one.
+
+    `now` is the exchange's current time, never the reply's `grid_time`: outside a session
+    that equals `close_time`, which can be in the future."""
+    wait = until_next_open(state, now)
+    if wait is None:
+        print("next open: not given in the session state (the calendar has the schedule)")
+    else:
+        # In the exchange's time units, whose resolution the contract has not fixed.
+        print(f"next open: session {state.next_session_date}, in {wait} exchange time units")
 
 
 @contextlib.asynccontextmanager
@@ -101,6 +122,7 @@ async def run(url: str, args: argparse.Namespace) -> int:
                                 print("a session is under way: run this outside one")
                                 return 0
                             seen_closed = True
+                            show_next_open(item, session.info.server_time)
                         elif isinstance(item, OfficialClose):
                             closes += 1
                             close = to_decimal(item.value)

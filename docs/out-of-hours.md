@@ -1,6 +1,6 @@
 # Using the SDK outside session hours
 
-**Version:** 0.1
+**Version:** 0.2
 
 You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 
@@ -35,7 +35,7 @@ asyncio.run(main())
 
 ## 2. Read the calendar
 
-Right after it acknowledges you, at any hour, the exchange sends its calendar: every session of the term with its open and close times. It is the only place to learn when the market trades, so never hard-code trading days or hours ([Reading the calendar](quickstart.md#reading-the-calendar)).
+Right after it acknowledges you, at any hour, the exchange sends its calendar: every session of the term with its open and close times. It is the only source of the term's full schedule, so never hard-code trading days or hours ([Reading the calendar](quickstart.md#reading-the-calendar)).
 
 ```python
 from qte_sdk.calendar import next_session
@@ -63,7 +63,13 @@ Outside a session a subscribe is accepted and answered once, with a `SessionStat
 
 ```python
 from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
-from qte_sdk.market_data import OfficialClose, SessionState, market_data, subscribe
+from qte_sdk.market_data import (
+    OfficialClose,
+    SessionState,
+    market_data,
+    subscribe,
+    until_next_open,
+)
 from qte_sdk.units import to_decimal
 
 await subscribe(session, ["AAPL"])
@@ -72,11 +78,22 @@ try:
         async for item in market_data(session):
             if isinstance(item, SessionState):
                 print("market session:", MarketSessionPhase.Name(item.state))
+                if item.HasField("next_session_date"):
+                    wait = until_next_open(item, session.info.server_time)
+                    print("next session:", item.next_session_date, "opens in", wait)
             elif isinstance(item, OfficialClose):
                 print("official close:", item.instrument, to_decimal(item.value))
 except TimeoutError:
     pass
 ```
+
+On this out-of-hours reply the `SessionState` fields mean:
+
+- `session_date`, `open_time` and `close_time` name the most recent session that has closed or, before the running exchange process has closed any session, the next scheduled one.
+- `grid_time` is not a publication time: it equals `close_time`, so it can be in the future. Never use it as "now".
+- `next_session_date`, `next_open_time` and `next_close_time` name the next scheduled session. They are set together, only on this reply, and are absent when the term has no later session, or from an exchange that predates them, so your code must work without them.
+
+For "now", use the exchange's current time: `session.info.server_time`, the time your session was acknowledged, or a later exchange timestamp. `until_next_open(state, now)` gives `next_open_time - now` in the exchange's time units, or `None` when the next session is not named. These fields are a convenience; the calendar from step 2 is still the full schedule.
 
 The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`. **The exchange does not send it yet.** Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. Write your code so it works with or without one.
 

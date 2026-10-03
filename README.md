@@ -102,7 +102,7 @@ The main modules, each documented in its docstrings:
 - **Prices are whole numbers of micro-dollars** ($199.97 is `199_970_000`). Convert with `qte_sdk.units`; never use `float` for prices.
 - **There is no order ID.** Your team's orders are addressed by instrument, side and price, and your team holds at most one resting order at each price.
 - **One market-data feed for everyone.** Market data is published on a fixed 100 ms grid: during a session the market state at every grid point, and an instrument's book only when it has changed, so keep the last book you received for each instrument.
-- **Not every team sends orders.** Teams on the trading arms send orders; an order from a team without market access is rejected with a reason code that says so.
+- **Not every team sends orders.** Teams on the trading arms and Execution teams send orders; an order from a team without market access is rejected with a reason code that says so.
 
 ## Status
 

@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.8
+**Version:** 0.9
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -99,7 +99,7 @@ Two rules about sessions:
 
 ### Reading the calendar
 
-Right after it acknowledges your session, at any hour, the exchange sends a `calendar` message: every session of the term with its `open_time` and `close_time` (`early_close` marks the day that closes early), the named holidays inside the term, and the term's first and last dates. It is the only place to learn when the market trades. Never hard-code trading days, holidays or hours.
+Right after it acknowledges your session, at any hour, the exchange sends a `calendar` message: every session of the term with its `open_time` and `close_time` (`early_close` marks the day that closes early), the named holidays inside the term, and the term's first and last dates. It is the only source of the term's full schedule; outside a session, the `SessionState` that answers a subscribe also names the next open and close (step 4). Never hard-code trading days, holidays or hours.
 
 `open_session` does not wait for the calendar. `session.calendar` is `None` until it arrives, and is set as you iterate the session. To wait for it first:
 
@@ -268,7 +268,7 @@ except TimeoutError:
     print("no final outcome within 10 seconds: check your orders")
 ```
 
-Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it. An `order_cancelled` carries it exactly when its `reason_code` is `CANCEL_REQUEST` (your cancel), `MASS_CANCEL` (your mass cancel) or `AMEND_CUT` (your amend cut the order to nothing), and echoes the `request_ref` of that message. This rule may still be refined, so keep a fallback: when `request_ref` is missing, match the cancellation by its strategy, instrument, side and price, as `examples/quote_both_sides.py` does. Match on `request_ref` with `request_ref_of`.
+Every send returns the `request_ref` it put on the message. The `accepted` or `reject` that answers the message echoes it. An `order_cancelled` is meant to carry it when its `reason_code` is `CANCEL_REQUEST` (your cancel), `MASS_CANCEL` (your mass cancel) or `AMEND_CUT` (your amend cut the order to nothing), echoing the `request_ref` of that message. These rules are provisional: the contract has not specified them yet, so your program must not rely on `request_ref` being present, or absent, for any reason code. Keep a fallback: when `request_ref` is missing, match the cancellation by its strategy, instrument, side and price, as `examples/quote_both_sides.py` does. Match on `request_ref` with `request_ref_of`.
 
 An amend changes the orders at one level: `send_amend(session, instrument=..., side=..., price=..., new_size=...)`. `new_size` is the new total remaining size, not an amount to add. `send_mass_cancel(session)` cancels **every order your team has on the exchange**, including those of your teammates' strategies.
 
@@ -381,11 +381,13 @@ Each example reads `QTE_URL` and `QTE_TOKEN` from the environment, runs for a bo
 | `examples/print_book.py` | Connect, subscribe and print the book, trades, mark and market session state, or the official close outside a session. Sends no orders. Stops after `--seconds` or `--max-messages`. |
 | `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Keeps the latest book with `LatestBooks` and acts on it after each order event and on its own timer, not only when a new book arrives, since the exchange publishes a book only when it changes. Cancels its own orders when `--seconds` are up. |
 | `examples/take_liquidity.py` | Send one market order once the latest book shows the side it trades against, and report its fills. Sends at most one order and never retries. Stops when the order is finished or after `--seconds`. |
+| `examples/out_of_hours.py` | Outside a session: read the calendar, subscribe, and print the closed market's session state and the wait until the next open. Sends no orders, and stops at once if a session is under way. The runnable part of [Using the SDK outside session hours](out-of-hours.md). Stops after `--seconds`. |
 
 ```sh
 python examples/print_book.py --instrument AAPL --seconds 10
 python examples/quote_both_sides.py --instrument AAPL --strat-id my-strategy --seconds 30
 python examples/take_liquidity.py --instrument AAPL --strat-id my-strategy --side buy --size 1
+python examples/out_of_hours.py --instrument AAPL
 ```
 
 The examples are for learning the SDK, not strategies: they make no attempt to make money.
