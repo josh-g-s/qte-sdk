@@ -23,14 +23,27 @@ from qte_sdk.contract.v1.order_events_pb2 import ObligationState, Reject
 from qte_sdk.contract.v1.session_pb2 import AccountQuery
 from qte_sdk.orders import is_order_event, reason_code_name, request_ref_of
 
-SUMMARY = {
-    "equity": "1000500000",
-    "cash": "800000000",
-    "previous_close_equity": "1000000000",
-    "daily_pnl": "500000",
-    "loss_level": "LOSS_LEVEL_NONE",
-    "timestamp": "42",
-}
+PREVIOUS_CLOSE_EQUITY = 12_000_000_000
+
+
+def summary_for(cash: int, positions: list[dict], timestamp: int) -> dict:
+    """An account summary consistent with its reply: equity is cash plus each position at
+    its price, and the timestamp is the reply's `as_of`."""
+    equity = cash + sum(int(p["quantity"]) * int(p["price"]) for p in positions)
+    return {
+        "equity": str(equity),
+        "cash": str(cash),
+        "previous_close_equity": str(PREVIOUS_CLOSE_EQUITY),
+        "daily_pnl": str(equity - PREVIOUS_CLOSE_EQUITY),
+        "loss_level": "LOSS_LEVEL_NONE",
+        "timestamp": str(timestamp),
+    }
+
+
+TWO_POSITIONS = [
+    {"instrument": "AAPL", "quantity": "100", "price": "199970000"},
+    {"instrument": "MSFT", "quantity": "-20", "price": "410250000"},
+]
 
 
 # Sending.
@@ -68,11 +81,8 @@ async def test_reply_with_summary_and_positions_decodes_typed():
             "account_state",
             {
                 "request_ref": "acct-1",
-                "summary": SUMMARY,
-                "positions": [
-                    {"instrument": "AAPL", "quantity": "100", "price": "199970000"},
-                    {"instrument": "MSFT", "quantity": "-20", "price": "410250000"},
-                ],
+                "summary": summary_for(800_000_000, TWO_POSITIONS, 42),
+                "positions": TWO_POSITIONS,
                 "valuation_basis": "LIVE_MARK",
                 "session_date": "2026-10-02",
                 "as_of": "42",
@@ -87,10 +97,10 @@ async def test_reply_with_summary_and_positions_decodes_typed():
     assert state == AccountState(
         request_ref="acct-1",
         summary=AccountSummary(
-            equity=1_000_500_000,
+            equity=12_592_000_000,
             cash=800_000_000,
-            previous_close_equity=1_000_000_000,
-            daily_pnl=500_000,
+            previous_close_equity=12_000_000_000,
+            daily_pnl=592_000_000,
             loss_level=LOSS_LEVEL_NONE,
             timestamp=42,
         ),
@@ -109,8 +119,8 @@ async def test_reply_with_summary_and_positions_decodes_typed():
 
 async def test_reply_summary_keeps_limits_and_optional_fields():
     summary = {
-        **SUMMARY,
-        "loss_warning_amount": "0",
+        **summary_for(800_000_000, [], 42),
+        "loss_warning_amount": "30000000",
         "loss_halt_amount": "50000000",
         "limits": [
             {"kind": "LIMIT_GROSS", "used": "300000000", "cap": "2000000000"},
@@ -128,12 +138,14 @@ async def test_reply_summary_keeps_limits_and_optional_fields():
                 "summary": summary,
                 "valuation_basis": "LIVE_MARK",
                 "session_date": "2026-10-02",
+                "as_of": "42",
+                "cash": "800000000",
             },
             1,
         )
     )
     got = event.message.summary
-    assert got.HasField("loss_warning_amount") and got.loss_warning_amount == 0
+    assert got.loss_warning_amount == 30_000_000
     assert got.loss_halt_amount == 50_000_000
     assert [(lim.kind, lim.HasField("scope"), lim.used) for lim in got.limits] == [
         (LIMIT_GROSS, False, 300_000_000),
@@ -190,12 +202,21 @@ async def test_reply_with_zero_cash_still_has_cash():
     [event] = await received(
         frame(
             "account_state",
-            {"request_ref": "acct-7", "valuation_basis": "LIVE_MARK", "as_of": "1", "cash": "0"},
+            {
+                "request_ref": "acct-7",
+                "valuation_basis": "LIVE_MARK",
+                "session_date": "2026-10-02",
+                "as_of": "1",
+                "cash": "0",
+            },
             1,
         )
     )
     assert event.message.HasField("cash")
     assert event.message.cash == 0
+
+
+CARRIED = [{"instrument": "MSFT", "quantity": "50", "price": "410250000"}]
 
 
 async def test_reply_between_terms_carries_positions_valued_at_the_last_close():
@@ -204,8 +225,8 @@ async def test_reply_between_terms_carries_positions_valued_at_the_last_close():
             "account_state",
             {
                 "request_ref": "acct-8",
-                "summary": SUMMARY,
-                "positions": [{"instrument": "MSFT", "quantity": "50", "price": "410250000"}],
+                "summary": summary_for(800_000_000, CARRIED, 9),
+                "positions": CARRIED,
                 "valuation_basis": "LAST_OFFICIAL_CLOSE",
                 "session_date": "2026-06-30",
                 "as_of": "9",
@@ -307,14 +328,16 @@ async def test_refused_query_is_a_reject_echoing_its_request_ref(reason):
 
 
 async def test_account_summary_and_obligation_state_decode_typed():
+    # The contract still lists `account_summary` as a message type, so one that arrives on
+    # its own decodes typed, though the exchange sends a summary only inside account_state.
     events = await received(
-        frame("account_summary", SUMMARY, 1),
+        frame("account_summary", summary_for(800_000_000, [], 42), 1),
         frame("obligation_state", {"entries": [{"instrument": "AAPL"}], "timestamp": "3"}, 2),
     )
     assert all(isinstance(e, Received) for e in events)
     summary, obligations = (e.message for e in events)
     assert isinstance(summary, AccountSummary)
-    assert summary.equity == 1_000_500_000
+    assert summary.equity == 800_000_000
     assert not summary.HasField("loss_halt_amount")
     assert not summary.HasField("cure_deadline")
     assert isinstance(obligations, ObligationState)
