@@ -354,7 +354,7 @@ async def test_a_reconnect_to_an_exchange_without_a_calendar_has_none():
         rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
         async with rs, asyncio.timeout(5):
             async for event in rs:
-                if isinstance(event, Received):
+                if isinstance(event, Received) and event.type != "resume_ack":
                     calendars.append(rs.calendar)
                     if event.type == "book":
                         break

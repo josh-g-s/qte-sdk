@@ -5,18 +5,44 @@
         async for event in session:
             match event:
                 case Connected():
-                    ...  # a session is up: authenticated, and subscribed again
+                    ...  # a session is up: authenticated, resumed, and subscribed again
                 case Disconnected():
-                    ...  # data uncertainty: anything may have happened meanwhile
+                    ...  # data uncertainty until the resume catches up
+                case ResumeComplete():
+                    ...  # every private report you missed has now been delivered
                 case Retrying():
                     ...  # waiting `event.delay` seconds before the next attempt
                 case _:
                     ...  # a connection event, as `Session` delivers it
 
-The exchange does not yet offer a way to resume a session, so a dropped connection is not
-resumed: the next connection is a brand-new session. Fills, order events and market data
-sent while the connection was down are not recovered, and nothing tells you what they
-were. Until the exchange can resume a session, a reconnect cannot fill that gap.
+Every session it opens, the first included, is resumed (see `Session.resume`): it asks the
+exchange for the team's private order reports after the last one it delivered. Private
+reports are the `accepted`, `reject` (one sent once the order delay is over), `execution`,
+`order_cancelled`, `order_state` and `risk_notice` messages that carry a `report_seq`. The
+exchange either replays the ones you missed, exactly as first sent, or, when it no longer
+holds them all, sends a snapshot of the team's resting orders instead. The first session
+asks from 0, so it always gets the snapshot, which loads the resting view. The resting
+view reads incomplete from each `Connected` until that resume's `ResumeComplete`.
+
+Report numbers start again each term, so the last report number is only sent in the term
+it was counted in. The term is the one the calendar names (`term_start` and `term_end`).
+The exchange sends the calendar straight after `session_ack`, so when there is a report
+number to carry over, the new session first waits for it, for at most `ack_timeout` or
+`qte_sdk.session.DEFAULT_CALENDAR_TIMEOUT` seconds, whichever is less, keeping whatever
+else it reads meanwhile for delivery. If the term has changed, or either term is unknown,
+the session asks from 0 instead and gets a snapshot.
+
+With `resume=False` the report number is carried over too, so that a report missed while
+disconnected is noticed (see below). It is forgotten when the new session's calendar names
+a different term from the one it was counted in, so the new term's first reports are not
+dropped as duplicates of the old term's. The session waits for the calendar as above, but
+only when the term the number was counted in is known; if either term is unknown, the
+number is kept. A calendar that arrives only after the wait still has the number
+forgotten, if it names a different term, before any later report is counted.
+
+Market data sent while the connection was down is not recovered: the new session
+subscribes again and receives the books from then on. Nor are messages that carry no
+`report_seq`, such as a `reject` sent as soon as an order arrives.
 
 What happens on a disconnect, in this order:
 
@@ -25,9 +51,36 @@ What happens on a disconnect, in this order:
    positions, resting orders and the book may all have changed.
 2. After a backoff delay (see `Backoff`), a new connection is opened. Its sequence tracking
    starts afresh, so the new session's numbering is not reported as a gap.
-3. The new connection authenticates with the same token and, once the exchange acknowledges
-   the session, subscribes again to every instrument this session is subscribed to.
-4. A `Connected` event is delivered, with `reconnected=True`.
+3. The new connection authenticates with the same token. Once the exchange acknowledges the
+   session, it checks the term against the calendar (see above), sends `resume` with
+   `last_report_seq` and waits for the exchange's `resume_ack`, then subscribes again to
+   every instrument this session is subscribed to.
+4. A `Connected` event is delivered, with `reconnected=True` and the `resume_ack` as
+   `resume`.
+5. The `resume_ack` follows as an event, then the replayed reports or the `order_snapshot`
+   events, then `ResumeComplete`, then the reports that arrived meanwhile, in order, mixed
+   with market data as it arrives. After a full replay the resting view is complete
+   again, unless something other than the disconnect made it uncertain; after a snapshot
+   it holds exactly the snapshot's orders and is complete.
+
+A report the exchange sends twice, as a replay of one already delivered, is dropped. If a
+report number is skipped, a `ReportGap` is delivered (see `Session`).
+
+Waiting for `resume_ack` is bounded by `ack_timeout`, like the wait for `session_ack`; if
+it does not arrive in time the attempt fails and is retried. An exchange that does not
+serve `resume` answers it with a `reject`, either naming `RESUME` or, from an exchange that
+does not know the message, naming no request type. The session then goes on without a
+resume, as sessions did before the exchange offered it: `Connected.resume` is None, the
+`reject` is delivered as an event, private reports sent while disconnected are not
+recovered, and the resting view stays incomplete after a reconnect. Each new session asks
+again. Pass `resume=False` not to ask at all.
+
+Each connection presumes its link dead after `liveness_timeout` seconds with no message
+from the exchange (see `qte_sdk.connection.DEFAULT_LIVENESS_TIMEOUT`; pass
+`liveness_timeout` to change it). The check starts with the first heartbeat on the
+connection, so it never drops a link to an exchange that does not send heartbeats. The
+heartbeats are absorbed, and a quiet market does not trip it. A dead link is a disconnect
+like any other.
 
 A session the exchange acknowledged but that failed before it could be delivered as
 `Connected` (for example because its subscription could not be sent) is reported with a
@@ -38,17 +91,19 @@ A session the exchange acknowledged but that failed before it could be delivered
 incomplete on it.
 
 Nothing sent before a disconnect is sent again. An order in flight when the connection
-dropped may or may not have reached the exchange, and the SDK never repeats it. While no
-session is up, `send` raises `NotConnected` rather than queueing the message. The resting
-view stays incomplete after a reconnect: no event yet reports the orders already resting
-when a session starts.
+dropped may or may not have reached the exchange, and the SDK never repeats it. If it did
+and the exchange replays, the replayed reports say what became of it; a snapshot shows only
+whether it rests now. While no session is up, `send` raises
+`NotConnected` rather than queueing the message.
 
 Which failures are retried (`is_retryable`): a dropped or closed connection, a connection
 that could not be opened (`OSError` or a timeout), a handshake answered with a malformed
 response or with HTTP 5xx, 408 or 429, and a session that closed before it was
-acknowledged. Anything else stops the session and is raised from the iteration, because
-trying again would give the same answer: every `SessionRejected` (for example a token the
-exchange does not accept), including `ContractVersionMismatch`; `AuthNotSent`, when the
+acknowledged or before its resume was answered, and a link presumed dead
+(`LivenessTimeout`). Anything else stops the session and is raised from the iteration,
+because trying again would give the same answer: every `SessionRejected` (for example a
+token the exchange does not accept), including `ContractVersionMismatch`; `AuthNotSent`,
+when the
 `auth` message itself could not be encoded or sent; a certificate that failed
 verification; a handshake refused with any other status, which usually means a wrong URL,
 or whose negotiation failed; and any error in the SDK or your own code.
@@ -69,22 +124,30 @@ from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import (
+    Connected,
     DataUncertain,
     Disconnected,
     Event,
     HandshakeFailed,
+    LivenessTimeout,
     Received,
+    ReportGap,
+    ResumeComplete,
     SessionRejected,
 )
-from qte_sdk.contract.v1.session_pb2 import Calendar, Subscribe, Unsubscribe
+from qte_sdk.contract.v1.session_pb2 import Calendar, ResumeAck, Subscribe, Unsubscribe
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     DEFAULT_ACK_TIMEOUT,
+    DEFAULT_CALENDAR_TIMEOUT,
     AuthNotSent,
+    ResumeNotAcknowledged,
+    ResumeRejected,
     Session,
     SessionInfo,
     SessionNotAcknowledged,
     _finish_closing,
+    _Reports,
     _Secret,
     _wait_out,
     _without_token,
@@ -99,9 +162,14 @@ __all__ = [
     "Connected",
     "DataUncertain",
     "Disconnected",
+    "LivenessTimeout",
     "NotConnected",
     "ReconnectEvent",
     "ReconnectingSession",
+    "ReportGap",
+    "ResumeComplete",
+    "ResumeNotAcknowledged",
+    "ResumeRejected",
     "Retrying",
     "is_retryable",
 ]
@@ -148,19 +216,6 @@ DEFAULT_BACKOFF = Backoff()
 
 
 @dataclass(frozen=True)
-class Connected:
-    """A session is up: authenticated, acknowledged, and subscribed to `instruments`.
-
-    `reconnected` is False for the first session and True for every later one. After a
-    reconnect, what happened while disconnected is unknown; see `Disconnected`.
-    """
-
-    info: SessionInfo
-    instruments: tuple[str, ...]
-    reconnected: bool
-
-
-@dataclass(frozen=True)
 class Retrying:
     """The next connection attempt, number `attempt`, starts after `delay` seconds.
 
@@ -186,8 +241,9 @@ def is_retryable(error: BaseException) -> bool:
 
     True for a dropped connection, a connection that could not be opened or timed out
     (other than a certificate that failed verification), a handshake answered with a
-    malformed response or with HTTP 5xx, 408 or 429, and a session that closed before it
-    was acknowledged. False for everything else, including every `SessionRejected` and
+    malformed response or with HTTP 5xx, 408 or 429, a session that closed before it was
+    acknowledged or before its resume was answered, and a link presumed dead. False for
+    everything else, including every `SessionRejected` and
     `AuthNotSent`.
     """
     if isinstance(error, SessionRejected | AuthNotSent | ssl.SSLCertVerificationError):
@@ -214,10 +270,15 @@ class ReconnectingSession:
     to `QTE_TOKEN`, `QTE_TOKEN_FILE` and then `.env` (see `qte_sdk.session.resolve_url` and
     `qte_sdk.session.resolve_token`), and are resolved once, here.
     `resting`, if given, is updated from every event and marked incomplete on every
-    disconnect. `backoff=None` turns reconnecting off: the first failure to connect is
-    raised, and iteration ends after the first `Disconnected`. `sleep` and `rng` wait and draw the
-    jitter; replace them in tests. `ack_timeout` and `connection_options` are passed to
-    `open_session` for every connection, so `ack_timeout` bounds each attempt to open one.
+    disconnect; the resume that follows makes it complete again (see the module). `resume`
+    turns resuming on (the default) or off; either way, a new session may first wait
+    briefly for the exchange's calendar, to check the term (see the module). `backoff=None`
+    turns reconnecting off: the first failure to connect is raised, and iteration ends
+    after the first `Disconnected`. `sleep` and `rng` wait and draw the jitter; replace
+    them in tests. `ack_timeout` and `connection_options` are passed to `open_session` for
+    every connection, so `ack_timeout` bounds each attempt to open one; it also bounds each
+    wait for `resume_ack`, and the wait for the calendar. `connection_options` include
+    `liveness_timeout` (see `qte_sdk.connection.Connection`).
 
     `calendar` is the session calendar the exchange sent on the current session; see
     `qte_sdk.calendar`.
@@ -233,6 +294,7 @@ class ReconnectingSession:
         *,
         instruments: Iterable[str] = (),
         resting: RestingOrders | None = None,
+        resume: bool = True,
         backoff: Backoff | None = DEFAULT_BACKOFF,
         ack_timeout: float | None = DEFAULT_ACK_TIMEOUT,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
@@ -257,6 +319,11 @@ class ReconnectingSession:
         self._closed = False
         self._pending: asyncio.Future[Any] | None = None
         self._shutdown: asyncio.Future[None] | None = None
+        self._resume = resume
+        # The report cursor, carried from each session to the next.
+        self._reports = _Reports()
+        # The term the cursor was counted in, as the calendar names it, or None if unknown.
+        self._reports_term: tuple[str, str] | None = None
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "connected" if self._up else "not connected"
@@ -277,14 +344,25 @@ class ReconnectingSession:
         """The latest `calendar` message the exchange sent on the current session, or None
         if none has arrived on it yet.
 
-        The exchange sends one right after it acknowledges each session, so it usually
-        arrives, as an ordinary event too, just after each `Connected`. Each new session
-        starts with None here: the calendar's `next_open` was worked out from the
-        exchange's clock when the earlier session opened, so it is not carried over. An
-        exchange that predates the calendar message never sends one, and then this stays
+        The exchange sends one right after it acknowledges each session. It is delivered
+        as an ordinary event too, after `Connected`, but may already be set when
+        `Connected` arrives, since the session reads ahead while it waits for the calendar
+        or for `resume_ack`.
+        Each new session starts with None here until its calendar is read: the calendar's
+        `next_open` was worked out from the exchange's clock when the earlier session
+        opened, so it is not carried over. An exchange that predates the calendar message
+        never sends one, and then this stays
         None.
         """
         return self._calendar
+
+    @property
+    def last_report_seq(self) -> int | None:
+        """The `report_seq` up to which every private report has been read with no gap,
+        across all sessions so far, or None before the first. The next session resumes
+        from it if its calendar names the same term; report numbers start again each term,
+        so in a new term it resumes from 0 instead."""
+        return self._reports.cursor
 
     @property
     def instruments(self) -> tuple[str, ...]:
@@ -350,7 +428,7 @@ class ReconnectingSession:
                             return
                     if self._closed:
                         return
-                    session, failure, acknowledged = await self._attempt()
+                    session, failure, acknowledged, resumed = await self._attempt()
                     if self._closed:
                         return
                     if failure is not None:
@@ -359,9 +437,10 @@ class ReconnectingSession:
                         if acknowledged:
                             # The session was up, if only briefly: whatever it had received
                             # is lost, so this is a disconnect like any other.
+                            disconnected = Disconnected(failure)
                             if self.resting is not None:
-                                self.resting.mark_incomplete()
-                            yield Disconnected(failure)
+                                self.resting.apply(disconnected)
+                            yield disconnected
                             if self._closed:
                                 return
                         if self._gives_up(failure, failures):
@@ -370,8 +449,14 @@ class ReconnectingSession:
                 assert session is not None
                 self._info = session.info
                 self._calendar = session.calendar
+                if self._calendar is not None:
+                    self._enter_term(_term_of(self._calendar), strict=False)
                 self._up = True
-                yield Connected(session.info, self.instruments, reconnected)
+                connected = Connected(session.info, self.instruments, reconnected, resumed)
+                if self.resting is not None:
+                    # With a resume, the view reads incomplete until its ResumeComplete.
+                    self.resting.apply(connected)
+                yield connected
                 reconnected = True
 
                 failure = None
@@ -382,6 +467,9 @@ class ReconnectingSession:
                         if isinstance(event, Received) and event.type == "calendar":
                             assert isinstance(event.message, Calendar)
                             self._calendar = event.message
+                            # Before any later report is counted: a calendar that arrived
+                            # too late for the attempt to check may name a new term.
+                            self._enter_term(_term_of(event.message), strict=False)
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event
@@ -389,13 +477,14 @@ class ReconnectingSession:
                     failure = self._safe(error)
                 # Uncertainty is flagged before anything else, the close included.
                 self._up = False
+                disconnected = Disconnected(failure)
                 if self.resting is not None:
-                    self.resting.mark_incomplete()
+                    self.resting.apply(disconnected)
                 await _close(session)
                 self._session = None
                 if self._closed:
                     return
-                yield Disconnected(failure)
+                yield disconnected
                 if self._closed:
                     return
                 if failure is not None and not is_retryable(failure):
@@ -456,13 +545,20 @@ class ReconnectingSession:
     async def __aexit__(self, *exc_info: object) -> None:
         await self.close()
 
-    async def _attempt(self) -> tuple[Session | None, Exception | None, bool]:
-        """One connection attempt: open a session, then subscribe again. Returns the session,
-        or the reason it failed (neither if the session was closed meanwhile), and whether
-        the exchange acknowledged a session, whose events are lost if it then failed."""
+    async def _attempt(
+        self,
+    ) -> tuple[Session | None, Exception | None, bool, ResumeAck | None]:
+        """One connection attempt: open a session, resume it, then subscribe again. Returns
+        the session, or the reason it failed (neither if the session was closed meanwhile),
+        whether the exchange acknowledged a session, whose events are lost if it then
+        failed, and the `resume_ack`, if any."""
         session: Session | None = None
         failure: Exception | None = None
         acknowledged = False
+        resumed: ResumeAck | None = None
+        # Events a failed attempt read ahead are never delivered, so the cursor goes back.
+        saved = self._reports.saved()
+        saved_term = self._reports_term
         try:
             opened = await self._unless_closed(
                 open_session(
@@ -473,21 +569,77 @@ class ReconnectingSession:
                 )
             )
             if opened is _CLOSED:
-                return None, None, False
+                return None, None, False, None
             session = opened
             acknowledged = True
-            # Held here at once, so close() reaches it even while it subscribes.
+            # Held here at once, so close() reaches it even while it resumes or subscribes.
             self._session = session
+            # The cursor carries over, so a report missed while disconnected is noticed
+            # even without a resume.
+            self._reports.restore(saved)
+            session._reports = self._reports
+            if not (self._reports.cursor or self._reports.above):
+                # Nothing is counted that another term could make wrong (a cursor of 0
+                # means the same in every term). Whatever the cursor becomes from here on,
+                # the first report read or a snapshot's as_of, is counted in this session's
+                # term, which its calendar names when it arrives.
+                self._reports_term = None
+            elif (self._resume or self._reports_term is not None) and not self._closed:
+                # report_seq starts again each term, so a cursor counted in another term
+                # would send the wrong number in `resume`, and would drop the new term's
+                # first reports as duplicates. The calendar, which the exchange sends right
+                # after session_ack, names the term. It is checked before any report of
+                # this session is counted; whatever else is read ahead while waiting for it
+                # is kept for delivery. Without a resume, the wait is pointless while the
+                # cursor's own term is unknown, since only two known terms that differ
+                # reset it then.
+                calendar = await session.wait_for_calendar(
+                    timeout=_calendar_wait(self._ack_timeout)
+                )
+                # wait_for_calendar never raises: a rejection or drop it read is raised
+                # here, before a send could hide it behind a retryable closed connection.
+                session._raise_if_failed()
+                self._enter_term(_term_of(calendar), strict=self._resume)
+            if self._resume and not self._closed:
+                resumed = None
+                try:
+                    resumed = await session.resume(
+                        self._reports.cursor or 0, timeout=self._ack_timeout
+                    )
+                except ResumeRejected:
+                    session._withhold_in_answer(self._secret)
+                    # An exchange that does not serve resume (yet): the session goes on
+                    # without it, and the reject is delivered as an event. The next session
+                    # asks again.
+                    resumed = None
             if self._instruments and not self._closed:
                 subscription = Subscribe(instruments=list(self._instruments))
                 await session.connection.send("subscribe", subscription)
         except Exception as error:
             failure = self._safe(error)
+        except BaseException:
+            # Cancelled or interrupted: what this attempt read ahead will not be delivered,
+            # so the cursor goes back. Whoever handles the cancellation closes the session.
+            self._reports.restore(saved)
+            self._reports_term = saved_term
+            raise
         if session is not None and (failure is not None or self._closed):
+            # Restored before anything else is awaited, so a cancellation cannot skip it.
+            self._reports.restore(saved)
+            self._reports_term = saved_term
+            if isinstance(failure, ConnectionClosed):
+                # A send found the connection closed. If the exchange rejected the session
+                # just before, that rejection, not the retryable close, is the error.
+                drained = await session._failure_after_close(_CLOSE_READ_TIMEOUT)
+                if drained is not None:
+                    failure = self._safe(drained)
+                # It may repeat the token, so it is not kept in this frame while the close
+                # below is awaited, where a cancellation would show it in the traceback.
+                del drained
             await _close(session)
             self._session = None
             session = None
-        return session, failure, acknowledged
+        return session, failure, acknowledged, resumed
 
     async def _unless_closed(self, awaitable: Awaitable[Any]) -> Any:
         """Await `awaitable`, or return `_CLOSED` if `close()` cuts it short.
@@ -514,6 +666,28 @@ class ReconnectingSession:
             if self._pending is task:
                 self._pending = None
 
+    def _enter_term(self, term: tuple[str, str] | None, *, strict: bool) -> None:
+        """Note that the reports read from now on are counted in `term`, the term a
+        calendar names (None if it names none).
+
+        report_seq starts again each term, so the cursor is forgotten if it was counted in
+        another term: when both terms are known and differ, or, if `strict`, when either
+        is unknown too. `strict` is for a cursor about to be sent in `resume`, where asking
+        from 0 for a snapshot is always safe; without a resume the cursor only drops
+        duplicates and notices gaps, and is kept unless it is known to be stale. A resume
+        in progress is never cut short. A cursor that is kept keeps the term it was
+        counted in, unless `term` names one."""
+        reports = self._reports
+        counted_in = self._reports_term
+        if strict:
+            stale = term is None or term != counted_in
+        else:
+            stale = term is not None and counted_in is not None and term != counted_in
+        if stale and reports.resume is None and reports.cursor is not None:
+            reports.restore((None, frozenset()))
+        if term is not None or reports.cursor is None:
+            self._reports_term = term
+
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):
             return True
@@ -530,6 +704,23 @@ class ReconnectingSession:
 
 
 _CLOSED = object()
+
+# Seconds to spend reading what a connection that a send found closed still holds. The
+# frames it received before closing are already queued, so this is only a bound.
+_CLOSE_READ_TIMEOUT = 1.0
+
+
+def _calendar_wait(ack_timeout: float | None) -> float:
+    if ack_timeout is None:
+        return DEFAULT_CALENDAR_TIMEOUT
+    return min(ack_timeout, DEFAULT_CALENDAR_TIMEOUT)
+
+
+def _term_of(calendar: Calendar | None) -> tuple[str, str] | None:
+    """The term a calendar describes, as its configured start and end dates."""
+    if calendar is None or not (calendar.term_start and calendar.term_end):
+        return None
+    return calendar.term_start, calendar.term_end
 
 
 async def _close_result(task: "asyncio.Future[Any]") -> None:

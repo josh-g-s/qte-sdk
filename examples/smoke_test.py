@@ -82,7 +82,7 @@ from websockets.exceptions import ConnectionClosed
 from qte_sdk.account import AccountState, ValuationBasis, is_account_state, send_account_query
 from qte_sdk.books import LatestBooks
 from qte_sdk.calendar import Calendar, CalendarSession, next_session, session_open_at
-from qte_sdk.connection import ContractVersionMismatch, SessionRejected, Unknown
+from qte_sdk.connection import ContractVersionMismatch, ReportGap, SessionRejected, Unknown
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     LIMIT,
@@ -445,6 +445,7 @@ class Watcher:
         self.unknown_instruments: dict[str, str] = {}
         self.refusals: list[str] = []  # subscription rejects that name no instrument
         self.gaps = 0
+        self.report_gaps = 0  # gaps in the team's private order reports
         self.undecodable = 0
         self.unknown_types: set[str] = set()
         self.account_ref: str | None = None
@@ -507,6 +508,8 @@ class Watcher:
         self.messages += 1
         if isinstance(event, SeqGap):
             self.gaps += 1
+        elif isinstance(event, ReportGap):
+            self.report_gaps += 1
         elif isinstance(event, DecodeFailed):
             self.undecodable += 1
         elif isinstance(event, Unknown):
@@ -616,6 +619,8 @@ def check_feed(report: Report, watcher: Watcher) -> None:
     problems = []
     if watcher.gaps:
         problems.append(f"{watcher.gaps} sequence gap(s): messages were missed")
+    if watcher.report_gaps:
+        problems.append(f"{watcher.report_gaps} gap(s) in your team's order reports")
     if watcher.undecodable:
         problems.append(f"{watcher.undecodable} message(s) could not be decoded")
     if watcher.failure is not None:

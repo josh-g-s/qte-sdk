@@ -58,8 +58,9 @@ An `account_state` carries:
   and summary of the reply, so do not apply its account effect again, while `accepted`,
   `reject`, `order_cancelled` and `order_state` still apply whatever their `report_seq`,
   since the reply holds no resting-order state. It is absent when the team has had no
-  private report this term, and then every report applies. This SDK does not yet
-  surface `report_seq` on the events it delivers.
+  private report this term, and then every report applies. Each event the SDK delivers
+  for such a report carries it as `report_seq`, so the comparison is yours to make; the
+  SDK does not yet apply the cut itself.
 
 Prices, cash and equity are whole numbers of micro-dollars; convert them with
 `qte_sdk.units.to_decimal`. A query the exchange refuses is answered with a `reject`
