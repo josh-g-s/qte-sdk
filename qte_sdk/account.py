@@ -29,9 +29,13 @@ An `account_state` carries:
   instrument the team holds a nonzero position in, in ascending order of instrument, and
   empty when it holds none. A position is the team's, not one strategy's;
 - `valuation_basis`, which says what `summary` and every position's `price` are valued
-  at: `LIVE_MARK` inside a session, `LAST_OFFICIAL_CLOSE` outside one;
-- `session_date`, the session the values belong to, absent only before the first session
-  of the term (check `state.HasField("session_date")`);
+  at: `LIVE_MARK` inside a session, `LAST_OFFICIAL_CLOSE` outside one. Under `LIVE_MARK`
+  an instrument with no valid mark yet in the session is still valued at its last
+  official close, so a `LIVE_MARK` price is not always a mark;
+- `session_date`, the current session inside one, or outside one the session whose close
+  the values are taken at, absent only before the first session of the term (check
+  `state.HasField("session_date")`). Outside a session, `summary.daily_pnl` is the profit
+  and loss of that session;
 - `as_of`, the exchange's timestamp of the state the reply reads;
 - `cash`, the team's cash balance, sent to every team.
 
@@ -69,8 +73,9 @@ async def send_account_query(conn: Sender, *, request_ref: str | None = None) ->
 
     The exchange answers with one `account_state` echoing the `request_ref`, or with a
     `reject` echoing it. A fresh `request_ref` is made when none is given. A given one must
-    be 1 to 32 bytes of UTF-8 without the NUL character, as for an order message, or this
-    raises `ValueError` and sends nothing.
+    be 1 to 32 bytes of UTF-8 without the NUL character, or this raises `ValueError` and
+    sends nothing. The contract has not yet specified the rules for an account query's
+    `request_ref`, so this check is the SDK applying the rule its order messages follow.
     """
     ref = _ref(request_ref)
     await conn.send("account_query", AccountQuery(request_ref=ref))

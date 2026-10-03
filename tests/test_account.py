@@ -12,7 +12,12 @@ from qte_sdk.account import (
     send_account_query,
 )
 from qte_sdk.connection import Received
-from qte_sdk.contract.v1.common_pb2 import LOSS_LEVEL_NONE, ReasonCodes
+from qte_sdk.contract.v1.common_pb2 import (
+    LIMIT_GROSS,
+    LIMIT_INSTRUMENT,
+    LOSS_LEVEL_NONE,
+    ReasonCodes,
+)
 from qte_sdk.contract.v1.order_events_pb2 import ObligationState, Reject
 from qte_sdk.contract.v1.session_pb2 import AccountQuery
 from qte_sdk.orders import is_order_event, reason_code_name, request_ref_of
@@ -101,6 +106,37 @@ async def test_reply_with_summary_and_positions_decodes_typed():
     assert state.summary.cash == state.cash
 
 
+async def test_reply_summary_keeps_limits_and_optional_fields():
+    summary = {
+        **SUMMARY,
+        "loss_warning_amount": "0",
+        "loss_halt_amount": "50000000",
+        "limits": [
+            {"kind": "LIMIT_GROSS", "used": "300000000", "cap": "2000000000"},
+            {"kind": "LIMIT_INSTRUMENT", "scope": "AAPL", "used": "0", "cap": "500000000"},
+        ],
+        "in_cure": True,
+        "cure_deadline": "900",
+        "cure_paused": False,
+    }
+    [event] = await received(
+        frame(
+            "account_state",
+            {"request_ref": "acct-5", "summary": summary, "valuation_basis": "LIVE_MARK"},
+            1,
+        )
+    )
+    got = event.message.summary
+    assert got.HasField("loss_warning_amount") and got.loss_warning_amount == 0
+    assert got.loss_halt_amount == 50_000_000
+    assert [(lim.kind, lim.HasField("scope"), lim.used) for lim in got.limits] == [
+        (LIMIT_GROSS, False, 300_000_000),
+        (LIMIT_INSTRUMENT, True, 0),
+    ]
+    assert got.in_cure and got.cure_deadline == 900
+    assert got.HasField("cure_paused") and not got.cure_paused
+
+
 async def test_reply_for_a_desk_or_the_house_has_no_summary():
     [event] = await received(
         frame(
@@ -162,5 +198,7 @@ async def test_account_summary_and_obligation_state_decode_typed():
     summary, obligations = (e.message for e in events)
     assert isinstance(summary, AccountSummary)
     assert summary.equity == 1_000_500_000
+    assert not summary.HasField("loss_halt_amount")
+    assert not summary.HasField("cure_deadline")
     assert isinstance(obligations, ObligationState)
     assert obligations.entries[0].instrument == "AAPL"

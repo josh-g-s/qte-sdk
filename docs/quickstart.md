@@ -313,13 +313,15 @@ try:
             if is_account_state(event) and event.message.request_ref == ref:
                 state = event.message
                 live = state.valuation_basis == LIVE_MARK
-                print("valued at", "the live mark" if live else "the last official close")
+                print("inside a session" if live else "outside a session")
+                if state.HasField("session_date"):
+                    print("session:", state.session_date)
                 print("cash:", to_decimal(state.cash))
                 for position in state.positions:
                     print(position.instrument, position.quantity, to_decimal(position.price))
                 if state.HasField("summary"):
                     print("equity:", to_decimal(state.summary.equity))
-                    print("today:", to_decimal(state.summary.daily_pnl))
+                    print("daily P&L:", to_decimal(state.summary.daily_pnl))
                 break
             if is_order_event(event) and event.type == "reject":
                 if request_ref_of(event.message) == ref:
@@ -330,7 +332,7 @@ except TimeoutError:
     print("no answer within 10 seconds")
 ```
 
-The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: the live mark inside a session, the last official close outside one, and `session_date` names that session. `summary` is absent for an Execution desk and the house, so check `HasField("summary")` first; `cash` is always there. Read the `qte_sdk.account` docstring for every field.
+The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session. `session_date` names the session the values belong to: the current one, or outside a session the one that last closed, whose profit and loss `daily_pnl` then shows. `summary` is absent for an Execution desk and the house, so check `HasField("summary")` first; `cash` is always there. Read the `qte_sdk.account` docstring for every field.
 
 The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
 
