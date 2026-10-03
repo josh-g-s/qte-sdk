@@ -43,7 +43,8 @@ Messages are the generated contract classes. Prices are `int` micro-dollars and 
 `int` shares, exact at any size; use `qte_sdk.units.to_decimal` for exact `Decimal`
 dollars. Each instrument's condition is the `condition` field of `Book` and of `Mark`
 (an `InstrumentCondition` value), not a separate message. Timestamps are left as the
-`int` the wire carries.
+`int` the wire carries, milliseconds since the Unix epoch in UTC; use
+`qte_sdk.units.to_datetime` for a `datetime` and `to_timedelta` for the difference of two.
 """
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
@@ -186,9 +187,9 @@ def until_next_open(state: SessionState, now: int) -> int | None:
     session; it is absent there too when the term has no later session. `now` must be an
     exchange timestamp, such as `session.info.server_time` (the time the session was
     acknowledged) or a later one, never your machine's clock:
-    the result is `state.next_open_time - now`, in the exchange's time units, whose
-    resolution the contract has not fixed. It is negative if `now` is already past that
-    open.
+    the result is `state.next_open_time - now`, in milliseconds, which
+    `qte_sdk.units.to_timedelta` turns into a `timedelta`. It is negative if `now` is
+    already past that open.
     """
     if not state.HasField("next_open_time"):
         return None

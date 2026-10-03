@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from fake_exchange import CONTRACT_VERSION, serve_local
@@ -35,6 +36,7 @@ from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
 from qte_sdk.orders import reason_code_name, send_amend, send_new
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import open_session
+from qte_sdk.units import to_timedelta
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
@@ -106,7 +108,10 @@ class FakeExchange:
         official_close: bool = True,
         calendar: dict[str, Any] | None = None,
         closed_state: dict[str, Any] | None = None,
+        server_time: int = 1,
     ) -> None:
+        # The exchange's clock in the session_ack, in milliseconds since the epoch.
+        self.server_time = server_time
         # With `closed_state`, that is the session_state answering a subscribe when closed.
         self.closed_state = closed_state
         self.book_once = book_once
@@ -148,7 +153,7 @@ class FakeExchange:
         ack = {
             "session_id": "s-1",
             "team": "team-a",
-            "server_time": "1",
+            "server_time": str(self.server_time),
             "contract_version": CONTRACT_VERSION,
             "unscored": True,
         }
@@ -555,14 +560,34 @@ async def test_print_book_prints_the_official_close_outside_a_session():
     assert "stopped after 0.5 seconds (2 messages)" in out
 
 
+# Exchange timestamps are milliseconds since the Unix epoch, UTC.
+LAST_OPEN = 1_790_947_800_000  # 2026-10-02 13:30 UTC, 09:30 in New York
+LAST_CLOSE = 1_790_971_200_000  # 2026-10-02 20:00 UTC
+NEXT_OPEN = 1_791_207_000_000  # 2026-10-05 13:30 UTC, 09:30 in New York
+NEXT_CLOSE = 1_791_230_400_000  # 2026-10-05 20:00 UTC
+SERVER_TIME = 1_791_062_220_000  # 2026-10-03 21:17 UTC, 40 h 13 min before NEXT_OPEN
+
 CALENDAR = {
-    "term_first_session": "2026-01-02",
-    "term_last_session": "2026-01-05",
+    "term_first_session": "2026-10-02",
+    "term_last_session": "2026-10-05",
     "sessions": [
-        {"session_date": "2026-01-02", "open_time": "-20", "close_time": "0"},
-        {"session_date": "2026-01-05", "open_time": "100", "close_time": "200"},
+        {"session_date": "2026-10-02", "open_time": str(LAST_OPEN), "close_time": str(LAST_CLOSE)},
+        {"session_date": "2026-10-05", "open_time": str(NEXT_OPEN), "close_time": str(NEXT_CLOSE)},
     ],
 }
+
+
+def new_york_loads() -> bool:
+    """Whether Python finds New York's time zone here, as the example's process will."""
+    try:
+        ZoneInfo("America/New_York")
+    except ZoneInfoNotFoundError:
+        return False
+    return True
+
+
+# How the example shows NEXT_OPEN, with New York time where the time zone data is present.
+NEXT_OPEN_SHOWN = "2026-10-05 13:30 UTC" + (" (09:30 New York)" if new_york_loads() else "")
 
 
 async def test_out_of_hours_shows_the_calendar_and_the_closed_market_with_no_close():
@@ -570,29 +595,37 @@ async def test_out_of_hours_shows_the_calendar_and_the_closed_market_with_no_clo
     # names the last closed session and the next one, as the calendar does.
     state = {
         "state": "CLOSED",
-        "session_date": "2026-01-02",
-        "open_time": "-20",
-        "close_time": "0",
-        "grid_time": "0",
-        "next_session_date": "2026-01-05",
-        "next_open_time": "100",
-        "next_close_time": "200",
+        "session_date": "2026-10-02",
+        "open_time": str(LAST_OPEN),
+        "close_time": str(LAST_CLOSE),
+        "grid_time": str(LAST_CLOSE),
+        "next_session_date": "2026-10-05",
+        "next_open_time": str(NEXT_OPEN),
+        "next_close_time": str(NEXT_CLOSE),
     }
     exchange = FakeExchange(
-        closed=True, official_close=False, calendar=CALENDAR, closed_state=state
+        closed=True,
+        official_close=False,
+        calendar=CALENDAR,
+        closed_state=state,
+        server_time=SERVER_TIME,
     )
     async with serve_local(exchange) as url:
         code, out, err = await run_example(
             "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
         )
     assert code == 0, err
-    assert "last closed session: 2026-01-02" in out
-    assert "next session: 2026-01-05" in out
-    assert "market session 2026-01-02: CLOSED" in out
-    # The fake acknowledges at server_time 1 and names a next open at 100.
-    assert "next open: session 2026-01-05, in 99 exchange time units" in out
+    new_york = " (17:17 New York)" if new_york_loads() else ""
+    assert f"exchange time: 2026-10-03 21:17 UTC{new_york}" in out
+    assert "last closed session: 2026-10-02" in out
+    assert f"next session: 2026-10-05, opens {NEXT_OPEN_SHOWN}, in 40 h 13 min" in out
+    assert "market session 2026-10-02: CLOSED" in out
+    assert f"next open: {NEXT_OPEN_SHOWN}, in 40 h 13 min" in out
     assert "no official close: the exchange does not send it yet, as expected" in out
     assert exchange.types() == ["auth", "subscribe"]
+    # Real times only: no raw count of milliseconds is printed.
+    assert str(NEXT_OPEN) not in out and str(SERVER_TIME) not in out
+    assert "time units" not in out
 
 
 async def test_out_of_hours_measures_the_next_open_from_server_time_not_a_future_grid_time():
@@ -600,22 +633,92 @@ async def test_out_of_hours_measures_the_next_open_from_server_time_not_a_future
     # and its grid_time equals that session's close_time, in the future.
     state = {
         "state": "CLOSED",
-        "session_date": "2026-01-05",
-        "open_time": "100",
-        "close_time": "200",
-        "grid_time": "200",
-        "next_session_date": "2026-01-05",
-        "next_open_time": "100",
-        "next_close_time": "200",
+        "session_date": "2026-10-05",
+        "open_time": str(NEXT_OPEN),
+        "close_time": str(NEXT_CLOSE),
+        "grid_time": str(NEXT_CLOSE),
+        "next_session_date": "2026-10-05",
+        "next_open_time": str(NEXT_OPEN),
+        "next_close_time": str(NEXT_CLOSE),
     }
-    exchange = FakeExchange(closed=True, official_close=False, closed_state=state)
+    exchange = FakeExchange(
+        closed=True, official_close=False, closed_state=state, server_time=SERVER_TIME
+    )
     async with serve_local(exchange) as url:
         code, out, err = await run_example(
             "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
         )
     assert code == 0, err
-    # Measured from server_time 1, not from grid_time 200 (which would give -100).
-    assert "next open: session 2026-01-05, in 99 exchange time units" in out
+    # Measured from server_time, not from grid_time (which would give "6 h 30 min ago").
+    assert f"next open: {NEXT_OPEN_SHOWN}, in 40 h 13 min" in out
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("tzdata") is not None,
+    reason="the tzdata package gives zoneinfo New York's time zone whatever PYTHONTZPATH says",
+)
+async def test_out_of_hours_shows_utc_only_where_python_has_no_time_zone_data():
+    # An empty time zone search path, as on Windows without the tzdata package.
+    exchange = FakeExchange(
+        closed=True, official_close=False, calendar=CALENDAR, server_time=SERVER_TIME
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py",
+            url,
+            synthetic_token(),
+            "--instrument",
+            INSTRUMENT,
+            "--seconds",
+            "1",
+            PYTHONTZPATH="",
+        )
+    assert code == 0, err
+    assert "exchange time: 2026-10-03 21:17 UTC\n" in out
+    assert "next session: 2026-10-05, opens 2026-10-05 13:30 UTC, in 40 h 13 min" in out
+    assert "New York" not in out
+
+
+def test_out_of_hours_falls_back_to_utc_when_new_york_cannot_be_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    example = load_example("out_of_hours.py")
+
+    def no_zone(key: str) -> None:
+        raise ZoneInfoNotFoundError(f"No time zone found with key {key}")
+
+    monkeypatch.setattr(example, "ZoneInfo", no_zone)
+    assert example.load_new_york() is None
+    assert example.show_time(NEXT_OPEN, None) == "2026-10-05 13:30 UTC"
+
+
+def test_out_of_hours_shows_new_york_time_and_its_date_when_it_differs():
+    example = load_example("out_of_hours.py")
+    if example.NEW_YORK is None:
+        pytest.skip("no time zone data here (on Windows, install the tzdata package)")
+    assert example.show_time(NEXT_OPEN) == "2026-10-05 13:30 UTC (09:30 New York)"
+    # 02:00 UTC on 6 October is still the evening of 5 October in New York.
+    late = NEXT_OPEN + (12 * 60 + 30) * 60_000
+    assert example.show_time(late) == "2026-10-06 02:00 UTC (2026-10-05 22:00 New York)"
+    # In January New York is five hours behind UTC, not four.
+    january = 1_767_623_400_000  # 2026-01-05 14:30 UTC
+    assert example.show_time(january) == "2026-01-05 14:30 UTC (09:30 New York)"
+
+
+@pytest.mark.parametrize(
+    ("milliseconds", "shown"),
+    [
+        (NEXT_OPEN - SERVER_TIME, "in 40 h 13 min"),
+        (40 * 60_000 + 59_999, "in 40 min"),
+        (59_999, "in less than a minute"),
+        (0, "in less than a minute"),
+        (-1, "less than a minute ago"),
+        (-(2 * 60 + 5) * 60_000, "2 h 5 min ago"),
+    ],
+)
+def test_out_of_hours_shows_a_wait_as_hours_and_whole_minutes(milliseconds, shown):
+    example = load_example("out_of_hours.py")
+    assert example.show_wait(to_timedelta(milliseconds)) == shown
 
 
 async def test_out_of_hours_works_when_the_state_names_no_next_session():

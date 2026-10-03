@@ -5,11 +5,16 @@ then:
 
     python examples/out_of_hours.py --instrument AAPL
 
-The example is the runnable part of docs/out-of-hours.md. It opens a session, waits for
-the exchange's calendar and prints the last session that has closed and the next one to
-open, then subscribes to one instrument and prints the market session state the exchange
-answers with and, when that state names it, the wait until the next session opens. It
-stops after --seconds.
+The example is the runnable part of docs/out-of-hours.md. It opens a session, prints the
+exchange's time, waits for the exchange's calendar and prints the last session that has
+closed and when the next one opens, then subscribes to one instrument and prints the
+market session state the exchange answers with and, when that state names it, the wait
+until the next session opens. It stops after --seconds.
+
+Times are printed in UTC, and in New York time too where Python has time zone data. On
+Windows that needs the tzdata package (`pip install tzdata`); without it the example
+prints UTC only. New York time is only for reading: the trading hours come from the
+calendar, and "now" is the exchange's clock, never this computer's.
 
 Outside a session the state is CLOSED. The contract also provides each instrument's
 official close after it, but the exchange does not send that yet, so the example says so
@@ -25,6 +30,8 @@ import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from datetime import timedelta, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
@@ -48,12 +55,50 @@ from qte_sdk.session import (
     open_session,
     resolve_url,
 )
-from qte_sdk.units import to_decimal
+from qte_sdk.units import to_datetime, to_decimal, to_timedelta
 
 # The longest wait for the calendar, and for the connection to close at the end. Local
 # choices, not values the exchange sets.
 CALENDAR_SECONDS = 5.0
 CLOSE_SECONDS = 5.0
+
+
+def load_new_york() -> tzinfo | None:
+    """New York's time zone, to show times in, or None where Python has no time zone data
+    (on Windows without the tzdata package)."""
+    try:
+        return ZoneInfo("America/New_York")
+    except ZoneInfoNotFoundError:
+        return None
+
+
+NEW_YORK = load_new_york()
+
+
+def show_time(timestamp: int, zone: tzinfo | None = NEW_YORK) -> str:
+    """An exchange timestamp as UTC and, given a zone, New York time, to the minute."""
+    utc = to_datetime(timestamp)
+    shown = f"{utc:%Y-%m-%d %H:%M} UTC"
+    if zone is None:
+        return shown
+    local = utc.astimezone(zone)
+    # The date only if New York is on a different day from UTC.
+    local_text = f"{local:%H:%M}" if local.date() == utc.date() else f"{local:%Y-%m-%d %H:%M}"
+    return f"{shown} ({local_text} New York)"
+
+
+def show_wait(wait: timedelta) -> str:
+    """A wait as hours and whole minutes, rounded down: "in 40 h 13 min", or "... ago"
+    when the time has already passed."""
+    minutes = abs(wait) // timedelta(minutes=1)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        text = f"{hours} h {minutes} min"
+    elif minutes:
+        text = f"{minutes} min"
+    else:
+        text = "less than a minute"
+    return f"in {text}" if wait >= timedelta(0) else f"{text} ago"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -70,7 +115,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def show_calendar(calendar: Calendar | None, now: int) -> None:
-    """Print the last session that has closed and the next one to open, by date."""
+    """Print the last session that has closed and when the next one opens.
+
+    `now` is the exchange's current time, `session.info.server_time`."""
     if calendar is None:
         print("calendar: none received")
         return
@@ -78,20 +125,24 @@ def show_calendar(calendar: Calendar | None, now: int) -> None:
     upcoming = next_session(calendar, now)
     # The session date is what the history service asks for.
     print("last closed session:", closed[-1].session_date if closed else "none this term")
-    print("next session:", upcoming.session_date if upcoming else "none left this term")
+    if upcoming is None:
+        print("next session: none left this term")
+    else:
+        wait = to_timedelta(upcoming.open_time - now)
+        opens = f"opens {show_time(upcoming.open_time)}, {show_wait(wait)}"
+        print(f"next session: {upcoming.session_date}, {opens}")
 
 
 def show_next_open(state: SessionState, now: int) -> None:
-    """Print the next session the closed-market reply names, if it names one.
+    """Print when the next session opens, if the closed-market reply names one.
 
     `now` is the exchange's current time, never the reply's `grid_time`: outside a session
     that equals `close_time`, which can be in the future."""
-    wait = until_next_open(state, now)
+    wait = until_next_open(state, now)  # in milliseconds
     if wait is None:
         print("next open: not given in the session state (the calendar has the schedule)")
     else:
-        # In the exchange's time units, whose resolution the contract has not fixed.
-        print(f"next open: session {state.next_session_date}, in {wait} exchange time units")
+        print(f"next open: {show_time(state.next_open_time)}, {show_wait(to_timedelta(wait))}")
 
 
 @contextlib.asynccontextmanager
@@ -112,6 +163,8 @@ async def run(url: str, args: argparse.Namespace) -> int:
     session = await open_session(url)
     async with closing(session):
         print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
+        # The exchange's clock when it acknowledged the session: "now" from here on.
+        print(f"exchange time: {show_time(session.info.server_time)}")
         seen_closed = False
         closes = 0
         try:

@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.13
+**Version:** 0.14
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -158,23 +158,23 @@ Right after it acknowledges your session, at any hour, the exchange sends a `cal
 
 ```python
 from qte_sdk.calendar import next_close, next_open
+from qte_sdk.units import to_datetime, to_timedelta
 
 calendar = await session.wait_for_calendar(timeout=5)
 if calendar is None:
     print("no calendar from this exchange")
 else:
-    now = session.info.server_time
+    now = session.info.server_time  # the exchange's clock, not your computer's
     opens, closes = next_open(calendar, now), next_close(calendar, now)
-    # Differences of exchange timestamps, in the exchange's time units (see below).
     if opens is not None:
-        print("until the next open:", opens - now)
+        print("next open:", to_datetime(opens), "in", to_timedelta(opens - now))
     if closes is not None:
-        print("until the next close:", closes - now)
+        print("next close:", to_datetime(closes), "in", to_timedelta(closes - now))
 ```
 
 - `wait_for_calendar` keeps every event it reads while it waits, so iterating the session afterwards still delivers all of them, the calendar included. Call it from the loop that reads the session, not from a second task.
 - It returns `None` if no calendar arrives in time. An older exchange never sends one, so your program must still work without it.
-- The times are the exchange's own timestamps, like `session.info.server_time`. A timestamp is a signed 64-bit count of time units since the Unix epoch, in UTC. The contract has not fixed the resolution yet, so do not assume what one unit is. Compare and subtract timestamps only with other timestamps from the exchange, never with your computer's clock, and do not convert them with time zone rules of your own.
+- The times are the exchange's own timestamps, like `session.info.server_time`. A timestamp is a signed 64-bit count of milliseconds since the Unix epoch, in UTC, so the difference of two is a number of milliseconds. `qte_sdk.units` converts them exactly: `to_datetime` gives a timezone-aware `datetime` in UTC, `to_timedelta` turns a difference into a `timedelta`, and `to_timestamp` turns a `datetime` that has a time zone back into a timestamp. For "now", use `session.info.server_time` or a later timestamp from the exchange, never your computer's clock: the exchange's clock is the one that opens and closes the market. Show a time in New York time if you like, but take the trading hours from the calendar, never from time zone rules of your own.
 - `next_open` skips days with no session. It returns `None` once the term's last session has opened, and `next_close` returns `None` once it has closed.
 - The calendar is the schedule. Whether the market is open right now is what `SessionState` reports (step 4).
 - A `ReconnectingSession` (step 9) keeps the calendar of its current session in its `calendar` attribute, which is `None` again after each reconnect until the new session's calendar arrives.
@@ -226,7 +226,7 @@ A `Book` is the state of one instrument at the end of an interval, not a stream 
 
 **Outside a session** you can still connect and subscribe, but there is no live market. A subscribe is answered once, not on the grid, with a `SessionState` whose `state` is `CLOSED`.
 
-That one `SessionState` can also name the next scheduled session in three optional fields: `next_session_date`, `next_open_time` and `next_close_time`. They are set together, only on this out-of-hours reply, never on the `SessionState` of a running session, and are absent when the term has no later session; an exchange from before these fields does not send them either, so write code that works without them. `until_next_open(state, session.info.server_time)` from `qte_sdk.market_data` gives the time until that open in exchange time units, or `None` when the fields are absent. `server_time` is the time your session was acknowledged; pass a later exchange timestamp instead if you have one. They are a convenience: the calendar is still where to read the full schedule.
+That one `SessionState` can also name the next scheduled session in three optional fields: `next_session_date`, `next_open_time` and `next_close_time`. They are set together, only on this out-of-hours reply, never on the `SessionState` of a running session, and are absent when the term has no later session; an exchange from before these fields does not send them either, so write code that works without them. `until_next_open(state, session.info.server_time)` from `qte_sdk.market_data` gives the time until that open in milliseconds (`to_timedelta` turns it into a `timedelta`), or `None` when the fields are absent. `server_time` is the time your session was acknowledged; pass a later exchange timestamp instead if you have one. They are a convenience: the calendar is still where to read the full schedule.
 
 The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`, but **the exchange does not send it yet**. Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. When it is sent, `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. Write your code so it works with or without one. [Using the SDK outside session hours](out-of-hours.md) walks through a whole run when no session is open.
 
@@ -428,13 +428,13 @@ It is a separate service with its own address, which the course team gives you. 
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.history import HistoryClient, HistoryPending, HistoryUnavailable
 from qte_sdk.market_data import Book
-from qte_sdk.units import to_decimal
+from qte_sdk.units import to_datetime, to_decimal
 
 client = HistoryClient()  # address from QTE_HISTORY_URL, token from QTE_TOKEN
 try:
     async for item in client.fetch("2026-01-05", "AAPL", "book"):
         if isinstance(item, Book) and item.bid_levels:
-            print(item.grid_time, to_decimal(item.bid_levels[0].price))
+            print(to_datetime(item.grid_time), to_decimal(item.bid_levels[0].price))
         elif isinstance(item, (Unknown, DecodeFailed)):
             print("could not use a message:", item)
 except HistoryUnavailable:
@@ -453,9 +453,11 @@ except HistoryPending as error:
 
   ```python
   from contextlib import aclosing
+  from datetime import UTC, datetime
   from qte_sdk.books import LatestBooks
+  from qte_sdk.units import to_timestamp
 
-  t = ...  # a grid_time in the session, as an int like the wire carries
+  t = to_timestamp(datetime(2026, 1, 5, 15, 0, tzinfo=UTC))  # 15:00 UTC, 10:00 in New York
   books = LatestBooks()
   async with aclosing(client.fetch("2026-01-05", "AAPL", "book")) as items:
       async for item in items:
