@@ -482,8 +482,27 @@ async def test_a_resume_cut_off_by_the_connection_raises_not_acknowledged():
     exchange = Scripted({"answer": [], "drop": True})
     async with serve_local(exchange) as url:
         async with await open_session(url, synthetic_token()) as session:
-            with pytest.raises(ResumeNotAcknowledged):
+            with pytest.raises(ResumeNotAcknowledged) as caught:
                 await session.resume(0)
+    assert str(caught.value) == "the connection closed before resume_ack"
+
+
+@pytest.mark.parametrize(
+    ("reason", "shown"),
+    [
+        ("term change", ' (close code 4001, reason "term change")'),
+        # Any other reason is server text, so only the code is shown.
+        ("term change at 18:00", " (close code 4001)"),
+    ],
+)
+async def test_a_resume_cut_off_by_a_term_change_says_so(reason: str, shown: str):
+    exchange = Scripted({"answer": [], "close": (TERM_CHANGE_CLOSE_CODE, reason)})
+    async with serve_local(exchange) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            with pytest.raises(ResumeNotAcknowledged) as caught:
+                await session.resume(0)
+    assert str(caught.value) == f"the connection closed before resume_ack{shown}"
+    assert is_retryable(caught.value)
 
 
 async def test_resume_is_sent_once_with_a_valid_cursor():

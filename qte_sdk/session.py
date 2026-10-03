@@ -42,6 +42,7 @@ from qte_sdk.connection import (
     SeqGap,
     SessionInfo,
     SessionRejected,
+    _close_detail,
 )
 from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import Reject
@@ -449,7 +450,9 @@ class Session:
             if isinstance(self._failure, SessionRejected):
                 # The exchange refused the session itself; that is the error to report.
                 raise self._failure
-            raise ResumeNotAcknowledged("the connection closed before resume_ack")
+            failure = self._failure
+            detail = _close_detail(failure) if isinstance(failure, ConnectionClosed) else ""
+            raise ResumeNotAcknowledged(f"the connection closed before resume_ack{detail}")
         if isinstance(answer, DecodeFailed):
             raise ResumeNotAcknowledged(f"resume_ack could not be decoded: {answer.error}")
         assert isinstance(answer, Received)
@@ -782,7 +785,7 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
 async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
     early: list[Event] = []
     events = conn.events()
-    close_code: int | None = None
+    detail = ""
     try:
         async for event in events:
             if isinstance(event, Received):
@@ -802,11 +805,11 @@ async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
                 raise SessionNotAcknowledged(f"session_ack could not be decoded: {event.error}")
             early.append(event)
     except ConnectionClosed as error:
-        # Only the code is kept: the close reason is server text and could echo the token.
-        close_code = error.rcvd.code if error.rcvd is not None else None
+        # Only the code and a known reason are kept: any other close reason is server text
+        # and could echo the token.
+        detail = _close_detail(error)
     finally:
         await events.aclose()
-    detail = f" (close code {close_code})" if close_code is not None else ""
     raise SessionNotAcknowledged(f"the connection closed before session_ack{detail}")
 
 

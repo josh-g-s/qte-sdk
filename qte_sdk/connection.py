@@ -193,6 +193,18 @@ def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
     return type(error)(withheld(error.rcvd), withheld(error.sent), error.rcvd_then_sent)
 
 
+def _close_detail(error: ConnectionClosed) -> str:
+    """The close the peer sent, for an error message that replaces `error`: its code, and
+    its reason only if it is in `_KNOWN_CLOSE_REASONS`, for example
+    ` (close code 4001, reason "term change")`. Empty if the peer sent no close."""
+    close = error.rcvd
+    if close is None:
+        return ""
+    if close.reason in _KNOWN_CLOSE_REASONS:
+        return f' (close code {close.code}, reason "{close.reason}")'
+    return f" (close code {close.code})"
+
+
 def _exception_name(exc_info: Any) -> str:
     if isinstance(exc_info, BaseException):
         return type(exc_info).__name__
