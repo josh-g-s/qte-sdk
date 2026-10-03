@@ -616,6 +616,30 @@ async def test_a_refused_resume_leaves_the_session_up_without_it():
     assert "<token withheld>" in events[1].message.reason_detail  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("special", ["\\", "\n", "\t"], ids=["backslash", "newline", "tab"])
+async def test_a_refused_resume_withholds_a_token_that_str_would_escape(special: str):
+    # str() of the reject, or of its payload, writes a backslash, newline or tab escaped,
+    # so a token holding one is not found there. The fields are read as they are held.
+    token = synthetic_token() + special + synthetic_token()
+    exchange = Scripted(
+        {"answer": [resume_reject(f"no resume for {token}")], "after": [order_state(4)]}
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, token, sleep=Clock().sleep)
+        async with rs:
+            events = await take(rs, 3)
+    assert kinds(events) == ["Connected", "reject:None", "order_state:4"]
+    reject = events[1]
+    assert isinstance(reject, Received) and isinstance(reject.message, Reject)
+    detail = reject.message.reason_detail
+    assert token not in detail
+    assert detail == "no resume for <token withheld>"
+    assert_token_absent(token, detail)
+    # The payload, which held the token as received, is not delivered at all.
+    assert reject.payload is None
+    assert_token_absent(token, repr(events) + str(reject.message))
+
+
 async def test_an_exchange_that_serves_neither_heartbeats_nor_resume_keeps_working():
     # How a gateway that predates resume answers it: a plain MALFORMED_MESSAGE reject with
     # no request_type and no request_ref. It sends no heartbeat and no report_seq.
@@ -1275,6 +1299,8 @@ async def test_a_session_rejected_while_waiting_for_the_calendar_is_not_retried(
                 async for event in rs:
                     events.append(event)
     assert "order_state:1" in kinds(events)
+    # The rejected session is never reported as up.
+    assert kinds(events).count("Connected") == 1
     assert not isinstance(caught.value, ResumeRejected)
     assert caught.value.reason_name == "TEAM_DISABLED"
     assert connections == 2

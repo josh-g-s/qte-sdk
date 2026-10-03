@@ -24,6 +24,7 @@ keeps it, in a wrapper no repr shows, to authenticate each new session.
 """
 
 import asyncio
+import json
 import os
 from collections import deque
 from collections.abc import AsyncIterator
@@ -496,13 +497,16 @@ class Session:
         answer = self._reports.answer
         if not isinstance(answer, Received) or not isinstance(answer.message, Reject):
             return
-        if secret.value not in str(answer.message) and secret.value not in str(answer.payload):
+        # Read field by field: str() of the message or the payload escapes a token with a
+        # backslash, newline or tab, so it could not be found there.
+        if not _holds_token(answer.message, secret) and not _holds_token(answer.payload, secret):
             return
         message = Reject()
         message.CopyFrom(answer.message)
         if message.HasField("reason_detail"):
             message.reason_detail = _redact(message.reason_detail, secret)
-        if secret.value in str(message):
+        if _holds_token(message, secret):
+            # Still in another field (request_ref or instrument): keep only the reason.
             message = Reject(reason_code=message.reason_code)
         safe = Received(answer.type, message, answer.seq, None, answer.report_seq)
         self._buffer = deque(safe if e is answer else e for e in self._buffer)
@@ -768,9 +772,12 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
         return
     except Exception as error:
         kind = SessionNotAcknowledged if isinstance(error, ConnectionClosed) else AuthNotSent
-        replacement: BaseException = kind(
-            _redact(f"could not send auth: {type(error).__name__}: {error}", secret)
-        )
+        if _holds_token(error, secret):
+            # Its text may hold the token escaped, where a redaction would not find it.
+            text = f"could not send auth: {type(error).__name__}; details withheld"
+        else:
+            text = f"could not send auth: {type(error).__name__}: {error}"
+        replacement: BaseException = kind(text)
     except BaseException as error:
         # Cancellation and interrupts keep their type, so they behave as they otherwise would.
         replacement = type(error)(*error.args)
@@ -824,21 +831,94 @@ class _Secret:
     __str__ = __repr__
 
 
+def _token_forms(token: str) -> list[str]:
+    """The token as written, and as the usual escapes write it: Python's repr of it as text
+    or bytes (with a quote escaped or not) and JSON. Those escape a backslash, newline or
+    tab, so text that holds an escaped copy does not hold the token as written. Longest
+    first, so a redaction replaces a whole escaped copy rather than part of it."""
+    raw = token.encode()
+    forms = {
+        token,
+        repr(token)[1:-1],
+        repr(token + "'\"")[1:-4],
+        json.dumps(token)[1:-1],
+        json.dumps(token, ensure_ascii=False)[1:-1],
+        token.encode("unicode_escape").decode("ascii"),
+        repr(raw)[2:-1],
+        repr(raw + b"'\"")[2:-4],
+    }
+    return sorted((form for form in forms if form), key=len, reverse=True)
+
+
+# Attributes an exception can keep its data in outside `args` and `__dict__`.
+_EXCEPTION_FIELDS = ("filename", "filename2", "strerror", "object")
+
+
+def _holds_token(value: object, secret: _Secret) -> bool:
+    """Whether `value` holds the token, as written or escaped (see `_token_forms`), in any
+    text it carries: a str or bytes, the keys and values of a dict, the items of a list,
+    tuple or set, every field of a protobuf message, and an exception's text, arguments and
+    attributes. Text is read as it is held, decoded, not only as str() or repr() shows it,
+    since those escape a token with a backslash, newline or tab. Never raises."""
+    forms = _token_forms(secret.value)
+    seen: set[int] = set()
+    pending: list[object] = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, bytes | bytearray):
+            item = bytes(item).decode("utf-8", "replace")
+        if isinstance(item, str):
+            if any(form in item for form in forms):
+                return True
+            continue
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        try:
+            if isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, list | tuple | set | frozenset):
+                pending.extend(item)
+            elif isinstance(item, Message):
+                for _, field_value in item.ListFields():
+                    if isinstance(field_value, str | bytes | Message):
+                        pending.append(field_value)
+                    elif hasattr(field_value, "items"):  # a map field
+                        pending.extend(field_value.keys())
+                        pending.extend(field_value.values())
+                    elif hasattr(field_value, "__iter__"):  # a repeated field
+                        pending.extend(field_value)
+            elif isinstance(item, BaseException):
+                pending.extend((str(item), repr(item)))
+                pending.extend(item.args)
+                pending.extend(getattr(item, "__dict__", {}).values())
+                pending.extend(getattr(item, name, None) for name in _EXCEPTION_FIELDS)
+        except Exception:
+            # Something that cannot even be looked at is taken to hold the token.
+            return True
+    return False
+
+
 def _redact(text: str, secret: _Secret) -> str:
-    return text.replace(secret.value, repr(secret))
+    for form in _token_forms(secret.value):
+        text = text.replace(form, repr(secret))
+    return text
 
 
 def _without_token(error: BaseException, secret: _Secret) -> BaseException | None:
     """None if `error` and its chain never mention the token, else a replacement that does not.
 
     The exchange is not expected to echo a token back, but if a message from it did, it
-    would otherwise reach an exception message.
+    would otherwise reach an exception message. A rejection keeps its reason and detail,
+    with the token redacted from them; any other error keeps only its type, since its text
+    may hold the token in a form a redaction would not find.
     """
     seen: set[int] = set()
     link: BaseException | None = error
     while link is not None and id(link) not in seen:
         seen.add(id(link))
-        if secret.value in str(link) or secret.value in repr(link):
+        if _holds_token(link, secret):
             break
         link = link.__cause__ or link.__context__
     else:
@@ -847,6 +927,7 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
         detail = None if error.detail is None else _redact(error.detail, secret)
         name = _redact(error.reason_name, secret)
         return type(error)(error.reason_code, detail, reason_name=name)
+    withheld = f"{type(error).__name__}; details withheld, since they repeated the token"
     if isinstance(error, SessionNotAcknowledged):
-        return type(error)(_redact(str(error), secret))
-    return SessionNotAcknowledged(_redact(f"{type(error).__name__}: {error}", secret))
+        return type(error)(withheld)
+    return SessionNotAcknowledged(withheld)
