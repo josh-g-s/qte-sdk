@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.13
+// **Version:** 1.15
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -12,8 +12,9 @@
 // whole-second close of a session.
 // `account_state` is the reply to a team's `account_query` and is sent only in
 // answer to one.
-// Every `timestamp` field's wire resolution and representation is not yet
-// specified.
+// Every `timestamp` field is a signed 64-bit count of milliseconds since the
+// Unix epoch, UTC (SPEC 8.1, SPEC 9.2, SPEC 13.1), carried on the wire as a
+// decimal string like every 64-bit field.
 syntax = "proto3";
 
 package qte.contract.v1;
@@ -308,18 +309,24 @@ message AccountState {
   // LIVE_MARK inside a session, LAST_OFFICIAL_CLOSE outside one. The basis for
   // `summary` and for every `positions` price. SPEC 7.1, SPEC 13.4
   ValuationBasis valuation_basis = 4;
-  // The US session date (ISO 8601). Inside a session, the current session's
-  // date. Outside a session, the date of the last session that has an
-  // official close, including across the break between terms: a Fundamentals
-  // pod that queries before a term's first session, holding positions carried
-  // over from the term before, gets the date of that term's last session.
-  // Inside a session it is the current session's date even if no official
-  // close exists yet. Outside a session it is absent while no session has an
-  // official close: before the platform's first session, and after a first
-  // session that ended with no official close (SPEC 7.2). This date names a
-  // session only: it does not date the close the values use. Positions and
-  // `summary` are valued at the latest official close, which on a break day
-  // is that day's close, not this session's. SPEC 7.1, SPEC 13.1, SPEC 13.4
+  // The US trading date (ISO 8601). Inside a session, the current session's
+  // date, even if no official close exists yet. Outside a session, the trading
+  // date of the official close the values use, a break day's close included:
+  // the date of the latest session's or break day's set of official closes. A
+  // name that kept an older close because it had no valid mark in the latest
+  // close window is part of that set, so one date covers the whole reply and
+  // no position has a date of its own. On a break day, once that day's close
+  // has run, it is that day's date and not the term's last session's; before
+  // that close has run it is the date of the latest close that has. A
+  // Fundamentals pod that queries before a term's first session, holding
+  // positions carried over from the term before, gets the date of the latest
+  // close that has run. After the competition's first session the date is
+  // always present: if no name got an official close in that session it is
+  // still that session's date, and a position with no official close ever is
+  // valued at 0. Outside a session it is absent only before the competition's
+  // first session, when the book is empty. Positions and `summary` are valued
+  // at the same latest official close. SPEC 7.1, SPEC 13.1, SPEC 13.4,
+  // SPEC 23.4
   optional string session_date = 5;
   // timestamp. The exchange's own timestamp of the state this reply reads, the
   // same instant as `summary.timestamp`. It does not order the reply against
