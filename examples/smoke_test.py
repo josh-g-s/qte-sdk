@@ -74,6 +74,7 @@ from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 from google.protobuf.message import Message
@@ -130,7 +131,7 @@ from qte_sdk.session import (
     token_source,
     url_source,
 )
-from qte_sdk.units import to_decimal, to_micros
+from qte_sdk.units import to_datetime, to_decimal, to_micros, to_timedelta
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 NAME_WIDTH = 14
@@ -317,6 +318,22 @@ def last_closed(calendar: Calendar, now: int) -> CalendarSession | None:
     return max(closed, key=lambda entry: entry.close_time, default=None)
 
 
+def time_text(timestamp: int, now: int) -> str:
+    """An exchange timestamp as UTC, to the minute, and how long until it from `now`, the
+    exchange's own time (never this machine's clock)."""
+    try:
+        when = to_datetime(timestamp)
+        wait = to_timedelta(timestamp - now)
+    except ValueError:  # beyond what a datetime holds
+        return f"at exchange time {timestamp}"
+    minutes = abs(wait) // timedelta(minutes=1)
+    hours, minutes = divmod(minutes, 60)
+    span = f"{hours} h {minutes} min" if hours else f"{minutes} min"
+    return f"{when:%Y-%m-%d %H:%M} UTC, " + (
+        f"in {span}" if wait >= timedelta(0) else f"{span} ago"
+    )
+
+
 def check_calendar(report: Report, calendar: Calendar | None, now: int, seconds: float) -> None:
     if calendar is None:
         report.add(FAIL, "calendar", f"none received within {seconds:g} s of connecting")
@@ -332,9 +349,8 @@ def check_calendar(report: Report, calendar: Calendar | None, now: int, seconds:
     if upcoming is None:
         parts.append("no later session this term")
     else:
-        # In the exchange's time units, whose resolution the contract has not fixed.
-        wait = upcoming.open_time - now
-        parts.append(f"next open: session {upcoming.session_date}, in {wait} exchange time units")
+        opens = time_text(upcoming.open_time, now)
+        parts.append(f"next open: session {upcoming.session_date}, {opens}")
     closed = last_closed(calendar, now)
     parts.append(f"last closed: {closed.session_date if closed else 'none yet this term'}")
     report.add(PASS, "calendar", "; ".join(parts))

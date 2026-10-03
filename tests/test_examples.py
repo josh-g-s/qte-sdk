@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from fake_exchange import CONTRACT_VERSION, serve_local
@@ -39,7 +40,7 @@ from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
 from qte_sdk.orders import reason_code_name, send_amend, send_new
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import open_session
-from qte_sdk.units import to_decimal
+from qte_sdk.units import to_decimal, to_timedelta
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
@@ -111,6 +112,7 @@ class FakeExchange:
         official_close: bool = True,
         calendar: dict[str, Any] | None = None,
         closed_state: dict[str, Any] | None = None,
+        server_time: int = 1,
         known_instruments: frozenset[str] | None = None,
         account_state: dict[str, Any] | None = None,
         account_reject: str | None = None,
@@ -119,6 +121,8 @@ class FakeExchange:
         move_resting_to: tuple[int, ...] = (),
         withhold_accepted: bool = False,
     ) -> None:
+        # The exchange's clock in the session_ack, in milliseconds since the epoch.
+        self.server_time = server_time
         # With `withhold_accepted`, a limit order's `accepted` is never sent, as if lost.
         self.withhold_accepted = withhold_accepted
         # With `known_instruments`, a subscribe naming any other instrument is answered with
@@ -193,7 +197,7 @@ class FakeExchange:
         ack = {
             "session_id": "s-1",
             "team": "team-a",
-            "server_time": "1",
+            "server_time": str(self.server_time),
             "contract_version": CONTRACT_VERSION,
             "unscored": True,
         }
@@ -644,14 +648,34 @@ async def test_print_book_prints_the_official_close_outside_a_session():
     assert "stopped after 0.5 seconds (2 messages)" in out
 
 
+# Exchange timestamps are milliseconds since the Unix epoch, UTC.
+LAST_OPEN = 1_790_947_800_000  # 2026-10-02 13:30 UTC, 09:30 in New York
+LAST_CLOSE = 1_790_971_200_000  # 2026-10-02 20:00 UTC
+NEXT_OPEN = 1_791_207_000_000  # 2026-10-05 13:30 UTC, 09:30 in New York
+NEXT_CLOSE = 1_791_230_400_000  # 2026-10-05 20:00 UTC
+SERVER_TIME = 1_791_062_220_000  # 2026-10-03 21:17 UTC, 40 h 13 min before NEXT_OPEN
+
 CALENDAR = {
-    "term_first_session": "2026-01-02",
-    "term_last_session": "2026-01-05",
+    "term_first_session": "2026-10-02",
+    "term_last_session": "2026-10-05",
     "sessions": [
-        {"session_date": "2026-01-02", "open_time": "-20", "close_time": "0"},
-        {"session_date": "2026-01-05", "open_time": "100", "close_time": "200"},
+        {"session_date": "2026-10-02", "open_time": str(LAST_OPEN), "close_time": str(LAST_CLOSE)},
+        {"session_date": "2026-10-05", "open_time": str(NEXT_OPEN), "close_time": str(NEXT_CLOSE)},
     ],
 }
+
+
+def new_york_loads() -> bool:
+    """Whether Python finds New York's time zone here, as the example's process will."""
+    try:
+        ZoneInfo("America/New_York")
+    except ZoneInfoNotFoundError:
+        return False
+    return True
+
+
+# How the example shows NEXT_OPEN, with New York time where the time zone data is present.
+NEXT_OPEN_SHOWN = "2026-10-05 13:30 UTC" + (" (09:30 New York)" if new_york_loads() else "")
 
 
 async def test_out_of_hours_shows_the_calendar_and_the_closed_market_with_no_close():
@@ -659,29 +683,37 @@ async def test_out_of_hours_shows_the_calendar_and_the_closed_market_with_no_clo
     # names the last closed session and the next one, as the calendar does.
     state = {
         "state": "CLOSED",
-        "session_date": "2026-01-02",
-        "open_time": "-20",
-        "close_time": "0",
-        "grid_time": "0",
-        "next_session_date": "2026-01-05",
-        "next_open_time": "100",
-        "next_close_time": "200",
+        "session_date": "2026-10-02",
+        "open_time": str(LAST_OPEN),
+        "close_time": str(LAST_CLOSE),
+        "grid_time": str(LAST_CLOSE),
+        "next_session_date": "2026-10-05",
+        "next_open_time": str(NEXT_OPEN),
+        "next_close_time": str(NEXT_CLOSE),
     }
     exchange = FakeExchange(
-        closed=True, official_close=False, calendar=CALENDAR, closed_state=state
+        closed=True,
+        official_close=False,
+        calendar=CALENDAR,
+        closed_state=state,
+        server_time=SERVER_TIME,
     )
     async with serve_local(exchange) as url:
         code, out, err = await run_example(
             "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
         )
     assert code == 0, err
-    assert "last closed session: 2026-01-02" in out
-    assert "next session: 2026-01-05" in out
-    assert "market session 2026-01-02: CLOSED" in out
-    # The fake acknowledges at server_time 1 and names a next open at 100.
-    assert "next open: session 2026-01-05, in 99 exchange time units" in out
+    new_york = " (17:17 New York)" if new_york_loads() else ""
+    assert f"exchange time: 2026-10-03 21:17 UTC{new_york}" in out
+    assert "last closed session: 2026-10-02" in out
+    assert f"next session: 2026-10-05, opens {NEXT_OPEN_SHOWN}, in 40 h 13 min" in out
+    assert "market session 2026-10-02: CLOSED" in out
+    assert f"next open: {NEXT_OPEN_SHOWN}, in 40 h 13 min" in out
     assert "no official close: the exchange does not send it yet, as expected" in out
     assert exchange.types() == ["auth", "subscribe"]
+    # Real times only: no raw count of milliseconds is printed.
+    assert str(NEXT_OPEN) not in out and str(SERVER_TIME) not in out
+    assert "time units" not in out
 
 
 async def test_out_of_hours_measures_the_next_open_from_server_time_not_a_future_grid_time():
@@ -689,22 +721,92 @@ async def test_out_of_hours_measures_the_next_open_from_server_time_not_a_future
     # and its grid_time equals that session's close_time, in the future.
     state = {
         "state": "CLOSED",
-        "session_date": "2026-01-05",
-        "open_time": "100",
-        "close_time": "200",
-        "grid_time": "200",
-        "next_session_date": "2026-01-05",
-        "next_open_time": "100",
-        "next_close_time": "200",
+        "session_date": "2026-10-05",
+        "open_time": str(NEXT_OPEN),
+        "close_time": str(NEXT_CLOSE),
+        "grid_time": str(NEXT_CLOSE),
+        "next_session_date": "2026-10-05",
+        "next_open_time": str(NEXT_OPEN),
+        "next_close_time": str(NEXT_CLOSE),
     }
-    exchange = FakeExchange(closed=True, official_close=False, closed_state=state)
+    exchange = FakeExchange(
+        closed=True, official_close=False, closed_state=state, server_time=SERVER_TIME
+    )
     async with serve_local(exchange) as url:
         code, out, err = await run_example(
             "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "1"
         )
     assert code == 0, err
-    # Measured from server_time 1, not from grid_time 200 (which would give -100).
-    assert "next open: session 2026-01-05, in 99 exchange time units" in out
+    # Measured from server_time, not from grid_time (which would give "6 h 30 min ago").
+    assert f"next open: {NEXT_OPEN_SHOWN}, in 40 h 13 min" in out
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("tzdata") is not None,
+    reason="the tzdata package gives zoneinfo New York's time zone whatever PYTHONTZPATH says",
+)
+async def test_out_of_hours_shows_utc_only_where_python_has_no_time_zone_data():
+    # An empty time zone search path, as on Windows without the tzdata package.
+    exchange = FakeExchange(
+        closed=True, official_close=False, calendar=CALENDAR, server_time=SERVER_TIME
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py",
+            url,
+            synthetic_token(),
+            "--instrument",
+            INSTRUMENT,
+            "--seconds",
+            "1",
+            PYTHONTZPATH="",
+        )
+    assert code == 0, err
+    assert "exchange time: 2026-10-03 21:17 UTC\n" in out
+    assert "next session: 2026-10-05, opens 2026-10-05 13:30 UTC, in 40 h 13 min" in out
+    assert "New York" not in out
+
+
+def test_out_of_hours_falls_back_to_utc_when_new_york_cannot_be_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    example = load_example("out_of_hours.py")
+
+    def no_zone(key: str) -> None:
+        raise ZoneInfoNotFoundError(f"No time zone found with key {key}")
+
+    monkeypatch.setattr(example, "ZoneInfo", no_zone)
+    assert example.load_new_york() is None
+    assert example.show_time(NEXT_OPEN, None) == "2026-10-05 13:30 UTC"
+
+
+def test_out_of_hours_shows_new_york_time_and_its_date_when_it_differs():
+    example = load_example("out_of_hours.py")
+    if example.NEW_YORK is None:
+        pytest.skip("no time zone data here (on Windows, install the tzdata package)")
+    assert example.show_time(NEXT_OPEN) == "2026-10-05 13:30 UTC (09:30 New York)"
+    # 02:00 UTC on 6 October is still the evening of 5 October in New York.
+    late = NEXT_OPEN + (12 * 60 + 30) * 60_000
+    assert example.show_time(late) == "2026-10-06 02:00 UTC (2026-10-05 22:00 New York)"
+    # In January New York is five hours behind UTC, not four.
+    january = 1_767_623_400_000  # 2026-01-05 14:30 UTC
+    assert example.show_time(january) == "2026-01-05 14:30 UTC (09:30 New York)"
+
+
+@pytest.mark.parametrize(
+    ("milliseconds", "shown"),
+    [
+        (NEXT_OPEN - SERVER_TIME, "in 40 h 13 min"),
+        (40 * 60_000 + 59_999, "in 40 min"),
+        (59_999, "in less than a minute"),
+        (0, "in less than a minute"),
+        (-1, "less than a minute ago"),
+        (-(2 * 60 + 5) * 60_000, "2 h 5 min ago"),
+    ],
+)
+def test_out_of_hours_shows_a_wait_as_hours_and_whole_minutes(milliseconds, shown):
+    example = load_example("out_of_hours.py")
+    assert example.show_wait(to_timedelta(milliseconds)) == shown
 
 
 async def test_out_of_hours_works_when_the_state_names_no_next_session():
@@ -1747,16 +1849,17 @@ async def run_smoke_test(
 
 
 async def test_the_smoke_test_checks_a_setup_during_a_session_and_sends_no_order():
-    exchange = FakeExchange(calendar=CALENDAR)
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME)
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
     assert code == 0, out + err
     assert found["token"] == ("PASS", "found in the QTE_TOKEN environment variable (not shown)")
     assert found["address"] == ("PASS", "set, from the QTE_URL environment variable (not shown)")
     assert found["connect"] == ("PASS", "authenticated as team team-a (unscored, contract 0.x)")
-    # The fake acknowledges at server_time 1, between the calendar's two sessions.
+    # The fake acknowledges at SERVER_TIME, between the calendar's two sessions.
     assert found["calendar"] == (
         "PASS",
-        "next open: session 2026-01-05, in 99 exchange time units; last closed: 2026-01-02",
+        "next open: session 2026-10-05, 2026-10-05 13:30 UTC, in 40 h 13 min; "
+        "last closed: 2026-10-02",
     )
     assert found["session-state"] == ("PASS", "OPEN, session 2026-01-05")
     status, reason = found["market:TEST"]
@@ -1781,7 +1884,7 @@ async def test_the_smoke_tests_order_rests_inside_the_band_and_is_cancelled(
     tick: tuple[str, ...], price: int
 ):
     # The book shows 99.95 and 100.05, so the largest step both are multiples of is 0.05.
-    exchange = FakeExchange(calendar=CALENDAR)
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME)
     code, out, err, found = await run_smoke_test(
         exchange, "--instruments", INSTRUMENT, *TEST_ORDER, *tick
     )
@@ -1808,7 +1911,9 @@ async def test_the_smoke_tests_order_rests_inside_the_band_and_is_cancelled(
 
 
 async def test_the_smoke_test_sends_a_cancel_again_after_later_grid_points():
-    exchange = FakeExchange(calendar=CALENDAR, cancel_rejects=["MIN_REST_VIOLATION"] * 2)
+    exchange = FakeExchange(
+        calendar=CALENDAR, server_time=SERVER_TIME, cancel_rejects=["MIN_REST_VIOLATION"] * 2
+    )
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
     assert code == 0, out + err
     types = exchange.types()
@@ -1837,7 +1942,7 @@ async def test_the_smoke_test_fails_loudly_when_the_order_is_moved_away_from_its
 ):
     # Another program of the team amends the resting test order to a new price, so a
     # cancel of the test order's own level would not touch it.
-    exchange = FakeExchange(calendar=CALENDAR, move_resting_to=moves)
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, move_resting_to=moves)
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
     assert code == 1, out + err
     status, reason = found["test-order"]
@@ -1855,7 +1960,7 @@ async def test_the_smoke_test_fails_loudly_when_the_order_is_moved_away_from_its
 async def test_the_smoke_test_still_warns_when_it_never_sees_the_order_accepted():
     # With no accepted, nothing at the level can be tied to the test order: the script
     # cancels the level all the same, and warns that the order may be anywhere.
-    exchange = FakeExchange(calendar=CALENDAR, withhold_accepted=True)
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, withhold_accepted=True)
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
     assert code == 1, out + err
     status, reason = found["test-order"]
@@ -1871,7 +1976,7 @@ async def test_the_smoke_test_ignores_an_earlier_orders_fill_at_its_level():
     # While the test order is delayed, an earlier order of the same strategy at that level
     # fills and leaves it. That fill is not the test order's, which still rests and must be
     # cancelled.
-    exchange = FakeExchange(calendar=CALENDAR, teammate_fill_first="smoke")
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, teammate_fill_first="smoke")
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
     assert code == 0, out + err
     assert exchange.types().count("cancel") == 1
@@ -1883,7 +1988,9 @@ async def test_the_smoke_test_ignores_an_earlier_orders_fill_at_its_level():
 
 async def test_the_smoke_test_fails_loudly_when_it_cannot_confirm_the_cancel():
     # The cancel is accepted, but no order_cancelled ever follows.
-    exchange = FakeExchange(calendar=CALENDAR, confirm_cancels=asyncio.Event())
+    exchange = FakeExchange(
+        calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=asyncio.Event()
+    )
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
     assert code == 1, out + err
     status, reason = found["test-order"]
@@ -1900,7 +2007,7 @@ async def test_the_smoke_test_fails_loudly_when_it_cannot_confirm_the_cancel():
 async def test_the_smoke_test_reports_a_rejected_test_order_by_its_reason(
     reason: str, status: str, code: int
 ):
-    exchange = FakeExchange(calendar=CALENDAR, reject_new=reason)
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, reject_new=reason)
     returned, out, err, found = await run_smoke_test(
         exchange, "--instruments", INSTRUMENT, *TEST_ORDER
     )
@@ -1922,7 +2029,9 @@ async def test_the_smoke_test_reports_a_rejected_test_order_by_its_reason(
 async def test_the_smoke_test_outside_a_session_sees_the_closed_market_and_places_no_order(
     official_close: bool, expected: tuple[str, str], order: tuple[str, ...]
 ):
-    exchange = FakeExchange(closed=True, official_close=official_close, calendar=CALENDAR)
+    exchange = FakeExchange(
+        closed=True, official_close=official_close, calendar=CALENDAR, server_time=SERVER_TIME
+    )
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *order)
     assert code == 0, out + err
     assert found["session-state"] == ("PASS", "CLOSED, session 2026-01-05")
@@ -1938,7 +2047,7 @@ async def test_the_smoke_test_outside_a_session_sees_the_closed_market_and_place
 
 async def test_the_smoke_test_fails_an_instrument_with_no_book_during_a_session():
     # The fake publishes a book for TEST only, while its session state comes every interval.
-    exchange = FakeExchange(calendar=CALENDAR)
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME)
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, "OTHER")
     assert code == 1, out + err
     assert found["market:TEST"][0] == "PASS"
@@ -1946,7 +2055,9 @@ async def test_the_smoke_test_fails_an_instrument_with_no_book_during_a_session(
 
 
 async def test_the_smoke_test_fails_a_refused_account_query():
-    exchange = FakeExchange(calendar=CALENDAR, account_reject="MALFORMED_MESSAGE")
+    exchange = FakeExchange(
+        calendar=CALENDAR, server_time=SERVER_TIME, account_reject="MALFORMED_MESSAGE"
+    )
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
     assert code == 1, out + err
     assert found["account"] == ("FAIL", "refused: MALFORMED_MESSAGE")
@@ -1956,7 +2067,12 @@ async def test_the_smoke_test_never_shows_a_rejects_free_text():
     # A reject's reason_detail is the exchange's own text, which can name the team's
     # figures against a risk limit: only the reason code is shown.
     detail = "gross 123456789 of 100000000"
-    exchange = FakeExchange(calendar=CALENDAR, reject_new="RISK_LIMIT_BREACH", reject_detail=detail)
+    exchange = FakeExchange(
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+        reject_new="RISK_LIMIT_BREACH",
+        reject_detail=detail,
+    )
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
     assert code == 1, out + err
     assert found["test-order"] == ("FAIL", "BUY 1 TEST @ 100.000000 rejected: RISK_LIMIT_BREACH")
@@ -1964,7 +2080,9 @@ async def test_the_smoke_test_never_shows_a_rejects_free_text():
 
 
 async def test_the_smoke_test_fails_an_instrument_the_exchange_does_not_know():
-    exchange = FakeExchange(calendar=CALENDAR, known_instruments=frozenset({INSTRUMENT}))
+    exchange = FakeExchange(
+        calendar=CALENDAR, server_time=SERVER_TIME, known_instruments=frozenset({INSTRUMENT})
+    )
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, "NOPE")
     assert code == 1, out + err
     assert found["market:NOPE"] == ("FAIL", "the exchange does not know it: UNKNOWN_INSTRUMENT")
@@ -1979,7 +2097,7 @@ async def test_the_smoke_test_says_the_account_query_was_answered_without_its_fi
         "cash": "123456789",
         "positions": [{"instrument": INSTRUMENT, "quantity": "7", "price": "100000000"}],
     }
-    exchange = FakeExchange(calendar=CALENDAR, account_state=state)
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, account_state=state)
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
     assert code == 0, out + err
     assert found["account"] == (
@@ -1993,10 +2111,10 @@ async def test_the_smoke_test_says_the_account_query_was_answered_without_its_fi
 async def test_the_smoke_test_reads_the_last_closed_sessions_books_from_history():
     token = synthetic_token()
     books = history_book(1) + history_book(2, bid="99960000")
-    fake = FakeHistory(token=token, objects={("2026-01-02", INSTRUMENT, "book"): books})
+    fake = FakeHistory(token=token, objects={("2026-10-02", INSTRUMENT, "book"): books})
     with serve_history(fake) as history_url:
         code, out, err, found = await run_smoke_test(
-            FakeExchange(calendar=CALENDAR),
+            FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME),
             "--instruments",
             INSTRUMENT,
             token=token,
@@ -2005,17 +2123,17 @@ async def test_the_smoke_test_reads_the_last_closed_sessions_books_from_history(
     assert code == 0, out + err
     assert found["history:TEST"] == (
         "PASS",
-        "session 2026-01-02: first book bid 99.950000 x 300, ask 100.050000 x 200 (LIVE); "
+        "session 2026-10-02: first book bid 99.950000 x 300, ask 100.050000 x 200 (LIVE); "
         "only its start was read, not checked against its digest",
     )
-    assert [path for path, _ in fake.requests] == ["/v1/history/2026-01-02/TEST/book"]
+    assert [path for path, _ in fake.requests] == ["/v1/history/2026-10-02/TEST/book"]
 
 
 async def test_the_smoke_test_never_repeats_an_unusable_history_address():
     # A value pasted into the wrong place could be a secret: the address is not shown.
     secret = synthetic_token()
     code, out, err, found = await run_smoke_test(
-        FakeExchange(calendar=CALENDAR),
+        FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME),
         "--instruments",
         INSTRUMENT,
         QTE_HISTORY_URL=f"https://127.0.0.1:{secret}/",
@@ -2032,7 +2150,7 @@ async def test_the_smoke_test_fails_a_dotenv_that_git_does_not_ignore():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "QTE_"))}
     # The conftest makes the working directory a fresh one: make it a git repository.
     subprocess.run(["git", "init", "-q", "."], check=True, capture_output=True, env=env)
-    exchange = FakeExchange(calendar=CALENDAR)
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME)
     token = synthetic_token()
     async with serve_local(exchange) as url:
         dotenv = Path.cwd() / ".env"

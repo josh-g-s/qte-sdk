@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.6
+**Version:** 1.7
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -54,6 +54,11 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 ## Past market data
 
 The history service (`qte_sdk.history.HistoryClient`) serves the market data that closed sessions published, message for message. It shows what the market published, not how your own orders would have filled against it. The SDK has no fill simulator.
+
+## Times
+
+- Every exchange timestamp (`server_time`, `grid_time`, a calendar session's `open_time` and `close_time`, and the rest) is a whole number of milliseconds since the Unix epoch, in UTC. Convert with `qte_sdk.units`: `to_datetime` for a timezone-aware UTC `datetime`, `to_timedelta` for the difference of two timestamps, and `to_timestamp` to turn a `datetime` with a time zone back into a timestamp.
+- For "now", use the exchange's clock (`session.info.server_time` or a later exchange timestamp), never the computer's. Take trading hours from the calendar; a time zone such as New York's is only for showing times.
 
 ## Where to test
 
