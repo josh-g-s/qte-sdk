@@ -1,6 +1,7 @@
 """Connect to the exchange and print the book of one instrument.
 
-Set QTE_URL and QTE_TOKEN (or QTE_TOKEN_FILE) first (see docs/quickstart.md), then:
+Set QTE_URL and QTE_TOKEN first, in ./.env or the environment (see docs/quickstart.md),
+then:
 
     python examples/print_book.py --instrument AAPL --seconds 10
 
@@ -47,7 +48,14 @@ from qte_sdk.market_data import (
     subscribe,
 )
 from qte_sdk.orders import reason_code_name
-from qte_sdk.session import MissingToken, Session, SessionNotAcknowledged, open_session
+from qte_sdk.session import (
+    MissingToken,
+    MissingURL,
+    Session,
+    SessionNotAcknowledged,
+    open_session,
+    resolve_url,
+)
 from qte_sdk.units import to_decimal
 
 
@@ -185,9 +193,10 @@ def fail(message: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    url = os.environ.get("QTE_URL")
-    if not url:
-        fail("set QTE_URL to the exchange address, for example ws://127.0.0.1:8080/ws")
+    try:
+        url = resolve_url()  # QTE_URL from the environment, or from ./.env
+    except MissingURL as error:
+        fail(f"{error}; for example ws://127.0.0.1:8080/ws (see docs/quickstart.md)")
         return 2
     try:
         return asyncio.run(run(url, args))

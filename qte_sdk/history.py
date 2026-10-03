@@ -291,10 +291,11 @@ class Manifest:
 class HistoryClient:
     """A client for the exchange's history service.
 
-    `url` is the service's address (`https://...`), or None to read `QTE_HISTORY_URL`.
-    `token` is your team token, or None to read `QTE_TOKEN` or `QTE_TOKEN_FILE` (see
-    `qte_sdk.session.resolve_token`). Raises `MissingHistoryURL` or
-    `qte_sdk.session.MissingToken` if either is missing.
+    `url` is the service's address (`https://...`), or None to read the `QTE_HISTORY_URL`
+    environment variable; it is never read from `.env`, and `QTE_URL` is the exchange's
+    address, not this service's. `token` is your team token, or None to read `QTE_TOKEN`,
+    `QTE_TOKEN_FILE` or `.env` (see `qte_sdk.session.resolve_token`). Raises
+    `MissingHistoryURL` or `qte_sdk.session.MissingToken` if either is missing.
 
     `timeout` bounds each network operation (connecting, or one read), in seconds; a
     network failure raises the usual Python error, such as `TimeoutError`. `max_wait`

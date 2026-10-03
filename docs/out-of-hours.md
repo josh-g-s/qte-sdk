@@ -18,13 +18,12 @@ This is the same at any hour. `open_session` connects, sends your token and wait
 
 ```python
 import asyncio
-import os
 
 from qte_sdk.session import open_session
 
 
 async def main() -> None:
-    session = await open_session(os.environ["QTE_URL"])  # the token comes from QTE_TOKEN
+    session = await open_session()  # the address and token come from .env or the environment
     async with session:
         print("team:", session.info.team)
         ...  # the snippets below go here
