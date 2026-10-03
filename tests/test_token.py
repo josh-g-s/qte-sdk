@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from qte_sdk import dotenv as dotenv_module
 from qte_sdk import token as helper
 from qte_sdk.session import TOKEN_ENV_VAR, TOKEN_FILE_ENV_VAR, URL_ENV_VAR, resolve_token
 
@@ -202,7 +203,9 @@ def test_set_needs_a_terminal_and_asks_for_nothing_without_one(capsys):
 def test_set_with_redirected_input_refuses_and_shows_nothing(tmp_path):
     token = synthetic_token()
     env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
-    env["HOME"] = str(tmp_path / "home")
+    env["HOME"] = env["USERPROFILE"] = str(tmp_path / "home")
+    env.pop("HOMEDRIVE", None)
+    env.pop("HOMEPATH", None)
     for argv in (["set"], ["set", "--file"]):
         result = subprocess.run(
             [sys.executable, "-m", "qte_sdk.token", *argv],
@@ -323,9 +326,13 @@ def git(*args: str) -> None:
     subprocess.run(["git", *args], check=True, capture_output=True, env=env)
 
 
-def ignored() -> bool:
+def ignored_path(name: str) -> bool:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "QTE_"))}
-    return subprocess.run(["git", "check-ignore", "-q", ".env"], env=env).returncode == 0
+    return subprocess.run(["git", "check-ignore", "-q", name], env=env).returncode == 0
+
+
+def ignored() -> bool:
+    return ignored_path(".env")
 
 
 @needs_git
@@ -399,7 +406,11 @@ def test_a_tracked_dotenv_that_gitignore_names_is_still_refused(capsys):
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
+    # Every variable expanduser reads on any platform, so no test touches a real home.
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
     return home
 
 
@@ -447,6 +458,74 @@ def test_set_file_takes_a_path(tmp_path, capsys):
 
 def test_set_file_refuses_a_directory(tmp_path):
     assert run(["set", "--file", str(tmp_path)]) == 1
+
+
+@needs_git
+@pytest.mark.parametrize("target", [".env", "secrets/qte-token"])
+def test_set_file_refuses_a_tracked_destination_before_asking(target: str, capsys):
+    git("init", "-q", ".")
+    path = Path(target)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("old\n")
+    git("add", "-f", target)
+    assert run(["set", "--file", target]) == 1  # the token is never asked for
+    assert path.read_text() == "old\n"
+    assert f"git rm --cached {path.name}" in capsys.readouterr().err
+
+
+@needs_git
+def test_set_file_offers_to_ignore_an_unignored_destination(capsys):
+    git("init", "-q", ".")
+    token = synthetic_token()
+    assert run(["set", "--file", "qte-token"], ask=answers("y"), ask_secret=answers(token)) == 0
+    assert Path(".gitignore").read_text() == "qte-token\n"
+    assert ignored_path("qte-token")
+    out, err = capsys.readouterr()
+    assert_token_absent(token, out + err)
+
+
+@needs_git
+def test_set_file_says_plainly_when_the_offer_is_declined(capsys):
+    git("init", "-q", ".")
+    token = synthetic_token()
+    assert run(["set", "--file", "qte-token"], ask=answers("n"), ask_secret=answers(token)) == 0
+    assert "Not added" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [["set"], ["set", "--file", "qte-token"]])
+def test_without_git_inside_a_repository_nothing_is_written(monkeypatch, argv, capsys):
+    (Path.cwd() / ".git").mkdir()
+    monkeypatch.setattr(dotenv_module.shutil, "which", lambda name: None)
+    assert run(argv) == 1  # stops before either prompt
+    assert sorted(p.name for p in Path.cwd().iterdir()) == [".git"]
+    assert "could not say whether it tracks" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", ["timeout", "exit 128"])
+def test_a_failing_git_inside_a_repository_stops_set(monkeypatch, failure: str):
+    (Path.cwd() / ".git").mkdir()
+
+    def broken(args, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(args, 5)
+        return subprocess.CompletedProcess(args, 128)
+
+    monkeypatch.setattr(dotenv_module.shutil, "which", lambda name: "/usr/bin/git")
+    monkeypatch.setattr(dotenv_module.subprocess, "run", broken)
+    assert run(["set"]) == 1
+    assert not dotenv().exists()
+
+
+def test_outside_a_repository_git_is_not_needed(monkeypatch):
+    monkeypatch.setattr(dotenv_module.shutil, "which", lambda name: None)
+    assert run(["set"], ask=answers(URL), ask_secret=answers(synthetic_token())) == 0
+
+
+def test_the_saved_message_does_not_promise_privacy_on_windows():
+    assert "readable only by you" in helper._privacy("posix")
+    message = helper._privacy("nt")
+    assert "readable only by you" not in message
+    assert "user profile" in message
 
 
 # check

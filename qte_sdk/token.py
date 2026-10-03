@@ -6,15 +6,22 @@
 
 `set` asks for the exchange address and then the token, which is read without echo. Press
 Enter at the address prompt to keep the address already set, in `QTE_URL` or in `./.env`.
-Both go into `./.env`, which is created readable only by you before anything is written;
-an existing `.env` is replaced in one step, keeping its other lines. If the `.env` is in a
-git working tree and git does not ignore it, `set` offers to add it to `.gitignore`; if git
-already tracks it, `set` stops before asking for the token and says to run
-`git rm --cached .env`, since `.gitignore` alone would not keep the token out of a commit.
+Both go into `./.env`, which is created with mode 0600 before anything is written; an
+existing `.env` is replaced in one step, keeping its other lines.
 
 `set --file [PATH]` writes only the token, to `PATH` or by default `~/.qte/token` (in a
-directory only you can open), and prints the `export QTE_TOKEN_FILE=...` line to add to
-your shell profile.
+directory made 0700), and prints the `export QTE_TOKEN_FILE=...` line to add to your shell
+profile.
+
+For either destination, if it is in a git working tree: when git tracks the file, `set`
+stops before asking for the token and says to run `git rm --cached`, since `.gitignore`
+alone would not keep the token out of a commit; when git cannot tell (it is not installed,
+say), `set` stops too, rather than guess; and when git does not ignore the file, `set`
+offers to add it to `.gitignore`.
+
+On macOS and Linux the modes make the files readable only by you. Windows does not apply
+them, and this command does not change Windows access lists, so there it says so: keep the
+file in a folder only you can open, such as your user profile.
 
 `check` reports where the SDK would take the token and the address from, as
 `qte_sdk.session.resolve_token` and `resolve_url` would, without showing the token.
@@ -90,7 +97,7 @@ def main(
                 "without redirecting its input"
             )
         if args.file is not None:
-            return _set_file(args.file, ask_secret)
+            return _set_file(args.file, ask, ask_secret)
         return _set_dotenv(args.url, ask, ask_secret)
     except _Refused as refusal:
         reason = str(refusal)
@@ -113,7 +120,7 @@ def _parser() -> argparse.ArgumentParser:
         help="store the address and token in ./.env, or the token alone in a private file",
         description=(
             f"Ask for the exchange address and your token and store them in ./{DOTENV_NAME}, "
-            "readable only by you. With --file, store only the token in a private file."
+            "kept private. With --file, store only the token in a private file."
         ),
     )
     set_.add_argument(
@@ -157,7 +164,7 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
         raise _Refused(f"{path} would be larger than the SDK reads; make it smaller first")
     _write_private(path, text)
     del text, secret
-    print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}, readable only by you.")
+    print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}{_privacy()}")
     print("Run your programs from this folder, so the SDK finds it.")
     if os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR):
         print(
@@ -258,8 +265,17 @@ def _is_plain(value: str) -> bool:
 def _refuse_if_tracked(path: Path) -> None:
     """Stop before the token is asked for if git tracks `path`: the token would then be
     committed with it, and adding it to `.gitignore` would not prevent that."""
-    if not is_inside_git_work_tree(path.parent) or is_tracked_by_git(path) is not True:
+    if not is_inside_git_work_tree(path.parent):
         return
+    tracked = is_tracked_by_git(path)
+    if tracked is False:
+        return
+    if tracked is None:
+        raise _Refused(
+            f"{path} is inside a git repository, but git could not say whether it tracks "
+            "the file (is git installed and on your PATH?), so nothing was changed. Install "
+            f"git and run this again, or choose a location outside the repository."
+        )
     raise _Refused(
         f"git tracks {path}, so your token in it would be committed, and adding it to "
         f".gitignore does not stop that. Run `git rm --cached {path.name}` and commit, then "
@@ -269,7 +285,16 @@ def _refuse_if_tracked(path: Path) -> None:
 
 def _offer_gitignore(path: Path, ask: Prompt) -> None:
     """If git does not ignore `path`, offer to add it to the `.gitignore` beside it."""
-    if not is_inside_git_work_tree(path.parent) or is_ignored_by_git(path) is not False:
+    if not is_inside_git_work_tree(path.parent):
+        return
+    ignored = is_ignored_by_git(path)
+    if ignored is True:
+        return
+    if ignored is None:
+        print(
+            f"Could not ask git whether it ignores {path.name}: make sure {path.name} is in "
+            "your .gitignore before you commit anything."
+        )
         return
     answer = ask(
         f"{path.name} is in a git repository and git does not ignore it, so it could be "
@@ -331,13 +356,12 @@ def _merge(lines: list[str], values: dict[str, str]) -> str:
 # set --file
 
 
-def _set_file(target: str, ask_secret: Prompt) -> int:
+def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
     path = Path(target).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
     if path.is_symlink() or path.is_dir():
         raise _Refused(f"{path} is a directory or a symbolic link; choose another path")
-    secret = _ask_token(ask_secret)
     directory = path.parent
     try:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -347,10 +371,13 @@ def _set_file(target: str, ask_secret: Prompt) -> int:
         raise _Refused(
             f"could not create {directory} ({error.strerror or type(error).__name__})"
         ) from None
+    _refuse_if_tracked(path)
+    secret = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")
     del secret
+    print(f"Saved the token to {path}{_privacy()}")
+    _offer_gitignore(path, ask)
     line = f"export {TOKEN_FILE_ENV_VAR}={shlex.quote(str(path))}"
-    print(f"Saved the token to {path}, readable only by you.")
     print("Add this line to your shell profile (~/.zshrc or ~/.bashrc), and run it here too:")
     print()
     print(f"    {line}")
@@ -361,6 +388,16 @@ def _set_file(target: str, ask_secret: Prompt) -> int:
 
 
 # Writing
+
+
+def _privacy(system: str | None = None) -> str:
+    """The end of the message saying where the token was saved: what protects it."""
+    if (system or os.name) == "posix":
+        return ", readable only by you."
+    return (
+        ". Windows does not apply the file's private mode, so keep it in a folder only you "
+        "can open, such as your user profile, and do not share that folder."
+    )
 
 
 def _write_private(path: Path, text: str) -> None:
