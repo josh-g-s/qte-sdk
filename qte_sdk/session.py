@@ -866,37 +866,50 @@ class _Secret:
     __str__ = __repr__
 
 
+def _detached(error: BaseException) -> BaseException:
+    """`error` without its traceback or chain, for the caller to raise again from its own
+    frame. Used where the frames an interruption (a Ctrl-C, say) came through can hold a
+    form of the token, which a traceback that shows locals would display."""
+    error = error.with_traceback(None)
+    error.__cause__ = error.__context__ = None
+    return error
+
+
 def _token_forms(secret: _Secret) -> tuple[_Secret, ...]:
     """The token as written, and as the usual escapes write it: Python's repr of it as text
     or bytes (with a quote escaped or not) and JSON. Those escape a backslash, newline or
     tab, so text that holds an escaped copy does not hold the token as written. Longest
-    first, so a redaction replaces a whole escaped copy rather than part of it. Never
-    raises, even for a token that is not valid Unicode, such as one read from an
+    first, so a redaction replaces a whole escaped copy rather than part of it. Raises no
+    error of its own, even for a token that is not valid Unicode, such as one read from an
     environment variable holding bytes that are not UTF-8.
 
-    Each form is held like the token, in a `_Secret`, and nothing here keeps one in a plain
-    local once it returns or raises, so no traceback that shows locals reveals them."""
-    raw: bytes | None = None
-    texts: set[str] | None = None
+    Each form is held like the token, in a `_Secret`. An interruption while they are made
+    is raised from here, without the frames below, where they are plain text."""
+    failure: BaseException
     try:
-        # surrogatepass: a lone surrogate would make a plain encode() raise an error that
-        # holds the token.
-        raw = secret.value.encode("utf-8", "surrogatepass")
-        texts = {
-            secret.value,
-            repr(secret.value)[1:-1],
-            repr(secret.value + "'\"")[1:-4],
-            json.dumps(secret.value)[1:-1],
-            json.dumps(secret.value, ensure_ascii=False)[1:-1],
-            secret.value.encode("unicode_escape").decode("ascii"),
-            repr(raw)[2:-1],
-            repr(raw + b"'\"")[2:-4],
-        }
-        texts.discard("")
-        # map and sorted run no Python frame that would hold a form as a local.
-        return tuple(map(_Secret, sorted(texts, key=len, reverse=True)))
-    finally:
-        raw = texts = None
+        return _make_token_forms(secret)
+    except BaseException as error:
+        failure = _detached(error)
+    # Raised outside the handler, so nothing is chained to it.
+    raise failure
+
+
+def _make_token_forms(secret: _Secret) -> tuple[_Secret, ...]:
+    # surrogatepass: a lone surrogate would make a plain encode() raise an error that holds
+    # the token.
+    raw = secret.value.encode("utf-8", "surrogatepass")
+    texts = {
+        secret.value,
+        repr(secret.value)[1:-1],
+        repr(secret.value + "'\"")[1:-4],
+        json.dumps(secret.value)[1:-1],
+        json.dumps(secret.value, ensure_ascii=False)[1:-1],
+        secret.value.encode("unicode_escape").decode("ascii"),
+        repr(raw)[2:-1],
+        repr(raw + b"'\"")[2:-4],
+    }
+    texts.discard("")
+    return tuple(map(_Secret, sorted(texts, key=len, reverse=True)))
 
 
 # Attributes an exception can keep its data in outside `args` and `__dict__`.
@@ -909,7 +922,21 @@ def _holds_token(value: object, secret: _Secret) -> bool:
     tuple or set, every field of a protobuf message, singular, repeated or map, and an
     exception's text, arguments and attributes. Text is read as it is held, decoded, not
     only as str() or repr() shows it, since those escape a token with a backslash, newline
-    or tab. Never raises."""
+    or tab.
+
+    Raises no error of its own: something that cannot be read is taken to hold the token.
+    An interruption during the scan is raised from here, without the frames below, which
+    can hold the forms of the token or what was being read."""
+    failure: BaseException
+    try:
+        return _scan_for_token(value, secret)
+    except BaseException as error:
+        failure = _detached(error)
+    # Raised outside the handler, so nothing is chained to it.
+    raise failure
+
+
+def _scan_for_token(value: object, secret: _Secret) -> bool:
     forms = _token_forms(secret)
     # Every object scanned is kept here, not only its id(), until the scan ends: the upb
     # protobuf backend makes a new wrapper for a sub-message on each access, and a freed

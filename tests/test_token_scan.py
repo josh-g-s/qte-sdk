@@ -6,17 +6,26 @@ build messages, repeated fields and maps differently.
 """
 
 import os
+import re
 import subprocess
 import sys
 import traceback
+from types import SimpleNamespace
 
 import pytest
 from google.protobuf import struct_pb2
 from google.protobuf.internal import api_implementation
 from test_session import assert_token_absent, synthetic_token
 
+import qte_sdk.session
 from qte_sdk.contract.v1.session_pb2 import Calendar, Holiday, Subscribe
-from qte_sdk.session import _holds_token, _Secret, _token_forms
+from qte_sdk.session import (
+    TOKEN_ENV_VAR,
+    TOKEN_FILE_ENV_VAR,
+    _holds_token,
+    _Secret,
+    _token_forms,
+)
 
 # Set for the run under the pure-python backend, so that run can check it got it.
 BACKEND_VAR = "QTE_TEST_PROTOBUF_BACKEND"
@@ -93,6 +102,37 @@ def test_a_scan_cut_short_leaves_no_form_of_the_token_in_a_traceback(special: st
         assert form not in text
 
 
+@pytest.mark.parametrize("where", ["json", "wrapper"])
+@pytest.mark.parametrize("entry", ["_holds_token", "_redact"])
+def test_an_interruption_while_the_forms_are_made_shows_none_of_them(
+    where: str, entry: str, monkeypatch: pytest.MonkeyPatch
+):
+    # Cut short inside json.dumps, which has the token as an argument, or while a form is
+    # put in its wrapper, after the plain forms are all made: the frames below the SDK's
+    # entry point, which hold them, are not part of the traceback.
+    token = synthetic_token() + "\\" + synthetic_token()
+    secret = _Secret(token)
+    forms = [form.value for form in _token_forms(secret)]
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise Interrupt
+
+    if where == "json":
+        monkeypatch.setattr(qte_sdk.session, "json", SimpleNamespace(dumps=interrupted))
+    else:
+        monkeypatch.setattr(qte_sdk.session, "_Secret", interrupted)
+    with pytest.raises(Interrupt) as caught:
+        getattr(qte_sdk.session, entry)("nothing to find here", secret)
+    rendered = traceback.TracebackException.from_exception(caught.value, capture_locals=True)
+    frames = [frame for frame in rendered.stack if frame.filename != __file__]
+    expected = ["_holds_token"] if entry == "_holds_token" else ["_redact", "_token_forms"]
+    assert [frame.name for frame in frames] == expected
+    text = "\n".join(f"{frame.name} {frame.locals}" for frame in frames)
+    assert_token_absent(token, text)
+    for form in forms:
+        assert form not in text
+
+
 def test_the_forms_of_the_token_are_held_withheld():
     token = synthetic_token() + "\\" + synthetic_token()
     forms = _token_forms(_Secret(token))
@@ -101,18 +141,28 @@ def test_the_forms_of_the_token_are_held_withheld():
 
 
 @pytest.mark.skipif(BACKEND_VAR in os.environ, reason="this is the run it starts")
-def test_the_scan_holds_under_the_pure_python_backend():
+def test_the_scan_holds_under_the_pure_python_backend(monkeypatch: pytest.MonkeyPatch):
+    # The child's environment is copied from this one: a real token must not be in it,
+    # where a failure report showing locals could display it. Nor may inherited pytest
+    # options deselect the checks the child is run for.
+    for name in (TOKEN_ENV_VAR, TOKEN_FILE_ENV_VAR, "PYTEST_ADDOPTS"):
+        monkeypatch.delenv(name, raising=False)
     env = {
         **os.environ,
         "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python",
         BACKEND_VAR: "python",
     }
     run = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", __file__],
+        [sys.executable, "-m", "pytest", "-v", "-p", "no:cacheprovider", __file__],
         env=env,
         capture_output=True,
         text=True,
         timeout=300,
     )
     assert run.returncode == 0, run.stdout[-4000:] + run.stderr[-4000:]
-    assert "1 skipped" in run.stdout
+    # Every other test in this module ran there and passed, the backend check included.
+    this = "test_the_scan_holds_under_the_pure_python_backend"
+    others = [name for name in globals() if name.startswith("test_") and name != this]
+    outcomes = re.findall(r"::(test_\w+)(?:\[[^\]]*\])? (PASSED|FAILED|SKIPPED|ERROR)", run.stdout)
+    assert {name for name, outcome in outcomes if outcome == "PASSED"} == set(others)
+    assert [outcome for name, outcome in outcomes if outcome != "PASSED"] == ["SKIPPED"]
