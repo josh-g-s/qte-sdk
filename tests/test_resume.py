@@ -7,7 +7,7 @@ import traceback
 import pytest
 from fake_exchange import frame, serve_local
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
-from test_session import ack, assert_token_absent, synthetic_token
+from test_session import ack, assert_token_absent, session_reject, synthetic_token
 from websockets.asyncio.server import ServerConnection
 
 import qte_sdk.connection
@@ -20,15 +20,18 @@ from qte_sdk.connection import (
     ReportGap,
     ResumeComplete,
     SeqGap,
+    SessionRejected,
 )
 from qte_sdk.contract.v1.common_pb2 import BUY, RESTING, SELL
 from qte_sdk.contract.v1.order_events_pb2 import OrderState
+from qte_sdk.contract.v1.session_pb2 import OrderSnapshot, ResumeAck
 from qte_sdk.market_data import as_market_data
 from qte_sdk.reconnect import Connected, Disconnected, ReconnectingSession, is_retryable
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     ResumeNotAcknowledged,
     ResumeRejected,
+    _Reports,
     open_session,
 )
 
@@ -571,3 +574,63 @@ async def test_an_unanswered_resume_fails_the_attempt_and_is_retried():
             events = await take(rs, 4)
     assert kinds(events) == ["Disconnected", "Retrying", "Connected", "resume_ack:None"]
     assert isinstance(events[0], Disconnected) and isinstance(events[0].error, TimeoutError)
+
+
+# Edge cases a review found
+
+
+async def test_an_order_reject_before_the_ack_does_not_fail_the_session():
+    release_reject = frame(
+        "reject",
+        {"request_type": "NEW", "reason_code": "MALFORMED_MESSAGE", "request_ref": "r-1"},
+        report_seq="7",
+    )
+
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(release_reject)  # a private report, sent before the ack
+        await ws.send(ack())
+        await ws.wait_closed()
+
+    async with serve_local(handler) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            events = await take(session, 1)
+    assert kinds(events) == ["reject:7"]
+
+
+async def test_a_session_rejected_while_resuming_is_not_retried():
+    exchange = Scripted({"answer": [session_reject("TEAM_DISABLED")]})
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        with pytest.raises(SessionRejected) as caught:
+            async with rs:
+                async for _ in rs:
+                    pass
+    assert not isinstance(caught.value, ResumeRejected)
+    assert caught.value.reason_name == "TEAM_DISABLED"
+    assert exchange.connections == 1
+
+
+def test_a_view_is_incomplete_while_a_snapshot_arrives():
+    view = RestingOrders()
+    view.apply(ResumeAck(replayed=False, as_of_report_seq=50, snapshot_count=2))
+    view.apply(OrderSnapshot(instrument="AAPL", side=BUY, price=PRICE, remaining_size=7))
+    assert view.incomplete and len(view) == 0
+    view.apply(OrderSnapshot(instrument="AAPL", side=BUY, price=PRICE + 1, remaining_size=7))
+    view.apply(ResumeComplete(False, 50, 2))
+    assert not view.incomplete and len(view) == 2
+
+
+def test_a_replay_does_not_complete_while_a_gap_below_as_of_is_open():
+    reports = _Reports()
+    for n in (10, 12):  # 11 is missing; 12 is delivered beyond the gap
+        reports.route(Received("order_state", OrderState(), None, report_seq=n))
+    assert reports.cursor == 10
+    reports.begin(10)
+    ack_event = Received("resume_ack", ResumeAck(replayed=True, as_of_report_seq=12), None)
+    assert [type(e).__name__ for e in reports.route(ack_event)] == ["Received"]
+    replayed = [
+        reports.route(Received("order_state", OrderState(), None, report_seq=n)) for n in (11, 12)
+    ]
+    assert [[type(e).__name__ for e in r] for r in replayed] == [["Received"], ["ResumeComplete"]]
+    assert reports.cursor == 12

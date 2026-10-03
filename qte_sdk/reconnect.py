@@ -69,8 +69,9 @@ A session the exchange acknowledged but that failed before it could be delivered
 incomplete on it.
 
 Nothing sent before a disconnect is sent again. An order in flight when the connection
-dropped may or may not have reached the exchange, and the SDK never repeats it; if it did,
-the resumed reports say what became of it. While no session is up, `send` raises
+dropped may or may not have reached the exchange, and the SDK never repeats it. If it did
+and the exchange replays, the replayed reports say what became of it; a snapshot shows only
+whether it rests now. While no session is up, `send` raises
 `NotConnected` rather than queueing the message.
 
 Which failures are retried (`is_retryable`): a dropped or closed connection, a connection

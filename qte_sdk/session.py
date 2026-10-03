@@ -209,7 +209,9 @@ class _Reports:
         # The replay or the snapshot covers every report held so far at or below as_of.
         resume.held = {n: e for n, e in resume.held.items() if n > ack.as_of_report_seq}
         if ack.replayed:
-            if self._delivered(ack.as_of_report_seq):
+            # Complete at once only if nothing up to as_of is missing; otherwise the replay
+            # fills the gap and completes on as_of, even when as_of itself is a duplicate.
+            if self.cursor is not None and self.cursor >= ack.as_of_report_seq:
                 return self._complete(ack)
             return []
         resume.snapshots_left = ack.snapshot_count
@@ -351,7 +353,14 @@ class Session:
     def last_report_seq(self) -> int | None:
         """The `report_seq` up to which this session has read every private report with no
         gap, or None before the first report or `resume`. Pass it to the next session's
-        `resume` to have the exchange replay the reports that come after it."""
+        `resume` to have the exchange replay the reports that come after it.
+
+        It counts reports as they are read, which can be before they are delivered (for
+        example while `resume` or `wait_for_calendar` reads ahead), so take it once you
+        have handled every event the session has delivered. Without a resume, the first
+        report read is its starting point: nothing says whether earlier ones were missed.
+        A report that could not be decoded counts too, as a `DecodeFailed`, since a replay
+        would send the same bytes again."""
         return self._reports.cursor
 
     async def resume(
@@ -417,6 +426,9 @@ class Session:
         if timed_out:
             raise TimeoutError(f"the exchange did not answer resume within {timeout} s")
         if answer is None:
+            if isinstance(self._failure, SessionRejected):
+                # The exchange refused the session itself; that is the error to report.
+                raise self._failure
             raise ResumeNotAcknowledged("the connection closed before resume_ack")
         if isinstance(answer, DecodeFailed):
             raise ResumeNotAcknowledged(f"resume_ack could not be decoded: {answer.error}")
@@ -673,8 +685,10 @@ async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
                 if event.type == "session_ack":
                     assert isinstance(event.message, SessionAck)
                     return event.message, early
-                if event.type == "reject":
-                    # Before the acknowledgement, the only request in flight is `auth`.
+                if event.type == "reject" and event.report_seq is None:
+                    # Before the acknowledgement, the only request in flight is `auth`. A
+                    # reject with a report_seq is one of the team's order reports, which can
+                    # arrive from the moment the connection opens.
                     message: Any = event.message
                     detail = message.reason_detail if message.HasField("reason_detail") else None
                     name = event.unknown_enum_names().get("reason_code")

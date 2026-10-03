@@ -333,7 +333,7 @@ Each of your team's private order reports (`accepted`, a `reject` sent once the 
 
 The first session resumes too, from 0, so it always starts with a snapshot of your resting orders. A `RestingOrders` view you pass as `resting=`, or that follows the session, is loaded from that snapshot, is marked incomplete on `Disconnected`, and is complete again at `ResumeComplete`.
 
-Market data is not replayed: what was published while you were disconnected is lost, and the new session's subscription delivers the latest books from then on. An order in flight when the connection dropped may or may not have reached the exchange, and the SDK never sends it again; if it arrived, the resumed reports tell you what became of it. To resume a session you opened yourself, call `await session.resume(last_report_seq)` right after `open_session`, before reading events, passing the previous session's `last_report_seq` (or 0 for a snapshot).
+Market data is not replayed: what was published while you were disconnected is lost, and the new session's subscription delivers the latest books from then on. An order in flight when the connection dropped may or may not have reached the exchange, and the SDK never sends it again. If it arrived and the exchange replays what you missed, the replayed reports tell you what became of it; a snapshot shows only whether it is resting now, not whether it filled or was rejected. To resume a session you opened yourself, call `await session.resume(last_report_seq)` right after `open_session`, before reading events, passing the previous session's `last_report_seq` (or 0 for a snapshot).
 
 ## 10. Past market data (history)
 

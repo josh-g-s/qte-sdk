@@ -167,6 +167,11 @@ class RestingOrders:
             if not event.replayed:
                 self._snapshot = {}
                 self._snapshot_damaged = False
+                # Uncertain until the snapshot is complete. The view itself is untouched
+                # meanwhile, so a replay could still put it right if the snapshot is cut short.
+                if not self._incomplete:
+                    self._incomplete = True
+                    self._replay_restores = True
         elif isinstance(event, OrderSnapshot):
             self._on_order_snapshot(event)
         elif isinstance(event, OrderState):
