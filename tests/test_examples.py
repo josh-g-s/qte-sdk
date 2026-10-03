@@ -27,12 +27,12 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
-from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, MarketSessionPhase
+from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, MarketSessionPhase, OrderLifecycleState
 from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
 from qte_sdk.contract.v1.market_data_pb2 import SessionState as SessionStateMessage
 from qte_sdk.contract.v1.market_data_pb2 import WallLevel
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
-from qte_sdk.orders import send_amend, send_new
+from qte_sdk.orders import reason_code_name, send_amend, send_new
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import open_session
 
@@ -368,6 +368,8 @@ class FakeExchange:
             reason = "NO_ORDER_AT_LEVEL"
         elif key != old and key in self.resting:
             reason = "DUPLICATE_ORDER_AT_LEVEL"
+        elif (key[2] <= BID) if p["side"] == "BUY" else (key[2] >= ASK):
+            reason = "AMEND_PRICE_AT_OR_BEYOND_WALL"  # at or beyond its own side's wall
         if reason is not None:
             reject = {
                 "request_ref": p.get("request_ref"),
@@ -835,7 +837,8 @@ async def test_the_fake_rejects_a_duplicate_without_accepting_it():
 async def test_the_fakes_amends_keep_a_resting_order_view_right():
     exchange = FakeExchange()
     view = RestingOrders()
-    low, high = BID - TICK, BID - 2 * TICK
+    # Bids rest strictly inside the wall's best bid and ask.
+    first, second, third = BID + TICK, BID + 2 * TICK, BID + 3 * TICK
     async with serve_local(exchange) as url:
         session = await open_session(url, token=synthetic_token())
         async with session:
@@ -846,10 +849,12 @@ async def test_the_fakes_amends_keep_a_resting_order_view_right():
                 while True:
                     event = await anext(events)
                     view.apply(event)
-                    if isinstance(event, Received) and event.type in ("order_state", "reject"):
-                        return event.type
+                    if isinstance(event, Received) and event.type == "order_state":
+                        return OrderLifecycleState.Name(event.message.state)
+                    if isinstance(event, Received) and event.type == "reject":
+                        return reason_code_name(event.message.reason_code)
 
-            for price in (BID, low):
+            for price in (first, second):
                 await send_new(
                     session,
                     strat_id="s",
@@ -859,22 +864,24 @@ async def test_the_fakes_amends_keep_a_resting_order_view_right():
                     price=price,
                     size=5,
                 )
-                assert await answer() == "order_state"
+                assert await answer() == "RESTING"
             amend = {"instrument": INSTRUMENT, "side": BUY, "new_size": 5}
-            await send_amend(session, price=BID, new_price=low, **amend)
-            assert await answer() == "reject"  # the team already rests there
-            assert {o.key.price for o in view} == {BID, low}
+            await send_amend(session, price=first, new_price=second, **amend)
+            assert await answer() == "DUPLICATE_ORDER_AT_LEVEL"
+            await send_amend(session, price=first, new_price=BID, **amend)
+            assert await answer() == "AMEND_PRICE_AT_OR_BEYOND_WALL"
+            assert {o.key.price for o in view} == {first, second}
 
-            await send_amend(session, price=BID, new_price=high, **amend)
-            assert await answer() == "order_state"
-            assert {o.key.price for o in view} == {low, high}
+            await send_amend(session, price=first, new_price=third, **amend)
+            assert await answer() == "RESTING"
+            assert {o.key.price for o in view} == {second, third}
 
-            await send_amend(session, price=high, new_price=ASK, **amend)
-            assert await answer() == "order_state"  # FILLED against the wall
-            assert {o.key.price for o in view} == {low}
+            await send_amend(session, price=third, new_price=ASK, **amend)
+            assert await answer() == "FILLED"  # against the wall
+            assert {o.key.price for o in view} == {second}
 
-            await send_amend(session, price=low, new_price=low, **{**amend, "new_size": 0})
-            assert await answer() == "order_state"  # CANCELLED: cut to nothing
+            await send_amend(session, price=second, new_price=second, **{**amend, "new_size": 0})
+            assert await answer() == "CANCELLED"  # cut to nothing
     assert len(view) == 0
     assert exchange.resting == {}
 
