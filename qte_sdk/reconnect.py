@@ -40,9 +40,13 @@ at once, with or without a resume and whether or not either term is known, witho
 waiting for the next calendar: the next session asks from 0 and gets a snapshot, or, with
 `resume=False`, counts the new term's reports from the first it reads, as a first session
 does. The same holds when the exchange closes an attempt to connect with 4001 before it is
-up. The close is retried like any other drop. A client that was not connected when the
-term changed is not sent the close; for it, the check of the new session's calendar,
-described here and below, is what forgets the number.
+up, even if the attempt is then cancelled or the session closed. The close is retried like
+any other drop. One exception: if the exchange rejects a new session while it waits for
+the calendar, just before closing it with 4001, the rejection can end the session before
+the close is seen, and then `last_report_seq` keeps the old number. The rejection is not
+retried, so that number is never sent. A client that was not connected when the term
+changed is not sent the close; for it, the check of the new session's calendar, described
+here and below, is what forgets the number.
 
 With `resume=False` the report number is carried over too, so that a report missed while
 disconnected is noticed (see below). It is forgotten when the new session's calendar names
@@ -344,6 +348,9 @@ class ReconnectingSession:
         self._reports = _Reports()
         # The term the cursor was counted in, as the calendar names it, or None if unknown.
         self._reports_term: tuple[str, str] | None = None
+        # Set when the exchange closed the current attempt's connection for a term change,
+        # which an attempt checks even when a cancellation hides the error that said so.
+        self._term_change_seen = False
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "connected" if self._up else "not connected"
@@ -610,16 +617,20 @@ class ReconnectingSession:
         # Events a failed attempt read ahead are never delivered, so the cursor goes back.
         saved = self._reports.saved()
         saved_term = self._reports_term
+        self._term_change_seen = False
         try:
             opened = await self._unless_closed(
                 open_session(
                     self.url,
                     self._secret.value,
                     ack_timeout=self._ack_timeout,
+                    _on_close=self._note_close,
                     **self._connection_options,
                 )
             )
             if opened is _CLOSED:
+                if self._term_change_seen:
+                    self._forget_cursor()
                 return None, None, False, None
             session = opened
             acknowledged = True
@@ -673,10 +684,14 @@ class ReconnectingSession:
             # so the cursor goes back. Whoever handles the cancellation closes the session.
             self._reports.restore(saved)
             self._reports_term = saved_term
+            if self._closed_for_term_change(session):
+                # The exchange closed the connection for a term change before the
+                # cancellation, which took the place of the error that said so.
+                self._forget_cursor()
             raise
         # A close for a term change leaves the cursor meaningless, whatever error is
         # reported in the end: noted now, before a drained rejection can replace it.
-        term_changed = _closed_at_term_change(failure)
+        term_changed = _closed_at_term_change(failure) or self._closed_for_term_change(session)
         if session is not None and (failure is not None or self._closed):
             # Restored before anything else is awaited, so a cancellation cannot skip it.
             self._reports.restore(saved)
@@ -699,7 +714,7 @@ class ReconnectingSession:
             await _close(session)
             self._session = None
             session = None
-        elif term_changed:
+        elif failure is not None and term_changed:
             # Closed before the session was acknowledged: the cursor is the old term's.
             self._forget_cursor()
         return session, failure, acknowledged, resumed
@@ -750,6 +765,21 @@ class ReconnectingSession:
             reports.restore((None, frozenset()))
         if term is not None or reports.cursor is None:
             self._reports_term = term
+
+    def _note_close(self, code: int) -> None:
+        """Told by `open_session` the close code the exchange sent, even when the opening
+        was cancelled."""
+        if code == TERM_CHANGE_CLOSE_CODE:
+            self._term_change_seen = True
+
+    def _closed_for_term_change(self, session: Session | None) -> bool:
+        """Whether the exchange closed this attempt's connection for a term change, as
+        `open_session` reported or as the open session's connection received it."""
+        if self._term_change_seen:
+            return True
+        return session is not None and (
+            session.connection._close_code_received() == TERM_CHANGE_CLOSE_CODE
+        )
 
     def _forget_cursor(self) -> None:
         """Forget the report cursor and its term, as at the start: the exchange closed the

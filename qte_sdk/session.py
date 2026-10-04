@@ -27,7 +27,7 @@ import asyncio
 import json
 import os
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from google.protobuf.message import Message
@@ -765,6 +765,7 @@ async def open_session(
     token: str | None = None,
     *,
     ack_timeout: float | None = DEFAULT_ACK_TIMEOUT,
+    _on_close: Callable[[int], None] | None = None,
     **connection_options: Any,
 ) -> Session:
     """Connect to `url`, authenticate, and wait for the exchange to acknowledge the session.
@@ -804,6 +805,12 @@ async def open_session(
             ack, early = await _wait_for_ack(conn)
     except BaseException as error:
         interrupted = await _finish_closing(conn)
+        # For `ReconnectingSession`: the close code the exchange sent, if any, is passed on
+        # even when a cancellation replaces the error, which is never chained (it may
+        # repeat the token). A code is a number, so it cannot.
+        close_code = conn._close_code_received()
+        if _on_close is not None and close_code is not None:
+            _on_close(close_code)
         if isinstance(error, TimeoutError) and deadline.expired():
             # A fresh error, not the one asyncio chained to the cancelled step.
             safe = TimeoutError(f"the session was not acknowledged within {ack_timeout} s")

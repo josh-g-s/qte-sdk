@@ -45,8 +45,9 @@ Term change: when one term ends and the next begins, the exchange closes every c
 open at that moment with close code `TERM_CHANGE_CLOSE_CODE` (4001) and reason
 `term change`, after every message already queued for it, so no connection carries
 reports of two terms. Iteration raises a `ConnectionClosedError`, which
-`ReconnectingSession` retries like any other drop. The new session's calendar names the
-new term, in which report numbers start again (see `qte_sdk.reconnect`).
+`ReconnectingSession` retries like any other drop. Report numbers start again in the new
+term, so `ReconnectingSession` forgets its report number on this close, whatever the next
+session's calendar says (see `qte_sdk.reconnect`).
 
 Report numbers: each of the team's private order reports that the exchange can replay
 carries a `report_seq` on its envelope, which is the event's `report_seq` here (None on
@@ -180,8 +181,8 @@ too long, or when a connection has not authenticated in time. Its reason text is
 TERM_CHANGE_CLOSE_CODE = 4001
 """The close code the exchange sends on every connection open when one term ends and the
 next begins, after every message already queued for it. Its reason text is
-`term change`. Reconnect: the new session's calendar names the new term, in which report
-numbers start again."""
+`term change`. Report numbers start again in the new term, so reconnect and resume from 0,
+whatever the next session's calendar says."""
 
 # Close reasons whose exact text is fixed by the contract or by `websockets` itself, so
 # they cannot carry the token and are kept. Any other reason is withheld.
@@ -631,6 +632,13 @@ class Connection:
         if self._ws is None:
             raise RuntimeError("connection is not open")
         return self._ws
+
+    def _close_code_received(self) -> int | None:
+        """The close code the peer sent, as soon as `websockets` has read its close frame,
+        even if nothing reading this connection has met the close yet; None if no close
+        has arrived. A code is a number, so it cannot carry the token."""
+        close = self._ws.protocol.close_rcvd if self._ws is not None else None
+        return close.code if close is not None else None
 
     def _handle(self, frame: str | bytes) -> Iterator[Event]:
         # Any failure to decode one frame is reported for that frame, and delivery goes on:
