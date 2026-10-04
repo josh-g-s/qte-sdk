@@ -9,9 +9,10 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from fake_exchange import exchange, frame, serve_local, silent_server
+from fake_exchange import LoopClock, exchange, frame, serve_local, silent_server
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
+from websockets.protocol import State
 
 from qte_sdk.connection import (
     Connection,
@@ -755,19 +756,27 @@ async def fill_until_stalled(conn: Connection) -> "asyncio.Task[None]":
     raise AssertionError("the writes never backed up")
 
 
-async def test_close_is_bounded_when_the_peer_stops_reading():
+async def test_close_is_bounded_when_the_peer_stops_reading(monkeypatch):
+    clock = LoopClock(monkeypatch)
     async with deaf_server() as url:
-        conn = Connection(url, close_timeout=0.2, compression=None)
+        conn = Connection(url, close_timeout=10, compression=None)
         await conn.open()
+        ws = conn._ws  # noqa: SLF001
+        assert ws is not None
         stalled = await fill_until_stalled(conn)
-        started = asyncio.get_running_loop().time()
-        await asyncio.wait_for(conn.close(), 5)
-        elapsed = asyncio.get_running_loop().time() - started
+        closing = asyncio.create_task(conn.close())
+        # The close frame is queued behind the stalled writes, and close() waits for them
+        # until its 10 s are up.
+        async with asyncio.timeout(5):
+            while ws.state is not State.CLOSING:
+                await asyncio.sleep(0)
+        assert not closing.done()
+        clock.advance(10)
+        await asyncio.wait_for(closing, 5)
         # The stalled send ends too, rather than waiting on the dropped socket.
         await asyncio.wait_for(asyncio.gather(stalled, return_exceptions=True), 5)
         with pytest.raises(ConnectionClosedError):
             await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
-    assert 0.2 <= elapsed < 2
 
 
 async def test_cancelling_iteration_keeps_the_type_and_drops_the_chain():

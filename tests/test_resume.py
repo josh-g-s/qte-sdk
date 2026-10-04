@@ -7,7 +7,7 @@ import typing
 from contextlib import aclosing
 
 import pytest
-from fake_exchange import LoopClock, frame, serve_local
+from fake_exchange import LoopClock, frame, serve_local, wait_until
 from test_calendar import CALENDAR, CALENDAR_PAYLOAD, calendar_frame
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
@@ -202,18 +202,18 @@ async def test_heartbeats_are_absorbed_and_keep_a_quiet_link_alive(monkeypatch):
         [peer] = peers
         async with session:
             reading = asyncio.create_task(anext(aiter(session)))
-            for n in range(2, 5):
+            for n in range(2, 7):
                 await peer.send(frame("heartbeat", {}, n))
-                # Once the session has read heartbeat n, its 10 s start again; then 6 s
-                # pass with nothing more.
+                # Once the session has read heartbeat n, its 10 s start again; then 3 s
+                # pass with nothing more, leaving more than the 5 s each wait here allows.
                 async with asyncio.timeout(5):
                     while session.connection._expected_seq <= n:  # noqa: SLF001
                         await asyncio.sleep(0)
-                clock.advance(6)
-            await peer.send(frame("book", {"instrument": "AAPL", "grid_time": "1"}, 5))
+                clock.advance(3)
+            await peer.send(frame("book", {"instrument": "AAPL", "grid_time": "1"}, 7))
             event = await asyncio.wait_for(reading, 5)
-    # 18 s of heartbeats outlasted the 10 s timeout; none of them was delivered, and
-    # their seqs counted, so the book's seq 5 is not a gap.
+    # 15 s of heartbeats outlasted the 10 s timeout; none of them was delivered, and
+    # their seqs counted, so the book's seq 7 is not a gap.
     assert kinds([event]) == ["book:None"]
 
 
@@ -259,15 +259,31 @@ def test_the_liveness_timeout_is_a_documented_choice_and_can_be_turned_off():
     assert "not a value the exchange sends" in doc
 
 
-async def test_a_dead_link_reconnects_and_resumes():
+async def test_a_dead_link_reconnects_and_resumes(monkeypatch):
+    clock = LoopClock(monkeypatch)
     exchange = Scripted(
         {"term": TERM, "answer": [EMPTY], "after": [heartbeat(), order_state(1)]},
         {"term": TERM, "answer": [EMPTY]},
     )
+    events: list[object] = []
+
+    async def collect(rs: ReconnectingSession) -> None:
+        async for event in rs:
+            events.append(event)
+            if len(events) == 9:
+                break
+
     async with serve_local(exchange) as url:
-        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep, liveness_timeout=0.1)
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep, liveness_timeout=10)
         async with rs:
-            events = await take(rs, 9)
+            collecting = asyncio.create_task(collect(rs))
+            # Once the report after the heartbeat is read, the session waits for the next
+            # message with its liveness clock running; the link stays quiet past 10 s.
+            async with asyncio.timeout(5):
+                while len(events) < 5:
+                    await asyncio.sleep(0)
+            clock.advance(10)
+            await asyncio.wait_for(collecting, 5)
     assert kinds(events) == [
         "Connected",
         "calendar:None",
@@ -701,7 +717,7 @@ async def test_an_unanswered_resume_fails_the_attempt_and_is_retried(monkeypatch
             first = asyncio.create_task(anext(stream))
             # The time runs out only once the first session is open and the exchange holds
             # the resume it will never answer; the second has its full 10 s to open.
-            await asyncio.wait_for(exchange.resume_received.wait(), 5)
+            await wait_until(first, exchange.resume_received)
             clock.advance(10)
             events = [await asyncio.wait_for(first, 5), *await take(stream, 3)]
     assert kinds(events) == ["Disconnected", "Retrying", "Connected", "resume_ack:None"]

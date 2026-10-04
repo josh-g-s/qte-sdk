@@ -38,6 +38,19 @@ class LoopClock:
         self._offset += seconds
 
 
+async def wait_until(task: "asyncio.Future[Any]", *events: asyncio.Event) -> None:
+    """Wait until every one of `events` is set, or until `task` is done if that comes first.
+
+    For a task bounded by a timeout of its own, so no other limit is needed. A task that
+    ends first, with an error say, raises it when the test awaits it, rather than leaving
+    the test waiting for the fake exchange in vain."""
+    waiting = asyncio.gather(*(event.wait() for event in events))
+    try:
+        await asyncio.wait({waiting, task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        waiting.cancel()
+
+
 def frame(type_: str, payload: Any, seq: int | None = None, **extra: Any) -> str:
     """One server-to-client envelope as JSON text."""
     env: dict[str, Any] = {"version": CONTRACT_VERSION, "type": type_, "payload": payload, **extra}
