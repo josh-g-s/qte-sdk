@@ -476,18 +476,28 @@ def assert_withheld(error: BaseException, token: str) -> None:
     assert_no_token(shown, token)
 
 
+class _Recording:
+    """A connection factory that records what it makes. Empty, it is falsy, which must not
+    make it look absent."""
+
+    def __init__(self) -> None:
+        self.made: list[ClientConnection] = []
+
+    def __len__(self) -> int:
+        return len(self.made)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> ClientConnection:
+        self.made.append(ClientConnection(*args, **kwargs))
+        return self.made[-1]
+
+
 async def test_a_connection_factory_passed_in_is_still_used():
-    made: list[ClientConnection] = []
-
-    class Recorded(ClientConnection):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            made.append(self)
-
+    factory = _Recording()
+    assert not factory
     async with exchange([]) as url:
-        async with Connection(url, create_connection=Recorded) as conn:
+        async with Connection(url, create_connection=factory) as conn:
             assert [event async for event in conn] == []
-            assert len(made) == 1 and conn._open_ws() is made[0]
+            assert len(factory.made) == 1 and conn._open_ws() is factory.made[0]
             assert conn._close_code_received() == 1000
 
 

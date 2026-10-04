@@ -487,7 +487,8 @@ class Connection:
             logger = logging.getLogger(logger)
         # A factory the caller passes still makes the connection; it is wrapped, so the
         # connection is known from the moment it exists (see `_close_code_received`).
-        self._make_ws = connect_options.pop("create_connection", None) or ClientConnection
+        factory = connect_options.pop("create_connection", None)
+        self._make_ws = ClientConnection if factory is None else factory
         self._connect_options = {
             **connect_options,
             "logger": _WithoutCredentials(logger, {}),
