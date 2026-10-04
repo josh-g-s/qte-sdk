@@ -1,12 +1,15 @@
 // Outbound market data.
 //
-// **Version:** 1.11
+// **Version:** 1.12
 //
 // Message types on the envelope `type` field: `book`, `trades`, `mark`,
-// `session_state`, `official_close`. One feed for everyone (SPEC 4.3): the
-// same publisher, the same timestamp, the same 100 ms conflation grid for
-// `book`, `trades` and `session_state`; `mark` is published on its own
-// one-second grid (SPEC 4.3, SPEC 7.1). Engine state (the flow accumulators,
+// `session_state`, `official_close`, `option_chain`, `option_greeks`. One
+// feed for everyone (SPEC 4.3): the same publisher, the same timestamp, the
+// same 100 ms conflation grid for `book`, `trades`, `option_greeks` and
+// `session_state`; `mark` is published on its own one-second grid (SPEC 4.3,
+// SPEC 7.1). An option contract is named by Alpaca's OCC option
+// symbol, unpadded, in `instrument`, and its `book`, `trades` and `mark` are these same
+// messages (SPEC 18.1 to 18.3). Engine state (the flow accumulators,
 // the impact offset, the carry, the Tier-M state) is not published and has
 // no field here (SPEC 6.1, SPEC 9.3.3, SPEC 9.3.5). Every `timestamp` field
 // is a signed 64-bit count of milliseconds since the Unix epoch, UTC (SPEC
@@ -89,18 +92,43 @@ enum InstrumentCondition {
   DISABLED = 6;
 }
 
-// One level of the wall ladder (SPEC 5.3).
+// One level of the wall ladder (SPEC 5.3). An option contract's wall has
+// exactly one level per side (SPEC 18.2).
 message WallLevel {
   int64 price = 1; // int64-micro. SPEC 5.3, SPEC 6.2
-  int64 size = 2;  // int64-qty. The displayed size, at least one share. SPEC 5.3
+  // int64-qty. The displayed size, at least one share; at least one contract
+  // for an option. SPEC 5.3, SPEC 18.2
+  int64 size = 2;
 }
 
 // One price of resting student depth (SPEC 4.3).
 message StudentLevel {
   int64 price = 1; // int64-micro. The price the orders rest at. SPEC 4.3
   // int64-qty. The total resting size at that price, STALE orders included,
-  // with no team, no strategy and no order count. SPEC 4.3, SPEC 8.4
+  // with no team, no strategy and no order count. Shares; contracts for an
+  // option. SPEC 4.3, SPEC 8.4, SPEC 18.1
   int64 size = 2;
+}
+
+// What an option contract may do now (SPEC 18.1 to 18.3, SPEC 18.6), published
+// on the contract's `Book`. Open to future values: a client treats a value it
+// does not know as the most restrictive it does know.
+enum OptionTradingState {
+  OPTION_TRADING_STATE_UNSPECIFIED = 0;
+  // Ordinary trading: no restriction beyond the usual order checks.
+  OPTION_TRADING = 1;
+  // No order or fill may increase the desk's absolute position in the
+  // contract or take it through zero. Orders that only reduce are accepted,
+  // and the contract has no quoting obligation. It is the state of a
+  // retained contract, of a contract in an expiry that is reducing-only
+  // after a changeover, and of a contract whose published Greeks are flagged
+  // unavailable (SPEC 18.1, SPEC 18.3, SPEC 18.6).
+  OPTION_REDUCING_ONLY = 2;
+  // No wall and no matching of any kind: new orders are refused and a cancel
+  // is accepted. The mark is frozen, absent or recovering, or the contract
+  // has never had valid Greeks (SPEC 18.2, SPEC 18.3). Over
+  // OPTION_REDUCING_ONLY whenever both apply.
+  OPTION_SUSPENDED = 3;
 }
 
 // The adjusted book of one instrument at the end of one 100 ms interval: the
@@ -130,8 +158,18 @@ message Book {
   // applies, the first in this order is shown: DISABLED, then
   // REFERENCE_UNAVAILABLE, then ONE_SIDED or EMPTY, then FROZEN, then LIVE
   // (see InstrumentCondition). Required; never
-  // INSTRUMENT_CONDITION_UNSPECIFIED on the wire.
+  // INSTRUMENT_CONDITION_UNSPECIFIED on the wire. For an option contract
+  // the condition is the contract's own mark's: ONE_SIDED, EMPTY and
+  // DISABLED are never carried, because an option contract whose quote is
+  // not two-sided shows no wall and takes no trade, which trading_state
+  // reports (SPEC 18.2, SPEC 18.3).
   InstrumentCondition condition = 7;
+  // Present iff `instrument` is an option contract; absent for every other
+  // instrument, so an equity's book is unchanged. What the contract may do
+  // now (SPEC 18.1 to 18.3, SPEC 18.6). It is a field of the book like any
+  // other: a change in it alone makes the book changed. An option contract's
+  // wall is one level per side, at the band's edges (SPEC 18.2).
+  optional OptionTradingState trading_state = 8;
 }
 
 // One tape print (SPEC 10).
@@ -235,4 +273,113 @@ message OfficialClose {
   // bool. Set when any of the window's one-second marks was frozen, the
   // same data-quality flag the fallback ladder raises. SPEC 7.2
   bool frozen = 4;
+}
+
+// How an expiry's window of strikes was set (SPEC 18.1). Open to future
+// values.
+enum OptionWindowStatus {
+  OPTION_WINDOW_STATUS_UNSPECIFIED = 0;
+  // Computed from the previous official close's inputs.
+  OPTION_WINDOW_COMPUTED = 1;
+  // The previous window, kept because valid closing inputs were unavailable.
+  OPTION_WINDOW_RETAINED = 2;
+}
+
+// A listed option contract's place in the day's chain (SPEC 18.1, SPEC 18.5).
+// Open to future values.
+enum OptionContractRole {
+  OPTION_CONTRACT_ROLE_UNSPECIFIED = 0;
+  // In the active window and not obligated: tradable, no quoting obligation.
+  OPTION_ROLE_ACTIVE = 1;
+  // In the active window and the obligated contract at its strike: the
+  // out-of-the-money one, the call at or above the previous close's forward
+  // and the put below it. Only in an expiry that is not reducing-only.
+  OPTION_ROLE_OBLIGATED = 2;
+  // Outside the window, kept listed because a student position is open in
+  // it: reducing-only, with no quoting obligation.
+  OPTION_ROLE_RETAINED = 3;
+}
+
+// One expiry of one underlying in the day's chain.
+message OptionChainExpiry {
+  string underlying = 1; // id. The underlying's symbol. SPEC 18.1
+  string expiry = 2;     // string. The listed expiry date, ISO 8601. SPEC 18.1
+  OptionWindowStatus window_status = 3; // SPEC 18.1
+  // Whether the whole expiry is reducing-only: the old expiry after a
+  // changeover open (SPEC 18.6). Then no contract of it is obligated.
+  bool reducing_only = 4;
+  // The expiry's listed contracts, each named by Alpaca's OCC option
+  // symbol, unpadded, in byte order of the symbol. A call and a put at every active
+  // strike, and any retained contract. SPEC 18.1
+  repeated OptionChainContract contracts = 5;
+}
+
+// One listed contract in the chain.
+message OptionChainContract {
+  string instrument = 1;   // id. Alpaca's OCC option symbol, unpadded (SPY261120C00665000). SPEC 18.1
+  OptionContractRole role = 2; // SPEC 18.1, SPEC 18.5
+}
+
+// The day's listed option chain: the contracts that accept orders in the
+// session it is for, with the window and the obligated contract at each
+// strike (SPEC 18.1, SPEC 18.5). It is fixed for the session. It names no
+// instrument and carries no timestamp: it is published once for a session,
+// not on the 100 ms grid.
+message OptionChain {
+  string session_date = 1; // string. The US session date (ISO 8601) the chain is for. SPEC 13.1, SPEC 18.1
+  // One entry per underlying and expiry, by underlying then expiry date.
+  // An underlying and expiry with no listed contract has no entry.
+  repeated OptionChainExpiry expiries = 2;
+}
+
+// Whether a contract's published Greeks can be relied on (SPEC 18.3). Open to
+// future values.
+enum OptionGreeksStatus {
+  OPTION_GREEKS_STATUS_UNSPECIFIED = 0;
+  // From a calculation that succeeded and is the latest.
+  OPTION_GREEKS_VALID = 1;
+  // The latest calculation failed, or none has run yet this session and the
+  // previous session's values are held: the values are the last published,
+  // flagged unavailable for new risk. The contract is reducing-only.
+  OPTION_GREEKS_UNAVAILABLE = 2;
+  // The contract has never had valid Greeks: no values. The contract is
+  // suspended.
+  OPTION_GREEKS_NONE = 3;
+}
+
+// One option contract's published Greeks, with the forward and implied
+// volatility they were calculated from (SPEC 18.3). Greeks measure risk and
+// marks measure value: nothing here sets a mark. Published for listed
+// contracts only. Units are the contract's per-share units: a contract
+// multiplier of 100 is not applied.
+message OptionGreeks {
+  string instrument = 1; // id. Alpaca's OCC option symbol, unpadded (SPY261120C00665000). SPEC 18.1
+  int64 grid_time = 2;   // timestamp. The grid point this is published at. SPEC 4.3
+  OptionGreeksStatus status = 3; // SPEC 18.3
+  // timestamp. The one-second instant the values were calculated at; for the
+  // closing calculation, the session's close. Earlier than grid_time for
+  // retained values. Present iff status is not OPTION_GREEKS_NONE. SPEC 18.3
+  optional int64 calculated_at = 4;
+  // int64-micro. The forward of the contract's underlying and expiry that the
+  // values were calculated with, dollars per share. Present iff status is not
+  // OPTION_GREEKS_NONE. SPEC 18.3
+  optional int64 forward = 5;
+  // int64-vol. Implied volatility from the contract's own official mark, in
+  // millionths of a volatility point (25 percent is 25000000). Present iff
+  // status is not OPTION_GREEKS_NONE. SPEC 18.3
+  optional int64 implied_vol = 6;
+  // int64-q12. Delta per share, a decimal fraction times 10^12. Present iff
+  // status is not OPTION_GREEKS_NONE. SPEC 18.3
+  optional int64 delta = 7;
+  // int64-q12. Gamma per share per dollar of the underlying, times 10^12.
+  // Present iff status is not OPTION_GREEKS_NONE. SPEC 18.3
+  optional int64 gamma = 8;
+  // int64-micro. Vega in millionths of a dollar per share per volatility
+  // point: the figure the band's padding reads. Present iff status is not
+  // OPTION_GREEKS_NONE. SPEC 18.2, SPEC 18.3
+  optional int64 vega = 9;
+  // int64-micro. Theta in millionths of a dollar per share per calendar day,
+  // negative when a day's passing lowers the value. Present iff status is
+  // not OPTION_GREEKS_NONE. SPEC 18.3
+  optional int64 theta = 10;
 }

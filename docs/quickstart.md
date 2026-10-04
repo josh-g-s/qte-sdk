@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.25
+**Version:** 0.26
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -269,7 +269,38 @@ parse_option_symbol("SPY240119C00470000").strike  # 470000000
 is_option_symbol("XOM")  # False: an equity
 ```
 
-Option chains, Greeks, option books and option orders are not in the SDK yet.
+An option contract is otherwise an instrument like any other:
+- Subscribe to it, and order it with `send_new`, by its symbol.
+- Its `book`, `trades`, `mark` and `official_close` are the usual messages.
+- Every size is a whole number of **contracts**; the 100-share multiplier is never applied on the wire.
+- Prices, the mark included, stay in micro-dollars per share.
+
+Two more market-data messages are for options only, and reach a connection only once it is subscribed to an option contract:
+- `OptionChain`, the day's listed contracts with each one's role;
+- `OptionGreeks`, a contract's published delta, gamma, vega and theta, with the forward and implied volatility, as fixed-point integers.
+
+An option contract's book also carries `trading_state`: trading, reducing-only or suspended. Read it with `qte_sdk.options.trading_state`, which treats a state it does not know as suspended:
+
+```python
+from qte_sdk.options import LatestGreeks, chain_contracts, greek_to_decimal, trading_state
+from qte_sdk.options import OPTION_ROLE_OBLIGATED, OPTION_TRADING, OptionChain
+
+greeks = LatestGreeks()  # the latest Greeks per contract, as LatestBooks keeps books
+# in your one loop, for each market-data item:
+greeks.update(item)
+if isinstance(item, OptionChain):
+    quote_these = chain_contracts(item, underlying="SPY", role=OPTION_ROLE_OBLIGATED)
+g = greeks.get("SPY261120C00665000")
+if g is not None and g.HasField("delta"):
+    delta = greek_to_decimal(g.delta)  # Decimal('0.500000000000'), never a float
+book = books.get("SPY261120C00665000")
+may_open = book is not None and trading_state(book) == OPTION_TRADING
+```
+
+The `qte_sdk.options` docstring covers when each message arrives. Not published by the exchange yet:
+- a way to get the chain before subscribing to a listed contract, so your first option subscribe must name one you work out from the symbol rules;
+- options reject reasons;
+- options in the history service.
 
 ## 6. Place and cancel an order
 

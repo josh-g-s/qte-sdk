@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from qte_sdk.contract.v1 import common_pb2 as qte_dot_contract_dot_v1_dot_common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!qte/contract/v1/market_data.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"(\n\tWallLevel\x12\r\n\x05price\x18\x01 \x01(\x03\x12\x0c\n\x04size\x18\x02 \x01(\x03\"+\n\x0cStudentLevel\x12\r\n\x05price\x18\x01 \x01(\x03\x12\x0c\n\x04size\x18\x02 \x01(\x03\"\xbc\x02\n\x04\x42ook\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x11\n\tgrid_time\x18\x02 \x01(\x03\x12.\n\nbid_levels\x18\x03 \x03(\x0b\x32\x1a.qte.contract.v1.WallLevel\x12.\n\nask_levels\x18\x04 \x03(\x0b\x32\x1a.qte.contract.v1.WallLevel\x12\x39\n\x12student_bid_levels\x18\x05 \x03(\x0b\x32\x1d.qte.contract.v1.StudentLevel\x12\x39\n\x12student_ask_levels\x18\x06 \x03(\x0b\x32\x1d.qte.contract.v1.StudentLevel\x12\x37\n\tcondition\x18\x07 \x01(\x0e\x32$.qte.contract.v1.InstrumentCondition\"\x94\x01\n\tTapePrint\x12\r\n\x05price\x18\x01 \x01(\x03\x12\x0c\n\x04size\x18\x02 \x01(\x03\x12-\n\x0e\x61ggressor_side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\x11\n\ttimestamp\x18\x04 \x01(\x03\x12(\n\x04kind\x18\x05 \x01(\x0e\x32\x1a.qte.contract.v1.MatchKind\"[\n\x06Trades\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x11\n\tgrid_time\x18\x02 \x01(\x03\x12*\n\x06prints\x18\x03 \x03(\x0b\x32\x1a.qte.contract.v1.TapePrint\"v\n\x04Mark\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x12\n\nsampled_at\x18\x02 \x01(\x03\x12\r\n\x05value\x18\x03 \x01(\x03\x12\x37\n\tcondition\x18\x04 \x01(\x0e\x32$.qte.contract.v1.InstrumentCondition\"\xc1\x02\n\x0cSessionState\x12\x32\n\x05state\x18\x01 \x01(\x0e\x32#.qte.contract.v1.MarketSessionPhase\x12\x14\n\x0csession_date\x18\x02 \x01(\t\x12\x11\n\topen_time\x18\x03 \x01(\x03\x12\x12\n\nclose_time\x18\x04 \x01(\x03\x12\x11\n\tgrid_time\x18\x05 \x01(\x03\x12\x15\n\routage_active\x18\x06 \x01(\x08\x12\x1e\n\x11next_session_date\x18\x07 \x01(\tH\x00\x88\x01\x01\x12\x1b\n\x0enext_open_time\x18\x08 \x01(\x03H\x01\x88\x01\x01\x12\x1c\n\x0fnext_close_time\x18\t \x01(\x03H\x02\x88\x01\x01\x42\x14\n\x12_next_session_dateB\x11\n\x0f_next_open_timeB\x12\n\x10_next_close_time\"X\n\rOfficialClose\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x14\n\x0csession_date\x18\x02 \x01(\t\x12\r\n\x05value\x18\x03 \x01(\x03\x12\x0e\n\x06\x66rozen\x18\x04 \x01(\x08*\x94\x01\n\x13InstrumentCondition\x12$\n INSTRUMENT_CONDITION_UNSPECIFIED\x10\x00\x12\x08\n\x04LIVE\x10\x01\x12\r\n\tONE_SIDED\x10\x02\x12\t\n\x05\x45MPTY\x10\x03\x12\n\n\x06\x46ROZEN\x10\x04\x12\x19\n\x15REFERENCE_UNAVAILABLE\x10\x05\x12\x0c\n\x08\x44ISABLED\x10\x06\x42\x38Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!qte/contract/v1/market_data.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"(\n\tWallLevel\x12\r\n\x05price\x18\x01 \x01(\x03\x12\x0c\n\x04size\x18\x02 \x01(\x03\"+\n\x0cStudentLevel\x12\r\n\x05price\x18\x01 \x01(\x03\x12\x0c\n\x04size\x18\x02 \x01(\x03\"\x8f\x03\n\x04\x42ook\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x11\n\tgrid_time\x18\x02 \x01(\x03\x12.\n\nbid_levels\x18\x03 \x03(\x0b\x32\x1a.qte.contract.v1.WallLevel\x12.\n\nask_levels\x18\x04 \x03(\x0b\x32\x1a.qte.contract.v1.WallLevel\x12\x39\n\x12student_bid_levels\x18\x05 \x03(\x0b\x32\x1d.qte.contract.v1.StudentLevel\x12\x39\n\x12student_ask_levels\x18\x06 \x03(\x0b\x32\x1d.qte.contract.v1.StudentLevel\x12\x37\n\tcondition\x18\x07 \x01(\x0e\x32$.qte.contract.v1.InstrumentCondition\x12?\n\rtrading_state\x18\x08 \x01(\x0e\x32#.qte.contract.v1.OptionTradingStateH\x00\x88\x01\x01\x42\x10\n\x0e_trading_state\"\x94\x01\n\tTapePrint\x12\r\n\x05price\x18\x01 \x01(\x03\x12\x0c\n\x04size\x18\x02 \x01(\x03\x12-\n\x0e\x61ggressor_side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\x11\n\ttimestamp\x18\x04 \x01(\x03\x12(\n\x04kind\x18\x05 \x01(\x0e\x32\x1a.qte.contract.v1.MatchKind\"[\n\x06Trades\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x11\n\tgrid_time\x18\x02 \x01(\x03\x12*\n\x06prints\x18\x03 \x03(\x0b\x32\x1a.qte.contract.v1.TapePrint\"v\n\x04Mark\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x12\n\nsampled_at\x18\x02 \x01(\x03\x12\r\n\x05value\x18\x03 \x01(\x03\x12\x37\n\tcondition\x18\x04 \x01(\x0e\x32$.qte.contract.v1.InstrumentCondition\"\xc1\x02\n\x0cSessionState\x12\x32\n\x05state\x18\x01 \x01(\x0e\x32#.qte.contract.v1.MarketSessionPhase\x12\x14\n\x0csession_date\x18\x02 \x01(\t\x12\x11\n\topen_time\x18\x03 \x01(\x03\x12\x12\n\nclose_time\x18\x04 \x01(\x03\x12\x11\n\tgrid_time\x18\x05 \x01(\x03\x12\x15\n\routage_active\x18\x06 \x01(\x08\x12\x1e\n\x11next_session_date\x18\x07 \x01(\tH\x00\x88\x01\x01\x12\x1b\n\x0enext_open_time\x18\x08 \x01(\x03H\x01\x88\x01\x01\x12\x1c\n\x0fnext_close_time\x18\t \x01(\x03H\x02\x88\x01\x01\x42\x14\n\x12_next_session_dateB\x11\n\x0f_next_open_timeB\x12\n\x10_next_close_time\"X\n\rOfficialClose\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x14\n\x0csession_date\x18\x02 \x01(\t\x12\r\n\x05value\x18\x03 \x01(\x03\x12\x0e\n\x06\x66rozen\x18\x04 \x01(\x08\"\xc3\x01\n\x11OptionChainExpiry\x12\x12\n\nunderlying\x18\x01 \x01(\t\x12\x0e\n\x06\x65xpiry\x18\x02 \x01(\t\x12:\n\rwindow_status\x18\x03 \x01(\x0e\x32#.qte.contract.v1.OptionWindowStatus\x12\x15\n\rreducing_only\x18\x04 \x01(\x08\x12\x37\n\tcontracts\x18\x05 \x03(\x0b\x32$.qte.contract.v1.OptionChainContract\"\\\n\x13OptionChainContract\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x31\n\x04role\x18\x02 \x01(\x0e\x32#.qte.contract.v1.OptionContractRole\"Y\n\x0bOptionChain\x12\x14\n\x0csession_date\x18\x01 \x01(\t\x12\x34\n\x08\x65xpiries\x18\x02 \x03(\x0b\x32\".qte.contract.v1.OptionChainExpiry\"\xda\x02\n\x0cOptionGreeks\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x11\n\tgrid_time\x18\x02 \x01(\x03\x12\x33\n\x06status\x18\x03 \x01(\x0e\x32#.qte.contract.v1.OptionGreeksStatus\x12\x1a\n\rcalculated_at\x18\x04 \x01(\x03H\x00\x88\x01\x01\x12\x14\n\x07\x66orward\x18\x05 \x01(\x03H\x01\x88\x01\x01\x12\x18\n\x0bimplied_vol\x18\x06 \x01(\x03H\x02\x88\x01\x01\x12\x12\n\x05\x64\x65lta\x18\x07 \x01(\x03H\x03\x88\x01\x01\x12\x12\n\x05gamma\x18\x08 \x01(\x03H\x04\x88\x01\x01\x12\x11\n\x04vega\x18\t \x01(\x03H\x05\x88\x01\x01\x12\x12\n\x05theta\x18\n \x01(\x03H\x06\x88\x01\x01\x42\x10\n\x0e_calculated_atB\n\n\x08_forwardB\x0e\n\x0c_implied_volB\x08\n\x06_deltaB\x08\n\x06_gammaB\x07\n\x05_vegaB\x08\n\x06_theta*\x94\x01\n\x13InstrumentCondition\x12$\n INSTRUMENT_CONDITION_UNSPECIFIED\x10\x00\x12\x08\n\x04LIVE\x10\x01\x12\r\n\tONE_SIDED\x10\x02\x12\t\n\x05\x45MPTY\x10\x03\x12\n\n\x06\x46ROZEN\x10\x04\x12\x19\n\x15REFERENCE_UNAVAILABLE\x10\x05\x12\x0c\n\x08\x44ISABLED\x10\x06*~\n\x12OptionTradingState\x12$\n OPTION_TRADING_STATE_UNSPECIFIED\x10\x00\x12\x12\n\x0eOPTION_TRADING\x10\x01\x12\x18\n\x14OPTION_REDUCING_ONLY\x10\x02\x12\x14\n\x10OPTION_SUSPENDED\x10\x03*r\n\x12OptionWindowStatus\x12$\n OPTION_WINDOW_STATUS_UNSPECIFIED\x10\x00\x12\x1a\n\x16OPTION_WINDOW_COMPUTED\x10\x01\x12\x1a\n\x16OPTION_WINDOW_RETAINED\x10\x02*\x87\x01\n\x12OptionContractRole\x12$\n OPTION_CONTRACT_ROLE_UNSPECIFIED\x10\x00\x12\x16\n\x12OPTION_ROLE_ACTIVE\x10\x01\x12\x19\n\x15OPTION_ROLE_OBLIGATED\x10\x02\x12\x18\n\x14OPTION_ROLE_RETAINED\x10\x03*\x8a\x01\n\x12OptionGreeksStatus\x12$\n OPTION_GREEKS_STATUS_UNSPECIFIED\x10\x00\x12\x17\n\x13OPTION_GREEKS_VALID\x10\x01\x12\x1d\n\x19OPTION_GREEKS_UNAVAILABLE\x10\x02\x12\x16\n\x12OPTION_GREEKS_NONE\x10\x03\x42\x38Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,22 +33,38 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'qte_sdk.contract.v1.market_
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1'
-  _globals['_INSTRUMENTCONDITION']._serialized_start=1269
-  _globals['_INSTRUMENTCONDITION']._serialized_end=1417
+  _globals['_INSTRUMENTCONDITION']._serialized_start=2084
+  _globals['_INSTRUMENTCONDITION']._serialized_end=2232
+  _globals['_OPTIONTRADINGSTATE']._serialized_start=2234
+  _globals['_OPTIONTRADINGSTATE']._serialized_end=2360
+  _globals['_OPTIONWINDOWSTATUS']._serialized_start=2362
+  _globals['_OPTIONWINDOWSTATUS']._serialized_end=2476
+  _globals['_OPTIONCONTRACTROLE']._serialized_start=2479
+  _globals['_OPTIONCONTRACTROLE']._serialized_end=2614
+  _globals['_OPTIONGREEKSSTATUS']._serialized_start=2617
+  _globals['_OPTIONGREEKSSTATUS']._serialized_end=2755
   _globals['_WALLLEVEL']._serialized_start=84
   _globals['_WALLLEVEL']._serialized_end=124
   _globals['_STUDENTLEVEL']._serialized_start=126
   _globals['_STUDENTLEVEL']._serialized_end=169
   _globals['_BOOK']._serialized_start=172
-  _globals['_BOOK']._serialized_end=488
-  _globals['_TAPEPRINT']._serialized_start=491
-  _globals['_TAPEPRINT']._serialized_end=639
-  _globals['_TRADES']._serialized_start=641
-  _globals['_TRADES']._serialized_end=732
-  _globals['_MARK']._serialized_start=734
-  _globals['_MARK']._serialized_end=852
-  _globals['_SESSIONSTATE']._serialized_start=855
-  _globals['_SESSIONSTATE']._serialized_end=1176
-  _globals['_OFFICIALCLOSE']._serialized_start=1178
-  _globals['_OFFICIALCLOSE']._serialized_end=1266
+  _globals['_BOOK']._serialized_end=571
+  _globals['_TAPEPRINT']._serialized_start=574
+  _globals['_TAPEPRINT']._serialized_end=722
+  _globals['_TRADES']._serialized_start=724
+  _globals['_TRADES']._serialized_end=815
+  _globals['_MARK']._serialized_start=817
+  _globals['_MARK']._serialized_end=935
+  _globals['_SESSIONSTATE']._serialized_start=938
+  _globals['_SESSIONSTATE']._serialized_end=1259
+  _globals['_OFFICIALCLOSE']._serialized_start=1261
+  _globals['_OFFICIALCLOSE']._serialized_end=1349
+  _globals['_OPTIONCHAINEXPIRY']._serialized_start=1352
+  _globals['_OPTIONCHAINEXPIRY']._serialized_end=1547
+  _globals['_OPTIONCHAINCONTRACT']._serialized_start=1549
+  _globals['_OPTIONCHAINCONTRACT']._serialized_end=1641
+  _globals['_OPTIONCHAIN']._serialized_start=1643
+  _globals['_OPTIONCHAIN']._serialized_end=1732
+  _globals['_OPTIONGREEKS']._serialized_start=1735
+  _globals['_OPTIONGREEKS']._serialized_end=2081
 # @@protoc_insertion_point(module_scope)

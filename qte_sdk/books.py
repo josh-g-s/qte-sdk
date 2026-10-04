@@ -58,10 +58,13 @@ events themselves if you need to know that a first book may have been missed.
 The helper only keeps what it is given. It does not clear books when a session closes:
 a book held keeps the `grid_time` it was published at, so you can tell which session it
 came from. Every other message (`Trades`, `Mark`, `SessionState`, `OfficialClose`,
-`Reject`, a history `Manifest`, and so on) is ignored.
+`OptionChain`, `OptionGreeks`, `Reject`, a history `Manifest`, and so on) is ignored. An
+option contract's `Book` is kept like any other; `qte_sdk.options.LatestGreeks` keeps
+its Greeks the same way.
 """
 
 from collections.abc import Iterator
+from typing import Generic, Protocol, TypeVar
 
 from qte_sdk.connection import DataUncertain, DecodeFailed, Disconnected
 from qte_sdk.contract.v1.market_data_pb2 import Book
@@ -69,13 +72,70 @@ from qte_sdk.contract.v1.market_data_pb2 import Book
 __all__ = ["LatestBooks"]
 
 
-class LatestBooks:
-    """The latest `Book` received for each instrument, keyed by instrument id."""
+class _GridMessage(Protocol):
+    instrument: str
+    grid_time: int
+
+
+_M = TypeVar("_M", bound=_GridMessage)
+
+
+class _LatestByInstrument(Generic[_M]):
+    """The latest message of one type per instrument, by `grid_time`, with the stale
+    rules described in this module's docstring. `LatestBooks` and
+    `qte_sdk.options.LatestGreeks` are the two kinds."""
+
+    _kind: type[_M]
+    _type: str  # the envelope type token of `_kind`
 
     def __init__(self) -> None:
-        self._books: dict[str, Book] = {}
-        # Instrument -> whether a book at the grid_time held clears it (after a reconnect).
+        self._held: dict[str, _M] = {}
+        # Instrument -> whether a message at the grid_time held clears it (after a reconnect).
         self._stale: dict[str, bool] = {}
+
+    def update(self, item: object) -> bool:
+        if isinstance(item, self._kind):
+            return self._on_message(item)
+        if isinstance(item, Disconnected):
+            self._stale.update(dict.fromkeys(self._held, True))
+        elif isinstance(item, DataUncertain) or (
+            isinstance(item, DecodeFailed) and item.type in (None, self._type)
+        ):
+            self._stale.update(dict.fromkeys(self._held, False))
+        return False
+
+    def get(self, instrument: str) -> _M | None:
+        return self._held.get(instrument)
+
+    @property
+    def stale(self) -> frozenset[str]:
+        return frozenset(self._stale)
+
+    def __contains__(self, instrument: object) -> bool:
+        return instrument in self._held
+
+    def __iter__(self) -> Iterator[_M]:
+        return iter(list(self._held.values()))
+
+    def __len__(self) -> int:
+        return len(self._held)
+
+    def _on_message(self, message: _M) -> bool:
+        held = self._held.get(message.instrument)
+        if held is not None and message.grid_time <= held.grid_time:
+            if message.grid_time == held.grid_time and self._stale.get(message.instrument):
+                del self._stale[message.instrument]
+            return False
+        self._stale.pop(message.instrument, None)
+        self._held[message.instrument] = message
+        return True
+
+
+class LatestBooks(_LatestByInstrument[Book]):
+    """The latest `Book` received for each instrument, keyed by instrument id."""
+
+    _kind = Book
+    _type = "book"
 
     def update(self, item: object) -> bool:
         """Apply one market-data item. Returns True if it is a `Book` that replaced the book
@@ -83,42 +143,18 @@ class LatestBooks:
         later `grid_time`; False for anything else, including a book whose `grid_time` is
         the same as or older than the one held.
         """
-        if isinstance(item, Book):
-            return self._on_book(item)
-        if isinstance(item, Disconnected):
-            self._stale.update(dict.fromkeys(self._books, True))
-        elif isinstance(item, DataUncertain) or (
-            isinstance(item, DecodeFailed) and item.type in (None, "book")
-        ):
-            self._stale.update(dict.fromkeys(self._books, False))
-        return False
+        return super().update(item)
 
     def get(self, instrument: str) -> Book | None:
         """The latest book held for `instrument`, or None if none has been received."""
-        return self._books.get(instrument)
+        return super().get(instrument)
 
     @property
     def stale(self) -> frozenset[str]:
         """The instruments whose book held may be out of date because messages were missed
         since it was received. Their books are still kept and returned by `get`."""
-        return frozenset(self._stale)
-
-    def __contains__(self, instrument: object) -> bool:
-        return instrument in self._books
+        return super().stale
 
     def __iter__(self) -> Iterator[Book]:
         """The books held, one per instrument."""
-        return iter(list(self._books.values()))
-
-    def __len__(self) -> int:
-        return len(self._books)
-
-    def _on_book(self, book: Book) -> bool:
-        held = self._books.get(book.instrument)
-        if held is not None and book.grid_time <= held.grid_time:
-            if book.grid_time == held.grid_time and self._stale.get(book.instrument):
-                del self._stale[book.instrument]
-            return False
-        self._stale.pop(book.instrument, None)
-        self._books[book.instrument] = book
-        return True
+        return super().__iter__()

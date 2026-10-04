@@ -103,7 +103,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.account`](qte_sdk/account.py) | `send_account_query`, `is_account_state`: your team's positions, cash, equity and limit use; `AccountReports`: count each fill once against a reply |
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |
-| [`qte_sdk.options`](qte_sdk/options.py) | `option_symbol`, `parse_option_symbol`, `is_option_symbol`: build and read option contracts' OCC symbols, such as `SPY240119C00470000`; option chains, Greeks, books and orders are still to come |
+| [`qte_sdk.options`](qte_sdk/options.py) | `option_symbol`, `parse_option_symbol`, `is_option_symbol`: build and read option contracts' OCC symbols, such as `SPY240119C00470000`; `chain_contracts`, `expiry_date`, `limit_scope`: read the day's `OptionChain`; `LatestGreeks`, `greek_to_decimal`, `vol_to_decimal`: published Greeks, exactly; `trading_state`: what an option contract may do now |
 | [`qte_sdk.units`](qte_sdk/units.py) | `to_decimal`, `to_micros`: exact conversion between prices and micro-dollars; `to_datetime`, `to_timedelta`, `to_timestamp`: exchange timestamps (milliseconds since the epoch, UTC) as `datetime` and `timedelta` |
 
 ## Things to know before you trade
