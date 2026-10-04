@@ -144,7 +144,11 @@ class FakeExchange:
         outage: bool = False,
         session_reject: dict[str, Any] | None = None,
         refill_level: bool = False,
+        heartbeat_every: float | None = None,
     ) -> None:
+        # With `heartbeat_every`, a heartbeat is sent that often, in seconds, from the ack
+        # on, each carrying a send time that many seconds after the ack's server_time.
+        self.heartbeat_every = heartbeat_every
         # The exchange's clock in the session_ack, in milliseconds since the epoch.
         self.server_time = server_time
         # Whether the session_ack says the session is unscored.
@@ -221,12 +225,25 @@ class FakeExchange:
         self._seq = 0
         self._lock = asyncio.Lock()
 
-    async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+    async def send(
+        self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
+    ) -> None:
         async with self._lock:  # seq numbers must reach the client in order
             self._seq += 1
             env = {"version": CONTRACT_VERSION, "type": type_, "payload": payload, "seq": self._seq}
+            env.update(envelope)
             self.log.append(("sent", type_))
             await ws.send(json.dumps(env))
+
+    async def beat(self, ws: ServerConnection) -> None:
+        assert self.heartbeat_every is not None
+        sent = 0
+        while True:
+            await asyncio.sleep(self.heartbeat_every)
+            sent += 1
+            sent_at = self.server_time + round(sent * self.heartbeat_every * 1000)
+            with contextlib.suppress(ConnectionClosed):
+                await self.send(ws, "heartbeat", {}, sent_at=str(sent_at))
 
     async def answer_account_query(self, ws: ServerConnection, ref: str) -> None:
         if self.account_unknown is not None:
@@ -263,6 +280,7 @@ class FakeExchange:
         if self.calendar is not None:
             await self.send(ws, "calendar", self.calendar)
         ticker: asyncio.Task | None = None
+        beats = None if self.heartbeat_every is None else asyncio.create_task(self.beat(ws))
         try:
             async for raw in ws:
                 message = json.loads(raw)
@@ -291,6 +309,8 @@ class FakeExchange:
         finally:
             if ticker is not None:
                 ticker.cancel()
+            if beats is not None:
+                beats.cancel()
             for task in self._confirming:
                 task.cancel()
 
@@ -1968,11 +1988,28 @@ async def test_the_smoke_test_checks_a_setup_during_a_session_and_sends_no_order
     assert found["account"] == ("SKIP", "not answered by this exchange within 1 s")
     assert found["test-order"][0] == "SKIP"
     assert found["feed"][0] == "PASS"
+    # The fake sends no heartbeats: never a FAIL, since the interval may outlast the run.
+    status, reason = found["heartbeat"]
+    assert status == "SKIP"
+    assert reason.startswith("no heartbeat in ")
+    assert reason.endswith(
+        "s of reading; the exchange's interval may be longer than this run, try a larger --seconds"
+    )
     status, reason = found["history"]
     assert status == "SKIP"
     assert "QTE_HISTORY_URL is not set" in reason
-    assert out.splitlines()[-1] == "summary: 7 passed, 0 failed, 3 skipped"
+    assert out.splitlines()[-1] == "summary: 7 passed, 0 failed, 4 skipped"
     assert exchange.types() == ["auth", "subscribe", "account_query"]
+
+
+async def test_the_smoke_test_reports_the_heartbeats_and_about_how_far_apart_they_came():
+    # Heartbeats every 0.2 s, each stamped 0.2 s after the last on the exchange's clock.
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, heartbeat_every=0.2)
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    status, reason = found["heartbeat"]
+    assert status == "PASS"
+    assert re.fullmatch(r"\d+ heartbeat\(s\), about 0\.2 s apart", reason), reason
 
 
 async def test_the_smoke_tests_order_rests_inside_the_band_and_is_cancelled():

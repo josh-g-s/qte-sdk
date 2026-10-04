@@ -27,6 +27,8 @@ reason, then a summary:
                      query yet. Any other refusal is a FAIL. No figures are printed.
     test-order       only with --place-test-order (see below).
     feed             whether any message was missed or could not be decoded.
+    heartbeat        whether the exchange's heartbeats arrived, and about how far apart;
+                     a SKIP if none came, since the interval may be longer than the run.
     history:<name>   the start of the last closed session's books from the history service, when
                      QTE_HISTORY_URL is set (from the environment only, never .env).
 
@@ -932,6 +934,33 @@ def check_feed(report: Report, watcher: Watcher) -> None:
     report.add(PASS, "feed", f"{watcher.messages} messages, none missed or unreadable{note}")
 
 
+def check_heartbeat(report: Report, session: Session, opened_at: float) -> None:
+    """Whether the exchange's heartbeats arrived while the session was read, and about how
+    far apart. Never a FAIL: the interval is the exchange's to set, and may be longer than
+    this run, so none arriving is a SKIP. No interval is assumed here."""
+    count = session.heartbeats_received
+    read = time.monotonic() - opened_at
+    if count == 0:
+        report.add(
+            SKIP,
+            "heartbeat",
+            f"no heartbeat in {read:.0f} s of reading; the exchange's interval may be longer "
+            "than this run, try a larger --seconds",
+        )
+        return
+    # From the exchange's own clock when the heartbeat carries its send time, else from
+    # when they arrived here.
+    apart = None
+    sent_at = session.last_heartbeat_sent_at
+    if sent_at is not None:
+        apart = (sent_at - session.info.server_time) / count / 1000
+    if apart is None or apart <= 0:
+        arrived = session.last_heartbeat_at
+        apart = None if arrived is None else (arrived - opened_at) / count
+    spacing = "" if apart is None or apart <= 0 else f", about {apart:.3g} s apart"
+    report.add(PASS, "heartbeat", f"{count} heartbeat(s){spacing}")
+
+
 # The test order
 
 
@@ -1346,7 +1375,7 @@ async def check_history(
 
 
 def skip_after_connect(report: Report, reason: str) -> None:
-    for name in ("calendar", "market", "account", "test-order", "history"):
+    for name in ("calendar", "market", "account", "test-order", "heartbeat", "history"):
         report.add(SKIP, name, reason)
 
 
@@ -1363,7 +1392,11 @@ async def closing(session: Session) -> AsyncIterator[Session]:
             print("the connection did not close in time; it is dropped as the script exits")
 
 
-async def session_checks(report: Report, watcher: Watcher, args: argparse.Namespace) -> None:
+async def session_checks(
+    report: Report, watcher: Watcher, args: argparse.Namespace, opened_at: float
+) -> None:
+    """The checks made on the open session. `opened_at` is when the script began to open
+    it, on the `time.monotonic()` clock."""
     loop = asyncio.get_running_loop()
     session = watcher.session
     subscribed = loop.time()  # the waits below count from here, before any send
@@ -1385,11 +1418,13 @@ async def session_checks(report: Report, watcher: Watcher, args: argparse.Namesp
     await check_test_order(report, watcher, args)
     watcher.drain()
     check_feed(report, watcher)
+    check_heartbeat(report, session, opened_at)
 
 
 async def run(url: str, args: argparse.Namespace, report: Report) -> None:
     failure = None
     try:
+        opened_at = time.monotonic()
         session = await open_session(url, ack_timeout=args.seconds)
     # Only the error's kind, or the exchange's reason name, is shown: an error's text can
     # repeat the address (with anything a mistake put in it), and a refusal's free-text
@@ -1420,7 +1455,7 @@ async def run(url: str, args: argparse.Namespace, report: Report) -> None:
         watcher = Watcher(session, args.seconds)
         reader = asyncio.create_task(watcher.read())
         try:
-            await session_checks(report, watcher, args)
+            await session_checks(report, watcher, args, opened_at)
         finally:
             reader.cancel()
         known = [name for name in args.instruments if name not in watcher.unknown_instruments]
