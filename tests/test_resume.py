@@ -8,7 +8,7 @@ import typing
 from contextlib import aclosing
 
 import pytest
-from fake_exchange import frame, serve_local
+from fake_exchange import LoopClock, frame, serve_local, wait_until
 from test_calendar import CALENDAR, CALENDAR_PAYLOAD, calendar_frame
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
@@ -140,6 +140,7 @@ class Scripted:
         self.scripts = scripts
         self.connections = 0
         self.received: list[dict] = []
+        self.resume_received = asyncio.Event()
 
     async def __call__(self, ws: ServerConnection) -> None:
         script = self.scripts[min(self.connections, len(self.scripts) - 1)]
@@ -156,6 +157,7 @@ class Scripted:
             await ws.send(f)
         if script.get("answer") is not None:
             self.received.append(json.loads(await ws.recv()))
+            self.resume_received.set()
             for f in script["answer"]:
                 await ws.send(f)
         for f in script.get("after", ()):
@@ -186,23 +188,34 @@ def kinds(events: list[object]) -> list[str]:
 # Heartbeats and liveness
 
 
-async def test_heartbeats_are_absorbed_and_keep_a_quiet_link_alive():
+async def test_heartbeats_are_absorbed_and_keep_a_quiet_link_alive(monkeypatch):
+    clock = LoopClock(monkeypatch)
+    peers: list[ServerConnection] = []
+
     async def handler(ws: ServerConnection) -> None:
         await ws.recv()
+        peers.append(ws)
         await ws.send(ack())
-        for n in range(2, 8):
-            await asyncio.sleep(0.05)
-            await ws.send(frame("heartbeat", {}, n))
-        await ws.send(frame("book", {"instrument": "AAPL", "grid_time": "1"}, 8))
         await ws.wait_closed()
 
     async with serve_local(handler) as url:
-        session = await open_session(url, synthetic_token(), liveness_timeout=0.2)
+        session = await open_session(url, synthetic_token(), liveness_timeout=10)
+        [peer] = peers
         async with session:
-            events = await take(session, 1)
-    # 0.3 s of heartbeats outlasted the 0.2 s timeout; none of them was delivered, and
-    # their seqs counted, so the book's seq 8 is not a gap.
-    assert kinds(events) == ["book:None"]
+            reading = asyncio.create_task(anext(aiter(session)))
+            for n in range(2, 7):
+                await peer.send(frame("heartbeat", {}, n))
+                # Once the session has read heartbeat n, its 10 s start again; then 3 s
+                # pass with nothing more, leaving more than the 5 s each wait here allows.
+                async with asyncio.timeout(5):
+                    while session.connection._expected_seq <= n:  # noqa: SLF001
+                        await asyncio.sleep(0)
+                clock.advance(3)
+            await peer.send(frame("book", {"instrument": "AAPL", "grid_time": "1"}, 7))
+            event = await asyncio.wait_for(reading, 5)
+    # 15 s of heartbeats outlasted the 10 s timeout; none of them was delivered, and
+    # their seqs counted, so the book's seq 7 is not a gap.
+    assert kinds([event]) == ["book:None"]
 
 
 async def test_silence_after_a_heartbeat_drops_the_link():
@@ -247,15 +260,31 @@ def test_the_liveness_timeout_is_a_documented_choice_and_can_be_turned_off():
     assert "not a value the exchange sends" in doc
 
 
-async def test_a_dead_link_reconnects_and_resumes():
+async def test_a_dead_link_reconnects_and_resumes(monkeypatch):
+    clock = LoopClock(monkeypatch)
     exchange = Scripted(
         {"term": TERM, "answer": [EMPTY], "after": [heartbeat(), order_state(1)]},
         {"term": TERM, "answer": [EMPTY]},
     )
+    events: list[object] = []
+
+    async def collect(rs: ReconnectingSession) -> None:
+        async for event in rs:
+            events.append(event)
+            if len(events) == 9:
+                break
+
     async with serve_local(exchange) as url:
-        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep, liveness_timeout=0.1)
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep, liveness_timeout=10)
         async with rs:
-            events = await take(rs, 9)
+            collecting = asyncio.create_task(collect(rs))
+            # Once the report after the heartbeat is read, the session waits for the next
+            # message with its liveness clock running; the link stays quiet past 10 s.
+            async with asyncio.timeout(5):
+                while len(events) < 5:
+                    await asyncio.sleep(0)
+            clock.advance(10)
+            await asyncio.wait_for(collecting, 5)
     assert kinds(events) == [
         "Connected",
         "calendar:None",
@@ -798,12 +827,19 @@ async def test_an_exchange_that_serves_neither_heartbeats_nor_resume_keeps_worki
     assert view.incomplete and len(view) == 1
 
 
-async def test_an_unanswered_resume_fails_the_attempt_and_is_retried():
+async def test_an_unanswered_resume_fails_the_attempt_and_is_retried(monkeypatch):
+    clock = LoopClock(monkeypatch)
     exchange = Scripted({"answer": []}, {"answer": [EMPTY]})
     async with serve_local(exchange) as url:
-        rs = ReconnectingSession(url, synthetic_token(), ack_timeout=0.2, sleep=Clock().sleep)
+        rs = ReconnectingSession(url, synthetic_token(), ack_timeout=10, sleep=Clock().sleep)
         async with rs:
-            events = await take(rs, 4)
+            stream = aiter(rs)
+            first = asyncio.create_task(anext(stream))
+            # The time runs out only once the first session is open and the exchange holds
+            # the resume it will never answer; the second has its full 10 s to open.
+            await wait_until(first, exchange.resume_received)
+            clock.advance(10)
+            events = [await asyncio.wait_for(first, 5), *await take(stream, 3)]
     assert kinds(events) == ["Disconnected", "Retrying", "Connected", "resume_ack:None"]
     assert isinstance(events[0], Disconnected) and isinstance(events[0].error, TimeoutError)
 
