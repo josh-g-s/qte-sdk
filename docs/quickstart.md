@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.18
+**Version:** 0.19
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -441,6 +441,8 @@ A reason from a newer contract than your SDK knows decodes as `REASON_CODE_UNSPE
 Iterating a session ends normally when the exchange closes the connection, and raises `websockets.exceptions.ConnectionClosedError` if it drops. A session from `open_session` does not reconnect, and neither do the worked examples: open a new session yourself. Your orders may still be resting after a drop, so check before you trade again.
 
 The exchange sends a heartbeat at a regular interval, at any hour, so a working connection is never silent for long. The SDK absorbs heartbeats: they never appear among your events, and you send nothing back. Once the first heartbeat has arrived, if nothing at all arrives for `liveness_timeout` seconds, the SDK treats the link as dead, drops it and raises `qte_sdk.connection.LivenessTimeout`. The check starts only with that first heartbeat, so an exchange that does not send heartbeats is never dropped for being quiet. The default, 45 seconds, is the SDK's own choice, not a value the exchange sends; pass `liveness_timeout=` to `open_session` or `ReconnectingSession` to change it, or `None` to turn the check off.
+
+To check that heartbeats are arriving, read `session.heartbeats_received` (how many the connection has read since it opened), `session.last_heartbeat_at` (when the latest was read, on the `time.monotonic()` clock, so `time.monotonic() - session.last_heartbeat_at` is how many seconds ago) and `session.last_heartbeat_sent_at` (the exchange's send time of the latest, in milliseconds since the epoch; `qte_sdk.units.to_datetime` shows it as a time). They are 0 and `None` until the first heartbeat, and start again on each new connection. A heartbeat is counted as your loop reads the session, so they only move while it is reading. On a `ReconnectingSession` they describe the connection of the latest `Connected`, and keep their values after its `Disconnected` until the next `Connected`. How often the exchange sends heartbeats is its own setting, so do not build an interval into your program.
 
 The exchange also drops a connection that has sent it nothing for a while, with close code 4000 and reason `heartbeat timeout`. You do not need to send anything: in the background, the `websockets` library answers the exchange's pings and sends pings of its own. It can only answer a ping, or see the reply to its own, while it is reading the connection, and it pauses reading once more than 16 frames (its `max_queue` option) are waiting for your loop. If your loop stops reading for long, the connection is closed: by the library itself, with code 1011 and reason `keepalive ping timeout`, or by the exchange with 4000. Either way iterating raises `websockets.exceptions.ConnectionClosedError`, which `ReconnectingSession` treats as a drop and reconnects. Keep the loop that reads events quick, and do slow work in another task.
 

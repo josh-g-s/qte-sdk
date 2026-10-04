@@ -294,6 +294,13 @@ class Session:
     `calendar` is the exchange's session calendar, once it has arrived; see
     `wait_for_calendar` and `qte_sdk.calendar`.
 
+    Heartbeats are absorbed and never delivered as events. `heartbeats_received`,
+    `last_heartbeat_at` and `last_heartbeat_sent_at` say whether they are arriving: they
+    describe this session's connection from the moment it opened, before the
+    acknowledgement included, and a new session starts again from none. A heartbeat is
+    counted as it is read, so they move only while the session is read: by iterating it,
+    or by `wait_for_calendar` or `resume` reading ahead.
+
     Private reports: each of the team's order reports that the exchange can replay carries
     a `report_seq`, numbered per team without gaps. The session delivers them in that order
     and keeps `last_report_seq`, the number up to which it has delivered every one. A
@@ -365,6 +372,26 @@ class Session:
             if not deadline.expired():
                 raise
         return self._calendar
+
+    @property
+    def heartbeats_received(self) -> int:
+        """How many heartbeats this session's connection has read since it opened, 0 if
+        none. See the class description: it moves only while the session is read."""
+        return self.connection.heartbeats_received
+
+    @property
+    def last_heartbeat_at(self) -> float | None:
+        """When the latest heartbeat was read, on the `time.monotonic()` clock, or None
+        before the first; `time.monotonic() - session.last_heartbeat_at` is how many
+        seconds ago that was. See `Connection.last_heartbeat_at`."""
+        return self.connection.last_heartbeat_at
+
+    @property
+    def last_heartbeat_sent_at(self) -> int | None:
+        """The exchange's send time of the latest heartbeat, in milliseconds since the Unix
+        epoch, UTC, or None before the first or if it carried none. See
+        `Connection.last_heartbeat_sent_at`."""
+        return self.connection.last_heartbeat_sent_at
 
     @property
     def last_report_seq(self) -> int | None:

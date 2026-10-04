@@ -19,6 +19,13 @@ exchange that does not send heartbeats is never dropped for being quiet. The def
 `DEFAULT_LIVENESS_TIMEOUT`, is this SDK's choice, not a value the exchange sends; see its
 description.
 
+To see whether heartbeats are arriving, read `heartbeats_received`, `last_heartbeat_at` and
+`last_heartbeat_sent_at` (on a `qte_sdk.session.Session` too). They describe this connection
+only, from the moment it opened, and count a heartbeat as it is read: one still waiting in
+the socket is not counted until something reads this connection, such as the loop that
+iterates it. The interval between heartbeats is the exchange's to set, so nothing here
+assumes one.
+
 Staying alive: the exchange also sends WebSocket pings, and closes a connection that has
 sent it no complete frame for a while, with close code `HEARTBEAT_TIMEOUT_CLOSE_CODE`
 (4000) and reason `heartbeat timeout`. The client sends no messages of its own to stay
@@ -54,6 +61,7 @@ caller's configuration.
 import asyncio
 import logging
 import sys
+import time
 from collections.abc import AsyncIterator, Iterator, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -435,8 +443,10 @@ class Connection:
         self.url = url
         self.contract_version = contract_version
         self.liveness_timeout = liveness_timeout
-        # The liveness check starts once the exchange has shown it sends heartbeats.
-        self._heartbeats = False
+        # The heartbeats read so far. The liveness check starts once there is one.
+        self._heartbeats_received = 0
+        self._last_heartbeat_at: float | None = None
+        self._last_heartbeat_sent_at: int | None = None
         # Any logger the caller passes is wrapped too, so no route logs the token.
         logger = connect_options.pop("logger", None) or logging.getLogger("websockets.client")
         if isinstance(logger, str):
@@ -445,6 +455,29 @@ class Connection:
         self._ws: ClientConnection | None = None
         self._used = False
         self._expected_seq = 1
+
+    @property
+    def heartbeats_received(self) -> int:
+        """How many heartbeats this connection has read since it opened, 0 if none.
+
+        A heartbeat is counted when it is read, not when it reaches the socket, so the
+        count moves only while something reads the connection."""
+        return self._heartbeats_received
+
+    @property
+    def last_heartbeat_at(self) -> float | None:
+        """When the latest heartbeat was read, on the `time.monotonic()` clock, or None
+        before the first. `time.monotonic() - last_heartbeat_at` is how many seconds ago
+        that was. It is a local reading, which a loop that falls behind delays."""
+        return self._last_heartbeat_at
+
+    @property
+    def last_heartbeat_sent_at(self) -> int | None:
+        """The exchange's send time of the latest heartbeat, its envelope's `sent_at`: an
+        exchange timestamp, in milliseconds since the Unix epoch, UTC
+        (`qte_sdk.units.to_datetime` turns it into a datetime). None before the first
+        heartbeat, or if the latest one carried no `sent_at`."""
+        return self._last_heartbeat_sent_at
 
     async def __aenter__(self) -> "Connection":
         await self.open()
@@ -548,7 +581,7 @@ class Connection:
         """The next frame, or `LivenessTimeout` once nothing has arrived for
         `liveness_timeout` seconds, after the first heartbeat. Any frame restarts the
         clock, a heartbeat or one that cannot be decoded included."""
-        if self.liveness_timeout is None or not self._heartbeats:
+        if self.liveness_timeout is None or not self._heartbeats_received:
             return await ws.recv()
         deadline = asyncio.timeout(self.liveness_timeout)
         try:
@@ -593,7 +626,9 @@ class Connection:
 
         if env.type == "heartbeat":
             # Absorbed: it has counted for sequence tracking, and for liveness on arrival.
-            self._heartbeats = True
+            self._heartbeats_received += 1
+            self._last_heartbeat_at = time.monotonic()
+            self._last_heartbeat_sent_at = env.sent_at if env.HasField("sent_at") else None
             return
         report_seq = env.report_seq if env.HasField("report_seq") else None
 
