@@ -2652,6 +2652,39 @@ def test_the_smoke_test_keeps_the_first_report_that_its_order_left():
     assert order.may_rest
 
 
+def test_the_smoke_test_takes_a_size_only_amend_as_something_else_acting():
+    smoke = load_example(SMOKE_TEST)
+    order, level = probe(smoke)
+    amended = OrderState(
+        **level, price=99_960_000, old_price=99_960_000, state=RESTING, remaining_size=5
+    )
+    order.apply(amended)
+    assert order.interfered
+    assert order.moved_to is None
+    assert order.may_rest
+
+
+def test_the_smoke_test_still_names_fills_after_a_cancel_it_cannot_tie_to_its_order():
+    # After a sign that something else acts, a cancel at the level ends nothing, so a fill
+    # that follows is still collected and named on stderr.
+    smoke = load_example(SMOKE_TEST)
+    order, level = probe(smoke)
+    elsewhere = Execution(
+        **level, order_price=99_900_000, fill_price=99_900_000, fill_size=2, remaining_size=0
+    )
+    order.apply(elsewhere)
+    assert order.interfered
+    order.apply(OrderCancelled(**level, price=99_960_000, request_ref="theirs"))
+    assert order.cancelled is None
+    at_level = Execution(
+        **level, order_price=99_960_000, fill_price=99_960_000, fill_size=1, remaining_size=0
+    )
+    order.apply(at_level)
+    assert order.filled == 0
+    assert [fill.fill_size for fill in order.other_fills] == [2, 1]
+    assert "2 at 99.900000, 1 at 99.960000" in order.other_fill_warning()
+
+
 def test_the_smoke_test_does_not_clear_its_warning_on_a_fill_after_missed_reports():
     # After missed reports, a fill at the level may be another order's that took it.
     smoke = load_example(SMOKE_TEST)

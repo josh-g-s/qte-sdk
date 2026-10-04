@@ -651,11 +651,12 @@ class ProbeOrder:
             return
         match message:
             case OrderState():
-                if message.HasField("old_price") and message.old_price != message.price:
-                    # An amend, which this script never sends.
+                if message.HasField("old_price"):
+                    # An amend, which this script never sends, of its price or only its size.
                     if message.old_price == self.level_price:
-                        self.moved_to = message.price
-                        self.interfere("an amend moved the test order")
+                        if message.price != message.old_price:
+                            self.moved_to = message.price
+                        self.interfere("an amend of the test order")
                 elif message.price == self.level_price and message.state in (RESTING, STALE):
                     self.resting = True
             case Execution():
@@ -670,6 +671,10 @@ class ProbeOrder:
                     self.interfere("a fill of this strategy at another price")
             case OrderCancelled():
                 if not message.HasField("price") or message.price != self.level_price:
+                    return
+                if self.interfered:
+                    # Cannot be tied to the test order: it ends nothing, so later fills are
+                    # still collected and named.
                     return
                 if ref is not None and ref not in self.cancel_refs:
                     self.interfere("a cancel of the test order sent by something else")
