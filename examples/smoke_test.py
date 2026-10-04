@@ -56,10 +56,13 @@ check FAIL, and a line on stderr names the position your team then holds. If the
 bid rises to the price during the delay, nothing rests and the check is a SKIP: run it
 again. A cancel names a price level, not an order, and acts on whichever of your team's
 orders rests there when it is applied, so run this on an instrument your team is not
-otherwise trading at that price. If the script cannot confirm that the order is gone, the
-check fails and names the level where it may still rest, so you can cancel it yourself. If
-it is interrupted (Ctrl+C) while the order may rest, it first tries, for a few seconds, to
-cancel that level.
+otherwise trading at that price, with a strategy nothing else is using: if anything else
+acts on that strategy's buy orders on the instrument during the test (an amend of the test
+order, a fill at another price, a cancel of it), the test order can no longer be told
+apart from them, and the check fails with a warning. If the script cannot confirm that
+the order is gone, the check fails and names the level where it may still rest, so you
+can cancel it yourself. If it is interrupted (Ctrl+C) while the order may rest, it first
+tries, for a few seconds, to cancel that level.
 
 Timing. The exchange holds every order message for its order delay before applying it. The
 delay, the minimum time an order must rest before it may be cancelled, the price collar
@@ -470,7 +473,17 @@ def check_calendar(report: Report, calendar: Calendar | None, now: int, seconds:
 
 @dataclass
 class ProbeOrder:
-    """The test order, as the exchange has reported it."""
+    """The test order, as the exchange has reported it.
+
+    Reports are tied to it by its level (instrument, BUY, price) and strategy, once its
+    `new` is accepted: the team holds at most one order at a level, so from then until it
+    leaves, the level holds the test order. That holds only while nothing else acts on this
+    strategy's buy orders on the instrument. A sign that something does (an amend of the
+    test order, a fill of the strategy at another price, a cancel of the test order by
+    someone else's request) is interference: from then on nothing can be tied to the test
+    order for certain, so it is reported as possibly resting. The first report that it left
+    the book is final; later reports at the level are about some other order.
+    """
 
     instrument: str
     strat_id: str
@@ -490,12 +503,9 @@ class ProbeOrder:
     absent: bool = False
     # The price another of the team's programs amended the order to, if one did.
     moved_to: int | None = None
-    # Set when such an amend ended the order where it moved it (filled or cut to nothing).
-    ended_by_amend: bool = False
-    # Fills of this strategy's orders on this instrument and side at other prices, since
-    # the order was accepted. An amend that fills the order reports its execution before
-    # the order_state that says it moved, so these are held until that order_state says
-    # which, if any, were the order's.
+    # What showed that something else acted on this strategy's buy orders here, if anything.
+    interference: list[str] = field(default_factory=list)
+    # Fills of this strategy's buy orders here that could not be tied to the test order.
     other_fills: list[Execution] = field(default_factory=list)
     # Set when messages that may have been reports about it were missed after it was sent,
     # such as an amend that moved it: what the script saw of it may then be incomplete.
@@ -523,7 +533,11 @@ class ProbeOrder:
 
     @property
     def gone(self) -> bool:
-        return self.fully_filled or self.cancelled is not None or self.ended_by_amend
+        return self.fully_filled or self.cancelled is not None
+
+    @property
+    def interfered(self) -> bool:
+        return bool(self.interference)
 
     @property
     def confirmed(self) -> bool:
@@ -537,9 +551,8 @@ class ProbeOrder:
         if self.accepted_ms is None:
             # Never seen accepted, so nothing seen at its level can be tied to it.
             return True
-        if self.reports_missed and not self.fully_filled:
-            # A missed report may have moved it, so neither a level found empty nor an order
-            # cancelled there (perhaps another that took the level) proves it is gone.
+        if self.reports_missed or self.interfered:
+            # What was seen of it may not be all, or may not be about it at all.
             return True
         return not self.gone and not self.absent
 
@@ -549,6 +562,12 @@ class ProbeOrder:
                 f"WARNING: no reply to the test order ({self.where}) was seen, so it may "
                 "still be resting there, or wherever an amend moved it. Check your team's "
                 "orders and cancel it yourself."
+            )
+        if self.interfered:
+            return (
+                f"WARNING: something else acted on this strategy's buy orders on "
+                f"{self.instrument} during the test, so the test order may still be resting "
+                f"at {self.where_now}, or elsewhere. Check your team's orders and positions."
             )
         if self.reports_missed:
             return (
@@ -563,36 +582,35 @@ class ProbeOrder:
 
     def fill_warning(self) -> str:
         prices = ", ".join(str(to_decimal(price)) for price in self.fill_prices)
+        doubt = (
+            " (reports were missed, so it may have been another order of this strategy there)"
+            if self.reports_missed
+            else ""
+        )
         return (
-            f"WARNING: the test order filled: your team bought {self.filled} "
+            f"WARNING: the test order filled{doubt}: your team bought {self.filled} "
             f"{self.instrument} at {prices}, and now holds that position."
         )
 
-    def record_fill(self, fill: Execution) -> None:
-        self.filled += fill.fill_size
-        self.fill_prices.append(fill.fill_price)
-        self.fully_filled = fill.remaining_size == 0
-
-    def take_fills_at(self, price: int) -> None:
-        """Count as the order's the held fills at `price`, where an amend moved it."""
-        for fill in [fill for fill in self.other_fills if fill.order_price == price]:
-            self.other_fills.remove(fill)
-            self.record_fill(fill)
+    def other_fill_warning(self) -> str:
+        fills = ", ".join(
+            f"{fill.fill_size} at {to_decimal(fill.fill_price)}" for fill in self.other_fills
+        )
+        return (
+            f"WARNING: fills of strategy {self.strat_id}'s buy orders on {self.instrument} "
+            f"were seen that cannot be told apart from the test order: {fills}. Your team "
+            "may now hold that position."
+        )
 
     def answered(self) -> bool:
         """Whether the exchange has said what became of the new order."""
-        if self.rejected is not None or self.gone or self.moved_to is not None:
+        if self.rejected is not None or self.gone or self.interfered:
             return True
         return self.accepted_ms is not None and self.resting
 
-    def ours(self, strat_id: str, instrument: str, side: int, price: int) -> bool:
-        """Whether a report about this strategy's order at this level is about the test
-        order. Only once its `new` is accepted: a report before that is about an order
-        that held the level earlier, such as one that filled while the `new` was delayed.
-        From then on the level holds the test order until it leaves, since the team holds
-        at most one order at a level. After a move, its level is the new one."""
-        level = (instrument, side, price) == (self.instrument, BUY, self.level_price)
-        return level and strat_id == self.strat_id and self.accepted_ms is not None
+    def interfere(self, sign: str) -> None:
+        if sign not in self.interference:
+            self.interference.append(sign)
 
     def apply(self, message: Message) -> None:
         ref = request_ref_of(message)
@@ -602,48 +620,60 @@ class ProbeOrder:
                     self.accepted_ms = (time.monotonic() - self.sent_at) * 1000
                 elif ref in self.cancel_refs:
                     self.replies[ref] = message
+                return
             case Reject():
                 if ref == self.new_ref:
                     self.rejected = message
                 elif ref in self.cancel_refs:
                     self.replies[ref] = message
+                return
+            case OrderCancelled() if ref in self.cancel_refs and not self.gone:
+                # This script's own cancel, which names the test order's first level.
+                if message.strat_id != self.strat_id:
+                    # It found another strategy's order there: the test order left unseen.
+                    self.interfere(
+                        f"this script's cancel removed strategy {message.strat_id}'s order"
+                    )
+                    self.absent = True
+                elif self.moved_to is None and not self.interfered:
+                    self.cancelled = message
+                return
+            case OrderState() | Execution() | OrderCancelled():
+                pass
+            case _:
+                return
+        if (
+            self.accepted_ms is None  # about an order that held the level before
+            or self.gone  # the order left the book: later reports are about another
+            or message.strat_id != self.strat_id
+            or (message.instrument, message.side) != (self.instrument, BUY)
+        ):
+            return
+        match message:
             case OrderState():
-                level = (message.strat_id, message.instrument, message.side, message.price)
-                resting = message.state in (RESTING, STALE)
                 if message.HasField("old_price") and message.old_price != message.price:
-                    # An amend, which this script never sends, moved an order: if it was
-                    # the test order, it is no longer at the level this script cancels,
-                    # and an amend that filled it reported the fill just before this.
-                    moved = (message.strat_id, message.instrument, message.side)
-                    if self.ours(*moved, message.old_price):
+                    # An amend, which this script never sends.
+                    if message.old_price == self.level_price:
                         self.moved_to = message.price
-                        self.take_fills_at(message.price)
-                        self.ended_by_amend = not resting
-                elif self.ours(*level) and resting:
+                        self.interfere("an amend moved the test order")
+                elif message.price == self.level_price and message.state in (RESTING, STALE):
                     self.resting = True
             case Execution():
                 if not message.HasField("order_price"):
                     return
-                strat = (message.strat_id, message.instrument, message.side)
-                if self.ours(*strat, message.order_price):
-                    self.record_fill(message)
-                elif self.ours(*strat, self.level_price):
-                    # This strategy's order on this side at another price: the test order's
-                    # only if an amend moved it there, which its order_state tells next.
+                if message.order_price == self.level_price and not self.interfered:
+                    self.filled += message.fill_size
+                    self.fill_prices.append(message.fill_price)
+                    self.fully_filled = message.remaining_size == 0
+                else:
                     self.other_fills.append(message)
+                    self.interfere("a fill of this strategy at another price")
             case OrderCancelled():
-                if not message.HasField("price"):
+                if not message.HasField("price") or message.price != self.level_price:
                     return
-                level = (message.instrument, message.side, message.price)
-                # This script's own cancel names the order's first level, which is no
-                # longer the order's once another program has moved it.
-                mine = (
-                    self.moved_to is None
-                    and level == (self.instrument, BUY, self.price)
-                    and ref in self.cancel_refs
-                )
-                if mine or self.ours(message.strat_id, *level):
-                    self.cancelled = message
+                if ref is not None and ref not in self.cancel_refs:
+                    self.interfere("a cancel of the test order sent by something else")
+                self.cancelled = message
 
 
 class Watcher:
@@ -990,7 +1020,7 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
     grid_points = 1
     while True:
         watcher.drain()  # apply what has arrived before deciding to send
-        if order.gone or order.moved_to is not None or order.rejected is not None:
+        if order.gone or order.interfered or order.rejected is not None:
             # Nothing of the test order is at its level: a cancel there could only hit
             # another order, such as the one a DUPLICATE_ORDER_AT_LEVEL reject names.
             return None
@@ -1013,13 +1043,11 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
             return "the cancel could not be sent: the connection closed or stalled"
         answered = await watcher.until(
             lambda ref=ref: (
-                order.gone
-                or order.moved_to is not None
-                or isinstance(order.replies.get(ref), Reject)
+                order.gone or order.interfered or isinstance(order.replies.get(ref), Reject)
             ),
             deadline,
         )
-        if order.gone or order.moved_to is not None:
+        if order.gone or order.interfered:
             return None
         reply = order.replies.get(ref)
         if not answered:
@@ -1038,15 +1066,13 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
         target = watcher.grid_points + grid_points
         grid_points *= 2
         await watcher.until(
-            lambda target=target: (
-                order.gone or order.moved_to is not None or watcher.grid_points >= target
-            ),
+            lambda target=target: order.gone or order.interfered or watcher.grid_points >= target,
             deadline,
         )
 
 
-async def moved(watcher: Watcher, order: ProbeOrder, seconds: float) -> tuple[str, str]:
-    """The verdict when another program of the team amended the order to a new price.
+async def interfered(watcher: Watcher, order: ProbeOrder, seconds: float) -> tuple[str, str]:
+    """The verdict when something else acted on this strategy's buy orders here.
 
     It first waits for the exchange's next grid point: every report sent before it arrives
     before it on the one connection, so a further move made by then is seen and the level
@@ -1054,20 +1080,13 @@ async def moved(watcher: Watcher, order: ProbeOrder, seconds: float) -> tuple[st
     loop = asyncio.get_running_loop()
     seen = watcher.grid_points
     await watcher.until(lambda: watcher.grid_points > seen, loop.time() + seconds)
-    if order.filled:
-        return FAIL, (
-            f"{order.where} was moved by another of your team's programs to "
-            f"{order.where_now}, where it filled {order.filled} share(s): a real trade, so "
-            "your team now holds that position"
-        )
-    if order.gone:
-        return FAIL, (
-            f"{order.where} was moved by another of your team's programs to "
-            f"{order.where_now}, then left the book there"
-        )
+    watcher.drain()
+    signs = "; ".join(order.interference)
     return FAIL, (
-        f"{order.where} was moved by another of your team's programs, and may still be "
-        f"resting at {order.where_now}; check your team's orders and cancel it yourself"
+        f"{order.where}: something else acted on strategy {order.strat_id}'s buy orders on "
+        f"{order.instrument} during the test ({signs}), so the test order cannot be told "
+        f"apart from them; it may still be resting at {order.where_now}; check your team's "
+        "orders and positions"
     )
 
 
@@ -1097,8 +1116,8 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
     watcher.drain()  # so a later report, such as a second move, is seen before deciding
     if order.rejected is not None:
         return rejected_new(order)
-    if order.moved_to is not None:
-        return await moved(watcher, order, seconds)
+    if order.interfered:
+        return await interfered(watcher, order, seconds)
     if order.gone:
         return left_alone(order)
     # It rests, or what became of it is unknown. Cancel the level either way: a cancel is
@@ -1110,15 +1129,9 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
         unsure = f"accepted, but not reported resting within {seconds:g} s"
     why_not = await cancel_level(watcher, order, seconds)
     watcher.drain()  # a move or a fill may have arrived just behind the last reply
-    if order.moved_to is not None:
-        return await moved(watcher, order, seconds)
+    if order.interfered:
+        return await interfered(watcher, order, seconds)
     if order.confirmed:
-        assert order.cancelled is not None
-        if order.cancelled.strat_id != order.strat_id:
-            return FAIL, (
-                f"the cancel at {order.where} removed strategy {order.cancelled.strat_id}'s "
-                "order there, not the test order: tell whoever runs that strategy"
-            )
         if order.accepted_ms is None:
             return FAIL, (
                 f"{order.where}: {unsure}; a cancel then removed an order of this strategy "
@@ -1215,7 +1228,7 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
     except BaseException:
         # Interrupted (Ctrl+C) or failed part-way while the order may rest: try once more
         # to cancel exactly its level before the error goes on.
-        if order.may_rest and order.moved_to is None:
+        if order.may_rest and not order.interfered:
             await clean_up(watcher, order, args.seconds)
         raise
     else:
@@ -1224,6 +1237,8 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
         # Also on Ctrl+C or a failure part-way, so the level is always named.
         if order.filled:
             print(order.fill_warning(), file=sys.stderr, flush=True)
+        if order.other_fills:
+            print(order.other_fill_warning(), file=sys.stderr, flush=True)
         if order.may_rest:
             print(order.warning(), file=sys.stderr, flush=True)
 

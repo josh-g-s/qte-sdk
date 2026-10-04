@@ -2041,7 +2041,7 @@ async def test_the_smoke_test_fails_loudly_when_the_order_is_moved_away_from_its
     assert status == "FAIL"
     where = f"BUY TEST @ {to_decimal(moves[-1])}"
     assert f"may still be resting at {where}" in reason
-    assert f"WARNING: the test order may still be resting at {where}" in err
+    assert f"so the test order may still be resting at {where}, or elsewhere" in err
     assert exchange.resting == {(INSTRUMENT, "BUY", moves[-1]): ("smoke", 1)}
     # A cancel, if one went before the move was seen, names only the test order's level.
     cancels = [m["payload"] for m in exchange.received if m["type"] == "cancel"]
@@ -2599,34 +2599,71 @@ async def test_the_smoke_tests_cleanup_sends_nothing_once_the_order_is_rejected(
     assert not order.may_rest
 
 
-def test_the_smoke_test_counts_a_fill_made_by_another_programs_amend():
-    # Another program amends the resting test order to a marketable price, where it fills:
-    # the execution comes first, then the order_state with old_price that ties it to the
-    # test order. A later cancel at the first level, of an order that took it since, is not
-    # the test order's.
-    smoke = load_example(SMOKE_TEST)
+def probe(smoke: Any) -> tuple[Any, dict[str, Any]]:
+    """A test order at 99.96 that the exchange has accepted and reported resting."""
     order = smoke.ProbeOrder(INSTRUMENT, "smoke", 99_960_000)
     order.sent = True
     level = {"strat_id": "smoke", "instrument": INSTRUMENT, "side": BUY}
     order.apply(Accepted(request_ref=order.new_ref))
     order.apply(OrderState(**level, price=99_960_000, state=RESTING, remaining_size=1))
+    return order, level
+
+
+def test_the_smoke_test_cannot_tie_a_fill_after_another_programs_amend_to_its_order():
+    # Another program amends the resting test order to a marketable price, where it fills:
+    # the execution comes before the order_state with old_price. A fill of the strategy at
+    # another price is a sign that something else is acting, so nothing after it is tied
+    # to the test order, and the warnings name the fill and the order's possible level.
+    smoke = load_example(SMOKE_TEST)
+    order, level = probe(smoke)
     order.cancel_refs.append("cleanup")
     fill = Execution(
         **level, order_price=100_050_000, fill_price=100_050_000, fill_size=1, remaining_size=0
     )
     order.apply(fill)
-    assert order.filled == 0  # not yet tied to the test order
     moved = OrderState(
         **level, price=100_050_000, old_price=99_960_000, state=FILLED, remaining_size=0
     )
     order.apply(moved)
-    assert (order.filled, order.fill_prices, order.moved_to) == (1, [100_050_000], 100_050_000)
-    assert order.gone
-    assert not order.may_rest
-    replacement = OrderCancelled(**level, price=99_960_000, request_ref="cleanup")
-    order.apply(replacement)
+    assert order.interfered
+    assert order.filled == 0
+    assert order.may_rest
+    # This script's cancel at the first level, of an order that took it since, is not
+    # taken for the test order's.
+    order.apply(OrderCancelled(**level, price=99_960_000, request_ref="cleanup"))
     assert order.cancelled is None
-    assert "your team bought 1 TEST at 100.050000" in order.fill_warning()
+    assert "1 at 100.050000" in order.other_fill_warning()
+    assert "may still be resting at BUY TEST @ 100.050000" in order.warning()
+
+
+def test_the_smoke_test_keeps_the_first_report_that_its_order_left():
+    # Another program cancels the test order and puts an order of the same strategy at the
+    # level; this script's cancel then removes that one. The first cancel is the test
+    # order's, and it came from something else, so the order is not reported as cleanly gone.
+    smoke = load_example(SMOKE_TEST)
+    order, level = probe(smoke)
+    order.cancel_refs.append("mine")
+    order.apply(OrderCancelled(**level, price=99_960_000, request_ref="theirs"))
+    order.apply(OrderCancelled(**level, price=99_960_000, request_ref="mine"))
+    assert order.cancelled is not None
+    assert order.cancelled.request_ref == "theirs"
+    assert not order.confirmed
+    assert order.interfered
+    assert order.may_rest
+
+
+def test_the_smoke_test_does_not_clear_its_warning_on_a_fill_after_missed_reports():
+    # After missed reports, a fill at the level may be another order's that took it.
+    smoke = load_example(SMOKE_TEST)
+    order, level = probe(smoke)
+    order.reports_missed = True
+    fill = Execution(
+        **level, order_price=99_960_000, fill_price=99_960_000, fill_size=1, remaining_size=0
+    )
+    order.apply(fill)
+    assert order.gone
+    assert order.may_rest
+    assert "may have been another order of this strategy there" in order.fill_warning()
 
 
 async def test_the_smoke_test_does_not_trust_a_confirmed_cancel_after_missed_reports():
