@@ -34,27 +34,31 @@ It exits with status 0 when no check failed, 1 when one did, and 2 when it found
 or no usable address, and so could not connect. The output never shows the token or any
 account figure.
 
-The test order. With --place-test-order --strat-id ID, and only while the market session is
-OPEN, it places one passive limit buy of one share on the first instrument whose book is
-two-sided and LIVE, waits until the exchange reports it resting, then cancels exactly that
-price level and waits for the exchange to confirm the cancel. It never sends a mass cancel,
-which would cancel every order your team has, other strategies' included.
+The test order. With --place-test-order --strat-id ID --tick DOLLARS, and only while the
+market session is OPEN and no exchange outage is in force, it places one limit buy of one
+share on the first instrument whose book is two-sided and LIVE, waits until the exchange
+reports it resting, then cancels exactly that price level and waits for the exchange to
+confirm the cancel. It never sends a mass cancel, which would cancel every order your
+team has, other strategies' included. In a scored session it places nothing unless you
+also pass --allow-scored: there the order is a real order of your team like any other.
 
-Its price is the lowest on its step at which a buy can rest. Your orders rest only strictly
-inside the band between the wall's best bid and best ask: an order at the wall's own price
-or beyond it is not left resting (`order_cancelled` with REMAINDER_OUTSIDE_BAND). So the
-price is one step above the wall's best bid, and it must be below every ask. The exchange
-does not send the tick, so the step is the tick you give with --tick or, without it, the
-largest step that every price in the book is a multiple of. Every price in a book is on
-the tick, so that step is a whole number of ticks and a price on it is on the tick too,
-though it may be a few ticks above the lowest price that could rest. If the spread leaves
-no room, the check is a SKIP: try another instrument, or give --tick.
+Its price is one tick above the wall's best bid, the lowest at which a buy can rest: your
+orders rest only strictly inside the band between the wall's best bid and best ask, and
+one at the wall's own price or beyond it is not left resting (`order_cancelled` with
+REMAINDER_OUTSIDE_BAND). The exchange does not send the tick, so you give it with --tick.
+The price must be at least three ticks below every ask, or the check is a SKIP: try
+another instrument.
 
-A resting buy can still be filled. If it is, the check says so: your team then holds that
-position. A cancel names a price level, not an order, and acts on whichever of your team's
+The order can fill. There is no post-only order, so if the asks fall to its price during
+the order delay, or a seller trades with it while it rests, it trades. A fill makes the
+check FAIL, and a line on stderr names the position your team then holds. If the wall's
+bid rises to the price during the delay, nothing rests and the check is a SKIP: run it
+again. A cancel names a price level, not an order, and acts on whichever of your team's
 orders rests there when it is applied, so run this on an instrument your team is not
 otherwise trading at that price. If the script cannot confirm that the order is gone, the
-check fails and names the level where it may still rest, so you can cancel it yourself.
+check fails and names the level where it may still rest, so you can cancel it yourself. If
+it is interrupted (Ctrl+C) while the order may rest, it first tries, for a few seconds, to
+cancel that level.
 
 Timing. The exchange holds every order message for its order delay before applying it. The
 delay, the minimum time an order must rest before it may be cancelled, the price collar
@@ -69,6 +73,7 @@ for an instrument's first book, which --book-wait bounds (never less than --seco
 import argparse
 import asyncio
 import contextlib
+import ipaddress
 import math
 import os
 import sys
@@ -80,6 +85,7 @@ from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
@@ -125,6 +131,7 @@ from qte_sdk.market_data import (
     subscribe,
 )
 from qte_sdk.orders import (
+    ORDER_EVENT_TYPES,
     is_order_event,
     new_request_ref,
     reason_code_name,
@@ -148,6 +155,14 @@ NAME_WIDTH = 14
 
 # The test order is one share, the smallest order there is.
 TEST_ORDER_SIZE = 1
+
+# The least room, in ticks, between the test order's price and the best ask. There is no
+# post-only order, so an ask that falls to the price during the order delay fills it; the
+# room makes that less likely, never impossible. A local choice.
+MIN_ROOM_TICKS = 3
+
+# The longest wait for the cancel made after an interruption. A local choice.
+CLEANUP_SECONDS = 5.0
 
 # The longest wait for the connection to close at the end. A local choice, not a value the
 # exchange sets.
@@ -177,7 +192,9 @@ RETRY_CANCEL = frozenset(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check a setup end to end. Sends no orders unless asked."
+        description="Check a setup end to end. Sends no orders unless asked.",
+        # Spelled out in full only: an abbreviation such as --pl must never place an order.
+        allow_abbrev=False,
     )
     default = os.environ.get("QTE_INSTRUMENT")
     parser.add_argument(
@@ -214,7 +231,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "during a session, place one passive one-share buy, then cancel it and confirm "
-            "the cancel; needs --strat-id"
+            "the cancel; needs --strat-id and --tick. It is a real order and can fill"
         ),
     )
     parser.add_argument(
@@ -227,8 +244,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=to_micros,  # dollars as text, converted exactly to micro-dollars
         default=None,
         help=(
-            "the instrument's tick in dollars, for the test order's price, for example 0.01 "
-            "(default: worked out from the prices in the book)"
+            "the instruments' tick in dollars, for the test order's price, for example "
+            "0.01; needed with --place-test-order, since the exchange does not send it"
+        ),
+    )
+    parser.add_argument(
+        "--allow-scored",
+        action="store_true",
+        help=(
+            "let --place-test-order place its order in a scored session too, where it "
+            "counts like any other order of your team"
         ),
     )
     args = parser.parse_args(argv)
@@ -242,6 +267,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(
             "--place-test-order needs --strat-id (or QTE_STRAT_ID): a strategy ID "
             "registered for your team"
+        )
+    if args.place_test_order and args.tick is None:
+        parser.error(
+            "--place-test-order needs --tick, the instruments' tick in dollars, for example "
+            "0.01: the exchange does not send it, and the order's price is set from it"
         )
     args.instruments = list(dict.fromkeys(args.instruments))
     return args
@@ -279,6 +309,17 @@ def reject_text(reject: Reject) -> str:
     """The reject's reason code. Its free-text `reason_detail` is left out: it can name a
     risk limit and the team's figures against it, which this output never shows."""
     return reason_code_name(reject.reason_code)
+
+
+def missed_reports(event: object) -> bool:
+    """Whether `event` means a report about the team's orders may have been missed: a gap in
+    the messages or in the team's reports, or one that could not be decoded and may have
+    been a report."""
+    if isinstance(event, SeqGap | ReportGap):
+        return True
+    return isinstance(event, DecodeFailed) and (
+        event.type is None or event.type in ORDER_EVENT_TYPES
+    )
 
 
 def refuses_unknown_type(event: Received) -> bool:
@@ -319,6 +360,29 @@ def describe(source: str) -> str:
     return f"the {source} environment variable"
 
 
+def address_problem(url: str) -> str | None:
+    """What keeps `url` from being used as the exchange address, or None. Never the address
+    itself, which a mistake could have filled with the token.
+
+    A plain ws:// address carries the token unencrypted, so it is refused for any host
+    but this machine (a test exchange of your own)."""
+    if url.startswith("wss://"):
+        return None
+    if not url.startswith("ws://"):
+        return "it does not start with ws:// or wss:// as an exchange address must"
+    try:
+        host = urlsplit(url).hostname or ""
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if loopback:
+        return None
+    return (
+        "it is a plain ws:// address for a host other than this machine, which would send "
+        "your token unencrypted: use the wss:// address you were given"
+    )
+
+
 def check_setup(report: Report) -> tuple[str | None, list[str]]:
     """Report where the SDK finds the token and the address, showing neither. Returns the
     address and what keeps the script from connecting, if anything."""
@@ -341,11 +405,11 @@ def check_setup(report: Report) -> tuple[str | None, list[str]]:
         else:
             # The address itself is not shown: a mistake could have put the token there.
             where = f"set, from {describe(source)} (not shown)"
-            if url.startswith(("ws://", "wss://")):
+            shape = address_problem(url)
+            if shape is None:
                 report.add(PASS, "address", where)
             else:
-                shape = "it does not start with ws:// or wss:// as an exchange address must"
-                problems.append(f"QTE_URL is not a WebSocket address: {shape}")
+                problems.append(f"QTE_URL cannot be used: {shape}")
                 report.add(FAIL, "address", f"{where}, but {shape}")
     for warning in caught:
         if issubclass(warning.category, DotenvNotIgnored):
@@ -417,6 +481,7 @@ class ProbeOrder:
     rejected: Reject | None = None
     resting: bool = False
     filled: int = 0
+    fill_prices: list[int] = field(default_factory=list)
     fully_filled: bool = False
     # The order_cancelled that took it off the book, whoever's cancel caused it.
     cancelled: OrderCancelled | None = None
@@ -424,6 +489,9 @@ class ProbeOrder:
     absent: bool = False
     # The price another of the team's programs amended the order to, if one did.
     moved_to: int | None = None
+    # Set when messages that may have been reports about it were missed after it was sent,
+    # such as an amend that moved it: what the script saw of it may then be incomplete.
+    reports_missed: bool = False
     cancel_refs: list[str] = field(default_factory=list)
     replies: dict[str, Message] = field(default_factory=dict)
     retried: list[str] = field(default_factory=list)
@@ -461,6 +529,9 @@ class ProbeOrder:
         if self.accepted_ms is None:
             # Never seen accepted, so nothing seen at its level can be tied to it.
             return True
+        if self.reports_missed and not self.confirmed:
+            # A missed report may have moved it, so a level found empty proves nothing.
+            return True
         return not self.gone and not self.absent
 
     def warning(self) -> str:
@@ -470,9 +541,22 @@ class ProbeOrder:
                 "still be resting there, or wherever an amend moved it. Check your team's "
                 "orders and cancel it yourself."
             )
+        if self.reports_missed:
+            return (
+                f"WARNING: reports about the test order ({self.where}) were missed, so it "
+                "may still rest, there or elsewhere if it was moved. Check your team's "
+                "orders and cancel it yourself."
+            )
         return (
             f"WARNING: the test order may still be resting at {self.where_now}. Check your "
             "team's orders and cancel that level yourself."
+        )
+
+    def fill_warning(self) -> str:
+        prices = ", ".join(str(to_decimal(price)) for price in self.fill_prices)
+        return (
+            f"WARNING: the test order filled: your team bought {self.filled} "
+            f"{self.instrument} at {prices}, and now holds that position."
         )
 
     def answered(self) -> bool:
@@ -519,6 +603,7 @@ class ProbeOrder:
                     message.strat_id, message.instrument, message.side, message.order_price
                 ):
                     self.filled += message.fill_size
+                    self.fill_prices.append(message.fill_price)
                     self.fully_filled = message.remaining_size == 0
             case OrderCancelled():
                 if not message.HasField("price"):
@@ -643,6 +728,8 @@ class Watcher:
             self.undecodable += 1
         elif isinstance(event, Unknown):
             self.unknown_types.add(event.type)
+        if self.order is not None and self.order.sent and missed_reports(event):
+            self.order.reports_missed = True
         item = as_market_data(event)
         self.books.update(item)  # lists a book as stale after a gap
         if isinstance(item, SessionState):
@@ -787,40 +874,28 @@ def check_feed(report: Report, watcher: Watcher) -> None:
 # The test order
 
 
-def price_step(book: Book) -> int:
-    """The largest step that every price in the book is a multiple of. Every price in a
-    book is on the instrument's tick, so this is a whole number of ticks, and a multiple
-    of it is on the tick too, even where it is coarser than the tick itself."""
-    sides = (book.bid_levels, book.ask_levels, book.student_bid_levels, book.student_ask_levels)
-    return math.gcd(*(level.price for levels in sides for level in levels))
-
-
-def probe_price(book: Book, tick: int | None) -> tuple[int | None, str]:
+def probe_price(book: Book, tick: int) -> tuple[int | None, str]:
     """The test buy's price and "", or None and why there is none.
 
-    The price is one step above the wall's best bid, since an order rests only strictly
-    inside the wall's best bid and ask: the lowest price that can rest when the step is the
-    tick. The step is `tick`, or else `price_step(book)`, a whole number of ticks. The price
-    must also be below every ask, the wall's and resting orders', so it cannot trade on
-    arrival."""
+    The price is one tick above the wall's best bid, the lowest at which a buy can rest,
+    since an order rests only strictly inside the wall's best bid and ask. It must also be
+    at least MIN_ROOM_TICKS ticks below every ask, the wall's and resting orders': there is
+    no post-only order, so if the asks fall to it during the order delay, it trades."""
     if book.condition != InstrumentCondition.LIVE or not book.bid_levels or not book.ask_levels:
         condition = name_of(InstrumentCondition, book.condition)
         return None, f"its quote is not two-sided and LIVE ({condition})"
-    step = tick if tick is not None else price_step(book)
-    if step <= 0:
-        return None, "its book shows no positive price"
     wall_bid = book.bid_levels[0].price
     best_ask = min(
         levels[0].price for levels in (book.ask_levels, book.student_ask_levels) if levels
     )
-    price = (wall_bid // step + 1) * step
-    if price >= best_ask:
-        return None, f"no room inside the band at a step of {to_decimal(step)}"
+    price = (wall_bid // tick + 1) * tick
+    if best_ask - price < MIN_ROOM_TICKS * tick:
+        return None, f"fewer than {MIN_ROOM_TICKS} ticks between the band's floor and the asks"
     return price, ""
 
 
 def choose(
-    watcher: Watcher, instruments: list[str], state: SessionState, tick: int | None
+    watcher: Watcher, instruments: list[str], state: SessionState, tick: int
 ) -> tuple[str, int] | str:
     """The first instrument the test order can rest on and its price, or why there is none."""
     why = []
@@ -860,16 +935,23 @@ def rejected_new(order: ProbeOrder) -> tuple[str, str]:
 
 def left_alone(order: ProbeOrder) -> tuple[str, str]:
     """The verdict when the order left the book without one of this script's cancels."""
-    if order.fully_filled:
-        return PASS, (
-            f"{order.where} was filled ({order.filled} share) before it could be cancelled: "
-            "nothing is left resting, but your team now holds that position"
+    if order.filled:
+        rest = "" if order.fully_filled else ", and the exchange cancelled the rest"
+        return FAIL, (
+            f"{order.where} filled {order.filled} share(s){rest}: a real trade, so your team "
+            "now holds that position"
         )
     assert order.cancelled is not None
     code = order.cancelled.reason_code
     reason = reason_code_name(code)
     if code == ReasonCodes.SESSION_CLOSE:
         return SKIP, f"{order.where}: the session closed, which cancelled it ({reason})"
+    if code == ReasonCodes.REMAINDER_OUTSIDE_BAND and not order.resting:
+        # The wall's bid rose to the price during the order delay: nothing rested.
+        return SKIP, (
+            f"{order.where} was not left resting ({reason}): the wall moved during the "
+            "order delay, so nothing rested; run it again"
+        )
     rested = "rested, then was cancelled" if order.resting else "was not left resting"
     return FAIL, f"{order.where} {rested} by the exchange: {reason}; nothing is left resting"
 
@@ -1008,6 +1090,11 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
                 f"{order.where}: {unsure}; a cancel then removed an order of this strategy "
                 "at that level, which cannot be tied to the test order"
             )
+        if order.filled:
+            return FAIL, (
+                f"{order.where} filled {order.filled} share(s) before the cancel removed the "
+                "rest: a real trade, so your team now holds that position"
+            )
         if unsure is not None:
             return FAIL, f"{order.where}: {unsure}; the cancel then removed it"
         text = (
@@ -1019,8 +1106,6 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
                 f", after {len(order.retried)} rejected cancel(s) "
                 f"({', '.join(order.retried)}) sent again on later grid points"
             )
-        if order.filled:
-            text += f"; {order.filled} share(s) filled first: your team now holds them"
         return PASS, text
     if order.gone:
         return left_alone(order)
@@ -1028,6 +1113,11 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
         return FAIL, (
             f"{order.where}: {unsure}; the exchange then reported no order of your team at "
             "that level, so it is not there, but this script cannot tell where it went"
+        )
+    if order.absent and order.reports_missed:
+        return FAIL, (
+            f"{order.where}: the exchange reported no order at that level, but reports "
+            "about it were missed, so it may rest elsewhere; check your team's orders"
         )
     if order.absent:
         return FAIL, (
@@ -1058,6 +1148,18 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
         phase = "unknown" if state is None else name_of(MarketSessionPhase, state.state)
         report.add(SKIP, name, f"the market session is {phase}: it is placed only while OPEN")
         return
+    if state.outage_active:
+        report.add(SKIP, name, "an exchange outage is in force: no order is placed during one")
+        return
+    if not watcher.session.info.unscored and not args.allow_scored:
+        report.add(
+            SKIP,
+            name,
+            "this is a scored session, where the test order is a real order of your team "
+            "and can fill: add --allow-scored to place it all the same",
+        )
+        return
+    assert args.tick is not None  # required with --place-test-order
     choice = choose(watcher, args.instruments, state, args.tick)
     if isinstance(choice, str):
         report.add(SKIP, name, f"nowhere to place it: {choice}")
@@ -1067,11 +1169,37 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
     watcher.order = order
     try:
         status, reason = await place_and_cancel(watcher, order, args.seconds)
+    except BaseException:
+        # Interrupted (Ctrl+C) or failed part-way while the order may rest: try once more
+        # to cancel exactly its level before the error goes on.
+        if order.may_rest and order.moved_to is None:
+            await clean_up(watcher, order, args.seconds)
+        raise
+    else:
         report.add(status, name, reason)
     finally:
         # Also on Ctrl+C or a failure part-way, so the level is always named.
+        if order.filled:
+            print(order.fill_warning(), file=sys.stderr, flush=True)
         if order.may_rest:
             print(order.warning(), file=sys.stderr, flush=True)
+
+
+async def clean_up(watcher: Watcher, order: ProbeOrder, seconds: float) -> None:
+    """A bounded, best-effort cancel of exactly the test order's level after an interruption.
+
+    It runs in a task of its own behind `asyncio.shield`, so the interruption that started it
+    does not stop it; a further interruption stops only the wait for it."""
+    print(
+        f"interrupted: cancelling the test order's level ({order.where}) before stopping",
+        file=sys.stderr,
+        flush=True,
+    )
+    cancelling = asyncio.ensure_future(cancel_level(watcher, order, min(seconds, CLEANUP_SECONDS)))
+    try:
+        await asyncio.shield(cancelling)
+    except BaseException:
+        pass  # interrupted again, or the cancel failed: the warning that follows says so
 
 
 # History
@@ -1099,7 +1227,9 @@ async def first_past_book(
     except HistoryNotImplemented:
         return SKIP, f"session {day}: the service does not serve books yet"
     except HistoryError as error:
-        return FAIL, f"session {day}: {type(error).__name__}: {error}"
+        # Its kind and HTTP status only: its text carries the service's own words.
+        status = f", HTTP {error.http_status}" if error.http_status is not None else ""
+        return FAIL, f"session {day}: refused ({type(error).__name__}{status})"
     except TimeoutError:
         return FAIL, f"session {day}: no answer within {seconds:g} s"
     except Exception as error:
@@ -1198,12 +1328,18 @@ async def run(url: str, args: argparse.Namespace, report: Report) -> None:
     failure = None
     try:
         session = await open_session(url, ack_timeout=args.seconds)
+    # Only the error's kind, or the exchange's reason name, is shown: an error's text can
+    # repeat the address (with anything a mistake put in it), and a refusal's free-text
+    # detail is the exchange's own words.
     except ContractVersionMismatch as error:
-        failure = f"the exchange does not serve this SDK's contract version: {error}; update it"
+        failure = (
+            f"the exchange does not serve this SDK's contract version ({error.reason_name}): "
+            "update the SDK"
+        )
     except SessionRejected as error:
-        failure = f"the exchange refused the session: {error}"
-    except Exception as error:  # the SDK keeps the token out of every error it raises
-        failure = f"could not connect: {type(error).__name__}: {error}"
+        failure = f"the exchange refused the session: {error.reason_name}"
+    except Exception as error:
+        failure = f"could not connect ({type(error).__name__})"
     if failure is not None:
         report.add(FAIL, "connect", failure)
         skip_after_connect(report, "not connected")
