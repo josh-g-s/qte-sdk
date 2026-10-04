@@ -53,6 +53,18 @@ stream, the manifest's `sha256` of each range entry) and raises
 the identity `ETag` the service sends is refused before any message, since it could be
 neither checked nor resumed.
 
+Cancelling a fetch, for example with `asyncio.timeout`, shuts its connection down at once.
+The request and each read of the response run in a worker thread, and the shutdown wakes
+that thread wherever it waits on the service: in the TLS handshake, sending the request,
+waiting for the answer, reading the body or resuming. The connection is closed and the
+thread ends without waiting for `timeout`, so a cancelled fetch neither holds a
+connection open nor keeps the program from exiting. Only looking up the service's address
+and opening the TCP connection cannot be woken: a thread cancelled then finishes that
+step, which `timeout` bounds, and closes the connection without sending the request. A
+response that arrives just as the fetch is cancelled is closed too. The cancelled task
+sees only `asyncio.CancelledError`. Closing a fetch part way, with `aclose()`, closes its
+connection as well.
+
 Credentials: the token is sent only in the `Authorization` header and is kept to the same
 standard as `qte_sdk.connection`: it never appears in a log record, an exception message,
 attribute or chain, or a traceback local variable that this module creates or lets escape.
@@ -298,7 +310,9 @@ class HistoryClient:
     `MissingHistoryURL` or `qte_sdk.session.MissingToken` if either is missing.
 
     `timeout` bounds each network operation (connecting, or one read), in seconds; a
-    network failure raises the usual Python error, such as `TimeoutError`. `max_wait`
+    network failure raises the usual Python error, such as `TimeoutError`. A cancelled
+    fetch stops without waiting out `timeout`, unless it is still opening its connection
+    (see the module docstring). `max_wait`
     bounds the total of the waits the service asks for, with `pending` or rate-limited
     answers, before one request raises instead of waiting again, and `max_retries` the
     number of times it asks again; set `max_retries` to 0 to never ask again.
@@ -576,8 +590,9 @@ class HistoryClient:
         try:
             return await asyncio.to_thread(self._request_safely, target, resume, handoff)
         except BaseException:
-            # Cancelled, most likely: the worker thread carries on, and closes the
-            # response itself if it arrives after this. The error was already made safe.
+            # Cancelled, most likely: shut the connection down, which wakes the worker
+            # thread at once, and leave the worker to close it, and any response that
+            # arrives after this, on its way out. The error was already made safe.
             handoff.abandon()
             raise
 
@@ -588,16 +603,19 @@ class HistoryClient:
         (such as the awaiting task) can keep a reference to the original."""
         failure: BaseException
         try:
-            return handoff.deliver(self._request(target, resume))
+            return handoff.deliver(self._request(target, resume, handoff))
         except BaseException as error:
             failure = _sanitised(error, self._secret)
         # Raised outside the handler, so the original error, whose traceback holds the
         # HTTP library's frames and their copy of the request headers, is not chained.
         raise failure
 
-    def _request(self, target: str, resume: "tuple[int, _Validator] | None") -> "_Reply":
-        """Send one GET and read the response status and headers. Runs in a worker thread."""
+    def _connect(self, handoff: "_Handoff") -> http.client.HTTPConnection:
+        """A connection to the service, its socket handed to `handoff` before anything is
+        sent or awaited on it, so a cancel can wake this thread from the TLS handshake on.
+        Runs in a worker thread. Raises if the fetch was cancelled while connecting."""
         conn: http.client.HTTPConnection
+        context: ssl.SSLContext | None = None
         if self._https:
             context = self._ssl_context or ssl.create_default_context()
             conn = http.client.HTTPSConnection(
@@ -605,6 +623,31 @@ class HistoryClient:
             )
         else:
             conn = http.client.HTTPConnection(self._host, self._port, timeout=self.timeout)
+        try:
+            # The TCP connection alone, even for https: `HTTPSConnection.connect` would make
+            # the TLS handshake too, before the socket could be handed over.
+            http.client.HTTPConnection.connect(conn)
+            if context is None:
+                handoff.attach(conn.sock)
+            else:
+                # As `HTTPSConnection.connect` does, but with the handshake made separately.
+                # The socket keeps the connection's timeout, which bounds the handshake.
+                tls = context.wrap_socket(
+                    conn.sock, server_hostname=conn.host, do_handshake_on_connect=False
+                )
+                conn.sock = tls
+                handoff.attach(tls)
+                tls.do_handshake()
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+    def _request(
+        self, target: str, resume: "tuple[int, _Validator] | None", handoff: "_Handoff"
+    ) -> "_Reply":
+        """Send one GET and read the response status and headers. Runs in a worker thread."""
+        conn = self._connect(handoff)
         try:
             conn.putrequest("GET", target, skip_accept_encoding=True)
             # Uncompressed, so byte offsets are valid for a resume.
@@ -630,13 +673,31 @@ class HistoryClient:
 
 class _Handoff:
     """Passes a response from the worker thread to the task awaiting it, or, once that
-    task has given up on it, has the worker close it instead. This works without the event
-    loop, which may already have stopped by the time the worker finishes."""
+    task has given up on it, has the worker close it instead.
+
+    The worker hands over its socket as soon as it is connected. Giving up shuts that
+    socket down, which wakes the worker at once from the TLS handshake, from sending the
+    request or from waiting for the answer, so it closes the connection and ends rather
+    than waiting for its timeout. Only the shutdown happens on the task's side: the worker
+    closes what it holds, so the two threads never both work on the connection's objects.
+    A response that arrives after the task has given up is closed by the worker too. This
+    works without the event loop, which may already have stopped by the time the worker
+    finishes."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._abandoned = False
+        self._sock: socket.socket | None = None
         self._reply: _Reply | None = None
+
+    def attach(self, sock: socket.socket) -> None:
+        """Hold the worker's socket, to shut down if the task gives up. Raises if it
+        already has, before anything is sent: the worker then closes the connection."""
+        with self._lock:
+            if not self._abandoned:
+                self._sock = sock
+                return
+        raise ConnectionAbortedError("the fetch was cancelled")
 
     def deliver(self, reply: "_Reply") -> "_Reply":
         with self._lock:
@@ -649,9 +710,13 @@ class _Handoff:
     def abandon(self) -> None:
         with self._lock:
             self._abandoned = True
+            sock, self._sock = self._sock, None
             reply, self._reply = self._reply, None
         if reply is not None:
+            # Delivered, so the worker is done with it.
             reply.close()
+        else:
+            _shut_down(sock)
 
 
 class _Validator:
@@ -721,13 +786,23 @@ class _Reply:
     def close(self) -> None:
         # Shut down first: it wakes a worker thread still blocked reading this socket,
         # which closing alone does not do everywhere.
-        if self.sock is not None:
-            try:
-                self.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+        _shut_down(self.sock)
         self.response.close()
         self.conn.close()
+
+
+def _shut_down(sock: socket.socket | None) -> None:
+    """Shut the connection down both ways, which wakes a thread blocked reading or writing
+    it, as closing alone does not do everywhere. On a TLS socket this is the plain
+    socket's shutdown: `ssl.SSLSocket.shutdown` drops the TLS layer before it shuts the
+    connection down, so a thread writing to it in between, or after a shutdown that
+    failed, would write in the clear."""
+    if sock is None:
+        return
+    try:
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except OSError:
+        pass
 
 
 _REFLECTED_RUN = 6

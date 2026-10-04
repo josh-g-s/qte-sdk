@@ -5,11 +5,15 @@ import hashlib
 import json
 import logging
 import secrets
+import shutil
 import socket
 import socketserver
+import ssl
+import subprocess
 import threading
 import traceback
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
@@ -129,6 +133,8 @@ class FakeHistory:
     hold_after: dict[str, tuple[int, threading.Event]] = field(default_factory=dict)
     # Set before any response is sent; the server waits for it.
     answer: threading.Event | None = None
+    # Set before a response to a resume (a request with a Range header) is sent.
+    answer_resume: threading.Event | None = None
     # Added to every ready entry's byte_offset in a range manifest, to break its layout.
     shift_offsets: int = 0
     requests: list[tuple[str, dict[str, str]]] = field(default_factory=list)
@@ -138,6 +144,8 @@ class FakeHistory:
         self.requests.append((handler.path, headers))
         if self.answer is not None:
             self.answer.wait(10)
+        if self.answer_resume is not None and "range" in headers:
+            self.answer_resume.wait(10)
         if headers.get("authorization") != f"Bearer {self.token}":
             return self.json(handler, 401, "unauthenticated")
         parts = urlsplit(handler.path)
@@ -304,7 +312,9 @@ class LocalServer(ThreadingHTTPServer):
 
 
 @contextmanager
-def serve_history(fake: FakeHistory) -> Iterator[str]:
+def serve_history(fake: FakeHistory, tls: ssl.SSLContext | None = None) -> Iterator[str]:
+    """Serve `fake` over http, or over https with `tls`, a server context."""
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -315,10 +325,13 @@ def serve_history(fake: FakeHistory) -> Iterator[str]:
             pass
 
     server = LocalServer(("127.0.0.1", 0), Handler)
+    if tls is not None:
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_address[1]}"
+        scheme = "http" if tls is None else "https"
+        yield f"{scheme}://127.0.0.1:{server.server_address[1]}"
     finally:
         server.shutdown()
         server.server_close()
@@ -1133,38 +1146,193 @@ async def test_closing_a_fetch_part_way_closes_its_connection(closes):
     assert closes == [200]
 
 
-async def test_cancelling_during_a_download_closes_its_connection(closes):
+# Cancelling. The client makes each request and each read in a worker thread. These tests
+# give it a 60 second timeout and have the fake service hold its answer for up to ten
+# seconds, so a worker that ends within `eventually`'s five was woken by the cancel.
+
+
+class RecordingExecutor(ThreadPoolExecutor):
+    """An event loop's default executor that keeps every call it is given."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[Future[Any]] = []
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Future[Any]:
+        call = super().submit(fn, *args, **kwargs)
+        self.calls.append(call)
+        return call
+
+
+def worker_calls() -> list[Future[Any]]:
+    """Every call the running event loop hands to a worker thread from now on."""
+    executor = RecordingExecutor()
+    asyncio.get_running_loop().set_default_executor(executor)
+    return executor.calls
+
+
+async def workers_end(calls: list[Future[Any]], token: str) -> list[BaseException]:
+    """Wait for every call in `calls` to end, and return what they raised. The client
+    discards a cancelled worker's error, but it must not carry the token either."""
+    assert calls
+    await eventually(lambda: all(call.done() for call in calls))
+    raised = [call.exception() for call in calls if not call.cancelled()]
+    errors = [error for error in raised if error is not None]
+    for error in errors:
+        assert_token_absent(token, shown(error))
+    return errors
+
+
+@pytest.fixture
+def connections(monkeypatch: pytest.MonkeyPatch) -> list[socket.socket]:
+    """Every TCP connection the client opens."""
+    opened: list[socket.socket] = []
+    connect = socket.create_connection
+
+    def recording(*args: Any, **kwargs: Any) -> socket.socket:
+        sock = connect(*args, **kwargs)
+        opened.append(sock)
+        return sock
+
+    monkeypatch.setattr(socket, "create_connection", recording)
+    return opened
+
+
+def all_closed(opened: list[socket.socket]) -> bool:
+    return bool(opened) and all(sock.fileno() == -1 for sock in opened)
+
+
+async def test_cancelling_while_the_service_holds_its_answer_ends_the_worker_at_once(
+    closes, connections
+):
     token = synthetic_token()
+    calls = worker_calls()
+    answer = threading.Event()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)}, answer=answer)
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token, timeout=60)
+        fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
+        await eventually(lambda: fake.requests)
+        fetching.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await fetching
+        await workers_end(calls, token)
+        assert all_closed(connections)
+        assert closes == []  # no response ever arrived
+        answer.set()
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_cancelling_during_a_download_ends_the_worker_and_closes_its_connection(
+    closes, connections
+):
+    token = synthetic_token()
+    calls = worker_calls()
     path = f"/v1/history/{DAY}/TEST/book"
     release = threading.Event()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
     fake.hold_after[path] = (len(book(1)), release)
     with serve_history(fake) as url:
-        stream = HistoryClient(url, token).fetch(DAY, "TEST", "book")
+        stream = HistoryClient(url, token, timeout=60).fetch(DAY, "TEST", "book")
         await anext(stream)
+        started = len(calls)
         reading = asyncio.ensure_future(anext(stream))
-        await asyncio.sleep(0.1)
+        # The read of the rest, which the service is holding.
+        await eventually(lambda: len(calls) > started and calls[-1].running())
         reading.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as caught:
             await reading
         assert closes == [200]
+        await workers_end(calls, token)
+        assert all_closed(connections)
         release.set()
+    assert_token_absent(token, shown(caught.value))
 
 
-async def test_cancelling_before_the_response_closes_it_once_it_arrives(closes):
+async def test_cancelling_while_a_resume_is_held_ends_the_worker_at_once(connections):
     token = synthetic_token()
-    answer = threading.Event()
-    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)}, answer=answer)
+    calls = worker_calls()
+    path = f"/v1/history/{DAY}/TEST/book"
+    resume = threading.Event()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(10)}, drop_after={path: 100})
+    fake.answer_resume = resume
     with serve_history(fake) as url:
-        client = HistoryClient(url, token)
+        client = HistoryClient(url, token, timeout=60)
         fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
-        await eventually(lambda: fake.requests)
+        await eventually(lambda: len(fake.requests) == 2)
+        assert fake.requests[1][1]["range"] == "bytes=100-"
+        fetching.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await fetching
+        await workers_end(calls, token)
+        assert len(connections) == 2 and all_closed(connections)
+        resume.set()
+    assert_token_absent(token, shown(caught.value))
+
+
+async def test_a_fetch_cancelled_while_connecting_sends_nothing(monkeypatch, connections):
+    token = synthetic_token()
+    calls = worker_calls()
+    connecting, connect = threading.Event(), threading.Event()
+    opening = socket.create_connection  # the recording one
+
+    def held(*args: Any, **kwargs: Any) -> socket.socket:
+        connecting.set()
+        connect.wait(10)
+        return opening(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", held)
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token, timeout=60)
+        fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
+        await eventually(connecting.is_set)
+        fetching.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fetching
+        # Connecting cannot be woken: the worker finishes it, then stops before sending.
+        connect.set()
+        errors = await workers_end(calls, token)
+        assert [type(error) for error in errors] == [ConnectionAbortedError]
+        assert all_closed(connections)
+        assert fake.requests == []
+
+
+@pytest.fixture
+def held_replies(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
+    """Holds the worker just after it has read a response's status and headers: the first
+    event is set when it gets there, and it goes on once the second is set."""
+    arrived, go_on = threading.Event(), threading.Event()
+    build = history._Reply.__init__
+
+    def held(reply: Any, *args: Any) -> None:
+        build(reply, *args)
+        arrived.set()
+        go_on.wait(10)
+
+    monkeypatch.setattr(history._Reply, "__init__", held)
+    return arrived, go_on
+
+
+async def test_a_response_that_arrives_as_the_fetch_is_cancelled_is_closed(
+    closes, connections, held_replies
+):
+    arrived, go_on = held_replies
+    token = synthetic_token()
+    calls = worker_calls()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token, timeout=60)
+        fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
+        await eventually(arrived.is_set)
         fetching.cancel()
         with pytest.raises(asyncio.CancelledError):
             await fetching
         assert closes == []
-        answer.set()
-        await eventually(lambda: closes == [200])
+        go_on.set()
+        await workers_end(calls, token)
+    assert closes == [200]
+    assert all_closed(connections)
 
 
 async def test_a_range_manifest_whose_entries_leave_a_gap_is_refused():
@@ -1177,22 +1345,144 @@ async def test_a_range_manifest_whose_entries_leave_a_gap_is_refused():
             await collect(client.fetch_range(DAY, DAY, ["AAA"], ["book", "trades"]))
 
 
-async def test_cancelling_then_stopping_the_event_loop_still_closes_the_response(closes):
+async def test_cancelling_then_stopping_the_event_loop_still_closes_the_response(
+    closes, held_replies, monkeypatch
+):
+    arrived, go_on = held_replies
+    abandon = history._Handoff.abandon
+
+    def abandoning(handoff: Any) -> None:
+        abandon(handoff)
+        go_on.set()  # the response reaches the handoff only after the fetch gave up
+
+    monkeypatch.setattr(history._Handoff, "abandon", abandoning)
     token = synthetic_token()
-    answer = threading.Event()
-    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)}, answer=answer)
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
 
     async def start_and_leave(url: str) -> None:
         client = HistoryClient(url, token)
         asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
-        await eventually(lambda: fake.requests)
+        await eventually(arrived.is_set)
         # Returning now leaves the fetch running: asyncio.run cancels it, then waits for
-        # the worker thread, which the server answers only once the loop is shutting down.
-        threading.Timer(0.2, answer.set).start()
+        # the worker thread, which delivers the response once the loop is shutting down.
 
     with serve_history(fake) as url:
         await asyncio.to_thread(asyncio.run, start_and_leave(url))
     assert closes == [200]
+
+
+def make_certificate(directory: Any, names: str) -> tuple[str, str]:
+    """A self-signed certificate for `names` (a subjectAltName value) and its key, made
+    with the openssl command, so no key is kept in the repository."""
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("needs the openssl command")
+    cert, key = str(directory / "cert.pem"), str(directory / "key.pem")
+    command = [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1"]
+    command += ["-keyout", key, "-out", cert, "-subj", "/CN=qte-sdk test"]
+    command += ["-addext", f"subjectAltName={names}"]
+    subprocess.run(command, check=True, capture_output=True)
+    return cert, key
+
+
+@pytest.fixture(scope="module")
+def certificate(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
+    return make_certificate(tmp_path_factory.mktemp("tls"), "IP:127.0.0.1")
+
+
+def server_context(certificate: tuple[str, str]) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(*certificate)
+    return context
+
+
+def trusting(certificate: tuple[str, str]) -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=certificate[0])
+
+
+async def test_https_checks_the_certificate_and_the_name_on_it(certificate, tmp_path):
+    token = synthetic_token()
+    body = many_books(3)
+    path = f"/v1/history/{DAY}/TEST/book"
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body}, drop_after={path: 100})
+    with serve_history(fake, server_context(certificate)) as url:
+        # Trusted, with the name the address uses, and resumed after a drop.
+        client = HistoryClient(url, token, ssl_context=trusting(certificate))
+        items = await collect(client.fetch(DAY, "TEST", "book"))
+        assert [item.grid_time for item in items] == [1000, 2000, 3000]
+        assert len(fake.requests) == 2
+        # A certificate no authority it trusts has signed.
+        with pytest.raises(ssl.SSLCertVerificationError) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+        assert_token_absent(token, shown(caught.value))
+    # A trusted certificate for another name.
+    other = make_certificate(tmp_path, "DNS:history.example.test")
+    with serve_history(fake, server_context(other)) as url:
+        client = HistoryClient(url, token, ssl_context=trusting(other))
+        with pytest.raises(ssl.SSLCertVerificationError, match="IP address mismatch"):
+            await collect(client.fetch(DAY, "TEST", "book"))
+    assert len(fake.requests) == 2  # neither request was sent
+
+
+async def test_cancelling_an_https_download_ends_the_worker_at_once(certificate):
+    token = synthetic_token()
+    calls = worker_calls()
+    path = f"/v1/history/{DAY}/TEST/book"
+    release = threading.Event()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
+    fake.hold_after[path] = (len(book(1)), release)
+    with serve_history(fake, server_context(certificate)) as url:
+        client = HistoryClient(url, token, timeout=60, ssl_context=trusting(certificate))
+        stream = client.fetch(DAY, "TEST", "book")
+        await anext(stream)
+        started = len(calls)
+        reading = asyncio.ensure_future(anext(stream))
+        await eventually(lambda: len(calls) > started and calls[-1].running())
+        reading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        await workers_end(calls, token)
+        release.set()
+
+
+class HeldHandshake:
+    """Accepts one connection, reads what the client sends first (for an https:// address,
+    the opening of the TLS handshake) and never answers it."""
+
+    def __enter__(self) -> "HeldHandshake":
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.url = f"https://127.0.0.1:{self.sock.getsockname()[1]}"
+        self.hello, self.done = threading.Event(), threading.Event()
+        threading.Thread(target=self.hold, daemon=True).start()
+        return self
+
+    def hold(self) -> None:
+        conn, _ = self.sock.accept()
+        with conn:
+            conn.recv(65536)
+            self.hello.set()
+            self.done.wait(10)
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.done.set()
+        self.sock.close()
+
+
+async def test_cancelling_during_the_tls_handshake_ends_the_worker_at_once():
+    token = synthetic_token()
+    calls = worker_calls()
+    with HeldHandshake() as server:
+        client = HistoryClient(server.url, token, timeout=60)
+        fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
+        await eventually(server.hello.is_set)
+        fetching.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await fetching
+        errors = await workers_end(calls, token)
+    assert errors and all(isinstance(error, OSError) for error in errors)
+    assert_token_absent(token, shown(caught.value))
 
 
 class ReflectingStatusLine:
