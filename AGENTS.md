@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.6
+**Version:** 1.9
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -9,6 +9,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 - `qte_sdk` is the Python client for the QTE exchange. You run your program on your own machine and it trades through the exchange's API, using the exchange address and team token the course team gives you.
 - Install it into your own project with `pip install "git+https://github.com/josh-g-s/qte-sdk"`. Clone this repository only to read or run the worked examples in `examples/`.
 - Start with the [README](https://github.com/josh-g-s/qte-sdk#readme), then the [quickstart](https://github.com/josh-g-s/qte-sdk/blob/main/docs/quickstart.md), which covers sessions, market data, orders, the values the exchange sets, reconnecting and past market data.
+- To check a setup end to end, have the person run `python examples/smoke_test.py --instruments <symbols>` from a clone. It prints PASS, FAIL or SKIP per check and sends no orders unless given `--place-test-order`.
 
 ## The token
 
@@ -53,6 +54,8 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 ## Past market data
 
 The history service (`qte_sdk.history.HistoryClient`) serves the market data that closed sessions published, message for message. It shows what the market published, not how your own orders would have filled against it. The SDK has no fill simulator.
+
+`qte_sdk.replay.replay` merges a closed session's books, trades, marks and session state into one stream, grid point by grid point, as the classes `market_data` yields, so the same market-data handling runs offline. It sends no orders and fills nothing, and raises `qte_sdk.replay.ReplayOutOfOrder` if a stream's times go back. Take time from the messages, never the machine's clock. Grid points arrive in order, live and in a replay, but the messages of one grid point (books, trades, marks and the session state, across instruments) come in no promised order: treat them as a set and do not rely on any order within it. [Developing your algo](docs/developing-your-algo.md) walks through the path from history to the exchange.
 
 ## Times
 

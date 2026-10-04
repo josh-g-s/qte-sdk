@@ -26,11 +26,11 @@ first book when it is published), which can be older than the latest `SessionSta
 can arrive again. `qte_sdk.books.LatestBooks` keeps the latest book per instrument.
 
 Outside a session the exchange still answers a subscribe, once: a `SessionState` whose
-`state` is `CLOSED`. The contract also provides an `OfficialClose` for each subscribed
-instrument that has one, carrying that instrument's last official close: the
-time-weighted average of the mark over the final five minutes of its session. The
-exchange does not send it yet, so its absence is expected. No `Book`, `Trades` or `Mark`
-arrives until a session opens.
+`state` is `CLOSED`, and an `OfficialClose` for each subscribed instrument that has one,
+carrying that instrument's last official close: the average of its mark over the final
+five minutes of its session. An instrument with no official close yet gets none, so code
+must work without one, and must not rely on the order of the `OfficialClose` messages
+and the `SessionState`. No `Book`, `Trades` or `Mark` arrives until a session opens.
 
 That one out-of-hours `SessionState` can also name the next scheduled session:
 `next_session_date`, `next_open_time` and `next_close_time` are set together, only on that
