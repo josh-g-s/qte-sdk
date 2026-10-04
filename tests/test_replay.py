@@ -265,12 +265,10 @@ async def test_messages_arrive_while_the_rest_of_the_day_is_still_downloading():
                 got += [item async for item in stream]
         finally:
             release.set()
-    assert [label(item) for item in got] == [
-        (1000, "book", "AAA"),
-        (1000, "session_state"),
-        (1100, "session_state"),
-        (1200, "book", "AAA"),
-        (1200, "session_state"),
+    assert grid_points(got) == [
+        point((1000, "book", "AAA"), (1000, "session_state")),
+        point((1100, "session_state")),
+        point((1200, "book", "AAA"), (1200, "session_state")),
     ]
 
 
