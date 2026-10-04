@@ -23,10 +23,17 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
 import qte_sdk.session
-from qte_sdk.connection import Connection, ContractVersionMismatch, Received, SessionRejected
+from qte_sdk.connection import (
+    TERM_CHANGE_CLOSE_CODE,
+    Connection,
+    ContractVersionMismatch,
+    Received,
+    SessionRejected,
+)
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import Book
 from qte_sdk.contract.v1.session_pb2 import Auth, Subscribe
+from qte_sdk.reconnect import ReconnectingSession
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     TOKEN_FILE_ENV_VAR,
@@ -370,6 +377,26 @@ async def test_an_abnormal_close_before_the_ack_is_an_error(code: int, reason: s
             await open_session(url, synthetic_token())
     assert str(caught.value) == f"the connection closed before session_ack{shown}"
     assert caught.value.close_code == code
+
+
+async def test_on_close_is_not_an_option_that_reaches_the_private_hook():
+    # The hook ReconnectingSession uses is positional-only, so a caller's on_close= is
+    # just another connect option, which websockets refuses, and is never called.
+    called: list[int] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(TERM_CHANGE_CLOSE_CODE, "term change")
+
+    async with serve_local(handler) as url:
+        with pytest.raises(TypeError, match="on_close"):
+            await open_session(url, synthetic_token(), on_close=called.append)
+        rs = ReconnectingSession(url, synthetic_token(), on_close=called.append)
+        with pytest.raises(TypeError, match="on_close"):
+            async with rs:
+                async for _ in rs:
+                    pass
+    assert called == []
 
 
 async def test_an_undecodable_ack_is_an_error():

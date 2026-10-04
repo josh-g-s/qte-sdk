@@ -792,22 +792,24 @@ async def open_session(
     secret = _Secret(resolve_token(token))
     del token
     return await _open_session(
-        resolve_url(url), secret, ack_timeout=ack_timeout, **connection_options
+        resolve_url(url), secret, None, ack_timeout=ack_timeout, **connection_options
     )
 
 
 async def _open_session(
     url: str,
     secret: "_Secret",
+    on_close: Callable[[int], None] | None,
+    /,
     *,
     ack_timeout: float | None,
-    on_close: Callable[[int], None] | None = None,
     **connection_options: Any,
 ) -> Session:
-    """`open_session`, for a resolved address and token. `on_close`, if given, is called
+    """`open_session`, for a resolved address and token. `on_close`, if not None, is called
     with the close code the exchange sent, if it closed the connection before the session
     was acknowledged, even when a cancellation then replaces the error; `ReconnectingSession`
-    uses it."""
+    uses it. It is positional-only, so an `on_close=` among a caller's options is passed
+    on with them and never reaches it."""
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)
     interrupted = False
