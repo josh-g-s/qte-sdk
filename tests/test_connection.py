@@ -12,7 +12,6 @@ import pytest
 from fake_exchange import LoopClock, exchange, frame, serve_local, silent_server
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
-from websockets.protocol import State
 
 from qte_sdk.connection import (
     Connection,
@@ -758,28 +757,35 @@ async def fill_until_stalled(conn: Connection) -> "asyncio.Task[None]":
 
 async def test_close_is_bounded_when_the_peer_stops_reading(monkeypatch):
     clock = LoopClock(monkeypatch)
+    loop = asyncio.get_running_loop()
     async with deaf_server() as url:
         conn = Connection(url, close_timeout=10, compression=None)
         await conn.open()
-        ws = conn._ws  # noqa: SLF001
-        assert ws is not None
         stalled = await fill_until_stalled(conn)
-        closing = asyncio.create_task(conn.close())
+
+        async def close() -> float:
+            await conn.close()
+            return loop.time()
+
+        started = loop.time()
+        closing = asyncio.create_task(close())
         # The close frame is queued behind the stalled writes, and close() waits for them
-        # until its 10 s are up: still waiting after 5 s, done once the other 5 s pass.
-        async with asyncio.timeout(5):
-            while ws.state is not State.CLOSING:
+        # until its 10 s are up. The clock moves half a second at a time, letting whatever
+        # comes due run, until close() returns, for 15 s at most: well short of the 20 s
+        # keepalive ping, which would end even an unbounded close.
+        for _ in range(30):
+            clock.advance(0.5)
+            for _ in range(20):
                 await asyncio.sleep(0)
-        clock.advance(5)
-        for _ in range(20):  # time for whatever came due to run
-            await asyncio.sleep(0)
-        assert not closing.done()
-        clock.advance(5)
-        await asyncio.wait_for(closing, 5)
+            if closing.done():
+                break
+        assert closing.done()
+        closed_at = closing.result()
         # The stalled send ends too, rather than waiting on the dropped socket.
         await asyncio.wait_for(asyncio.gather(stalled, return_exceptions=True), 5)
         with pytest.raises(ConnectionClosedError):
             await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
+    assert closed_at - started >= 10
 
 
 async def test_cancelling_iteration_keeps_the_type_and_drops_the_chain():
