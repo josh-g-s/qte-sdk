@@ -1,6 +1,6 @@
 # Developing your algo
 
-**Version:** 0.1
+**Version:** 0.2
 
 This guide is one path from an idea to a program trading on the exchange: explore past market data, run your strategy's loop on a replay of a past session, keep its order logic separate so you can test it, check your setup with the smoke test, then try it on the exchange during a session. Most of it works at any hour, so you can do it while the market is closed.
 
@@ -122,7 +122,7 @@ What to know about a replay:
 - **Each instrument and channel is its own download**, held open while the replay runs and read only as far as it needs, so a whole day never has to fit in memory. Name only the instruments you need.
 - **Stop it with `aclosing`**, as above: leaving the block, by `break` or an error, closes every download.
 - **Messages it cannot use are passed on.** `Unknown` (a type this SDK does not know) and `DecodeFailed` come where they were in their stream. Report them; a book may have been lost with one.
-- **Errors come from the history service**, as `fetch` raises them: `HistoryUnavailable` for a day with no session or an instrument it does not know, `HistoryNotClosed` for a session that has not closed, `HistoryPending` for data not ready yet.
+- **Errors come from the history service**, as `fetch` raises them: `HistoryUnavailable` for a day with no session or an instrument it does not know, `HistoryNotClosed` for a session that has not closed, `HistoryPending` for data not ready yet. A stream whose times go back raises `ReplayOutOfOrder`, after the messages before it, rather than deliver anything out of order.
 
 `examples/replay_book.py` replays one instrument's book and prints the best bid and ask as it changes:
 

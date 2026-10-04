@@ -357,8 +357,12 @@ async def test_a_stream_that_goes_back_in_time_is_refused_and_every_download_clo
             async with aclosing(items) as stream:
                 async for item in stream:
                     got.append(item)
-    # Nothing at or after the step back is delivered out of order.
-    assert all(label(item)[0] <= 2000 for item in got)
+    # Everything before the step back is delivered, in order, and nothing after it.
+    assert [label(item) for item in got] == [
+        (1000, "book", "AAA"),
+        (1000, "book", "BBB"),
+        (2000, "book", "AAA"),
+    ]
     assert closes == [200, 200]
 
 

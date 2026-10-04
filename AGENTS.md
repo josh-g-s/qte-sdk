@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.8
+**Version:** 1.9
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -55,7 +55,7 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 
 The history service (`qte_sdk.history.HistoryClient`) serves the market data that closed sessions published, message for message. It shows what the market published, not how your own orders would have filled against it. The SDK has no fill simulator.
 
-`qte_sdk.replay.replay` merges a closed session's books, trades, marks and session state into one stream, grid point by grid point, as the classes `market_data` yields, so the same market-data handling runs offline. It sends no orders and fills nothing. Take time from the messages, never the machine's clock. Grid points arrive in order, live and in a replay, but the messages of one grid point (books, trades, marks and the session state, across instruments) come in no promised order: treat them as a set and do not rely on any order within it. [Developing your algo](docs/developing-your-algo.md) walks through the path from history to the exchange.
+`qte_sdk.replay.replay` merges a closed session's books, trades, marks and session state into one stream, grid point by grid point, as the classes `market_data` yields, so the same market-data handling runs offline. It sends no orders and fills nothing, and raises `qte_sdk.replay.ReplayOutOfOrder` if a stream's times go back. Take time from the messages, never the machine's clock. Grid points arrive in order, live and in a replay, but the messages of one grid point (books, trades, marks and the session state, across instruments) come in no promised order: treat them as a set and do not rely on any order within it. [Developing your algo](docs/developing-your-algo.md) walks through the path from history to the exchange.
 
 ## Times
 

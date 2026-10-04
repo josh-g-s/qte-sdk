@@ -1528,6 +1528,26 @@ async def test_replay_book_says_when_the_service_has_no_such_data():
     assert token not in out + err
 
 
+async def test_replay_book_stops_with_a_message_when_the_history_goes_back_in_time():
+    token = synthetic_token()
+    day = test_history.DAY
+    # The second book is later than the third, so the stream goes back in time.
+    books = test_history.book(1) + test_history.book(3) + test_history.book(2, bid="99960000")
+    fake = history_session(token)
+    fake.objects[(day, INSTRUMENT, "book")] = books
+    with test_history.serve_history(fake) as history_url:
+        code, out, err = await run_example(
+            "replay_book.py",
+            None,
+            token,
+            *("--date", day, "--instrument", INSTRUMENT),
+            QTE_HISTORY_URL=history_url,
+        )
+    assert code == 1
+    assert "went back in time" in err and "Traceback" not in err
+    assert token not in out + err
+
+
 async def test_replay_book_refuses_to_start_without_a_history_url():
     code, out, err = await run_example(
         "replay_book.py", None, synthetic_token(), "--date", test_history.DAY
