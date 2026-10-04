@@ -78,8 +78,10 @@ history service that answers very slowly, a little at a time, can hold the exit 
 
 Stopping. Ctrl+C, SIGTERM (a `kill`, an editor's stop button, a time limit) and SIGHUP (a
 closed terminal) all stop the run the same way: if the test order may rest, the script
-first tries for a few seconds to cancel its level, and warns if it cannot confirm that.
-SIGKILL (`kill -9`) cannot be caught, so after one, check your team's orders yourself.
+first tries for a few seconds to cancel its level, and warns if it cannot confirm that. It
+does so even when the terminal is gone and nothing it writes can be seen. A signal that is
+already ignored when it starts (as under `nohup`) is left ignored. SIGKILL (`kill -9`)
+cannot be caught, so after one, check your team's orders yourself.
 """
 
 import argparse
@@ -1337,24 +1339,29 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
     finally:
         # Also on Ctrl+C or a failure part-way, so the level is always named.
         if order.filled:
-            print(order.fill_warning(), file=sys.stderr, flush=True)
+            say(order.fill_warning())
         if order.other_fills:
-            print(order.other_fill_warning(), file=sys.stderr, flush=True)
+            say(order.other_fill_warning())
         if order.may_rest:
-            print(order.warning(), file=sys.stderr, flush=True)
+            say(order.warning())
+
+
+def say(text: str) -> None:
+    """Print a line to stderr, if it can still be written. On a stop path the terminal or
+    pipe may be gone (a closed terminal is what SIGHUP means), and a failed write must not
+    stop what follows, above all the cleanup cancel."""
+    with contextlib.suppress(OSError, ValueError):
+        print(text, file=sys.stderr, flush=True)
 
 
 async def clean_up(watcher: Watcher, order: ProbeOrder, seconds: float) -> None:
     """A bounded, best-effort cancel of exactly the test order's level after an interruption.
 
     It runs in a task of its own behind `asyncio.shield`, so the interruption that started it
-    does not stop it; a further interruption stops only the wait for it."""
-    print(
-        f"interrupted: cancelling the test order's level ({order.where}) before stopping",
-        file=sys.stderr,
-        flush=True,
-    )
+    does not stop it; a further interruption stops only the wait for it. The task is made
+    before anything is said, so nothing can keep the cancel from being sent."""
     cancelling = asyncio.ensure_future(cancel_level(watcher, order, min(seconds, CLEANUP_SECONDS)))
+    say(f"interrupted: cancelling the test order's level ({order.where}) before stopping")
     try:
         await asyncio.shield(cancelling)
     except (asyncio.CancelledError, KeyboardInterrupt):
@@ -1464,7 +1471,7 @@ async def closing(session: Session) -> AsyncIterator[Session]:
             async with asyncio.timeout(CLOSE_SECONDS):
                 await session.close()
         except TimeoutError:
-            print("the connection did not close in time; it is dropped as the script exits")
+            say("the connection did not close in time; it is dropped as the script exits")
 
 
 async def session_checks(
@@ -1508,8 +1515,8 @@ async def run(url: str, args: argparse.Namespace, report: Report) -> None:
     handled = []
     for name in ("SIGTERM", "SIGHUP"):
         signum = getattr(signal, name, None)
-        if signum is None:
-            continue
+        if signum is None or signal.getsignal(signum) == signal.SIG_IGN:
+            continue  # absent here, or ignored on purpose (as under nohup): leave it so
         with contextlib.suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(signum, stop, task, signum)
             handled.append(signum)
@@ -1586,14 +1593,27 @@ def main(argv: list[str] | None = None) -> int:
     try:
         asyncio.run(run(url, args, report))
     except KeyboardInterrupt:
-        print("interrupted", file=sys.stderr)
-        return 130
+        say("interrupted")
+        return stopped(130)
     except asyncio.CancelledError:
         # SIGTERM or SIGHUP: see run(). The exit status is 128 plus the signal's number.
         signum = STOPPED_BY[0] if STOPPED_BY else signal.SIGTERM
-        print(f"stopped by {signal.Signals(signum).name}", file=sys.stderr)
-        return 128 + signum
+        say(f"stopped by {signal.Signals(signum).name}")
+        return stopped(128 + signum)
     return report.finish()
+
+
+def stopped(status: int) -> int:
+    """`status`, once anything still buffered for stdout or stderr is written or, if their
+    terminal or pipe is gone, thrown away: Python would otherwise fail to flush them as it
+    exits and end with another status (120)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            with contextlib.suppress(OSError, ValueError):
+                os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
+    return status
 
 
 if __name__ == "__main__":

@@ -2612,6 +2612,62 @@ async def test_the_smoke_test_shows_a_history_error_by_kind_and_status_only():
     assert words not in out + err
 
 
+def default_sigint() -> None:
+    """In the child, before it starts: Ctrl+C as a terminal gives it. A shell that runs the
+    tests in the background starts them with SIGINT ignored, and a child would inherit
+    that, and Python would then make no KeyboardInterrupt of it."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+@pytest.mark.parametrize(
+    ("signal_name", "code"), [("SIGHUP", 128 + 1), ("SIGTERM", 128 + 15)], ids=["sighup", "sigterm"]
+)
+async def test_the_smoke_test_cancels_its_orders_level_even_when_its_stderr_is_gone(
+    signal_name: str, code: int
+):
+    # A closed terminal: writes to stderr fail. The cleanup cancel must be sent all the same.
+    confirm = asyncio.Event()
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=confirm)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    reader, writer = os.pipe()
+    try:
+        async with serve_local(exchange) as url:
+            env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(EXAMPLES_DIR / SMOKE_TEST),
+                *("--instruments", INSTRUMENT, "--seconds", "3", *TEST_ORDER),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=writer,
+            )
+            os.close(writer)
+            writer = -1
+            try:
+                async with asyncio.timeout(RUN_LIMIT):
+                    await until(lambda: exchange.types().count("cancel") == 1)
+                    os.close(reader)  # nothing reads stderr any more: writes to it fail
+                    reader = -1
+                    process.send_signal(getattr(signal, signal_name))
+                    await until(lambda: exchange.types().count("cancel") == 2)
+                    confirm.set()
+                    out, _ = await process.communicate()
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+    finally:
+        for fd in (reader, writer):
+            if fd >= 0:
+                os.close(fd)
+    assert process.returncode == code, out.decode()
+    cancels = [m["payload"] for m in exchange.received if m["type"] == "cancel"]
+    assert [(c["side"], int(c["price"])) for c in cancels] == [("BUY", 99_960_000)] * 2
+    assert "mass_cancel" not in exchange.types()
+    assert exchange.resting == {}
+
+
 @pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
 @pytest.mark.parametrize(
     ("signal_name", "code"),
@@ -2636,6 +2692,7 @@ async def test_the_smoke_test_cancels_its_orders_level_when_interrupted(
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            preexec_fn=default_sigint,
         )
         try:
             async with asyncio.timeout(RUN_LIMIT):
@@ -2675,6 +2732,7 @@ async def test_the_smoke_tests_cleanup_after_an_interruption_is_bounded():
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            preexec_fn=default_sigint,
         )
         try:
             async with asyncio.timeout(RUN_LIMIT):
