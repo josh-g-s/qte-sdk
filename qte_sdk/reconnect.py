@@ -41,9 +41,16 @@ waiting for the next calendar: the next session asks from 0 and gets a snapshot,
 `resume=False`, counts the new term's reports from the first it reads, as a first session
 does. The same holds when the exchange closes an attempt to connect with 4001 before it is
 up, or while a session that failed or was cancelled is being closed, a cancellation
-included. The close is retried like any other drop. A client that was not connected when
-the term changed is not sent the close; for it, the check of the new session's calendar,
-described here and below, is what forgets the number.
+included. The close is retried like any other drop, unless the exchange rejected the
+session first: a rejection read before the 4001 stays the error and is not retried, though
+the number is still forgotten.
+
+The close is acted on once `websockets` has read it. A connection dropped with the 4001
+still unread, for example because reading paused with more than `max_queue` frames
+waiting for your loop and the keepalive then closed it, does not say that the term
+changed, and the number is kept. Like a client that was not connected when the term
+changed, which is not sent the close at all, it then relies on the check of the new
+session's calendar, described here and below, to forget the number.
 
 With `resume=False` the report number is carried over too, so that a report missed while
 disconnected is noticed (see below). It is forgotten when the new session's calendar names
@@ -620,8 +627,8 @@ class ReconnectingSession:
                 _open_session(
                     self.url,
                     self._secret,
+                    self._note_close,
                     ack_timeout=self._ack_timeout,
-                    on_close=self._note_close,
                     **self._connection_options,
                 )
             )
