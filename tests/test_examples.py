@@ -32,11 +32,26 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
-from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, MarketSessionPhase, OrderLifecycleState
+from qte_sdk.contract.v1.common_pb2 import (
+    BUY,
+    FILLED,
+    LIMIT,
+    NEW,
+    RESTING,
+    MarketSessionPhase,
+    OrderLifecycleState,
+    ReasonCodes,
+)
 from qte_sdk.contract.v1.market_data_pb2 import LIVE, StudentLevel, WallLevel
 from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
 from qte_sdk.contract.v1.market_data_pb2 import SessionState as SessionStateMessage
-from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
+from qte_sdk.contract.v1.order_events_pb2 import (
+    Accepted,
+    Execution,
+    OrderCancelled,
+    OrderState,
+    Reject,
+)
 from qte_sdk.orders import reason_code_name, send_amend, send_new
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import open_session
@@ -128,6 +143,7 @@ class FakeExchange:
         hide_moves: bool = False,
         outage: bool = False,
         session_reject: dict[str, Any] | None = None,
+        refill_level: bool = False,
     ) -> None:
         # The exchange's clock in the session_ack, in milliseconds since the epoch.
         self.server_time = server_time
@@ -146,6 +162,9 @@ class FakeExchange:
         self.outage = outage
         # With `session_reject`, the session is refused with it instead of acknowledged.
         self.session_reject = session_reject
+        # With `refill_level`, once `move_resting_to` has moved the order away, another
+        # order of the same strategy takes the level it left.
+        self.refill_level = refill_level
         # With `account_unknown`, an account_query is refused as a message type the
         # exchange does not know, as an older build does: MALFORMED_MESSAGE naming no
         # request type. "echo" keeps its request_ref on that reject; "bare" does not.
@@ -442,6 +461,9 @@ class FakeExchange:
                 else:
                     await self.send(ws, "order_state", state)
                 key = moved
+            if moves and self.refill_level:
+                level = (p["instrument"], p["side"], int(p["price"]))
+                self.resting[level] = (p["strat_id"], size)
             self.resting_reports += 1
             if self.resting_reports == self.gap_after_resting:
                 self._seq += 1  # one message the client never receives
@@ -2517,3 +2539,110 @@ async def test_the_smoke_test_cancels_its_orders_level_when_interrupted():
     assert [(c["side"], int(c["price"])) for c in cancels] == [("BUY", 99_960_000)] * 2
     assert "mass_cancel" not in exchange.types()
     assert exchange.resting == {}
+
+
+async def test_the_smoke_tests_cleanup_after_an_interruption_is_bounded():
+    # The cancels are never confirmed: the cleanup gives up after its bound and warns.
+    exchange = FakeExchange(
+        calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=asyncio.Event()
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    loop = asyncio.get_running_loop()
+    async with serve_local(exchange) as url:
+        env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(EXAMPLES_DIR / SMOKE_TEST),
+            *("--instruments", INSTRUMENT, "--seconds", "2", *TEST_ORDER),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                await until(lambda: exchange.types().count("cancel") == 1)
+                process.send_signal(signal.SIGINT)
+                interrupted = loop.time()
+                out, err = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    stderr = err.decode()
+    assert process.returncode == 130, out.decode() + stderr
+    # The cleanup is bounded by --seconds (2 s here); closing the connection adds little.
+    assert loop.time() - interrupted < 8
+    assert exchange.types().count("cancel") == 2
+    assert "WARNING: the test order may still be resting at BUY 1 TEST @ 99.960000" in stderr
+
+
+async def test_the_smoke_tests_cleanup_sends_nothing_once_the_order_is_rejected():
+    # An interruption lands before the reject of the test order was applied. The reject
+    # (here DUPLICATE_ORDER_AT_LEVEL) shows nothing of the test order is at the level, so
+    # a cancel there could only hit the order already resting at it.
+    smoke = load_example(SMOKE_TEST)
+    sent: list[str] = []
+
+    class Session:
+        async def send(self, type_: str, payload: Any) -> None:
+            sent.append(type_)
+
+    watcher = smoke.Watcher(Session(), 1.0)
+    order = smoke.ProbeOrder(INSTRUMENT, "smoke", 99_960_000)
+    order.sent = True
+    watcher.order = order
+    reason = ReasonCodes.DUPLICATE_ORDER_AT_LEVEL
+    reject = Reject(request_ref=order.new_ref, request_type=NEW, reason_code=reason)
+    watcher.queue.put_nowait(Received("reject", reject, 7))
+    assert await smoke.cancel_level(watcher, order, 1.0) is None
+    assert sent == []
+    assert not order.may_rest
+
+
+def test_the_smoke_test_counts_a_fill_made_by_another_programs_amend():
+    # Another program amends the resting test order to a marketable price, where it fills:
+    # the execution comes first, then the order_state with old_price that ties it to the
+    # test order. A later cancel at the first level, of an order that took it since, is not
+    # the test order's.
+    smoke = load_example(SMOKE_TEST)
+    order = smoke.ProbeOrder(INSTRUMENT, "smoke", 99_960_000)
+    order.sent = True
+    level = {"strat_id": "smoke", "instrument": INSTRUMENT, "side": BUY}
+    order.apply(Accepted(request_ref=order.new_ref))
+    order.apply(OrderState(**level, price=99_960_000, state=RESTING, remaining_size=1))
+    order.cancel_refs.append("cleanup")
+    fill = Execution(
+        **level, order_price=100_050_000, fill_price=100_050_000, fill_size=1, remaining_size=0
+    )
+    order.apply(fill)
+    assert order.filled == 0  # not yet tied to the test order
+    moved = OrderState(
+        **level, price=100_050_000, old_price=99_960_000, state=FILLED, remaining_size=0
+    )
+    order.apply(moved)
+    assert (order.filled, order.fill_prices, order.moved_to) == (1, [100_050_000], 100_050_000)
+    assert order.gone
+    assert not order.may_rest
+    replacement = OrderCancelled(**level, price=99_960_000, request_ref="cleanup")
+    order.apply(replacement)
+    assert order.cancelled is None
+    assert "your team bought 1 TEST at 100.050000" in order.fill_warning()
+
+
+async def test_the_smoke_test_does_not_trust_a_confirmed_cancel_after_missed_reports():
+    # Another program moves the test order, unseen (a gap), and an order of the same
+    # strategy then takes the level it left: the cancel there removes that one instead.
+    exchange = FakeExchange(
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+        move_resting_to=(100_010_000,),
+        hide_moves=True,
+        refill_level=True,
+    )
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT, *TEST_ORDER)
+    assert code == 1, out + err
+    status, reason = found["test-order"]
+    assert status == "FAIL"
+    assert "reports were missed, so it may have been another that took the level" in reason
+    assert "WARNING: reports about the test order (BUY 1 TEST @ 99.960000) were missed" in err
+    assert exchange.resting == {(INSTRUMENT, "BUY", 100_010_000): ("smoke", 1)}
