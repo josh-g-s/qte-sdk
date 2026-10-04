@@ -28,6 +28,7 @@ from fake_exchange import CONTRACT_VERSION, serve_local
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
+from qte_sdk import replay as qte_replay
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
 from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, MarketSessionPhase, OrderLifecycleState
 from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
@@ -1370,13 +1371,18 @@ def test_replay_book_reports_a_network_timeout_as_a_failure(monkeypatch, capsys)
 def test_replay_book_stops_cleanly_when_its_seconds_are_up(monkeypatch, capsys):
     example = load_example("replay_book.py")
     token = synthetic_token()
+
+    async def never_due(seconds: float) -> None:
+        await asyncio.Event().wait()
+
+    # The paced replay's wait for the second book never ends, so only --seconds stops it.
+    monkeypatch.setattr(qte_replay, "_sleep", never_due)
     with test_history.serve_history(history_session(token)) as url:
         monkeypatch.setattr(example, "HistoryClient", lambda: HistoryClient(url, token))
-        # So slow that the second book, a second of the session later, is hours away.
         arguments = ["--date", test_history.DAY, "--instrument", INSTRUMENT]
-        code = example.main([*arguments, "--speed", "0.0001", "--seconds", "0.2"])
+        code = example.main([*arguments, "--speed", "1", "--seconds", "2"])
     assert code == 0
-    assert capsys.readouterr().out.splitlines()[-1] == "stopped after 0.2 seconds (1 books)"
+    assert capsys.readouterr().out.splitlines()[-1] == "stopped after 2 seconds (1 books)"
 
 
 @pytest.mark.parametrize("inside", ["0", "-0.01"])
