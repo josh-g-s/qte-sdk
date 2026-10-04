@@ -1,6 +1,6 @@
 # Conformance steps
 
-**Version:** 1.1
+**Version:** 1.3
 
 The scripted checks a client and an exchange are run against, end to end. Each step names
 the messages it exercises and the rule it proves, citing `SPEC.md` sections and naming
@@ -29,6 +29,11 @@ Message names are the lower-case `type` tokens of the envelope, and each is the
 `order_state` is `OrderState`, `book` is `Book`, `trades` is `Trades`, `session_state`
 is `SessionState` and `official_close` is `OfficialClose`. Reason codes are the values
 of the `ReasonCode` enum.
+
+Every timestamp a step names (`receipt_time`, `release_time`, `grid_time`, `server_time`,
+`open_time`, `close_time` and the rest) is a signed 64-bit count of milliseconds since the
+Unix epoch, UTC, a decimal string on the wire (SPEC 8.1, SPEC 9.2, SPEC 13.1). A step that
+adds δ_oe to `receipt_time` adds milliseconds.
 
 The session-layer parts of steps 1 to 3 and 16 (authentication, subscription and the
 calendar) may change before the contract is frozen.
@@ -145,6 +150,28 @@ price and side; step 8 checks that the exchange refuses to.
     naming the session step 14 just closed, and `grid_time` equal to `close_time`; no
     `book`, `trades` or `mark`. One `official_close` for the instrument, since the
     exchange itself closed it.
+
+    The `value` of that `official_close` is the average of the instrument's valid
+    one-second marks over the close window: the 300 marks from five minutes before the
+    close to one second before it, each with equal weight, frozen marks included and a
+    second in which the instrument has no valid mark left out (SPEC 7.1, SPEC 7.2,
+    SPEC 9.4.4). This rule is provisional (SPEC 7.1). The script's own orders do not move
+    it: the mark is the midpoint of the live quote and is never derived from the
+    exchange's own book or any team's trades (SPEC 7.1). An instrument with no valid mark
+    in any second of the window gets no `official_close`, and the previous official close
+    stays in use (SPEC 7.1, SPEC 7.2).
+
+    Expected value. Precondition: the recorded market session the exchange under test is
+    fed holds one valid two-sided quote of QTEA, a bid of 99.99 and an ask of 100.01 at
+    the session open, which it never replaces, and no quote of QTEB or QTEC. Each of the
+    300 marks of the window is then that quote's midpoint, 100.00, since a quote stays in
+    force until it is replaced (SPEC 7.2), so QTEA's `official_close` has
+    `value = 100000000`, which is 100.000000 in int64-micro. QTEB and QTEC have no valid
+    mark in any second of the window, since each is reference unavailable all session
+    (SPEC 7.2), so a `subscribe` that also names either gets no `official_close` for it,
+    the script having no earlier session whose close could stay in use (SPEC 7.1). A
+    script that sees an `official_close` for QTEB or QTEC, or a `value` for QTEA other
+    than `100000000`, fails this step.
 
 ## Not scripted yet
 
