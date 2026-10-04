@@ -47,7 +47,10 @@ nothing. Any other failure of a download is raised from the replay as `fetch` ra
 after the items before it: `HistoryUnavailable` for an instrument or channel the service
 does not know or a day with no session, `HistoryNotClosed` for a session that has not
 closed, `HistoryPending` if the data is still not ready after the client's `max_wait`,
-and so on (see `qte_sdk.history`). The other downloads are closed when it is raised.
+and so on (see `qte_sdk.history`). A stream whose times go back, one message earlier
+than the one before it, raises `ReplayOutOfOrder` (a `ValueError`) naming the stream and
+both times, after the items before it, since the replay cannot merge it in order. The
+other downloads are closed when any of these is raised.
 
 Stopping. Use the replay inside `aclosing`, as above: leaving the block, by `break`, an
 error or the end of the session, closes every download.
@@ -101,9 +104,10 @@ def replay(
     instrument, and `session_state` for the session. `speed` paces the replay: None (the
     default) for as fast as you read it, or a positive number, 1.0 for the pace the
     session ran at. Raises `TypeError` or `ValueError` at once, before any download, for
-    arguments it cannot use, a date that does not parse included. Whether the session
-    and the instruments exist only the history service can say, as the replay runs. See
-    the module docstring for the order and the errors.
+    arguments it cannot use, a date that does not parse included. `ReplayOutOfOrder`, also
+    a `ValueError`, comes later, while the replay runs, if a stream's times go back.
+    Whether the session and the instruments exist only the history service can say, as
+    the replay runs. See the module docstring for the order and the errors.
     """
     if isinstance(session_date, str):
         session_date = date.fromisoformat(session_date)  # ValueError if it does not parse
