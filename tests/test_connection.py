@@ -9,11 +9,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from fake_exchange import exchange, frame, serve_local, silent_server
+from fake_exchange import LoopClock, exchange, frame, serve_local, silent_server
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from qte_sdk.connection import (
+    TERM_CHANGE_CLOSE_CODE,
     Connection,
     ContractVersionMismatch,
     DecodeFailed,
@@ -474,6 +476,43 @@ def assert_withheld(error: BaseException, token: str) -> None:
     assert_no_token(shown, token)
 
 
+class _Recording:
+    """A connection factory that records what it makes. Empty, it is falsy, which must not
+    make it look absent."""
+
+    def __init__(self) -> None:
+        self.made: list[ClientConnection] = []
+
+    def __len__(self) -> int:
+        return len(self.made)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> ClientConnection:
+        self.made.append(ClientConnection(*args, **kwargs))
+        return self.made[-1]
+
+
+async def test_a_connection_factory_passed_in_is_still_used():
+    factory = _Recording()
+    assert not factory
+    async with exchange([]) as url:
+        async with Connection(url, create_connection=factory) as conn:
+            assert [event async for event in conn] == []
+            assert len(factory.made) == 1 and conn._open_ws() is factory.made[0]
+            assert conn._close_code_received() == 1000
+
+
+def test_the_close_code_received_falls_back_to_the_public_one():
+    from types import SimpleNamespace
+
+    conn = Connection("ws://127.0.0.1:1")
+    assert conn._close_code_received() is None
+    # A websockets whose protocol has no close_rcvd: the public close_code serves.
+    conn._ws = SimpleNamespace(protocol=SimpleNamespace(), close_code=4001)  # type: ignore[assignment]
+    assert conn._close_code_received() == 4001
+    conn._ws = SimpleNamespace(close_code=None)  # type: ignore[assignment]
+    assert conn._close_code_received() is None
+
+
 async def test_a_close_reason_carrying_the_token_is_withheld_from_the_error():
     token = secrets.token_hex(16)
 
@@ -488,6 +527,27 @@ async def test_a_close_reason_carrying_the_token_is_withheld_from_the_error():
                 [event async for event in conn]
     assert caught.value.rcvd is not None and caught.value.rcvd.code == 4000
     assert caught.value.rcvd_then_sent is True
+    assert_withheld(caught.value, token)
+
+
+@pytest.mark.parametrize(
+    "reason", ["term change {token}", "Term change", "term change ", "{token} term change"]
+)
+async def test_only_the_exact_term_change_reason_is_kept(reason: str):
+    token = secrets.token_hex(16)
+    reason = reason.format(token=token)
+
+    async def close_at_term_change(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(TERM_CHANGE_CLOSE_CODE, reason)
+
+    async with serve_local(close_at_term_change) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            with pytest.raises(ConnectionClosedError) as caught:
+                [event async for event in conn]
+    assert caught.value.rcvd is not None
+    assert (caught.value.rcvd.code, caught.value.rcvd.reason) == (4001, "<withheld>")
     assert_withheld(caught.value, token)
 
 
@@ -715,7 +775,9 @@ async def test_cancelling_the_handshake_keeps_request_headers_out_of_the_traceba
 async def deaf_server() -> AsyncIterator[str]:
     """Completes the opening handshake, then stops reading, so the client's writes back up.
 
-    A small receive buffer makes them back up after a few hundred kilobytes.
+    A small receive buffer makes them back up after a few hundred kilobytes. It sends no
+    keepalive pings, whose unanswered pongs would end the connection however slowly the
+    test runs.
     """
     released = asyncio.Event()
 
@@ -730,7 +792,7 @@ async def deaf_server() -> AsyncIterator[str]:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
     sock.bind(("127.0.0.1", 0))
     try:
-        async with serve(stop_reading, sock=sock) as server:
+        async with serve(stop_reading, sock=sock, ping_interval=None) as server:
             try:
                 yield f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
             finally:
@@ -755,19 +817,37 @@ async def fill_until_stalled(conn: Connection) -> "asyncio.Task[None]":
     raise AssertionError("the writes never backed up")
 
 
-async def test_close_is_bounded_when_the_peer_stops_reading():
+async def test_close_is_bounded_when_the_peer_stops_reading(monkeypatch):
+    clock = LoopClock(monkeypatch)
+    loop = asyncio.get_running_loop()
     async with deaf_server() as url:
-        conn = Connection(url, close_timeout=0.2, compression=None)
+        # No keepalive either, so that nothing but close()'s own bound can end it.
+        conn = Connection(url, close_timeout=10, compression=None, ping_interval=None)
         await conn.open()
         stalled = await fill_until_stalled(conn)
-        started = asyncio.get_running_loop().time()
-        await asyncio.wait_for(conn.close(), 5)
-        elapsed = asyncio.get_running_loop().time() - started
+
+        async def close() -> float:
+            await conn.close()
+            return loop.time()
+
+        started = loop.time()
+        closing = asyncio.create_task(close())
+        # The close frame is queued behind the stalled writes, and close() waits for them
+        # until its 10 s are up. The clock moves half a second at a time, letting whatever
+        # comes due run, until close() returns, for 15 s at most.
+        for _ in range(30):
+            clock.advance(0.5)
+            for _ in range(20):
+                await asyncio.sleep(0)
+            if closing.done():
+                break
+        assert closing.done()
+        closed_at = closing.result()
         # The stalled send ends too, rather than waiting on the dropped socket.
         await asyncio.wait_for(asyncio.gather(stalled, return_exceptions=True), 5)
         with pytest.raises(ConnectionClosedError):
             await conn.send("subscribe", Subscribe(instruments=["AAPL"]))
-    assert 0.2 <= elapsed < 2
+    assert closed_at - started >= 10
 
 
 async def test_cancelling_iteration_keeps_the_type_and_drops_the_chain():

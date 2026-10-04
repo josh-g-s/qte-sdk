@@ -342,6 +342,26 @@ async def test_a_download_that_breaks_part_way_is_raised_after_the_items_before_
     assert closes == [200, 200]
 
 
+async def test_a_stream_that_goes_back_in_time_is_refused_and_every_download_closed(closes):
+    token = synthetic_token()
+    objects = {
+        (DAY, "AAA", "book"): book_at(1000, "AAA") + book_at(2000, "AAA") + book_at(1500, "AAA"),
+        (DAY, "BBB", "book"): book_at(1000, "BBB") + book_at(3000, "BBB"),
+    }
+    fake = FakeHistory(token, objects)
+    got = []
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = replay.replay(client, DAY, ["AAA", "BBB"], ["book"])
+        with pytest.raises(replay.ReplayOutOfOrder, match="book of AAA .* goes back in time"):
+            async with aclosing(items) as stream:
+                async for item in stream:
+                    got.append(item)
+    # Nothing at or after the step back is delivered out of order.
+    assert all(label(item)[0] <= 2000 for item in got)
+    assert closes == [200, 200]
+
+
 async def test_cancelling_a_paced_replay_closes_every_download(closes, monkeypatch):
     waiting = asyncio.Event()
 

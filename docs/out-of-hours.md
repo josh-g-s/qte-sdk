@@ -1,6 +1,6 @@
 # Using the SDK outside session hours
 
-**Version:** 0.6
+**Version:** 0.7
 
 You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market, query your account and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 
@@ -97,7 +97,7 @@ On this out-of-hours reply the `SessionState` fields mean:
 
 For "now", use the exchange's current time: `session.info.server_time`, the time your session was acknowledged, or a later exchange timestamp. `until_next_open(state, now)` gives `next_open_time - now` in milliseconds, or `None` when the next session is not named. These fields are a convenience; the calendar from step 2 is still the full schedule.
 
-The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`. **The exchange does not send it yet.** Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. Write your code so it works with or without one.
+The reply also carries an `OfficialClose` for each subscribed instrument that has one. Do not rely on its order relative to the `SessionState`, and write your code so it works without one: an instrument with no official close yet gets none.
 
 If the state is `OPEN`, a session is under way and this is the live market: stop here, and do not send the order in step 4.
 

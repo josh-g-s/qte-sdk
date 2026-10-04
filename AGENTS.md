@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.7
+**Version:** 1.8
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -9,6 +9,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 - `qte_sdk` is the Python client for the QTE exchange. You run your program on your own machine and it trades through the exchange's API, using the exchange address and team token the course team gives you.
 - Install it into your own project with `pip install "git+https://github.com/josh-g-s/qte-sdk"`. Clone this repository only to read or run the worked examples in `examples/`.
 - Start with the [README](https://github.com/josh-g-s/qte-sdk#readme), then the [quickstart](https://github.com/josh-g-s/qte-sdk/blob/main/docs/quickstart.md), which covers sessions, market data, orders, the values the exchange sets, reconnecting and past market data.
+- To check a setup end to end, have the person run `python examples/smoke_test.py --instruments <symbols>` from a clone. It prints PASS, FAIL or SKIP per check and sends no orders unless given `--place-test-order`.
 
 ## The token
 

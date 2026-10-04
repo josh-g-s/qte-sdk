@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.19
+**Version:** 0.22
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -121,6 +121,18 @@ On macOS you can also keep the token in the Keychain. Store it once with `securi
 
 Whichever you choose, never put the token in a source file or a notebook. The SDK never logs your token or puts it in an exception message, and a `.env` it cannot parse is reported by line number, never by its contents.
 
+### Check your setup
+
+Before you write any code, run the smoke test from a clone of this repository (step 11 says how to run the examples), naming an instrument or two:
+
+```sh
+python examples/smoke_test.py --instruments AAPL MSFT
+```
+
+It reports where the SDK finds the token and the address, without showing either; connects and names your team; reads the calendar; subscribes to each instrument and watches the market for `--seconds` (5 by default), and during a session waits up to `--book-wait` (60 by default, never less than `--seconds`) for the first book of an instrument that has none yet, since one with no valid quote has none; asks for your team's account; says whether the exchange's heartbeats arrived, and about how far apart (a `SKIP` if none came, since the interval may be longer than the run); and, when `QTE_HISTORY_URL` is set, reads the start of the last closed session's books from the history service. Each check prints `PASS`, `FAIL` or `SKIP` with a one-line reason, then a summary, and the exit status is not 0 if any check failed. A `SKIP` is something it could not check, such as an official close for an instrument that has none yet, or an account query the exchange does not answer; the reason says which. Its output never shows your token or any account figure (only a fill of the test order is named, with its quantity and price), so you can send it to the course team when you ask for help.
+
+It sends no orders unless you add `--place-test-order --strat-id <your strategy> --tick <tick>`, giving the instruments' tick in dollars (for example `0.01`), which the exchange does not send. Then, only while the market is open and no outage is in force, it places one buy of one share one tick above the wall's best bid, at least three ticks below every ask, waits for the exchange to report it resting, cancels exactly that price level and confirms the cancel; it never sends a mass cancel. It is a real order and can fill, since there is no post-only order: a fill fails the check, and a line on stderr names the position your team then holds. In a scored session it places nothing unless you also add `--allow-scored`. Use a strategy nothing else is trading during the test: if something else acts on its buy orders on the instrument meanwhile, the test order can no longer be told apart and the check fails. If it cannot confirm the cancel, it fails and names the level where the order may still rest; if you interrupt it while the order may rest (Ctrl+C, or a SIGTERM or SIGHUP such as a closed terminal), it first tries to cancel that level. A SIGKILL cannot be caught, so after one, check your team's orders yourself.
+
 ## 3. Open a session
 
 Everything in the SDK is `async`. A session is an authenticated connection: `open_session` connects, sends your token and waits for the exchange to acknowledge it.
@@ -228,7 +240,7 @@ A `Book` is the state of one instrument at the end of an interval, not a stream 
 
 That one `SessionState` can also name the next scheduled session in three optional fields: `next_session_date`, `next_open_time` and `next_close_time`. They are set together, only on this out-of-hours reply, never on the `SessionState` of a running session, and are absent when the term has no later session; an exchange from before these fields does not send them either, so write code that works without them. `until_next_open(state, session.info.server_time)` from `qte_sdk.market_data` gives the time until that open in milliseconds (`to_timedelta` turns it into a `timedelta`), or `None` when the fields are absent. `server_time` is the time your session was acknowledged; pass a later exchange timestamp instead if you have one. They are a convenience: the calendar is still where to read the full schedule.
 
-The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`, but **the exchange does not send it yet**. Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. When it is sent, `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. Write your code so it works with or without one. [Using the SDK outside session hours](out-of-hours.md) walks through a whole run when no session is open.
+The reply also carries an `OfficialClose` for each subscribed instrument that has one. Do not rely on its order relative to the `SessionState`, and write your code so it works without one: an instrument with no official close yet gets none. `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. [Using the SDK outside session hours](out-of-hours.md) walks through a whole run when no session is open.
 
 No `Book`, `Trades` or `Mark` arrives until a session opens, so a loop that waits for a book waits until then.
 
@@ -446,6 +458,10 @@ To check that heartbeats are arriving, read `session.heartbeats_received` (how m
 
 The exchange also drops a connection that has sent it nothing for a while, with close code 4000 and reason `heartbeat timeout`. You do not need to send anything: in the background, the `websockets` library answers the exchange's pings and sends pings of its own. It can only answer a ping, or see the reply to its own, while it is reading the connection, and it pauses reading once more than 16 frames (its `max_queue` option) are waiting for your loop. If your loop stops reading for long, the connection is closed: by the library itself, with code 1011 and reason `keepalive ping timeout`, or by the exchange with 4000. Either way iterating raises `websockets.exceptions.ConnectionClosedError`, which `ReconnectingSession` treats as a drop and reconnects. Keep the loop that reads events quick, and do slow work in another task.
 
+When one term ends and the next begins, the exchange closes every connection open at that moment, with close code 4001 (`qte_sdk.connection.TERM_CHANGE_CLOSE_CODE`) and reason `term change`, so no connection carries reports of two terms. It first sends each connection every message already queued for it, so the close is the last thing on the wire and never overtakes a report of the old term already on its way. It does not hold the close back for a loop that has fallen behind: that connection gets what was queued for it, then the close. Iterating raises `ConnectionClosedError` as for any drop. The code itself tells you the term changed, without waiting for the next calendar: on a `Disconnected` whose `error` is a `ConnectionClosedError`, `error.rcvd.code` is 4001. Report numbers start again at 1 in the new term, so the old term's number means nothing there. `ReconnectingSession` follows the exchange's rule for this: on a 4001 close it forgets the number at once, with or without a resume and whatever the calendar says, and reconnects. The new session asks from 0 for a snapshot, or, with `resume=False`, counts the new term's reports from the first it reads, as a first session does. It does the same when the exchange's 4001 cuts off an attempt to reconnect before the session is up, or arrives while the SDK is closing a connection it has given up on, even if that attempt is then cancelled.
+
+A program that is not connected when the term changes, because it was stopped or its connection had already dropped, is not sent the close. For it, `ReconnectingSession` forgets the number by checking the new session's calendar against the term the number was counted in (see below); with `resume=False` it can do so only when both terms are known. If you resume a session you opened yourself, pass 0 after a 4001 close, and otherwise compare the terms the same way before you pass a number to `resume`. A 4001 close can also cut off `open_session` or `session.resume`. The error raised then carries the code: as `close_code` on a `SessionNotAcknowledged` or `ResumeNotAcknowledged`, or as `rcvd.code` on a `ConnectionClosedError`.
+
 Each of your team's private order reports (`accepted`, a `reject` sent once the order delay is over, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a report number, `event.report_seq`, which counts up by one for each report your team receives. A session delivers reports in that order and keeps `session.last_report_seq`, the number up to which it has delivered every one. If a number is skipped, a `ReportGap` event comes first. A report the exchange fails to build is dropped without a number, so it causes no gap, nothing tells you it is missing, and a replay does not bring it back. Only a snapshot puts your resting orders right again (a resume answered with one; `session.resume(0)` asks for one), and the dropped report itself, a fill for example, is never delivered.
 
 `qte_sdk.reconnect.ReconnectingSession` reconnects for you and resumes each new session, so the reports you missed are not lost:
@@ -517,10 +533,11 @@ To run your strategy's loop over a whole past session, `replay(client, date, ins
 
 ## 11. Worked examples
 
-Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the environment or a `.env` in the folder you run it from, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
+Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the environment or a `.env` in the folder you run it from, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` (`--instruments` for the smoke test) or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
 
 | Example | What it shows |
 |---|---|
+| `examples/smoke_test.py` | Run this first. Check a setup end to end: where the token and address come from, the session, the calendar, the market, the account query and past data, with `PASS`, `FAIL` or `SKIP` for each check (step 2). Sends no orders unless given `--place-test-order`. |
 | `examples/print_book.py` | Connect, subscribe and print the book, trades, mark and market session state, or the official close outside a session. Sends no orders. Stops after `--seconds` or `--max-messages`. |
 | `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Keeps the latest book with `LatestBooks` and acts on it after each order event and on its own timer, not only when a new book arrives, since the exchange publishes a book only when it changes. Cancels its own orders when `--seconds` are up. |
 | `examples/take_liquidity.py` | Send one market order once the latest book shows the side it trades against, and report its fills. Sends at most one order and never retries. Stops when the order is finished or after `--seconds`. |
@@ -528,6 +545,7 @@ Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the envir
 | `examples/replay_book.py` | Replay one instrument's book from a past session with `qte_sdk.replay` and print the best bid and ask each time it changes. It reads the history service, so it needs `QTE_HISTORY_URL` and your token but not `QTE_URL`, and works at any hour for a session that has closed. Sends no orders. Stops after `--max-books`, `--seconds` or the end of the session's data. |
 
 ```sh
+python examples/smoke_test.py --instruments AAPL MSFT
 python examples/print_book.py --instrument AAPL --seconds 10
 python examples/quote_both_sides.py --instrument AAPL --strat-id my-strategy --seconds 30
 python examples/take_liquidity.py --instrument AAPL --strat-id my-strategy --side buy --size 1

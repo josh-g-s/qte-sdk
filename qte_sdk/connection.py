@@ -41,6 +41,14 @@ the exchange closes the connection with 4000 instead. Either way the error is a
 promptly, and do slow work elsewhere. You can raise `max_queue` (a `websockets` connect
 option) to absorb bursts, at the cost of memory.
 
+Term change: when one term ends and the next begins, the exchange closes every connection
+open at that moment with close code `TERM_CHANGE_CLOSE_CODE` (4001) and reason
+`term change`, after every message already queued for it, so no connection carries
+reports of two terms. Iteration raises a `ConnectionClosedError`, which
+`ReconnectingSession` retries like any other drop. Report numbers start again in the new
+term, so `ReconnectingSession` forgets its report number on this close, whatever the next
+session's calendar says (see `qte_sdk.reconnect`).
+
 Report numbers: each of the team's private order reports that the exchange can replay
 carries a `report_seq` on its envelope, which is the event's `report_seq` here (None on
 every other message). A connection only reports it; `qte_sdk.session.Session` keeps the
@@ -170,9 +178,15 @@ HEARTBEAT_TIMEOUT_CLOSE_CODE = 4000
 too long, or when a connection has not authenticated in time. Its reason text is
 `heartbeat timeout`."""
 
+TERM_CHANGE_CLOSE_CODE = 4001
+"""The close code the exchange sends on every connection open when one term ends and the
+next begins, after every message already queued for it. Its reason text is
+`term change`. Report numbers start again in the new term, so reconnect and resume from 0,
+whatever the next session's calendar says."""
+
 # Close reasons whose exact text is fixed by the contract or by `websockets` itself, so
 # they cannot carry the token and are kept. Any other reason is withheld.
-_KNOWN_CLOSE_REASONS = frozenset({"heartbeat timeout", "keepalive ping timeout"})
+_KNOWN_CLOSE_REASONS = frozenset({"heartbeat timeout", "term change", "keepalive ping timeout"})
 
 
 def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
@@ -188,6 +202,26 @@ def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
         return Close(close.code, "<withheld>" if close.reason else "")
 
     return type(error)(withheld(error.rcvd), withheld(error.sent), error.rcvd_then_sent)
+
+
+def _received_close_code(error: BaseException | None) -> int | None:
+    """The close code the peer sent, if `error` is a closed connection and the peer sent
+    one; otherwise None. A code is a number, so it cannot carry the token."""
+    if isinstance(error, ConnectionClosed) and error.rcvd is not None:
+        return error.rcvd.code
+    return None
+
+
+def _close_detail(error: ConnectionClosed) -> str:
+    """The close the peer sent, for an error message that replaces `error`: its code, and
+    its reason only if it is in `_KNOWN_CLOSE_REASONS`, for example
+    ` (close code 4001, reason "term change")`. Empty if the peer sent no close."""
+    close = error.rcvd
+    if close is None:
+        return ""
+    if close.reason in _KNOWN_CLOSE_REASONS:
+        return f' (close code {close.code}, reason "{close.reason}")'
+    return f" (close code {close.code})"
 
 
 def _exception_name(exc_info: Any) -> str:
@@ -451,8 +485,18 @@ class Connection:
         logger = connect_options.pop("logger", None) or logging.getLogger("websockets.client")
         if isinstance(logger, str):
             logger = logging.getLogger(logger)
-        self._connect_options = {**connect_options, "logger": _WithoutCredentials(logger, {})}
+        # A factory the caller passes still makes the connection; it is wrapped, so the
+        # connection is known from the moment it exists (see `_close_code_received`).
+        factory = connect_options.pop("create_connection", None)
+        self._make_ws = ClientConnection if factory is None else factory
+        self._connect_options = {
+            **connect_options,
+            "logger": _WithoutCredentials(logger, {}),
+            "create_connection": self._create_ws,
+        }
         self._ws: ClientConnection | None = None
+        # The connection `websockets` made, set before the opening handshake completes.
+        self._pending_ws: ClientConnection | None = None
         self._used = False
         self._expected_seq = 1
 
@@ -599,6 +643,28 @@ class Connection:
             raise RuntimeError("connection is not open")
         return self._ws
 
+    def _create_ws(self, *args: Any, **kwargs: Any) -> ClientConnection:
+        ws = self._make_ws(*args, **kwargs)
+        self._pending_ws = ws
+        return ws
+
+    def _close_code_received(self) -> int | None:
+        """The close code the peer sent, as soon as `websockets` has read its close frame,
+        even if nothing reading this connection has met the close yet, and even while
+        `open` has not yet returned; None if no close has arrived. A code is a number, so
+        it cannot carry the token."""
+        ws = self._ws if self._ws is not None else self._pending_ws
+        if ws is None:
+            return None
+        protocol = getattr(ws, "protocol", None)
+        if protocol is not None and hasattr(protocol, "close_rcvd"):
+            close = protocol.close_rcvd
+            return close.code if close is not None else None
+        # Without that attribute, the public code, which is set once the connection is
+        # closed (1006 if no close frame arrived).
+        code = getattr(ws, "close_code", None)
+        return code if isinstance(code, int) else None
+
     def _handle(self, frame: str | bytes) -> Iterator[Event]:
         # Any failure to decode one frame is reported for that frame, and delivery goes on:
         # besides ValueError and ParseError, the parsers raise RecursionError for JSON nested
@@ -617,6 +683,13 @@ class Connection:
             return
 
         env = decoded.envelope
+        heartbeat = env.type == "heartbeat"
+        if heartbeat:
+            # Counted as it is read, before any gap its seq reveals is delivered, so a
+            # program handling that SeqGap, or stopping at it, already sees this heartbeat.
+            self._heartbeats_received += 1
+            self._last_heartbeat_at = time.monotonic()
+            self._last_heartbeat_sent_at = env.sent_at if env.HasField("sent_at") else None
         seq = env.seq if env.HasField("seq") else None
         if seq is not None:
             # Tracked before the payload is decoded, so a bad payload still counts as received.
@@ -624,11 +697,8 @@ class Connection:
                 yield SeqGap(self._expected_seq, seq)
             self._expected_seq = seq + 1
 
-        if env.type == "heartbeat":
+        if heartbeat:
             # Absorbed: it has counted for sequence tracking, and for liveness on arrival.
-            self._heartbeats_received += 1
-            self._last_heartbeat_at = time.monotonic()
-            self._last_heartbeat_sent_at = env.sent_at if env.HasField("sent_at") else None
             return
         report_seq = env.report_seq if env.HasField("report_seq") else None
 

@@ -71,7 +71,7 @@ from datetime import date
 from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, SessionState, Trades
 from qte_sdk.history import HistoryClient, HistoryItem, _date_text
 
-__all__ = ["CHANNELS", "replay"]
+__all__ = ["CHANNELS", "ReplayOutOfOrder", "replay"]
 
 CHANNELS: tuple[str, ...] = ("book", "trades", "mark", "session_state")
 """The channels a replay can merge."""
@@ -136,6 +136,12 @@ def replay(
     return _replay(client, _date_text(session_date), streams, speed)
 
 
+class ReplayOutOfOrder(ValueError):
+    """A downloaded stream went back in time: one of its messages is earlier than the one
+    before it. The replay cannot merge such a stream, so it stops and closes every download
+    rather than deliver messages out of order."""
+
+
 class _Stream:
     """One download being merged: its items, its place among messages at the same time,
     and the time of its latest message that had one."""
@@ -174,6 +180,13 @@ async def _replay(
         moment = _time_of(item)
         if moment is None:
             moment = stream.last  # kept just after the message before it in its stream
+        elif moment < stream.last:
+            channel = CHANNELS[stream.rank]
+            where = channel if channel == "session_state" else f"{channel} of {stream.instrument}"
+            raise ReplayOutOfOrder(
+                f"the {where} on {session_date} goes back in time: a message at {moment} "
+                f"follows one at {stream.last}"
+            )
         else:
             stream.last = moment
         heapq.heappush(heap, (moment, stream.rank, stream.instrument, next(counter), item, stream))
