@@ -2517,6 +2517,14 @@ async def test_the_smoke_tests_argument_errors_never_repeat_what_was_typed(
     assert secret not in out + err
 
 
+async def test_the_smoke_test_treats_everything_after_a_double_dash_as_a_value():
+    # After "--", a word shaped like an option is a value all the same, so it is not named.
+    code, out, err = await run_example(SMOKE_TEST, None, synthetic_token(), "--", "--private-value")
+    assert code == 2
+    assert "unrecognized arguments (not shown)" in err
+    assert "private-value" not in out + err
+
+
 @pytest.mark.parametrize(
     ("args", "message"),
     [

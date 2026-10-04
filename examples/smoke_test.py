@@ -208,8 +208,17 @@ class Parser(argparse.ArgumentParser):
     """An argument parser whose errors name an argument but never repeat a value typed for
     it, since a mistake could put a token on the command line (`--token ...`)."""
 
+    # The words typed before any "--": only these can be options. Everything after a "--"
+    # is a value, however it looks.
+    _option_words: frozenset[str] = frozenset()
+
+    def parse_args(self, args: Any = None, namespace: Any = None) -> Any:
+        typed = list(sys.argv[1:] if args is None else args)
+        self._option_words = frozenset(typed[: typed.index("--")] if "--" in typed else typed)
+        return super().parse_args(typed, namespace)
+
     def error(self, message: str) -> NoReturn:
-        super().error(withhold_values(message))
+        super().error(withhold_values(message, self._option_words))
 
 
 # A long option's name, as argparse reports one it does not know: short enough that a token
@@ -226,18 +235,19 @@ _SAFE_COMPLAINTS = frozenset(
 )
 
 
-def withhold_values(message: str) -> str:
+def withhold_values(message: str, option_words: frozenset[str] = frozenset()) -> str:
     """`message` with every value typed on the command line left out.
 
     Only text known to hold no typed value is kept: this script's own messages, the names
-    of its own options, and an unknown option's name when it looks like one (lowercase
-    letters and hyphens, short), which a token does not. Anything else is replaced."""
+    of its own options, and an unknown option's name when it was typed before any "--" and
+    looks like one (lowercase letters and hyphens, short), as a token does not. Anything
+    else is replaced."""
     prefix = "unrecognized arguments: "
     if message.startswith(prefix):
         names = [
             word.split("=", 1)[0]
             for word in message[len(prefix) :].split()
-            if _OPTION_NAME.fullmatch(word.split("=", 1)[0])
+            if word in option_words and _OPTION_NAME.fullmatch(word.split("=", 1)[0])
         ]
         if not names:
             return "unrecognized arguments (not shown)"
