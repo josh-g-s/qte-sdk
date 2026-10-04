@@ -31,8 +31,18 @@ def test_real_looking_symbols_parse_and_rebuild(symbol, parts):
     assert is_option_symbol(symbol)
 
 
+def test_a_root_may_start_with_a_digit():
+    symbol = option_symbol("1SPY", date(2026, 10, 16), CALL, 1_000)
+    assert symbol == "1SPY261016C00000001"
+    parts = parse_option_symbol(symbol)
+    assert parts == OptionSymbol("1SPY", date(2026, 10, 16), CALL, 1_000)
+    assert is_option_symbol(symbol)
+    assert option_symbol(*_fields(parts)) == symbol
+    assert parse_option_symbol("123456240119P00470000").underlying == "123456"
+
+
 def test_the_length_varies_with_the_root_and_there_are_no_spaces():
-    for root in ("A", "AB", "ABC", "ABCD", "ABCDE", "ABCDE1"):
+    for root in ("A", "AB", "ABC", "ABCD", "ABCDE", "ABCDE1", "1", "999999"):
         symbol = option_symbol(root, date(2026, 10, 16), CALL, to_micros("1"))
         assert symbol == f"{root}261016C00001000"
         assert len(symbol) == len(root) + 15
@@ -74,7 +84,7 @@ def test_a_strike_that_is_not_an_int_is_refused(strike):
         option_symbol("SPY", date(2026, 10, 16), CALL, strike)
 
 
-@pytest.mark.parametrize("root", ["", "spy", "1SPY", "TOOLONG", "BRK.B", "S Y", None])
+@pytest.mark.parametrize("root", ["", "spy", "Spy", "TOOLONG", "BRK.B", "S Y", None])
 def test_a_bad_root_is_refused(root):
     with pytest.raises(ValueError, match="underlying"):
         option_symbol(root, date(2026, 10, 16), CALL, 470_000_000)
@@ -135,7 +145,7 @@ def test_a_zero_strike_is_refused():
         "SPY240119C0047000",  # seven strike digits
         "SPY240119C004700000",  # nine strike digits
         "240119C00470000",  # no root
-        "1SPY240119C00470000",
+        "toolow240119C00470000",
         "TOOLONG240119C00470000",
         "SPY240119C00470000\n",
         "SPY24-01-19C00470000",

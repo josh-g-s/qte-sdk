@@ -45,11 +45,11 @@ _MICROS_PER_STRIKE_UNIT = 1_000
 _STRIKE_DIGITS = 8
 _MAX_STRIKE_UNITS = 10**_STRIKE_DIGITS - 1
 
-# A root of one to six upper-case letters or digits, starting with a letter, then the
+# A root of one to six upper-case letters or digits, as the exchange accepts, then the
 # fixed fifteen-character suffix. The suffix has a fixed shape, so the root is whatever
 # comes before it.
-_ROOT = re.compile(r"[A-Z][A-Z0-9]{0,5}")
-_SYMBOL = re.compile(r"([A-Z][A-Z0-9]{0,5})([0-9]{2})([0-9]{2})([0-9]{2})([CP])([0-9]{8})")
+_ROOT = re.compile(r"[A-Z0-9]{1,6}")
+_SYMBOL = re.compile(r"([A-Z0-9]{1,6})([0-9]{2})([0-9]{2})([0-9]{2})([CP])([0-9]{8})")
 
 
 @dataclass(frozen=True)
@@ -71,9 +71,7 @@ def option_symbol(underlying: str, expiry: date, right: str, strike: int) -> str
     strike in micro-dollars, a whole number of thousandths of a dollar from 0.001 to
     99999.999. Raises `ValueError` for anything that has no symbol."""
     if not isinstance(underlying, str) or not _ROOT.fullmatch(underlying):
-        raise ValueError(
-            "the underlying must be 1 to 6 upper-case letters or digits, starting with a letter"
-        )
+        raise ValueError("the underlying must be 1 to 6 upper-case letters or digits")
     if isinstance(expiry, datetime) or not isinstance(expiry, date):
         # A datetime is a date too, but its date can differ between UTC and New York.
         raise ValueError("the expiry must be a datetime.date, not a datetime")
