@@ -6,9 +6,36 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
+import pytest
 from websockets.asyncio.server import ServerConnection, serve
 
 CONTRACT_VERSION = "0.x"
+
+
+class LoopClock:
+    """The running event loop's clock, which a test moves forward to make a timeout expire.
+
+    asyncio counts every timeout and sleep by the loop's clock. A test that waits until the
+    fake exchange has seen what it needs to, then calls `advance`, makes a timeout expire at
+    that point however busy the machine is, where a short real timeout would race the
+    exchange. Between advances the clock keeps pace with real time, so a test's own limits,
+    such as `asyncio.wait_for(..., 5)`, still work. An advance brings every pending timer
+    forward, those limits included, so advance only while none of them is pending.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop = asyncio.get_running_loop()
+        self._real = loop.time
+        self._offset = 0.0
+        monkeypatch.setattr(loop, "time", self.time)
+
+    def time(self) -> float:
+        return self._real() + self._offset
+
+    def advance(self, seconds: float) -> None:
+        """Move the clock `seconds` forward: whatever is due by then runs on the loop's
+        next iteration."""
+        self._offset += seconds
 
 
 def frame(type_: str, payload: Any, seq: int | None = None, **extra: Any) -> str:
