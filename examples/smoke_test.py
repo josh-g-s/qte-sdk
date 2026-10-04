@@ -62,7 +62,8 @@ and the message budgets are set by the exchange, so nothing here assumes their v
 script cancels once the exchange reports the order resting, and if a cancel is rejected
 MIN_REST_VIOLATION (or for a message budget) it sends it again after the exchange's next
 market-data grid point, then after two more, four more and so on, rather than after a
-fixed sleep. --seconds bounds each wait for the exchange.
+fixed sleep. --seconds bounds each wait for the exchange, except the wait during a session
+for an instrument's first book, which --book-wait bounds (never less than --seconds).
 """
 
 import argparse
@@ -204,8 +205,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_BOOK_WAIT,
         help=(
             "during a session, how long after subscribing to wait for an instrument's first "
-            "book, since one with no valid quote yet has none (default "
-            f"{DEFAULT_BOOK_WAIT:g}, at most {MAX_BOOK_WAIT:g})"
+            "book, since one with no valid quote yet has none; never less than --seconds "
+            f"(default {DEFAULT_BOOK_WAIT:g}, at most {MAX_BOOK_WAIT:g})"
         ),
     )
     parser.add_argument(
@@ -728,7 +729,11 @@ def check_market(
                 # A session publishes a book only for an instrument that has one, so one
                 # with no valid quote yet has none: not a fault in the setup.
                 why = "the instrument may have no valid quote yet"
-                report.add(SKIP, name, f"no book published within {book_limit:g} s ({why})")
+                if watcher.closed and watched < book_limit:
+                    why = "the connection ended first"
+                    report.add(SKIP, name, f"no book published within {watched:.1f} s ({why})")
+                else:
+                    report.add(SKIP, name, f"no book published within {book_limit:g} s ({why})")
         elif is_closed:
             close = watcher.closes.get(instrument)
             if close is None:
@@ -930,8 +935,15 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
         )
 
 
-def moved(order: ProbeOrder) -> tuple[str, str]:
-    """The verdict when another program of the team amended the order to a new price."""
+async def moved(watcher: Watcher, order: ProbeOrder, seconds: float) -> tuple[str, str]:
+    """The verdict when another program of the team amended the order to a new price.
+
+    It first waits for the exchange's next grid point: every report sent before it arrives
+    before it on the one connection, so a further move made by then is seen and the level
+    named is where the order rested then."""
+    loop = asyncio.get_running_loop()
+    seen = watcher.grid_points
+    await watcher.until(lambda: watcher.grid_points > seen, loop.time() + seconds)
     if order.gone:
         return FAIL, (
             f"{order.where} was moved by another of your team's programs to "
@@ -970,7 +982,7 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
     if order.rejected is not None:
         return rejected_new(order)
     if order.moved_to is not None:
-        return moved(order)
+        return await moved(watcher, order, seconds)
     if order.gone:
         return left_alone(order)
     # It rests, or what became of it is unknown. Cancel the level either way: a cancel is
@@ -983,7 +995,7 @@ async def place_and_cancel(watcher: Watcher, order: ProbeOrder, seconds: float) 
     why_not = await cancel_level(watcher, order, seconds)
     watcher.drain()  # a move or a fill may have arrived just behind the last reply
     if order.moved_to is not None:
-        return moved(order)
+        return await moved(watcher, order, seconds)
     if order.confirmed:
         assert order.cancelled is not None
         if order.cancelled.strat_id != order.strat_id:
@@ -1161,13 +1173,13 @@ async def closing(session: Session) -> AsyncIterator[Session]:
 async def session_checks(report: Report, watcher: Watcher, args: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
     session = watcher.session
+    subscribed = loop.time()  # the waits below count from here, before any send
     # One subscribe per instrument, so one the exchange does not know cannot keep the
     # others from being served.
     for instrument in args.instruments:
         await watcher.sent(subscribe(session, [instrument]))
     watcher.account_ref = new_request_ref()
     await watcher.sent(send_account_query(session, request_ref=watcher.account_ref))
-    subscribed = loop.time()
     # Watch for --seconds, applying every event as it arrives.
     await watcher.until(lambda: False, subscribed + args.seconds)
     # During a session, give an instrument with no book yet up to --book-wait for its first.
