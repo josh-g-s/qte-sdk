@@ -78,7 +78,8 @@ without its chain or the traceback it gathered inside the download, whose frames
 the response's bytes. A line that fails to decode is reported as a `DecodeFailed` whose
 error is a new `ValueError` naming only the type of the parser's error, since that error
 keeps the line, which could reflect the token. Redirects are not followed, and a plain
-`http://` address is refused unless it is this machine's own (a local test server).
+`http://` address is refused unless it is this machine's own (a local test server). An
+IPv6 address goes in square brackets, with or without a port, such as `http://[::1]:8080`.
 """
 
 import asyncio
@@ -1134,7 +1135,7 @@ def _sanitised(error: BaseException, secret: _Secret) -> BaseException:
     return error
 
 
-def _parse_url(url: str) -> tuple[bool, str, int | None, str]:
+def _parse_url(url: str) -> tuple[bool, str, int, str]:
     parts = urlsplit(url)
     if parts.scheme not in ("https", "http") or not parts.hostname:
         raise ValueError("the history service address must be an https:// URL")
@@ -1144,7 +1145,11 @@ def _parse_url(url: str) -> tuple[bool, str, int | None, str]:
         raise ValueError("the history service address takes no query or fragment")
     if parts.scheme == "http" and not _is_loopback(parts.hostname):
         raise ValueError("the history service address must be https:// (http:// is local only)")
-    return parts.scheme == "https", parts.hostname, parts.port, parts.path.rstrip("/")
+    https = parts.scheme == "https"
+    # Always a port: given none, http.client would split an IPv6 host such as "::1" at
+    # its last colon into a host and a port.
+    port = parts.port if parts.port is not None else (443 if https else 80)
+    return https, parts.hostname, port, parts.path.rstrip("/")
 
 
 def _is_loopback(host: str) -> bool:
