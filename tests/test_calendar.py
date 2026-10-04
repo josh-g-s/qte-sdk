@@ -3,7 +3,7 @@
 import asyncio
 
 import pytest
-from fake_exchange import frame, serve_local
+from fake_exchange import LoopClock, frame, serve_local
 from test_reconnect import Clock, Exchange, book, drop, session
 from test_session import ack, synthetic_token
 from websockets.asyncio.server import ServerConnection
@@ -67,14 +67,17 @@ def no_token_in_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
 
 
-def scripted(*steps: str | float, hold_open: bool = False):
-    """A server that receives `auth`, then sends each frame, sleeping for each number."""
+def scripted(*steps: str | float | asyncio.Event, hold_open: bool = False):
+    """A server that receives `auth`, then sends each frame, sleeping for each number and
+    waiting for each event to be set."""
 
     async def handler(ws: ServerConnection) -> None:
         await ws.recv()
         for step in steps:
             if isinstance(step, str):
                 await ws.send(step)
+            elif isinstance(step, asyncio.Event):
+                await step.wait()
             else:
                 await asyncio.sleep(step)
         if hold_open:
@@ -174,20 +177,38 @@ async def test_without_a_calendar_the_session_works_and_waiting_times_out_with_n
     assert not any(isinstance(event, SeqGap) for event in events)
 
 
-async def test_an_interrupted_wait_keeps_read_events_and_iteration_resumes_without_loss():
-    # Two frames and a gap are read while waiting, then the calendar comes later.
-    handler = scripted(ack(), book(2), book(4), 0.4, calendar_frame(5), book(6))
+async def test_an_interrupted_wait_keeps_read_events_and_iteration_resumes_without_loss(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = LoopClock(monkeypatch)
+    # Two frames and a gap are read while waiting, then the calendar comes once released.
+    released = asyncio.Event()
+    handler = scripted(ack(), book(2), book(4), released, calendar_frame(5), book(6))
     async with serve_local(handler) as url:
-        async with await open_session(url, synthetic_token()) as sess:
-            assert await sess.wait_for_calendar(timeout=0.1) is None
-            waiting = asyncio.create_task(sess.wait_for_calendar(timeout=None))
-            await asyncio.sleep(0.05)
-            waiting.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await waiting
-            assert sess.calendar is None
-            async with asyncio.timeout(5):
-                events = [event async for event in sess]
+        try:
+            async with await open_session(url, synthetic_token()) as sess:
+                first = asyncio.create_task(sess.wait_for_calendar(timeout=10))
+                # The wait times out only once it has read both frames, the gap between
+                # them noted, and is waiting for more.
+                async with asyncio.timeout(5):
+                    while sess.connection._expected_seq < 5 and not first.done():  # noqa: SLF001
+                        await asyncio.sleep(0)
+                clock.advance(10)
+                assert await asyncio.wait_for(first, 5) is None
+                waiting = asyncio.create_task(sess.wait_for_calendar(timeout=None))
+                # Interrupted while it waits for a frame that has not been sent.
+                async with asyncio.timeout(5):
+                    while not sess._reading and not waiting.done():  # noqa: SLF001
+                        await asyncio.sleep(0)
+                waiting.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiting
+                assert sess.calendar is None
+                released.set()
+                async with asyncio.timeout(5):
+                    events = [event async for event in sess]
+        finally:
+            released.set()  # so the exchange can finish and close, even after a failure
     assert events == [
         Received("book", events[0].message, 2),
         SeqGap(3, 4),
