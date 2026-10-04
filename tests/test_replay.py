@@ -1,8 +1,9 @@
 """The market-data replay against the fake history service of `test_history`."""
 
+import asyncio
 import threading
 from contextlib import aclosing
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
@@ -10,7 +11,7 @@ from test_history import DAY, FakeHistory, line, serve_history, synthetic_token
 
 from qte_sdk import history, replay
 from qte_sdk.connection import DecodeFailed, Unknown
-from qte_sdk.history import HistoryClient, HistoryUnavailable
+from qte_sdk.history import HistoryClient, HistoryInterrupted, HistoryUnavailable
 from qte_sdk.market_data import Book, Mark, SessionState, Trades
 from qte_sdk.replay import CHANNELS
 
@@ -84,12 +85,16 @@ def requested(fake: FakeHistory) -> list[str]:
 
 @pytest.fixture
 def closes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """The status of every history response closed, in order."""
+    """The status of every history response closed, once for each response (the client
+    may close one more than once), in the order they were first closed."""
     closed: list[int] = []
+    seen: list[Any] = []
     original = history._Reply.close
 
     def recording_close(reply: Any) -> None:
-        closed.append(reply.status)
+        if not any(reply is other for other in seen):
+            seen.append(reply)
+            closed.append(reply.status)
         original(reply)
 
     monkeypatch.setattr(history._Reply, "close", recording_close)
@@ -248,12 +253,17 @@ async def test_messages_arrive_while_the_rest_of_the_day_is_still_downloading():
     fake.hold_after[f"/v1/history/{DAY}/AAA/book"] = (len(first), release)
     with serve_history(fake) as url:
         items = replay.replay(HistoryClient(url, token), DAY, ["AAA"], ["book", "session_state"])
-        async with aclosing(items) as stream:
-            got = [await anext(stream)]
-            # The first book came while the service still holds back the rest of the stream.
-            assert not release.is_set()
+        try:
+            async with aclosing(items) as stream:
+                # The service holds back the rest of the book stream for 10 s unless
+                # released, so a replay that waited for the whole stream would time out here.
+                async with asyncio.timeout(5):
+                    got = [await anext(stream)]
+                assert not release.is_set()
+                release.set()
+                got += [item async for item in stream]
+        finally:
             release.set()
-            got += [item async for item in stream]
     assert [label(item) for item in got] == [
         (1000, "book", "AAA"),
         (1000, "session_state"),
@@ -272,19 +282,29 @@ def a_long_session(token: str) -> FakeHistory:
     return FakeHistory(token, objects)
 
 
-async def test_stopping_early_closes_every_download(closes):
+class StopHere(Exception):
+    pass
+
+
+@pytest.mark.parametrize("stop", ["break", "raise"])
+async def test_stopping_early_closes_every_download(closes, stop):
     fake = a_long_session(synthetic_token())
     with serve_history(fake) as url:
         client = HistoryClient(url, fake.token)
         got = []
-        async with aclosing(
-            replay.replay(client, DAY, ["AAA", "BBB"], ["book", "session_state"])
-        ) as items:
-            async for item in items:
-                got.append(item)
-                if len(got) == 4:
-                    break
-            assert closes == []  # each download is still open, part way through
+        try:
+            async with aclosing(
+                replay.replay(client, DAY, ["AAA", "BBB"], ["book", "session_state"])
+            ) as items:
+                async for item in items:
+                    got.append(item)
+                    if len(got) == 4:
+                        assert closes == []  # each download is still open, part way through
+                        if stop == "raise":
+                            raise StopHere
+                        break
+        except StopHere:
+            pass
     assert [label(item) for item in got] == [
         (1000, "book", "AAA"),
         (1000, "session_state"),
@@ -304,9 +324,54 @@ async def test_a_download_that_fails_is_raised_and_the_others_are_closed(closes)
             async with aclosing(items) as stream:
                 async for _ in stream:
                     pass
-    # NOPE is unknown to the service; AAA's download, already open, was closed.
-    assert closes.count(200) == 1
-    assert closes[-1] == 200
+    # NOPE is unknown to the service; AAA's download, already open, was closed after it.
+    assert closes == [404, 200]
+
+
+async def test_a_download_that_breaks_part_way_is_raised_after_the_items_before_it(closes):
+    fake = a_long_session(synthetic_token())
+    # AAA's books stop after the first, and the client may not resume.
+    fake.drop_after[f"/v1/history/{DAY}/AAA/book"] = len(book_at(1000, "AAA"))
+    got = []
+    with serve_history(fake) as url:
+        client = HistoryClient(url, fake.token, max_resumes=0)
+        items = replay.replay(client, DAY, ["AAA", "BBB"], ["book"])
+        with pytest.raises(HistoryInterrupted):
+            async with aclosing(items) as stream:
+                async for item in stream:
+                    got.append(item)
+    assert [label(item) for item in got] == [(1000, "book", "AAA")]
+    # The broken download closed itself; BBB's was closed when the error was raised.
+    assert closes == [200, 200]
+
+
+async def test_cancelling_a_paced_replay_closes_every_download(closes, monkeypatch):
+    waiting = asyncio.Event()
+
+    async def wait_for_ever(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(replay, "_sleep", wait_for_ever)
+    monkeypatch.setattr(replay, "_clock", lambda: 0.0)  # no time passes on its own
+    fake = a_long_session(synthetic_token())
+    got = []
+
+    async def consume(client: HistoryClient) -> None:
+        items = replay.replay(client, DAY, ["AAA", "BBB"], ["book"], speed=1.0)
+        async with aclosing(items) as stream:
+            async for item in stream:
+                got.append(item)
+
+    with serve_history(fake) as url:
+        task = asyncio.create_task(consume(HistoryClient(url, fake.token)))
+        async with asyncio.timeout(5):
+            await waiting.wait()  # paused before BBB's first book, 50 ms after AAA's
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert [label(item) for item in got] == [(1000, "book", "AAA")]
+    assert closes == [200, 200]
 
 
 async def test_by_default_the_replay_never_waits(clock):
@@ -366,9 +431,20 @@ async def test_a_paced_replay_that_falls_behind_catches_up_without_skipping(cloc
         ((DAY, ["AAA"]), {"speed": float("inf")}, ValueError),
         ((DAY, ["AAA"]), {"speed": float("nan")}, ValueError),
         ((datetime(2026, 1, 5, tzinfo=UTC), ["AAA"]), {}, TypeError),
+        ((20260105, ["AAA"]), {}, TypeError),
+        (("5 January 2026", ["AAA"]), {}, ValueError),
+        (("2026-02-30", ["AAA"]), {}, ValueError),
     ],
 )
 def test_arguments_it_cannot_use_are_refused_before_any_download(arguments, options, error):
     client = HistoryClient("http://127.0.0.1:9", synthetic_token())
     with pytest.raises(error):
         replay.replay(client, *arguments, **options)
+
+
+@pytest.mark.parametrize("day", [date(2026, 1, 5), "2026-01-05"], ids=["date", "text"])
+async def test_a_session_date_is_asked_for_as_yyyy_mm_dd(day):
+    fake = FakeHistory(synthetic_token(), {(DAY, "AAA", "book"): book_at(1000, "AAA")})
+    items = await replayed(fake, day, ["AAA"], ["book"])
+    assert [label(item) for item in items] == [(1000, "book", "AAA")]
+    assert requested(fake) == [f"/v1/history/{DAY}/AAA/book"]

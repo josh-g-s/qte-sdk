@@ -19,7 +19,8 @@ handles market data from a live session runs on a replay unchanged. The one addi
 
 Market data only. A replay sends no orders and takes none, fills nothing, and keeps no
 positions, cash or profit and loss. It shows what the market published to everyone that
-day; the market in it never saw your orders, so it cannot tell you what they would have
+day, with whatever was really traded then, your own team's orders and trades included if
+it traded. It cannot add an order that was not there, or work out what one would have
 done.
 
 Order. Each message is placed by its time: `grid_time` for `Book`, `Trades` and
@@ -99,8 +100,14 @@ def replay(
     instrument, and `session_state` for the session. `speed` paces the replay: None (the
     default) for as fast as you read it, or a positive number, 1.0 for the pace the
     session ran at. Raises `TypeError` or `ValueError` at once, before any download, for
-    arguments it cannot use. See the module docstring for the order and the errors.
+    arguments it cannot use, a date that does not parse included. Whether the session
+    and the instruments exist only the history service can say, as the replay runs. See
+    the module docstring for the order and the errors.
     """
+    if isinstance(session_date, str):
+        session_date = date.fromisoformat(session_date)  # ValueError if it does not parse
+    elif not isinstance(session_date, date):
+        raise TypeError("pass a session date as a datetime.date or 'YYYY-MM-DD'")
     if isinstance(instruments, str):
         raise TypeError('pass instruments as a list, such as ["AAPL"], not a single string')
     if isinstance(channels, str):
@@ -124,6 +131,7 @@ def replay(
         if channel in wanted
         for instrument in (sorted(set(names)) if channel in _PER_INSTRUMENT else [""])
     ]
+    # _date_text refuses a datetime, which is also a date.
     return _replay(client, _date_text(session_date), streams, speed)
 
 

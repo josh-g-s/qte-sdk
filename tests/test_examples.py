@@ -34,6 +34,7 @@ from qte_sdk.contract.v1.market_data_pb2 import Book as BookMessage
 from qte_sdk.contract.v1.market_data_pb2 import SessionState as SessionStateMessage
 from qte_sdk.contract.v1.market_data_pb2 import WallLevel
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution
+from qte_sdk.history import HistoryClient
 from qte_sdk.orders import reason_code_name, send_amend, send_new
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import open_session
@@ -1335,12 +1336,47 @@ async def test_replay_book_refuses_to_start_without_a_token():
     assert "QTE_TOKEN" in err
 
 
-@pytest.mark.parametrize("option", [("--speed", "0"), ("--date", "5 January")])
+@pytest.mark.parametrize(
+    "option",
+    [
+        ("--speed", "0"),
+        ("--speed", "inf"),
+        ("--speed", "nan"),
+        ("--seconds", "0"),
+        ("--max-books", "0"),
+        ("--date", "5 January"),
+    ],
+)
 async def test_replay_book_refuses_an_option_it_cannot_use(option: tuple[str, str]):
     arguments = ("--date", test_history.DAY, *option)
     code, out, err = await run_example("replay_book.py", None, synthetic_token(), *arguments)
     assert code == 2
     assert option[0] in err
+
+
+def test_replay_book_reports_a_network_timeout_as_a_failure(monkeypatch, capsys):
+    # The run's own --seconds limit is a clean stop; a history request timing out is not.
+    example = load_example("replay_book.py")
+    token = synthetic_token()
+    with test_history.SilentServer() as url:
+        monkeypatch.setattr(
+            example, "HistoryClient", lambda: HistoryClient(url, token, timeout=0.2)
+        )
+        code = example.main(["--date", test_history.DAY, "--instrument", INSTRUMENT])
+    assert code == 1
+    assert "could not reach the history service: TimeoutError" in capsys.readouterr().err
+
+
+def test_replay_book_stops_cleanly_when_its_seconds_are_up(monkeypatch, capsys):
+    example = load_example("replay_book.py")
+    token = synthetic_token()
+    with test_history.serve_history(history_session(token)) as url:
+        monkeypatch.setattr(example, "HistoryClient", lambda: HistoryClient(url, token))
+        # So slow that the second book, a second of the session later, is hours away.
+        arguments = ["--date", test_history.DAY, "--instrument", INSTRUMENT]
+        code = example.main([*arguments, "--speed", "0.0001", "--seconds", "0.2"])
+    assert code == 0
+    assert capsys.readouterr().out.splitlines()[-1] == "stopped after 0.2 seconds (1 books)"
 
 
 @pytest.mark.parametrize("inside", ["0", "-0.01"])

@@ -15,11 +15,13 @@ data, whichever comes first. By default it runs as fast as it can print; --speed
 at the pace the session ran, --speed 10 ten times as fast.
 
 This is market data only: the replay sends no orders and fills nothing. It shows what the
-market published that day, which never included any order of yours.
+market published that day, with whatever was really traded then, and cannot add an order
+that was not there or work out what one would have done.
 """
 
 import argparse
 import asyncio
+import math
 import os
 import sys
 from contextlib import aclosing
@@ -41,6 +43,20 @@ from qte_sdk.session import MissingToken
 from qte_sdk.units import to_datetime, to_decimal
 
 
+def positive_number(text: str) -> float:
+    value = float(text)
+    if not (math.isfinite(value) and value > 0):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a positive number")
+    return value
+
+
+def positive_count(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a positive whole number")
+    return value
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay a past session's book of one instrument.")
     parser.add_argument(
@@ -56,20 +72,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--speed",
-        type=float,
+        type=positive_number,
         default=None,
         help="replay this many times as fast as the session ran (default: as fast as possible)",
     )
     parser.add_argument(
-        "--max-books", type=int, default=50, help="stop after this many books (default 50)"
+        "--max-books",
+        type=positive_count,
+        default=50,
+        help="stop after this many books (default 50)",
     )
     parser.add_argument(
-        "--seconds", type=float, default=60.0, help="stop after this long (default 60)"
+        "--seconds", type=positive_number, default=60.0, help="stop after this long (default 60)"
     )
-    args = parser.parse_args(argv)
-    if args.speed is not None and not args.speed > 0:
-        parser.error("--speed must be a positive number")
-    return args
+    return parser.parse_args(argv)
 
 
 def best(book: Book) -> tuple[int | None, int | None]:
@@ -95,8 +111,9 @@ async def run(client: HistoryClient, args: argparse.Namespace) -> int:
     items = replay(
         client, args.date, [args.instrument], ["book", "session_state"], speed=args.speed
     )
+    deadline = asyncio.timeout(args.seconds)
     try:
-        async with asyncio.timeout(args.seconds), aclosing(items) as stream:
+        async with deadline, aclosing(items) as stream:
             async for item in stream:
                 match item:
                     case Book():
@@ -123,6 +140,8 @@ async def run(client: HistoryClient, args: argparse.Namespace) -> int:
                         # A line this SDK cannot use: a book may be missing after it.
                         print(f"warning: a message could not be used: {type(item).__name__}")
     except TimeoutError:
+        if not deadline.expired():
+            raise  # a network step timed out, not this run's own limit
         print(f"stopped after {args.seconds:g} seconds ({books} books)")
         return 0
     print(f"end of the session's data ({books} books)")
@@ -155,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     except HistoryError as error:
         # Only the kind of error and its HTTP status: the service's own text stays out.
         status = f" (HTTP {error.http_status})" if error.http_status is not None else ""
-        return fail(f"the history service refused the request: {type(error).__name__}{status}")
+        return fail(f"the history request failed: {type(error).__name__}{status}")
     except OSError as error:
         return fail(f"could not reach the history service: {type(error).__name__}")
     except KeyboardInterrupt:

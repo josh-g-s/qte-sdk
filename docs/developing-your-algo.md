@@ -214,6 +214,6 @@ The replay is market data only:
 - It sends no orders and takes none. There is nothing in it to send an order to.
 - It fills nothing. No order is matched, and no order event, `accepted`, `reject`, `execution` or `order_cancelled`, ever comes from it.
 - It keeps no positions, cash or profit and loss.
-- It shows the market as it was published to everyone that day, which never included any order of yours. Had your orders been there, they would have changed what others did, so the replay cannot tell you whether an order would have filled or what a strategy would have earned.
+- It shows the market as it was published to everyone that day, with whatever was really traded then: if your team traded that day, its resting orders are in the books and its trades on the tape, like everyone else's. It cannot add an order that was not there. An order that had been there would have changed what others did, so the replay cannot tell you whether one would have filled or what a strategy would have earned.
 
 The SDK has no fill simulator. Use the replay to check that your loop runs over a whole session, handles every message it is given and makes the decisions you expect, and use the exchange to see what happens to your orders.
