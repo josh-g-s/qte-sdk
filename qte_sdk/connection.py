@@ -658,6 +658,13 @@ class Connection:
             return
 
         env = decoded.envelope
+        heartbeat = env.type == "heartbeat"
+        if heartbeat:
+            # Counted as it is read, before any gap its seq reveals is delivered, so a
+            # program handling that SeqGap, or stopping at it, already sees this heartbeat.
+            self._heartbeats_received += 1
+            self._last_heartbeat_at = time.monotonic()
+            self._last_heartbeat_sent_at = env.sent_at if env.HasField("sent_at") else None
         seq = env.seq if env.HasField("seq") else None
         if seq is not None:
             # Tracked before the payload is decoded, so a bad payload still counts as received.
@@ -665,11 +672,8 @@ class Connection:
                 yield SeqGap(self._expected_seq, seq)
             self._expected_seq = seq + 1
 
-        if env.type == "heartbeat":
+        if heartbeat:
             # Absorbed: it has counted for sequence tracking, and for liveness on arrival.
-            self._heartbeats_received += 1
-            self._last_heartbeat_at = time.monotonic()
-            self._last_heartbeat_sent_at = env.sent_at if env.HasField("sent_at") else None
             return
         report_seq = env.report_seq if env.HasField("report_seq") else None
 
