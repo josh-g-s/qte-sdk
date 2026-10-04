@@ -1,6 +1,6 @@
 # Conformance steps
 
-**Version:** 1.3
+**Version:** 1.4
 
 The scripted checks a client and an exchange are run against, end to end. Each step names
 the messages it exercises and the rule it proves, citing `SPEC.md` sections and naming
@@ -34,6 +34,18 @@ Every timestamp a step names (`receipt_time`, `release_time`, `grid_time`, `serv
 `open_time`, `close_time` and the rest) is a signed 64-bit count of milliseconds since the
 Unix epoch, UTC, a decimal string on the wire (SPEC 8.1, SPEC 9.2, SPEC 13.1). A step that
 adds δ_oe to `receipt_time` adds milliseconds.
+
+**Order within a grid point** (SPEC 4.3). A step that names several public messages
+published at one grid point (a `book`, a `trades`, a `mark` and a `session_state`, for one
+instrument or several) checks them as a set, never in a fixed order. Every message
+published at a grid point (`grid_time` on `Book`, `Trades` and `SessionState`;
+`sampled_at` on `Mark`) is sent on a connection before any message published at a later
+grid point, and nothing orders the messages of one grid point among themselves. A script
+that fails an exchange for the order in which it sends one grid point's messages, or that
+takes `session_state` to mark the start or the end of its grid point, has not met the
+contract. The subscribe snapshot of step 3 is sent at subscribe time, not at a grid point:
+it repeats a `book` published at an earlier grid point and carries that grid point's
+`grid_time`, which can be earlier than a grid point the connection has already received.
 
 The session-layer parts of steps 1 to 3 and 16 (authentication, subscription and the
 calendar) may change before the contract is frozen.

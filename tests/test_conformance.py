@@ -975,8 +975,9 @@ async def test_step_11_wall_sweep_with_a_market_order(market: Client):
         size=size,
     )
     accepted = await c.answer(ref, start)
-    # Read on to the first grid point after the release, so every book and mark published
-    # up to it is in hand, then settle the preconditions before checking what the order did.
+    # Read on to the first grid point after the release, so every book and mark of an
+    # earlier grid point is in hand (one grid point's own messages come in no fixed order),
+    # then settle the preconditions before checking what the order did.
     await c.until(
         lambda: any(
             m.grid_time > accepted.release_time for m in c.since(c.after(accepted), SessionState)
@@ -1094,10 +1095,20 @@ async def test_step_12_self_trade_prevention(market: Client):
         buy,
     )
     assert cancelled.reason_code == ReasonCodes.SELF_TRADE, reason_code_name(cancelled.reason_code)
-    # Two grid points on, any print for it would have been published.
-    after = c.after(cancelled)
-    state = await c.next_session_state(after)
-    await c.next_session_state(c.after(state))
+    # A print for it would belong to the first grid point at or after the cancellation.
+    # Messages of one grid point come in no fixed order, so read on to a `session_state`
+    # of a later grid point than that one: every message of an earlier grid point is sent
+    # before it.
+    boundary = await c.wait_for(
+        lambda m: isinstance(m, SessionState) and m.grid_time >= cancelled.timestamp,
+        "session_state at the grid point after the cancellation",
+        0,
+    )
+    await c.wait_for(
+        lambda m: isinstance(m, SessionState) and m.grid_time > boundary.grid_time,
+        "session_state at a later grid point",
+        0,
+    )
     assert not [
         p
         for t in c.since(start, Trades)
