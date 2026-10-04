@@ -60,11 +60,11 @@ waiting for the answer, reading the body or resuming. The connection is closed a
 thread ends without waiting for `timeout`, so a cancelled fetch neither holds a
 connection open nor keeps the program from exiting. Only looking up the service's address
 and opening the TCP connection cannot be woken: a thread cancelled during them finishes
-that step and stops without sending the request. `timeout` bounds opening the
-connection, but the lookup is bounded only by your system's resolver. A response that
-arrives just as the fetch is cancelled is closed too. The cancelled task sees only
-`asyncio.CancelledError`. Closing a fetch part way, with `aclose()`, closes its
-connection as well.
+that step and stops without sending the request. `timeout` bounds each attempt to open
+the connection, one for each address the lookup gives, but the lookup is bounded only by
+your system's resolver. A response that arrives just as the fetch is cancelled is closed
+too. The cancelled task sees only `asyncio.CancelledError`. Closing a fetch part way,
+with `aclose()`, closes its connection as well.
 
 Credentials: the token is sent only in the `Authorization` header and is kept to the same
 standard as `qte_sdk.connection`: it never appears in a log record, an exception message,

@@ -48,6 +48,10 @@ DAY = "2026-01-05"
 CHANNELS = ("book", "trades", "mark")
 # The fake service's instrument universe: anything else is unavailable, whatever the date.
 UNIVERSE = frozenset({"TEST", "AAA", "BBB"})
+# The longest the fake service, or a test's gate, holds anything before going on alone: a
+# watchdog only, far past the client's 60 second timeout in the tests that cancel, since
+# every test releases what it holds (see `released`).
+HOLD_LIMIT = 300.0
 
 
 def synthetic_token() -> str:
@@ -143,9 +147,9 @@ class FakeHistory:
         headers = {name.lower(): value for name, value in handler.headers.items()}
         self.requests.append((handler.path, headers))
         if self.answer is not None:
-            self.answer.wait(10)
+            self.answer.wait(HOLD_LIMIT)
         if self.answer_resume is not None and "range" in headers:
-            self.answer_resume.wait(10)
+            self.answer_resume.wait(HOLD_LIMIT)
         if headers.get("authorization") != f"Bearer {self.token}":
             return self.json(handler, 401, "unauthenticated")
         parts = urlsplit(handler.path)
@@ -271,7 +275,7 @@ class FakeHistory:
         if hold is not None:
             handler.wfile.write(body[: hold[0]])
             handler.wfile.flush()
-            hold[1].wait(10)
+            hold[1].wait(HOLD_LIMIT)
             body = body[hold[0] :]
         handler.wfile.write(body[start:] if drop is None else body[:drop])
         handler.wfile.flush()
@@ -1117,13 +1121,23 @@ async def eventually(condition: Any) -> None:
             await asyncio.sleep(0.01)
 
 
+@contextmanager
+def released(*events: threading.Event) -> Iterator[None]:
+    """Set `events` on leaving, however the block ends, so nothing stays held after it."""
+    try:
+        yield
+    finally:
+        for event in events:
+            event.set()
+
+
 async def test_messages_arrive_while_the_rest_is_still_downloading():
     token = synthetic_token()
     path = f"/v1/history/{DAY}/TEST/book"
     release = threading.Event()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
     fake.hold_after[path] = (len(book(1)), release)
-    with serve_history(fake) as url:
+    with serve_history(fake) as url, released(release):
         stream = HistoryClient(url, token).fetch(DAY, "TEST", "book")
         async with asyncio.timeout(5):
             first = await anext(stream)
@@ -1147,8 +1161,9 @@ async def test_closing_a_fetch_part_way_closes_its_connection(closes):
 
 
 # Cancelling. The client makes each request and each read in a worker thread. These tests
-# give it a 60 second timeout and have the fake service hold its answer for up to ten
-# seconds, so a worker that ends within `eventually`'s five was woken by the cancel.
+# give it a 60 second timeout and have the fake service hold its answer until the test
+# has checked the worker, so a worker that ends within `eventually`'s five seconds was
+# woken by the cancel.
 
 
 class RecordingExecutor(ThreadPoolExecutor):
@@ -1209,7 +1224,7 @@ async def test_cancelling_while_the_service_holds_its_answer_ends_the_worker_at_
     calls = worker_calls()
     answer = threading.Event()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)}, answer=answer)
-    with serve_history(fake) as url:
+    with serve_history(fake) as url, released(answer):
         client = HistoryClient(url, token, timeout=60)
         fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
         await eventually(lambda: fake.requests)
@@ -1219,7 +1234,42 @@ async def test_cancelling_while_the_service_holds_its_answer_ends_the_worker_at_
         await workers_end(calls, token)
         assert all_closed(connections)
         assert closes == []  # no response ever arrived
-        answer.set()
+    assert_token_absent(token, shown(caught.value))
+
+
+@dataclass
+class HeldErrorBody(FakeHistory):
+    """Answers an error with the start of its body, then holds the rest until released."""
+
+    sent: threading.Event = field(default_factory=threading.Event)
+    release: threading.Event = field(default_factory=threading.Event)
+
+    def json(self, handler: BaseHTTPRequestHandler, code: int, status: str, *_: Any) -> None:
+        body = json.dumps({"status": status, "message": self.error_message}).encode()
+        handler.send_response(code)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body[:10])
+        handler.wfile.flush()
+        self.sent.set()
+        self.release.wait(HOLD_LIMIT)
+        handler.wfile.write(body[10:])
+
+
+async def test_cancelling_while_an_error_body_is_held_ends_the_worker_at_once(connections):
+    token = synthetic_token()
+    calls = worker_calls()
+    fake = HeldErrorBody(token)
+    with serve_history(fake) as url, released(fake.release):
+        client = HistoryClient(url, token, timeout=60)
+        fetching = asyncio.ensure_future(collect(client.fetch(DAY, "NOPE", "book")))
+        await eventually(fake.sent.is_set)
+        fetching.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await fetching
+        await workers_end(calls, token)
+        assert all_closed(connections)
     assert_token_absent(token, shown(caught.value))
 
 
@@ -1232,7 +1282,7 @@ async def test_cancelling_during_a_download_ends_the_worker_and_closes_its_conne
     release = threading.Event()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
     fake.hold_after[path] = (len(book(1)), release)
-    with serve_history(fake) as url:
+    with serve_history(fake) as url, released(release):
         stream = HistoryClient(url, token, timeout=60).fetch(DAY, "TEST", "book")
         await anext(stream)
         started = len(calls)
@@ -1245,7 +1295,6 @@ async def test_cancelling_during_a_download_ends_the_worker_and_closes_its_conne
         assert closes == [200]
         await workers_end(calls, token)
         assert all_closed(connections)
-        release.set()
     assert_token_absent(token, shown(caught.value))
 
 
@@ -1256,7 +1305,7 @@ async def test_cancelling_while_a_resume_is_held_ends_the_worker_at_once(connect
     resume = threading.Event()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(10)}, drop_after={path: 100})
     fake.answer_resume = resume
-    with serve_history(fake) as url:
+    with serve_history(fake) as url, released(resume):
         client = HistoryClient(url, token, timeout=60)
         fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
         await eventually(lambda: len(fake.requests) == 2)
@@ -1266,7 +1315,6 @@ async def test_cancelling_while_a_resume_is_held_ends_the_worker_at_once(connect
             await fetching
         await workers_end(calls, token)
         assert len(connections) == 2 and all_closed(connections)
-        resume.set()
     assert_token_absent(token, shown(caught.value))
 
 
@@ -1278,12 +1326,12 @@ async def test_a_fetch_cancelled_while_connecting_sends_nothing(monkeypatch, con
 
     def held(*args: Any, **kwargs: Any) -> socket.socket:
         connecting.set()
-        connect.wait(10)
+        connect.wait(HOLD_LIMIT)
         return opening(*args, **kwargs)
 
     monkeypatch.setattr(socket, "create_connection", held)
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
-    with serve_history(fake) as url:
+    with serve_history(fake) as url, released(connect):
         client = HistoryClient(url, token, timeout=60)
         fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
         await eventually(connecting.is_set)
@@ -1299,7 +1347,9 @@ async def test_a_fetch_cancelled_while_connecting_sends_nothing(monkeypatch, con
 
 
 @pytest.fixture
-def held_replies(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
+def held_replies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[threading.Event, threading.Event]]:
     """Holds the worker just after it has read a response's status and headers: the first
     event is set when it gets there, and it goes on once the second is set."""
     arrived, go_on = threading.Event(), threading.Event()
@@ -1308,10 +1358,11 @@ def held_replies(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, thre
     def held(reply: Any, *args: Any) -> None:
         build(reply, *args)
         arrived.set()
-        go_on.wait(10)
+        go_on.wait(HOLD_LIMIT)
 
     monkeypatch.setattr(history._Reply, "__init__", held)
-    return arrived, go_on
+    with released(go_on):
+        yield arrived, go_on
 
 
 async def test_a_response_that_arrives_as_the_fetch_is_cancelled_is_closed(
@@ -1424,25 +1475,67 @@ async def test_https_checks_the_certificate_and_the_name_on_it(certificate, tmp_
     assert len(fake.requests) == 2  # neither request was sent
 
 
-async def test_cancelling_an_https_download_ends_the_worker_at_once(certificate):
+@pytest.mark.parametrize("held", ["answer", "body"])
+async def test_cancelling_an_https_fetch_ends_the_worker_at_once(certificate, held):
     token = synthetic_token()
     calls = worker_calls()
     path = f"/v1/history/{DAY}/TEST/book"
     release = threading.Event()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
-    fake.hold_after[path] = (len(book(1)), release)
-    with serve_history(fake, server_context(certificate)) as url:
+    if held == "answer":
+        fake.answer = release
+    else:
+        fake.hold_after[path] = (len(book(1)), release)
+    with serve_history(fake, server_context(certificate)) as url, released(release):
         client = HistoryClient(url, token, timeout=60, ssl_context=trusting(certificate))
         stream = client.fetch(DAY, "TEST", "book")
-        await anext(stream)
-        started = len(calls)
-        reading = asyncio.ensure_future(anext(stream))
-        await eventually(lambda: len(calls) > started and calls[-1].running())
-        reading.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await reading
+        if held == "answer":
+            fetching = asyncio.ensure_future(anext(stream))
+            await eventually(lambda: fake.requests)
+        else:
+            await anext(stream)
+            started = len(calls)
+            fetching = asyncio.ensure_future(anext(stream))
+            await eventually(lambda: len(calls) > started and calls[-1].running())
+        fetching.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await fetching
         await workers_end(calls, token)
-        release.set()
+    assert_token_absent(token, shown(caught.value))
+
+
+def test_shutting_down_a_tls_connection_never_lets_a_write_out_in_the_clear(
+    certificate, monkeypatch
+):
+    # `ssl.SSLSocket.shutdown` drops the TLS layer before it shuts the connection down. A
+    # worker that sent the request in between would send it, token and all, in the clear.
+    # Here the request is sent at exactly that moment, from inside the shutdown.
+    token = synthetic_token()
+    plain_client, plain_server = socket.socketpair()
+    server = server_context(certificate).wrap_socket(
+        plain_server, server_side=True, do_handshake_on_connect=False
+    )
+    client = trusting(certificate).wrap_socket(
+        plain_client, server_hostname="127.0.0.1", do_handshake_on_connect=False
+    )
+    with server, client:
+        shaking = threading.Thread(target=server.do_handshake)
+        shaking.start()
+        client.do_handshake()
+        shaking.join()
+        request = b"GET / HTTP/1.1\r\nAuthorization: Bearer " + token.encode() + b"\r\n\r\n"
+        shutdown = socket.socket.shutdown
+
+        def sending_meanwhile(sock: socket.socket, how: int) -> None:
+            client.sendall(request)
+            shutdown(sock, how)
+
+        monkeypatch.setattr(socket.socket, "shutdown", sending_meanwhile)
+        history._shut_down(client)
+        monkeypatch.undo()
+        # What reached the other end, read below its TLS layer.
+        wire = socket.socket.recv(server, 65536)
+    assert wire and token.encode() not in wire
 
 
 class HeldHandshake:
@@ -1463,7 +1556,7 @@ class HeldHandshake:
         with conn:
             conn.recv(65536)
             self.hello.set()
-            self.done.wait(10)
+            self.done.wait(HOLD_LIMIT)
 
     def __exit__(self, *exc_info: object) -> None:
         self.done.set()
