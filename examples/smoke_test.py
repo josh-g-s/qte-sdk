@@ -74,8 +74,8 @@ MIN_REST_VIOLATION (or for a message budget) it sends it again after the exchang
 market-data grid point, then after two more, four more and so on, rather than after a
 fixed sleep. --seconds bounds each wait for the exchange, except the wait during a session
 for an instrument's first book, which --book-wait bounds (never less than --seconds). The
-history read is too, except that a slow address lookup, or a history address with several
-unreachable addresses, can hold the exit for longer.
+history read is too, except that a slow address lookup, or a history host name that
+resolves to several addresses, none reachable, can hold the exit for longer.
 
 Stopping. Ctrl+C, SIGTERM (a `kill`, an editor's stop button, a time limit) and SIGHUP (a
 closed terminal) all stop the run the same way: if the test order may rest, the script

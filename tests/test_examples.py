@@ -2894,6 +2894,8 @@ async def test_the_smoke_test_started_with_closed_output_still_exits_with_the_si
                 process.kill()
                 await process.wait()
     assert process.returncode == 128 + 15
+    cancels = [m["payload"] for m in exchange.received if m["type"] == "cancel"]
+    assert [(c["side"], int(c["price"])) for c in cancels] == [("BUY", 99_960_000)] * 2
     assert "mass_cancel" not in exchange.types()
     assert exchange.resting == {}
 
