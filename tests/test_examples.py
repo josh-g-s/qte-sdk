@@ -156,7 +156,11 @@ class FakeExchange:
         session_reject: dict[str, Any] | None = None,
         refill_level: bool = False,
         heartbeat_every: float | None = None,
+        instruments: dict[str, Any] | None = None,
     ) -> None:
+        # With `instruments`, an `instruments` message, a type newer than this SDK, follows
+        # the calendar, as a newer exchange sends it on every authentication.
+        self.instruments = instruments
         # With `heartbeat_every`, a heartbeat is sent that often, in seconds, from the ack
         # on, each carrying a send time that many seconds after the ack's server_time.
         self.heartbeat_every = heartbeat_every
@@ -290,6 +294,8 @@ class FakeExchange:
         await self.send(ws, "session_ack", ack)
         if self.calendar is not None:
             await self.send(ws, "calendar", self.calendar)
+        if self.instruments is not None:
+            await self.send(ws, "instruments", self.instruments)
         ticker: asyncio.Task | None = None
         beats = None if self.heartbeat_every is None else asyncio.create_task(self.beat(ws))
         try:
@@ -2183,6 +2189,21 @@ async def test_the_smoke_test_checks_a_setup_during_a_session_and_sends_no_order
     assert "QTE_HISTORY_URL is not set" in reason
     assert out.splitlines()[-1] == "summary: 7 passed, 0 failed, 4 skipped"
     assert exchange.types() == ["auth", "subscribe", "account_query"]
+
+
+async def test_the_smoke_test_passes_a_message_type_it_does_not_know_and_names_it():
+    exchange = FakeExchange(
+        calendar=CALENDAR, server_time=SERVER_TIME, instruments={"instruments": []}
+    )
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    assert found["calendar"][0] == "PASS"
+    status, reason = found["feed"]
+    assert status == "PASS"
+    assert reason.endswith(
+        "; message types this SDK does not know: instruments (a newer SDK may read them)"
+    )
+    assert not any(status == "FAIL" for status, _ in found.values())
 
 
 async def test_the_smoke_test_reports_the_heartbeats_and_about_how_far_apart_they_came():
