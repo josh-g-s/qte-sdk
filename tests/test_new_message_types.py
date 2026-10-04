@@ -32,12 +32,12 @@ INSTRUMENTS = {
             "kind": "EQUITY",
             "tick_size": "10000",
             "lot_size": "1",
-            "status": "ACTIVE",
+            "status": "INSTRUMENT_TRADING",
             "tradable": True,
         }
     ],
     "option_underlyings": [
-        {"underlying": "SPY", "strike_increment": "1000000", "listed": []},
+        {"underlying": "SPY", "strike_increment": "1000000", "contracts": []},
     ],
 }
 
