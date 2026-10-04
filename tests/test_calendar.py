@@ -194,15 +194,18 @@ async def test_an_interrupted_wait_keeps_read_events_and_iteration_resumes_witho
                     while sess.connection._expected_seq < 5 and not first.done():  # noqa: SLF001
                         await asyncio.sleep(0)
                 clock.advance(10)
-                assert await asyncio.wait_for(first, 5) is None
+                # Waited for without cancelling it, so a wait that will not end fails the
+                # test rather than hanging it.
+                await asyncio.wait({first}, timeout=5)
+                assert first.done() and first.result() is None
                 waiting = asyncio.create_task(sess.wait_for_calendar(timeout=None))
                 # Interrupted while it waits for a frame that has not been sent.
                 async with asyncio.timeout(5):
                     while not sess._reading and not waiting.done():  # noqa: SLF001
                         await asyncio.sleep(0)
                 waiting.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await waiting
+                await asyncio.wait({waiting}, timeout=5)
+                assert waiting.cancelled()
                 assert sess.calendar is None
                 released.set()
                 async with asyncio.timeout(5):
