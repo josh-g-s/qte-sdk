@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 import traceback
 import typing
 from contextlib import aclosing
@@ -269,6 +270,125 @@ async def test_a_dead_link_reconnects_and_resumes():
     assert isinstance(events[5], Disconnected)
     assert isinstance(events[5].error, LivenessTimeout)
     assert exchange.received[3] == resume(1)  # the same term, so the cursor is sent
+
+
+# What a program can see of the heartbeats
+
+
+def sent_heartbeat(sent_at: int) -> str:
+    """A heartbeat whose envelope carries the exchange's send time, as the wire writes it."""
+    return frame("heartbeat", {}, sent_at=str(sent_at))
+
+
+def heartbeats_seen(session: object) -> tuple[int, int | None]:
+    return session.heartbeats_received, session.last_heartbeat_sent_at  # type: ignore[attr-defined]
+
+
+async def test_a_session_that_reads_no_heartbeat_reports_none():
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(ack())
+        await ws.send(book(1))
+        await ws.wait_closed()
+
+    async with serve_local(handler) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            assert kinds(await take(session, 1)) == ["book:None"]
+            assert heartbeats_seen(session) == (0, None)
+            assert session.last_heartbeat_at is None
+
+
+async def test_heartbeats_are_counted_as_they_are_read_with_the_time_of_the_latest():
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(sent_heartbeat(1_000))  # before the ack: it counts too
+        await ws.send(ack())
+        await ws.send(book(1))
+        await ws.send(sent_heartbeat(16_000))
+        await ws.send(sent_heartbeat(31_000))
+        await ws.send(book(2))
+        await ws.send(heartbeat())  # with no sent_at
+        await ws.send(book(3))
+        await ws.wait_closed()
+
+    start = time.monotonic()
+    async with serve_local(handler) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            assert heartbeats_seen(session) == (1, 1_000)
+            first = session.last_heartbeat_at
+            assert first is not None and start <= first <= time.monotonic()
+
+            # Read one event at a time: the heartbeats between the books are read, and
+            # counted, only on the way to the next book.
+            assert kinds(await take(session, 1)) == ["book:None"]
+            assert heartbeats_seen(session) == (1, 1_000)
+            assert session.last_heartbeat_at == first
+
+            assert kinds(await take(session, 1)) == ["book:None"]
+            assert heartbeats_seen(session) == (3, 31_000)
+            latest = session.last_heartbeat_at
+            assert latest is not None and first <= latest <= time.monotonic()
+
+            assert kinds(await take(session, 1)) == ["book:None"]
+            assert heartbeats_seen(session) == (4, None)
+            assert session.connection.heartbeats_received == 4
+
+
+async def test_a_reconnect_starts_the_heartbeat_count_again():
+    calls = 0
+
+    async def handler(ws: ServerConnection) -> None:
+        nonlocal calls
+        calls += 1
+        await ws.recv()  # auth
+        await ws.send(ack())
+        if calls == 1:
+            await ws.recv()  # resume
+            await ws.send(EMPTY)
+            for sent_at in (1_000, 16_000, 31_000):
+                await ws.send(sent_heartbeat(sent_at))
+            await ws.send(book(1))
+            await ws.close()  # a normal close, so every frame above is delivered first
+            return
+        # Read while the new session waits for resume_ack, before its Connected.
+        await ws.send(sent_heartbeat(90_000))
+        await ws.recv()  # resume
+        await ws.send(EMPTY)
+        await ws.send(sent_heartbeat(105_000))
+        await ws.send(book(2))
+        await ws.wait_closed()
+
+    seen: list[tuple[str, int, int | None]] = []
+    stamps: list[float | None] = []
+    async with serve_local(handler) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        assert heartbeats_seen(rs) == (0, None) and rs.last_heartbeat_at is None
+        async with rs, aclosing(rs.events()) as events, asyncio.timeout(5):
+            async for event in events:
+                seen.append((kinds([event])[0], *heartbeats_seen(rs)))
+                stamps.append(rs.last_heartbeat_at)
+                if [kind for kind, *_ in seen].count("book:None") == 2:
+                    break
+    assert seen == [
+        ("Connected", 0, None),
+        ("resume_ack:None", 0, None),
+        ("ResumeComplete", 0, None),
+        ("book:None", 3, 31_000),
+        # The dropped connection's figures stay readable until the next Connected.
+        ("Disconnected", 3, 31_000),
+        ("Retrying", 3, 31_000),
+        # Then they are the new connection's alone.
+        ("Connected", 1, 90_000),
+        ("resume_ack:None", 1, 90_000),
+        ("ResumeComplete", 1, 90_000),
+        ("book:None", 2, 105_000),
+    ]
+    assert stamps[:3] == [None, None, None]
+    first, second, latest = stamps[3], stamps[6], stamps[9]
+    assert first is not None and second is not None and latest is not None
+    assert stamps[3:6] == [first] * 3  # kept through Disconnected and Retrying
+    assert stamps[6:9] == [second] * 3
+    assert first <= second <= latest
 
 
 # Report numbers on one session
