@@ -2012,6 +2012,31 @@ async def test_the_smoke_test_reports_the_heartbeats_and_about_how_far_apart_the
     assert re.fullmatch(r"\d+ heartbeat\(s\), about 0\.2 s apart", reason), reason
 
 
+@pytest.mark.parametrize(
+    ("sent_at", "arrived_after", "expected"),
+    [
+        (None, 3.0, "3 heartbeat(s), about 1 s apart"),  # no send time: from arrival
+        (1_000, 3.0, "3 heartbeat(s), about 1 s apart"),  # a send time before the ack
+        (None, 0.0, "3 heartbeat(s)"),  # no usable span: no spacing named
+    ],
+    ids=["no-send-time", "send-time-unusable", "no-span"],
+)
+def test_the_smoke_tests_heartbeat_spacing_falls_back_to_arrival_times(
+    sent_at: int | None, arrived_after: float, expected: str, capsys: pytest.CaptureFixture[str]
+):
+    smoke = load_example(SMOKE_TEST)
+    opened_at = 100.0
+    session = SimpleNamespace(
+        heartbeats_received=3,
+        last_heartbeat_sent_at=sent_at,
+        last_heartbeat_at=opened_at + arrived_after,
+        info=SimpleNamespace(server_time=5_000),
+    )
+    report = smoke.Report()
+    smoke.check_heartbeat(report, session, opened_at)
+    assert checks(capsys.readouterr().out)["heartbeat"] == ("PASS", expected)
+
+
 async def test_the_smoke_tests_order_rests_inside_the_band_and_is_cancelled():
     # The wall shows 99.95 and 100.05: with a 0.01 tick, the order goes at 99.96.
     price = 99_960_000
