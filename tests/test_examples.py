@@ -2837,6 +2837,47 @@ async def test_the_smoke_test_cancels_its_orders_level_even_when_its_terminal_is
     assert exchange.resting == {}
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGTERM") or not os.path.exists("/bin/sh"), reason="POSIX")
+@pytest.mark.parametrize("closed", [">&-", "2>&-", ">&- 2>&-"], ids=["stdout", "stderr", "both"])
+async def test_the_smoke_test_started_with_closed_output_still_exits_with_the_signals_status(
+    closed: str,
+):
+    # Started with stdout or stderr closed, Python sets sys.stdout or sys.stderr to None.
+    # A SIGTERM must still send the cleanup cancel and end with the signal's status.
+    confirm = asyncio.Event()
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=confirm)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("QTE_", "PYTHONUNBUFFERED"))}
+    async with serve_local(exchange) as url:
+        env.update(QTE_URL=url, QTE_TOKEN=synthetic_token())
+        process = await asyncio.create_subprocess_exec(
+            "/bin/sh",
+            "-c",
+            f'exec "$@" {closed}',
+            "sh",
+            sys.executable,
+            str(EXAMPLES_DIR / SMOKE_TEST),
+            *("--instruments", INSTRUMENT, "--seconds", "3", *TEST_ORDER),
+            env=env,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            preexec_fn=default_signals,
+        )
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                await until(lambda: exchange.types().count("cancel") == 1)
+                process.send_signal(signal.SIGTERM)
+                await until(lambda: exchange.types().count("cancel") == 2)
+                confirm.set()
+                await process.wait()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    assert process.returncode == 128 + 15
+    assert "mass_cancel" not in exchange.types()
+    assert exchange.resting == {}
+
+
 def ignored_sighup() -> None:
     default_signals()
     signal.signal(signal.SIGHUP, signal.SIG_IGN)

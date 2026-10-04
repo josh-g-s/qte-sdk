@@ -73,8 +73,9 @@ script cancels once the exchange reports the order resting, and if a cancel is r
 MIN_REST_VIOLATION (or for a message budget) it sends it again after the exchange's next
 market-data grid point, then after two more, four more and so on, rather than after a
 fixed sleep. --seconds bounds each wait for the exchange, except the wait during a session
-for an instrument's first book, which --book-wait bounds (never less than --seconds). A
-history service that answers very slowly, a little at a time, can hold the exit for longer.
+for an instrument's first book, which --book-wait bounds (never less than --seconds). The
+history read is too, except that a slow address lookup, or a history address with several
+unreachable addresses, can hold the exit for longer.
 
 Stopping. Ctrl+C, SIGTERM (a `kill`, an editor's stop button, a time limit) and SIGHUP (a
 closed terminal) all stop the run the same way: if the test order may rest, the script
@@ -1452,11 +1453,11 @@ async def check_history(
         report.add(SKIP, "history", f"{why}, so no closed session to ask about")
         return
     try:
-        # Never wait for data that is not ready yet: report it instead. The client reads in
-        # a worker thread that a timeout here does not stop, and the run waits for it at
-        # exit, so each of its network reads is given half of --seconds: one that stalls
-        # gives up soon after this script's own --seconds wait does. A service that sends
-        # its answer slowly, a little at a time, can still hold the exit for longer.
+        # Never wait for data that is not ready yet: report it instead. A timeout here
+        # wakes the client's worker thread at once, except while it looks up the address,
+        # which only the system resolver bounds, or opens a TCP connection, which the
+        # client's timeout (half of --seconds) bounds for each address it tries. So a slow
+        # lookup, or several unreachable addresses, can still hold the exit for longer.
         client = HistoryClient(timeout=args.seconds / 2, max_retries=0)
     except (ValueError, MissingToken) as error:
         # Not the error's text, which can repeat part of the address.
@@ -1630,6 +1631,8 @@ def stopped(status: int) -> int:
     terminal or pipe is gone, thrown away: Python would otherwise fail to flush them as it
     exits and end with another status (120)."""
     for stream in (sys.stdout, sys.stderr):
+        if stream is None:  # started with that descriptor closed (`>&-` or `2>&-`)
+            continue
         try:
             stream.flush()
         except (OSError, ValueError):
