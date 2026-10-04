@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.18
+**Version:** 0.19
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -511,6 +511,8 @@ except HistoryPending as error:
 
 - History tells you what the market published, not how your own orders would have filled against it.
 
+To run your strategy's loop over a whole past session, `replay(client, date, instruments)` from `qte_sdk.replay` merges that session's books, trades, marks and market session state into one stream in time order, as the same classes `market_data` yields, so the code that handles live market data runs on it unchanged. It is market data only: it sends no orders and fills nothing. [Developing your algo](developing-your-algo.md) shows how to use it, and the path from there to the exchange.
+
 ## 11. Worked examples
 
 Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the environment or a `.env` in the folder you run it from, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
@@ -521,12 +523,14 @@ Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the envir
 | `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Keeps the latest book with `LatestBooks` and acts on it after each order event and on its own timer, not only when a new book arrives, since the exchange publishes a book only when it changes. Cancels its own orders when `--seconds` are up. |
 | `examples/take_liquidity.py` | Send one market order once the latest book shows the side it trades against, and report its fills. Sends at most one order and never retries. Stops when the order is finished or after `--seconds`. |
 | `examples/out_of_hours.py` | Outside a session: read the calendar, subscribe, and print the closed market's session state and the wait until the next open. Sends no orders, and stops at once if a session is under way. The runnable part of [Using the SDK outside session hours](out-of-hours.md). Stops after `--seconds`. |
+| `examples/replay_book.py` | Replay one instrument's book from a past session with `qte_sdk.replay` and print the best bid and ask each time it changes. It reads the history service, so it needs `QTE_HISTORY_URL` and your token but not `QTE_URL`, and works at any hour for a session that has closed. Sends no orders. Stops after `--max-books`, `--seconds` or the end of the session's data. |
 
 ```sh
 python examples/print_book.py --instrument AAPL --seconds 10
 python examples/quote_both_sides.py --instrument AAPL --strat-id my-strategy --seconds 30
 python examples/take_liquidity.py --instrument AAPL --strat-id my-strategy --side buy --size 1
 python examples/out_of_hours.py --instrument AAPL
+python examples/replay_book.py --date 2026-01-05 --instrument AAPL
 ```
 
-The examples are for learning the SDK, not strategies: they make no attempt to make money.
+The examples are for learning the SDK, not strategies: they make no attempt to make money. When you are ready to build your own, [Developing your algo](developing-your-algo.md) walks through the path from past market data to the exchange.

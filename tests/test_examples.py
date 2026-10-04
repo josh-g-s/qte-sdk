@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
+import test_history
 from fake_exchange import CONTRACT_VERSION, serve_local
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
@@ -40,8 +41,12 @@ from qte_sdk.units import to_timedelta
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
 EXAMPLES = sorted(EXAMPLES_DIR.glob("*.py"))
+# The examples that read only the history service, and so need no exchange address.
+HISTORY_ONLY = {"replay_book.py"}
+SESSION_EXAMPLES = [path for path in EXAMPLES if path.name not in HISTORY_ONLY]
 QUICKSTART = EXAMPLES_DIR.parent / "docs" / "quickstart.md"
 OUT_OF_HOURS = EXAMPLES_DIR.parent / "docs" / "out-of-hours.md"
+DEVELOPING = EXAMPLES_DIR.parent / "docs" / "developing-your-algo.md"
 SDK_INSTALL_URL = "git+https://github.com/josh-g-s/qte-sdk"
 INSTRUMENT = "TEST"
 BID, ASK = 99_950_000, 100_050_000
@@ -67,7 +72,9 @@ def test_each_example_compiles_and_imports_without_running(path: Path, tmp_path:
     assert module.__doc__, "each example opens with a docstring saying what it does"
 
 
-@pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART, OUT_OF_HOURS], ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "path", [*EXAMPLES, QUICKSTART, OUT_OF_HOURS, DEVELOPING], ids=lambda p: p.name
+)
 def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path):
     for url in re.findall(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\")]+", path.read_text()):
         if url == SDK_INSTALL_URL:
@@ -78,7 +85,9 @@ def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path)
         assert parts.username is None and parts.password is None, url
 
 
-@pytest.mark.parametrize("path", [*EXAMPLES, QUICKSTART, OUT_OF_HOURS], ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "path", [*EXAMPLES, QUICKSTART, OUT_OF_HOURS, DEVELOPING], ids=lambda p: p.name
+)
 def test_no_example_or_quickstart_reaches_past_the_session_to_its_connection(path: Path):
     # A session sends and is iterated itself; its connection is an internal layer.
     assert re.search(r"\bsession\.connection\b", path.read_text()) is None
@@ -1211,19 +1220,127 @@ async def test_take_liquidity_prints_a_reject_and_exits_cleanly():
     assert exchange.types().count("new") == 1
 
 
-@pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
 async def test_each_example_refuses_to_start_without_an_exchange_url(path: Path):
     code, out, err = await run_example(path.name, None, synthetic_token(), QTE_STRAT_ID="x")
     assert code == 2
     assert "QTE_URL" in err
 
 
-@pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
 async def test_each_example_refuses_to_start_without_a_token(path: Path):
     async with serve_local(FakeExchange()) as url:
         code, out, err = await run_example(path.name, url, None, QTE_STRAT_ID="x")
     assert code == 2
     assert "QTE_TOKEN" in err
+
+
+def history_session(token: str) -> test_history.FakeHistory:
+    """A closed session of TEST in the fake history service: three books, the last with a
+    participant's bid above the wall's, and the market session state at each grid point."""
+    day = test_history.DAY
+    student_bid = test_history.book(3).replace(
+        b'"student_bid_levels":[]', b'"student_bid_levels":[{"price":"99990000","size":"5"}]'
+    )
+    books = test_history.book(1) + test_history.book(2, bid="99960000") + student_bid
+    states = b"".join(
+        test_history.line(
+            "session_state",
+            n,
+            {"state": "OPEN", "session_date": day, "grid_time": str(1000 * n)},
+        )
+        for n in (1, 2, 3)
+    )
+    objects = {(day, INSTRUMENT, "book"): books, (day, None, "session_state"): states}
+    return test_history.FakeHistory(token, objects)
+
+
+async def test_replay_book_prints_the_best_bid_and_ask_as_the_book_changes():
+    token = synthetic_token()
+    fake = history_session(token)
+    with test_history.serve_history(fake) as history_url:
+        code, out, err = await run_example(
+            "replay_book.py",
+            None,
+            token,
+            *("--date", test_history.DAY, "--instrument", INSTRUMENT),
+            QTE_HISTORY_URL=history_url,
+        )
+    assert code == 0, err
+    assert out.splitlines() == [
+        f"replaying TEST on {test_history.DAY} (times in UTC)",
+        "00:00:01.000  TEST  bid 99.950000  ask 100.050000",
+        "00:00:01.000  market session OPEN",
+        "00:00:02.000  TEST  bid 99.960000  ask 100.050000",
+        # The participant's bid at 99.99 is better than the wall's.
+        "00:00:03.000  TEST  bid 99.990000  ask 100.050000",
+        "end of the session's data (3 books)",
+    ]
+    assert sorted(path for path, _ in fake.requests) == [
+        f"/v1/history/{test_history.DAY}/TEST/book",
+        f"/v1/history/{test_history.DAY}/session_state",
+    ]
+    assert token not in out + err
+
+
+async def test_replay_book_stops_after_its_book_count_at_any_speed():
+    token = synthetic_token()
+    with test_history.serve_history(history_session(token)) as history_url:
+        code, out, err = await run_example(
+            "replay_book.py",
+            None,
+            token,
+            *("--date", test_history.DAY, "--instrument", INSTRUMENT),
+            *("--max-books", "2", "--speed", "100"),
+            QTE_HISTORY_URL=history_url,
+        )
+    assert code == 0, err
+    assert out.count("  TEST  bid ") == 2
+    assert out.splitlines()[-1] == "stopped after 2 books"
+
+
+async def test_replay_book_says_when_the_service_has_no_such_data():
+    token = synthetic_token()
+    with test_history.serve_history(history_session(token)) as history_url:
+        code, out, err = await run_example(
+            "replay_book.py",
+            None,
+            token,
+            *("--date", test_history.DAY, "--instrument", "NOPE"),
+            QTE_HISTORY_URL=history_url,
+        )
+    assert code == 1
+    assert "no such data" in err
+    assert token not in out + err
+
+
+async def test_replay_book_refuses_to_start_without_a_history_url():
+    code, out, err = await run_example(
+        "replay_book.py", None, synthetic_token(), "--date", test_history.DAY
+    )
+    assert code == 2
+    assert "QTE_HISTORY_URL" in err
+
+
+async def test_replay_book_refuses_to_start_without_a_token():
+    code, out, err = await run_example(
+        "replay_book.py",
+        None,
+        None,
+        "--date",
+        test_history.DAY,
+        QTE_HISTORY_URL="http://127.0.0.1:9",
+    )
+    assert code == 2
+    assert "QTE_TOKEN" in err
+
+
+@pytest.mark.parametrize("option", [("--speed", "0"), ("--date", "5 January")])
+async def test_replay_book_refuses_an_option_it_cannot_use(option: tuple[str, str]):
+    arguments = ("--date", test_history.DAY, *option)
+    code, out, err = await run_example("replay_book.py", None, synthetic_token(), *arguments)
+    assert code == 2
+    assert option[0] in err
 
 
 @pytest.mark.parametrize("inside", ["0", "-0.01"])

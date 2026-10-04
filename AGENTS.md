@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.6
+**Version:** 1.7
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -53,6 +53,8 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 ## Past market data
 
 The history service (`qte_sdk.history.HistoryClient`) serves the market data that closed sessions published, message for message. It shows what the market published, not how your own orders would have filled against it. The SDK has no fill simulator.
+
+`qte_sdk.replay.replay` merges a closed session's books, trades, marks and session state into one stream in time order, as the classes `market_data` yields, so the same market-data handling runs offline. It sends no orders and fills nothing. Take time from the messages, never the machine's clock, and do not rely on the order of messages within one grid point. [Developing your algo](docs/developing-your-algo.md) walks through the path from history to the exchange.
 
 ## Times
 

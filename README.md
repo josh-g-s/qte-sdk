@@ -77,7 +77,8 @@ Outside market hours the exchange still accepts the connection and the subscript
 |---|---|
 | [Quickstart](docs/quickstart.md) | Step by step: connect, read the calendar and market data, place and cancel an order, read order events, what each reject means, and fetch past market data |
 | [Outside session hours](docs/out-of-hours.md) | What works when no session is running, with a runnable walk-through: the calendar, the closed market, an order's reject, past market data |
-| [Worked examples](examples/) | Runnable programs: print the book, quote both sides and manage the quotes, take liquidity with a market order, see the closed market outside a session |
+| [Developing your algo](docs/developing-your-algo.md) | From an idea to the exchange: explore past market data, run your strategy's loop on a replay of a past session, test its order logic, check your setup, then trade during a session |
+| [Worked examples](examples/) | Runnable programs: print the book, quote both sides and manage the quotes, take liquidity with a market order, see the closed market outside a session, replay a past session's book |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
 The main modules, each documented in its docstrings:
@@ -89,6 +90,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.books`](qte_sdk/books.py) | `LatestBooks`: the latest book of each instrument, since a book is sent only when it changes |
 | [`qte_sdk.calendar`](qte_sdk/calendar.py) | `next_open`, `next_close`: when the market next opens and closes, from the exchange's calendar |
 | [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
+| [`qte_sdk.replay`](qte_sdk/replay.py) | `replay`: a past session's market data in one stream, in time order, to run your loop on; market data only, with no orders or fills |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
 | [`qte_sdk.account`](qte_sdk/account.py) | `send_account_query`, `is_account_state`: your team's positions, cash, equity and limit use; `AccountReports`: count each fill once against a reply |
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
@@ -105,7 +107,7 @@ The main modules, each documented in its docstrings:
 
 ## Status
 
-Working today: session authentication, the market calendar, market data, order entry and order events, the resting-order view, reconnect with heartbeats and session resume, past market data from the history service, a query for your team's positions, cash and limit use (it needs an exchange that serves the query), the quickstart and the worked examples. Planned: the closed market's official close price, which the exchange does not send yet. Progress is tracked in [the issues](https://github.com/josh-g-s/qte-sdk/issues).
+Working today: session authentication, the market calendar, market data, order entry and order events, the resting-order view, reconnect with heartbeats and session resume, past market data from the history service and its replay through your loop, a query for your team's positions, cash and limit use (it needs an exchange that serves the query), the quickstart and the worked examples. Planned: the closed market's official close price, which the exchange does not send yet. Progress is tracked in [the issues](https://github.com/josh-g-s/qte-sdk/issues).
 
 ## Licence
 
