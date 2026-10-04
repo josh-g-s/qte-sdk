@@ -23,9 +23,10 @@ An `account_state` carries:
 
 - `request_ref`, echoed from the query;
 - `summary`, the team's equity, cash, daily profit and loss and limit use, as an
-  `AccountSummary`. It is absent for an Execution desk and for the house, and for now
-  for every team: the exchange does not send it yet. Check `state.HasField("summary")`
-  before reading it, and treat its absence as unknown, never as zero. The exchange never sends an
+  `AccountSummary`. The exchange sends it from 6 October 2026 to every team except an
+  Execution desk and the house; an exchange from before then omits it for every team.
+  Check `state.HasField("summary")` before reading it, and treat its absence as
+  unknown, never as zero. The exchange never sends an
   account summary unprompted: it is sent only inside this reply;
 - `positions`, one `PositionValue` (instrument, signed quantity, price) for every
   instrument the team holds a nonzero position in, in ascending order of instrument, and
