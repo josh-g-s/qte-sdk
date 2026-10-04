@@ -16,11 +16,11 @@ Windows that needs the tzdata package (`pip install tzdata`); without it the exa
 prints UTC only. New York time is only for reading: the trading hours come from the
 calendar, and "now" is the exchange's clock, never this computer's.
 
-Outside a session the state is CLOSED. The contract also provides each instrument's
-official close after it, but the exchange does not send that yet, so the example says so
-when none arrives: that is expected, not a fault. During a session the state is OPEN and
-the example simply stops, since this is not a way to watch a live market (use
-print_book.py for that).
+Outside a session the state is CLOSED, and the reply carries each instrument's official
+close if it has one. The example prints the ones that arrive, and says so when none does,
+which is expected for an instrument with no official close yet. During a session the
+state is OPEN and the example simply stops, since this is not a way to watch a live
+market (use print_book.py for that).
 """
 
 import argparse
@@ -196,7 +196,7 @@ async def run(url: str, args: argparse.Namespace) -> int:
             if not seen_closed:
                 print("no market session state arrived")
             elif closes == 0:
-                print("no official close: the exchange does not send it yet, as expected")
+                print("no official close for this instrument")
             print(f"stopped after {args.seconds:g} seconds")
             return 0
     print("the exchange closed the connection")

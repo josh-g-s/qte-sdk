@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.21
+**Version:** 0.22
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -129,7 +129,7 @@ Before you write any code, run the smoke test from a clone of this repository (s
 python examples/smoke_test.py --instruments AAPL MSFT
 ```
 
-It reports where the SDK finds the token and the address, without showing either; connects and names your team; reads the calendar; subscribes to each instrument and watches the market for `--seconds` (5 by default), and during a session waits up to `--book-wait` (60 by default, never less than `--seconds`) for the first book of an instrument that has none yet, since one with no valid quote has none; asks for your team's account; says whether the exchange's heartbeats arrived, and about how far apart (a `SKIP` if none came, since the interval may be longer than the run); and, when `QTE_HISTORY_URL` is set, reads the start of the last closed session's books from the history service. Each check prints `PASS`, `FAIL` or `SKIP` with a one-line reason, then a summary, and the exit status is not 0 if any check failed. A `SKIP` is something it could not check, or that the exchange does not offer yet, such as the official close or the account query; the reason says which. Its output never shows your token or any account figure (only a fill of the test order is named, with its quantity and price), so you can send it to the course team when you ask for help.
+It reports where the SDK finds the token and the address, without showing either; connects and names your team; reads the calendar; subscribes to each instrument and watches the market for `--seconds` (5 by default), and during a session waits up to `--book-wait` (60 by default, never less than `--seconds`) for the first book of an instrument that has none yet, since one with no valid quote has none; asks for your team's account; says whether the exchange's heartbeats arrived, and about how far apart (a `SKIP` if none came, since the interval may be longer than the run); and, when `QTE_HISTORY_URL` is set, reads the start of the last closed session's books from the history service. Each check prints `PASS`, `FAIL` or `SKIP` with a one-line reason, then a summary, and the exit status is not 0 if any check failed. A `SKIP` is something it could not check, such as an official close for an instrument that has none yet, or an account query the exchange does not answer; the reason says which. Its output never shows your token or any account figure (only a fill of the test order is named, with its quantity and price), so you can send it to the course team when you ask for help.
 
 It sends no orders unless you add `--place-test-order --strat-id <your strategy> --tick <tick>`, giving the instruments' tick in dollars (for example `0.01`), which the exchange does not send. Then, only while the market is open and no outage is in force, it places one buy of one share one tick above the wall's best bid, at least three ticks below every ask, waits for the exchange to report it resting, cancels exactly that price level and confirms the cancel; it never sends a mass cancel. It is a real order and can fill, since there is no post-only order: a fill fails the check, and a line on stderr names the position your team then holds. In a scored session it places nothing unless you also add `--allow-scored`. Use a strategy nothing else is trading during the test: if something else acts on its buy orders on the instrument meanwhile, the test order can no longer be told apart and the check fails. If it cannot confirm the cancel, it fails and names the level where the order may still rest; if you interrupt it while the order may rest (Ctrl+C, or a SIGTERM or SIGHUP such as a closed terminal), it first tries to cancel that level. A SIGKILL cannot be caught, so after one, check your team's orders yourself.
 
@@ -240,7 +240,7 @@ A `Book` is the state of one instrument at the end of an interval, not a stream 
 
 That one `SessionState` can also name the next scheduled session in three optional fields: `next_session_date`, `next_open_time` and `next_close_time`. They are set together, only on this out-of-hours reply, never on the `SessionState` of a running session, and are absent when the term has no later session; an exchange from before these fields does not send them either, so write code that works without them. `until_next_open(state, session.info.server_time)` from `qte_sdk.market_data` gives the time until that open in milliseconds (`to_timedelta` turns it into a `timedelta`), or `None` when the fields are absent. `server_time` is the time your session was acknowledged; pass a later exchange timestamp instead if you have one. They are a convenience: the calendar is still where to read the full schedule.
 
-The contract also provides an `OfficialClose` for each subscribed instrument that has one, after the `SessionState`, but **the exchange does not send it yet**. Until it does, the `CLOSED` state is all you receive, and that is expected, not a fault. When it is sent, `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. Write your code so it works with or without one. [Using the SDK outside session hours](out-of-hours.md) walks through a whole run when no session is open.
+The reply also carries an `OfficialClose` for each subscribed instrument that has one. Do not rely on its order relative to the `SessionState`, and write your code so it works without one: an instrument with no official close yet gets none. `OfficialClose.value` is that instrument's last official close, the time-weighted average of the mark over the final five minutes of its session, in micro-dollars like every price; `frozen` is set if any of those marks was frozen. [Using the SDK outside session hours](out-of-hours.md) walks through a whole run when no session is open.
 
 No `Book`, `Trades` or `Mark` arrives until a session opens, so a loop that waits for a book waits until then.
 
@@ -529,6 +529,8 @@ except HistoryPending as error:
 
 - History tells you what the market published, not how your own orders would have filled against it.
 
+To run your strategy's loop over a whole past session, `replay(client, date, instruments)` from `qte_sdk.replay` merges that session's books, trades, marks and market session state into one stream, as the same classes `market_data` yields, so the code that handles live market data runs on it unchanged. Grid points come in order, as on a live connection; the messages of one grid point come in no promised order, live or replayed, so treat them as a set. It is market data only: it sends no orders and fills nothing. [Developing your algo](developing-your-algo.md) shows how to use it, and the path from there to the exchange.
+
 ## 11. Worked examples
 
 Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the environment or a `.env` in the folder you run it from, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` (`--instruments` for the smoke test) or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
@@ -540,6 +542,7 @@ Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the envir
 | `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Keeps the latest book with `LatestBooks` and acts on it after each order event and on its own timer, not only when a new book arrives, since the exchange publishes a book only when it changes. Cancels its own orders when `--seconds` are up. |
 | `examples/take_liquidity.py` | Send one market order once the latest book shows the side it trades against, and report its fills. Sends at most one order and never retries. Stops when the order is finished or after `--seconds`. |
 | `examples/out_of_hours.py` | Outside a session: read the calendar, subscribe, and print the closed market's session state and the wait until the next open. Sends no orders, and stops at once if a session is under way. The runnable part of [Using the SDK outside session hours](out-of-hours.md). Stops after `--seconds`. |
+| `examples/replay_book.py` | Replay one instrument's book from a past session with `qte_sdk.replay` and print the best bid and ask each time it changes. It reads the history service, so it needs `QTE_HISTORY_URL` and your token but not `QTE_URL`, and works at any hour for a session that has closed. Sends no orders. Stops after `--max-books`, `--seconds` or the end of the session's data. |
 
 ```sh
 python examples/smoke_test.py --instruments AAPL MSFT
@@ -547,6 +550,7 @@ python examples/print_book.py --instrument AAPL --seconds 10
 python examples/quote_both_sides.py --instrument AAPL --strat-id my-strategy --seconds 30
 python examples/take_liquidity.py --instrument AAPL --strat-id my-strategy --side buy --size 1
 python examples/out_of_hours.py --instrument AAPL
+python examples/replay_book.py --date 2026-01-05 --instrument AAPL
 ```
 
-The examples are for learning the SDK, not strategies: they make no attempt to make money.
+The examples are for learning the SDK, not strategies: they make no attempt to make money. When you are ready to build your own, [Developing your algo](developing-your-algo.md) walks through the path from past market data to the exchange.

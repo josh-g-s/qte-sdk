@@ -20,8 +20,8 @@ reason, then a summary:
     market:<name>    during a session, the instrument's best bid and ask and what arrived.
                      One with no valid quote yet has no book, so the script waits up to
                      --book-wait for its first, and a SKIP says if none came. Outside a
-                     session, its official close, which the exchange may not send yet (a
-                     SKIP). An instrument the exchange does not know is a FAIL.
+                     session, its official close (a SKIP for an instrument with none yet).
+                     An instrument the exchange does not know is a FAIL.
     account          asks for your team's account. No reply, or a refusal as a message
                      type the exchange does not know, is a SKIP: it does not serve the
                      query yet. Any other refusal is a FAIL. No figures are printed.
@@ -958,7 +958,7 @@ def check_market(
         elif is_closed:
             close = watcher.closes.get(instrument)
             if close is None:
-                report.add(SKIP, name, "no official close: not sent by this exchange")
+                report.add(SKIP, name, "no official close for this instrument")
             else:
                 frozen = " (frozen)" if close.frozen else ""
                 text = f"official close {to_decimal(close.value)}{frozen}"
