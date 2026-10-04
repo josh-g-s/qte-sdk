@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.24
+**Version:** 0.25
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -257,6 +257,20 @@ to_micros("199.97")  # 199970000
 to_decimal(199_970_000)  # Decimal('199.970000')
 ```
 
+An option contract's instrument id is its OCC symbol, without spaces: the underlying, the expiry as YYMMDD, `C` or `P`, and the strike in thousandths of a dollar as eight digits. Build and read one with `qte_sdk.options`, which keeps the strike in micro-dollars like every other price:
+
+```python
+from datetime import date
+
+from qte_sdk.options import CALL, is_option_symbol, option_symbol, parse_option_symbol
+
+option_symbol("SPY", date(2024, 1, 19), CALL, to_micros("470"))  # 'SPY240119C00470000'
+parse_option_symbol("SPY240119C00470000").strike  # 470000000
+is_option_symbol("XOM")  # False: an equity
+```
+
+Option chains, Greeks, option books and option orders are not in the SDK yet.
+
 ## 6. Place and cancel an order
 
 There is **no order ID** on the wire. Your team's orders are addressed by **instrument, side and price**, and your team holds **at most one resting order per instrument, side and price**, across all of its strategies. So to cancel an order you name its level, not an ID. A second `new` at a level where your team already rests is rejected (`DUPLICATE_ORDER_AT_LEVEL`); to change its size, send an amend.
@@ -396,7 +410,7 @@ except TimeoutError:
     print("no answer within 10 seconds")
 ```
 
-The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session, at each instrument's latest official close, a break day's close included, or at 0 for an instrument that has never had an official close. An option is named by its 21-character OCC option symbol. `session_date` is a trading date. Inside a session it is the current session's date. Outside a session it is the date of the official closes the values use, those of the latest session or break day: on a break day, once that day's close has run, it is that day's date. That holds between terms too, when positions carried over from the term before are returned. Outside a session `daily_pnl` is the profit and loss of the session just finished. `session_date` is always there after the competition's first session, even if no instrument got an official close in it, and is absent only before that first session, when you hold nothing. `summary` is absent for an Execution desk and the house, and `cash` is absent only for an Execution desk, so check `HasField("summary")` and `HasField("cash")` first. A refused query is a `reject` with `request_type` `ACCOUNT_QUERY` that echoes your `request_ref` whenever the exchange could read it. Read the `qte_sdk.account` docstring for every field.
+The reply, `account_state`, echoes your `request_ref` and arrives on the same stream as your order events, so read it in your one loop. A program that reads only `market_data(session)` never sees it. Positions are your team's, not one strategy's: every instrument you hold a nonzero quantity of, positive for long and negative for short, in order of instrument. `valuation_basis` says what the prices and the summary are valued at: `LIVE_MARK` inside a session, at each instrument's mark, or at its last official close until it has a valid mark in that session; `LAST_OFFICIAL_CLOSE` outside a session, at each instrument's latest official close, a break day's close included, or at 0 for an instrument that has never had an official close. An option is named by its OCC option symbol without spaces, such as `SPY240119C00470000` (see step 5). `session_date` is a trading date. Inside a session it is the current session's date. Outside a session it is the date of the official closes the values use, those of the latest session or break day: on a break day, once that day's close has run, it is that day's date. That holds between terms too, when positions carried over from the term before are returned. Outside a session `daily_pnl` is the profit and loss of the session just finished. `session_date` is always there after the competition's first session, even if no instrument got an official close in it, and is absent only before that first session, when you hold nothing. `summary` is absent for an Execution desk and the house, and `cash` is absent only for an Execution desk, so check `HasField("summary")` and `HasField("cash")` first. A refused query is a `reject` with `request_type` `ACCOUNT_QUERY` that echoes your `request_ref` whenever the exchange could read it. Read the `qte_sdk.account` docstring for every field.
 
 The reply also carries `as_of_report_seq`: the newest of your private order reports it already reflects. Each private report (`accepted`, a delayed `reject`, `execution`, `order_cancelled`, `order_state` and `risk_notice`) carries a report number, `event.report_seq` (None on other messages). The cut is for your account only: an `execution` or `risk_notice` at or below `as_of_report_seq` is already in the reply's cash, positions and summary, while `accepted`, `reject`, `order_cancelled` and `order_state` still apply to your view of your resting orders whatever their `report_seq`. `as_of_report_seq` is absent when your team has had no private report this term, and then every report applies.
 

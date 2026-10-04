@@ -30,7 +30,8 @@ An `account_state` carries:
   instrument the team holds a nonzero position in, in ascending order of instrument, and
   empty when it holds no nonzero net position, whether or not it has traded. A position
   is the team's, not one strategy's. An equity is named by its symbol and an option
-  contract by its 21-character OCC option symbol;
+  contract by its OCC option symbol without spaces, such as `SPY240119C00470000` (see
+  `qte_sdk.options`);
 - `valuation_basis`, which says what `summary` and every position's `price` are valued
   at: `LIVE_MARK` inside a session, `LAST_OFFICIAL_CLOSE` outside one. Under `LIVE_MARK`
   an instrument with no valid mark yet in the session is still valued at its last
