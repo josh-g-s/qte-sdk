@@ -384,8 +384,11 @@ async def test_a_reconnect_starts_the_heartbeat_count_again():
         ("book:None", 2, 105_000),
     ]
     assert stamps[:3] == [None, None, None]
-    times = [stamp for stamp in stamps if stamp is not None]
-    assert times == sorted(times)
+    first, second, latest = stamps[3], stamps[6], stamps[9]
+    assert first is not None and second is not None and latest is not None
+    assert stamps[3:6] == [first] * 3  # kept through Disconnected and Retrying
+    assert stamps[6:9] == [second] * 3
+    assert first <= second <= latest
 
 
 # Report numbers on one session
