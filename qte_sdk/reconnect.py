@@ -41,12 +41,9 @@ waiting for the next calendar: the next session asks from 0 and gets a snapshot,
 `resume=False`, counts the new term's reports from the first it reads, as a first session
 does. The same holds when the exchange closes an attempt to connect with 4001 before it is
 up, or while a session that failed or was cancelled is being closed, a cancellation
-included. The close is retried like any other drop. One exception: if the exchange rejects
-a new session while it waits for the calendar, just before closing it with 4001, the
-rejection can end the session before the close is seen, and then `last_report_seq` keeps
-the old number. The rejection is not retried, so that number is never sent. A client that
-was not connected when the term changed is not sent the close; for it, the check of the
-new session's calendar, described here and below, is what forgets the number.
+included. The close is retried like any other drop. A client that was not connected when
+the term changed is not sent the close; for it, the check of the new session's calendar,
+described here and below, is what forgets the number.
 
 With `resume=False` the report number is carried over too, so that a report missed while
 disconnected is noticed (see below). It is forgotten when the new session's calendar names
@@ -167,11 +164,11 @@ from qte_sdk.session import (
     SessionInfo,
     SessionNotAcknowledged,
     _finish_closing,
+    _open_session,
     _Reports,
     _Secret,
     _wait_out,
     _without_token,
-    open_session,
     resolve_token,
     resolve_url,
 )
@@ -620,11 +617,11 @@ class ReconnectingSession:
         self._term_change_seen = False
         try:
             opened = await self._unless_closed(
-                open_session(
+                _open_session(
                     self.url,
-                    self._secret.value,
+                    self._secret,
                     ack_timeout=self._ack_timeout,
-                    _on_close=self._note_close,
+                    on_close=self._note_close,
                     **self._connection_options,
                 )
             )
@@ -787,14 +784,14 @@ class ReconnectingSession:
                 await self._close_session(result)
 
     def _note_close(self, code: int) -> None:
-        """Told by `open_session` the close code the exchange sent, even when the opening
+        """Told by `_open_session` the close code the exchange sent, even when the opening
         was cancelled."""
         if code == TERM_CHANGE_CLOSE_CODE:
             self._term_change_seen = True
 
     def _closed_for_term_change(self, session: Session | None) -> bool:
         """Whether the exchange closed this attempt's connection for a term change, as
-        `open_session` reported or as the open session's connection received it."""
+        `_open_session` reported or as the open session's connection received it."""
         if self._term_change_seen:
             return True
         return session is not None and (

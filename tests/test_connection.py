@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from fake_exchange import LoopClock, exchange, frame, serve_local, silent_server
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
@@ -473,6 +474,33 @@ def assert_withheld(error: BaseException, token: str) -> None:
             shown.append(close.reason)
     assert error.__cause__ is None and error.__context__ is None
     assert_no_token(shown, token)
+
+
+async def test_a_connection_factory_passed_in_is_still_used():
+    made: list[ClientConnection] = []
+
+    class Recorded(ClientConnection):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    async with exchange([]) as url:
+        async with Connection(url, create_connection=Recorded) as conn:
+            assert [event async for event in conn] == []
+            assert len(made) == 1 and conn._open_ws() is made[0]
+            assert conn._close_code_received() == 1000
+
+
+def test_the_close_code_received_falls_back_to_the_public_one():
+    from types import SimpleNamespace
+
+    conn = Connection("ws://127.0.0.1:1")
+    assert conn._close_code_received() is None
+    # A websockets whose protocol has no close_rcvd: the public close_code serves.
+    conn._ws = SimpleNamespace(protocol=SimpleNamespace(), close_code=4001)  # type: ignore[assignment]
+    assert conn._close_code_received() == 4001
+    conn._ws = SimpleNamespace(close_code=None)  # type: ignore[assignment]
+    assert conn._close_code_received() is None
 
 
 async def test_a_close_reason_carrying_the_token_is_withheld_from_the_error():

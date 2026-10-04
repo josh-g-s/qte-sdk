@@ -765,7 +765,6 @@ async def open_session(
     token: str | None = None,
     *,
     ack_timeout: float | None = DEFAULT_ACK_TIMEOUT,
-    _on_close: Callable[[int], None] | None = None,
     **connection_options: Any,
 ) -> Session:
     """Connect to `url`, authenticate, and wait for the exchange to acknowledge the session.
@@ -792,8 +791,23 @@ async def open_session(
     """
     secret = _Secret(resolve_token(token))
     del token
-    url = resolve_url(url)
+    return await _open_session(
+        resolve_url(url), secret, ack_timeout=ack_timeout, **connection_options
+    )
 
+
+async def _open_session(
+    url: str,
+    secret: "_Secret",
+    *,
+    ack_timeout: float | None,
+    on_close: Callable[[int], None] | None = None,
+    **connection_options: Any,
+) -> Session:
+    """`open_session`, for a resolved address and token. `on_close`, if given, is called
+    with the close code the exchange sent, if it closed the connection before the session
+    was acknowledged, even when a cancellation then replaces the error; `ReconnectingSession`
+    uses it."""
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)
     interrupted = False
@@ -809,8 +823,8 @@ async def open_session(
         # even when a cancellation replaces the error, which is never chained (it may
         # repeat the token). A code is a number, so it cannot.
         close_code = conn._close_code_received()
-        if _on_close is not None and close_code is not None:
-            _on_close(close_code)
+        if on_close is not None and close_code is not None:
+            on_close(close_code)
         if isinstance(error, TimeoutError) and deadline.expired():
             # A fresh error, not the one asyncio chained to the cancelled step.
             safe = TimeoutError(f"the session was not acknowledged within {ack_timeout} s")

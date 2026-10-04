@@ -12,6 +12,7 @@ from fake_exchange import LoopClock, frame, serve_local, wait_until
 from test_calendar import CALENDAR, CALENDAR_PAYLOAD, calendar_frame
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
@@ -1903,7 +1904,7 @@ async def test_a_term_change_close_on_a_session_cancelled_as_it_opens_forgets_th
 
     consumer: asyncio.Task[None] | None = None
     cancelled = asyncio.Event()
-    real_open = qte_sdk.reconnect.open_session
+    real_open = qte_sdk.reconnect._open_session
 
     async def open_then_cancelled(*args: typing.Any, **kwargs: typing.Any) -> object:
         opened = await real_open(*args, **kwargs)
@@ -1916,7 +1917,7 @@ async def test_a_term_change_close_on_a_session_cancelled_as_it_opens_forgets_th
             cancelled.set()
         return opened
 
-    monkeypatch.setattr(qte_sdk.reconnect, "open_session", open_then_cancelled)
+    monkeypatch.setattr(qte_sdk.reconnect, "_open_session", open_then_cancelled)
     cursors: list[int | None] = []
 
     async with serve_local(exchange) as url:
@@ -2008,6 +2009,198 @@ async def test_a_term_change_close_that_arrives_while_a_failed_attempt_closes_co
     assert failed.error.close_code is None  # the close came only after the failure
     resumes = [e for e in scripted.received if e["type"] == "resume"]
     assert resumes == [resume(0), resume(7), resume(0)]
+
+
+ACK_TIMEOUT = 2.0
+
+
+@pytest.mark.parametrize("resume_on", [True, False])
+@pytest.mark.parametrize("interrupted_by", ["cancel", "timeout"])
+async def test_a_term_change_close_read_during_the_opening_handshake_counts(
+    interrupted_by: str, resume_on: bool, monkeypatch: pytest.MonkeyPatch
+):
+    # The first session counts to 7 and drops. On the next connection the exchange closes
+    # with 4001 straight after the upgrade, and websockets reads that close before
+    # Connection.open has returned. The opening is then cancelled, or runs out of time.
+    # The third session's calendar names the same term as the first, so only that close
+    # can make the cursor go.
+    clock = LoopClock(monkeypatch)
+    first: dict = {"term": TERM, "after": [order_state(6), order_state(7)], "drop": True}
+    third: dict = {"term": TERM, "after": [order_state(1), execution(2, 90)]}
+    if resume_on:
+        first["answer"] = [resume_ack(False, 5, 0)]
+        third["answer"] = [EMPTY]
+    scripted = Scripted(first, third)
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 2:
+            await ws.close(TERM_CHANGE_CLOSE_CODE, "term change")
+            return
+        await scripted(ws)
+
+    consumer: asyncio.Task[None] | None = None
+    interrupted = asyncio.Event()
+    handshakes = 0
+    handshake = ClientConnection.handshake
+
+    async def handshake_then_interrupted(
+        self: ClientConnection, *args: typing.Any, **kwargs: typing.Any
+    ) -> None:
+        nonlocal handshakes
+        await handshake(self, *args, **kwargs)
+        handshakes += 1
+        if handshakes != 2:
+            return
+        # Made certain rather than left to scheduling: websockets has read the 4001, and
+        # Connection.open has not returned yet.
+        await self.wait_closed()
+        interrupted.set()
+        if interrupted_by == "cancel":
+            assert consumer is not None
+            consumer.cancel()
+        else:
+            clock.advance(ACK_TIMEOUT + 1)
+        await asyncio.sleep(ACK_TIMEOUT * 10)  # cut short by the cancellation or the timeout
+
+    monkeypatch.setattr(ClientConnection, "handshake", handshake_then_interrupted)
+    events: list[object] = []
+    cursors: list[int | None] = []
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url,
+            synthetic_token(),
+            resume=resume_on,
+            ack_timeout=ACK_TIMEOUT,
+            backoff=Backoff(max_attempts=3),
+            sleep=Clock().sleep,
+        )
+
+        async def consume() -> None:
+            async with rs:
+                async for event in rs:
+                    events.append(event)
+                    cursors.append(rs.last_report_seq)
+                    if isinstance(event, Received) and event.report_seq == 2:
+                        return
+
+        consumer = asyncio.create_task(consume())
+        await wait_until(consumer, interrupted)
+        if interrupted_by == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await consumer
+            assert rs.last_report_seq is None
+            assert scripted.connections == 1
+            return
+        # Set up only now the clock has moved: an advance brings pending limits forward.
+        async with asyncio.timeout(5):
+            await consumer
+    failed = [
+        (event.error, cursor)
+        for event, cursor in zip(events, cursors, strict=True)
+        if isinstance(event, Retrying) and event.error is not None
+    ]
+    assert len(failed) == 1
+    error, cursor = failed[0]
+    assert isinstance(error, TimeoutError)
+    assert cursor is None
+    resumes = [e for e in scripted.received if e["type"] == "resume"]
+    assert resumes == ([resume(0), resume(0)] if resume_on else [])
+    assert kinds(events)[-2:] == ["order_state:1", "execution:2"]
+
+
+async def test_closing_an_attempt_that_saw_a_term_change_close_forgets_the_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The first session counts to 7 and drops. The exchange closes the next attempt with
+    # 4001 before session_ack, and close() is called while open_session is closing that
+    # connection, so the attempt ends as closed rather than failed.
+    scripted = Scripted(
+        {
+            "term": TERM,
+            "answer": [resume_ack(False, 5, 0)],
+            "after": [order_state(6), order_state(7)],
+            "drop": True,
+        }
+    )
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 1:
+            await scripted(ws)
+            return
+        await ws.recv()  # auth
+        await ws.close(TERM_CHANGE_CLOSE_CODE, "term change")
+
+    closing = asyncio.Event()
+    finish_closing = qte_sdk.session._finish_closing
+
+    async def closed_meanwhile(conn: Connection) -> bool:
+        closing.set()
+        asyncio.ensure_future(rs.close())
+        return await finish_closing(conn)
+
+    monkeypatch.setattr(qte_sdk.session, "_finish_closing", closed_meanwhile)
+    cursors: list[int | None] = []
+
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(
+            url, synthetic_token(), backoff=Backoff(max_attempts=3), sleep=Clock().sleep
+        )
+
+        async def consume() -> None:
+            async for event in rs:
+                if isinstance(event, Disconnected):
+                    cursors.append(rs.last_report_seq)
+
+        consumer = asyncio.create_task(consume())
+        await wait_until(consumer, closing)
+        async with asyncio.timeout(5):
+            await consumer  # ends quietly: the session was closed
+            await rs.close()
+    assert closing.is_set()
+    assert connections == 2
+    assert cursors == [7]  # the drop kept the cursor
+    assert rs.last_report_seq is None
+
+
+@pytest.mark.parametrize("resume_on", [True, False])
+async def test_a_term_change_close_after_a_rejection_still_forgets_the_cursor(resume_on: bool):
+    # The first session counts to 7 and drops. The next is acknowledged, then rejected
+    # while it waits for the calendar, then closed with 4001. The rejection is the error,
+    # but the close is read when the connection is closed.
+    first: dict = {"term": TERM, "after": [order_state(6), order_state(7)], "drop": True}
+    if resume_on:
+        first["answer"] = [resume_ack(False, 5, 0)]
+    scripted = Scripted(first)
+    connections = 0
+
+    async def exchange(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 1:
+            await scripted(ws)
+            return
+        await ws.recv()  # auth
+        await ws.send(ack())
+        await ws.send(session_reject("TEAM_DISABLED"))
+        await ws.close(TERM_CHANGE_CLOSE_CODE, "term change")
+
+    cursors: list[int | None] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), resume=resume_on, sleep=Clock().sleep)
+        with pytest.raises(SessionRejected):
+            async with rs, asyncio.timeout(5):
+                async for event in rs:
+                    if isinstance(event, Disconnected):
+                        cursors.append(rs.last_report_seq)
+    assert cursors == [7, None]
+    assert rs.last_report_seq is None
 
 
 @pytest.mark.parametrize("resume_on", [True, False])

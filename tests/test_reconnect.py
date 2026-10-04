@@ -822,7 +822,7 @@ async def test_closing_ends_iteration_in_a_task_that_once_caught_a_cancellation(
 
 
 async def test_cancelling_just_as_a_session_opens_closes_that_session(monkeypatch):
-    real_open = qte_sdk.reconnect.open_session
+    real_open = qte_sdk.reconnect._open_session
     consumer: asyncio.Task | None = None
 
     async def open_then_cancel(*args, **kwargs):
@@ -832,7 +832,7 @@ async def test_cancelling_just_as_a_session_opens_closes_that_session(monkeypatc
         asyncio.get_running_loop().call_soon(consumer.cancel)
         return opened
 
-    monkeypatch.setattr(qte_sdk.reconnect, "open_session", open_then_cancel)
+    monkeypatch.setattr(qte_sdk.reconnect, "_open_session", open_then_cancel)
     exchange = Exchange(session())
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(url, synthetic_token())

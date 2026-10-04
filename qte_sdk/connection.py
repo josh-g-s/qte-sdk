@@ -485,8 +485,17 @@ class Connection:
         logger = connect_options.pop("logger", None) or logging.getLogger("websockets.client")
         if isinstance(logger, str):
             logger = logging.getLogger(logger)
-        self._connect_options = {**connect_options, "logger": _WithoutCredentials(logger, {})}
+        # A factory the caller passes still makes the connection; it is wrapped, so the
+        # connection is known from the moment it exists (see `_close_code_received`).
+        self._make_ws = connect_options.pop("create_connection", None) or ClientConnection
+        self._connect_options = {
+            **connect_options,
+            "logger": _WithoutCredentials(logger, {}),
+            "create_connection": self._create_ws,
+        }
         self._ws: ClientConnection | None = None
+        # The connection `websockets` made, set before the opening handshake completes.
+        self._pending_ws: ClientConnection | None = None
         self._used = False
         self._expected_seq = 1
 
@@ -633,12 +642,27 @@ class Connection:
             raise RuntimeError("connection is not open")
         return self._ws
 
+    def _create_ws(self, *args: Any, **kwargs: Any) -> ClientConnection:
+        ws = self._make_ws(*args, **kwargs)
+        self._pending_ws = ws
+        return ws
+
     def _close_code_received(self) -> int | None:
         """The close code the peer sent, as soon as `websockets` has read its close frame,
-        even if nothing reading this connection has met the close yet; None if no close
-        has arrived. A code is a number, so it cannot carry the token."""
-        close = self._ws.protocol.close_rcvd if self._ws is not None else None
-        return close.code if close is not None else None
+        even if nothing reading this connection has met the close yet, and even while
+        `open` has not yet returned; None if no close has arrived. A code is a number, so
+        it cannot carry the token."""
+        ws = self._ws if self._ws is not None else self._pending_ws
+        if ws is None:
+            return None
+        protocol = getattr(ws, "protocol", None)
+        if protocol is not None and hasattr(protocol, "close_rcvd"):
+            close = protocol.close_rcvd
+            return close.code if close is not None else None
+        # Without that attribute, the public code, which is set once the connection is
+        # closed (1006 if no close frame arrived).
+        code = getattr(ws, "close_code", None)
+        return code if isinstance(code, int) else None
 
     def _handle(self, frame: str | bytes) -> Iterator[Event]:
         # Any failure to decode one frame is reported for that frame, and delivery goes on:
