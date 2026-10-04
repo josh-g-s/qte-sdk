@@ -38,7 +38,7 @@ from qte_sdk.history import (
     MissingHistoryURL,
 )
 from qte_sdk.market_data import Book, SessionState
-from qte_sdk.replay import replay
+from qte_sdk.replay import ReplayOutOfOrder, replay
 from qte_sdk.session import MissingToken
 from qte_sdk.units import to_datetime, to_decimal
 
@@ -164,6 +164,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return asyncio.run(run(client, args))
+    except ReplayOutOfOrder as error:
+        # Names the stream and both times; no server text or token.
+        return fail(f"the history went back in time, so the replay stopped: {error}")
     except HistoryUnavailable:
         return fail("no such data: not a session day, or an instrument the service does not know")
     except HistoryNotClosed:
