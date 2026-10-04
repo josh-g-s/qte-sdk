@@ -214,11 +214,24 @@ class Parser(argparse.ArgumentParser):
 
 # A long option's name, as argparse reports one it does not know: short enough that a token
 # typed after it is not taken for one.
-_OPTION_NAME = re.compile(r"--[A-Za-z][A-Za-z0-9-]{0,30}")
+_OPTION_NAME = re.compile(r"--[a-z][a-z-]{0,23}")
+
+# What argparse says about an option's value that never repeats the value.
+_SAFE_COMPLAINTS = frozenset(
+    {
+        "expected one argument",
+        "expected at least one argument",
+        "expected at most one argument",
+    }
+)
 
 
 def withhold_values(message: str) -> str:
-    """`message` with every value typed on the command line left out."""
+    """`message` with every value typed on the command line left out.
+
+    Only text known to hold no typed value is kept: this script's own messages, the names
+    of its own options, and an unknown option's name when it looks like one (lowercase
+    letters and hyphens, short), which a token does not. Anything else is replaced."""
     prefix = "unrecognized arguments: "
     if message.startswith(prefix):
         names = [
@@ -229,8 +242,15 @@ def withhold_values(message: str) -> str:
         if not names:
             return "unrecognized arguments (not shown)"
         return f"{prefix}{' '.join(dict.fromkeys(names))} (any values not shown)"
-    message = re.sub(r"invalid (.+?) value: .*", "invalid value (not shown)", message)
-    return re.sub(r"invalid choice: .*?(?= \(choose from|$)", "invalid choice (not shown)", message)
+    if message.startswith("argument "):
+        # "argument --tick: <complaint>", where the names are this script's own options.
+        names, _, complaint = message.partition(": ")
+        if complaint in _SAFE_COMPLAINTS:
+            return message
+        return f"{names}: value not accepted (not shown)"
+    if message.startswith(("ambiguous option", "invalid")):
+        return "an argument was not accepted (not shown)"
+    return message
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1327,8 +1347,12 @@ async def clean_up(watcher: Watcher, order: ProbeOrder, seconds: float) -> None:
     cancelling = asyncio.ensure_future(cancel_level(watcher, order, min(seconds, CLEANUP_SECONDS)))
     try:
         await asyncio.shield(cancelling)
-    except BaseException:
-        pass  # interrupted again, or the cancel failed: the warning that follows says so
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # Interrupted again (or stopped by a signal while cleaning up after an error): stop
+        # waiting, and stop as that asks. The warning that follows says what may rest.
+        raise
+    except Exception:
+        pass  # the cancel failed: the warning that follows says so
 
 
 # History

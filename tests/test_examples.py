@@ -2483,17 +2483,33 @@ async def test_the_smoke_test_places_no_order_during_an_outage():
     [
         (("--token", "{secret}"), "unrecognized arguments: --token (any values not shown)"),
         (("--token={secret}",), "unrecognized arguments: --token (any values not shown)"),
+        (("--token", "--{secret}"), "unrecognized arguments: --token (any values not shown)"),
         (("{secret}",), "unrecognized arguments (not shown)"),
-        (("--tick", "{secret}"), "argument --tick: invalid value (not shown)"),
-        (("--seconds", "{secret}"), "argument --seconds: invalid value (not shown)"),
+        (("--tick", "{secret}"), "argument --tick: value not accepted (not shown)"),
+        (("--tick", "-{secret}"), "argument --tick: expected one argument"),
+        (("--seconds", "{secret}"), "argument --seconds: value not accepted (not shown)"),
+        (
+            ("--place-test-order={secret}",),
+            "argument --place-test-order: value not accepted (not shown)",
+        ),
     ],
-    ids=["option-and-value", "option-equals-value", "bare-value", "tick", "seconds"],
+    ids=[
+        "option-and-value",
+        "option-equals-value",
+        "value-like-an-option",
+        "bare-value",
+        "tick",
+        "value-with-a-hyphen",
+        "seconds",
+        "value-for-a-flag",
+    ],
 )
 async def test_the_smoke_tests_argument_errors_never_repeat_what_was_typed(
     args: tuple[str, ...], shown: str
 ):
-    # A token typed on the command line by mistake must not come back in the error.
-    secret = synthetic_token()
+    # A token typed on the command line by mistake must not come back in the error. Mixed
+    # case and digits, as a token has, and no leading hyphen unless a case adds one.
+    secret = f"SeCrEt{secrets.token_hex(16)}"
     typed = [arg.replace("{secret}", secret) for arg in args]
     code, out, err = await run_example(SMOKE_TEST, None, synthetic_token(), *typed)
     assert code == 2
@@ -2668,6 +2684,30 @@ async def test_the_smoke_tests_cleanup_after_an_interruption_is_bounded():
     assert loop.time() - interrupted < 8
     assert exchange.types().count("cancel") == 2
     assert "WARNING: the test order may still be resting at BUY 1 TEST @ 99.960000" in stderr
+
+
+async def test_the_smoke_tests_cleanup_lets_a_further_stop_through():
+    # A SIGTERM or second Ctrl+C during the cleanup cancel stops the wait and goes on as a
+    # cancellation, even when the cleanup began after an ordinary error, so the run exits
+    # as the signal asks.
+    smoke = load_example(SMOKE_TEST)
+    sent: list[str] = []
+
+    class Session:
+        async def send(self, type_: str, payload: Any) -> None:
+            sent.append(type_)
+
+    watcher = smoke.Watcher(Session(), 0.5)
+    order = smoke.ProbeOrder(INSTRUMENT, "smoke", 99_960_000)
+    order.sent = True
+    watcher.order = order
+    cleaning = asyncio.create_task(smoke.clean_up(watcher, order, 0.5))
+    async with asyncio.timeout(RUN_LIMIT):
+        await until(lambda: sent == ["cancel"])
+        cleaning.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cleaning
+        await asyncio.sleep(0.6)  # the shielded cancel ends within its own 0.5 s bound
 
 
 async def test_the_smoke_tests_cleanup_sends_nothing_once_the_order_is_rejected():
