@@ -2479,6 +2479,29 @@ async def test_the_smoke_test_places_no_order_during_an_outage():
 
 
 @pytest.mark.parametrize(
+    ("args", "shown"),
+    [
+        (("--token", "{secret}"), "unrecognized arguments: --token (any values not shown)"),
+        (("--token={secret}",), "unrecognized arguments: --token (any values not shown)"),
+        (("{secret}",), "unrecognized arguments (not shown)"),
+        (("--tick", "{secret}"), "argument --tick: invalid value (not shown)"),
+        (("--seconds", "{secret}"), "argument --seconds: invalid value (not shown)"),
+    ],
+    ids=["option-and-value", "option-equals-value", "bare-value", "tick", "seconds"],
+)
+async def test_the_smoke_tests_argument_errors_never_repeat_what_was_typed(
+    args: tuple[str, ...], shown: str
+):
+    # A token typed on the command line by mistake must not come back in the error.
+    secret = synthetic_token()
+    typed = [arg.replace("{secret}", secret) for arg in args]
+    code, out, err = await run_example(SMOKE_TEST, None, synthetic_token(), *typed)
+    assert code == 2
+    assert shown in err
+    assert secret not in out + err
+
+
+@pytest.mark.parametrize(
     ("args", "message"),
     [
         (("--place-test-order", "--strat-id", "x"), "--place-test-order needs --tick"),
@@ -2565,9 +2588,18 @@ async def test_the_smoke_test_shows_a_history_error_by_kind_and_status_only():
     assert words not in out + err
 
 
-async def test_the_smoke_test_cancels_its_orders_level_when_interrupted():
-    # The cancel is accepted but confirmed only when the test says so, so the Ctrl+C lands
-    # while the order may still rest.
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+@pytest.mark.parametrize(
+    ("signal_name", "code"),
+    [("SIGINT", 130), ("SIGTERM", 128 + 15), ("SIGHUP", 128 + 1)],
+    ids=["ctrl-c", "sigterm", "sighup"],
+)
+async def test_the_smoke_test_cancels_its_orders_level_when_interrupted(
+    signal_name: str, code: int
+):
+    # The cancel is accepted but confirmed only when the test says so, so the signal lands
+    # while the order may still rest. Ctrl+C, a kill and a closed terminal all stop the run
+    # the same way.
     confirm = asyncio.Event()
     exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=confirm)
     env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
@@ -2584,7 +2616,7 @@ async def test_the_smoke_test_cancels_its_orders_level_when_interrupted():
         try:
             async with asyncio.timeout(RUN_LIMIT):
                 await until(lambda: exchange.types().count("cancel") == 1)
-                process.send_signal(signal.SIGINT)
+                process.send_signal(getattr(signal, signal_name))
                 # It cancels the same level again before stopping; then the exchange confirms.
                 await until(lambda: exchange.types().count("cancel") == 2)
                 confirm.set()
@@ -2594,7 +2626,7 @@ async def test_the_smoke_test_cancels_its_orders_level_when_interrupted():
                 process.kill()
                 await process.wait()
     stderr = err.decode()
-    assert process.returncode == 130, out.decode() + stderr
+    assert process.returncode == code, out.decode() + stderr
     assert "interrupted: cancelling the test order's level (BUY 1 TEST @ 99.960000)" in stderr
     assert "may still" not in stderr
     cancels = [m["payload"] for m in exchange.received if m["type"] == "cancel"]

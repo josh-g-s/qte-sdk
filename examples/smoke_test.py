@@ -73,7 +73,13 @@ script cancels once the exchange reports the order resting, and if a cancel is r
 MIN_REST_VIOLATION (or for a message budget) it sends it again after the exchange's next
 market-data grid point, then after two more, four more and so on, rather than after a
 fixed sleep. --seconds bounds each wait for the exchange, except the wait during a session
-for an instrument's first book, which --book-wait bounds (never less than --seconds).
+for an instrument's first book, which --book-wait bounds (never less than --seconds). A
+history service that answers very slowly, a little at a time, can hold the exit for longer.
+
+Stopping. Ctrl+C, SIGTERM (a `kill`, an editor's stop button, a time limit) and SIGHUP (a
+closed terminal) all stop the run the same way: if the test order may rest, the script
+first tries for a few seconds to cancel its level, and warns if it cannot confirm that.
+SIGKILL (`kill -9`) cannot be caught, so after one, check your team's orders yourself.
 """
 
 import argparse
@@ -82,6 +88,8 @@ import contextlib
 import ipaddress
 import math
 import os
+import re
+import signal
 import sys
 import time
 import warnings
@@ -90,7 +98,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
 from google.protobuf.message import Message
@@ -196,8 +204,37 @@ RETRY_CANCEL = frozenset(
 )
 
 
+class Parser(argparse.ArgumentParser):
+    """An argument parser whose errors name an argument but never repeat a value typed for
+    it, since a mistake could put a token on the command line (`--token ...`)."""
+
+    def error(self, message: str) -> NoReturn:
+        super().error(withhold_values(message))
+
+
+# A long option's name, as argparse reports one it does not know: short enough that a token
+# typed after it is not taken for one.
+_OPTION_NAME = re.compile(r"--[A-Za-z][A-Za-z0-9-]{0,30}")
+
+
+def withhold_values(message: str) -> str:
+    """`message` with every value typed on the command line left out."""
+    prefix = "unrecognized arguments: "
+    if message.startswith(prefix):
+        names = [
+            word.split("=", 1)[0]
+            for word in message[len(prefix) :].split()
+            if _OPTION_NAME.fullmatch(word.split("=", 1)[0])
+        ]
+        if not names:
+            return "unrecognized arguments (not shown)"
+        return f"{prefix}{' '.join(dict.fromkeys(names))} (any values not shown)"
+    message = re.sub(r"invalid (.+?) value: .*", "invalid value (not shown)", message)
+    return re.sub(r"invalid choice: .*?(?= \(choose from|$)", "invalid choice (not shown)", message)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    parser = Parser(
         description="Check a setup end to end. Sends no orders unless asked.",
         # Spelled out in full only: an abbreviation such as --pl must never place an order.
         allow_abbrev=False,
@@ -1352,8 +1389,12 @@ async def check_history(
         report.add(SKIP, "history", f"{why}, so no closed session to ask about")
         return
     try:
-        # Never wait for data that is not ready yet: report it instead.
-        client = HistoryClient(timeout=args.seconds, max_retries=0)
+        # Never wait for data that is not ready yet: report it instead. The client reads in
+        # a worker thread that a timeout here does not stop, and the run waits for it at
+        # exit, so each of its network reads is given half of --seconds: one that stalls
+        # gives up soon after this script's own --seconds wait does. A service that sends
+        # its answer slowly, a little at a time, can still hold the exit for longer.
+        client = HistoryClient(timeout=args.seconds / 2, max_retries=0)
     except (ValueError, MissingToken) as error:
         # Not the error's text, which can repeat part of the address.
         why = (
@@ -1422,6 +1463,40 @@ async def session_checks(
 
 
 async def run(url: str, args: argparse.Namespace, report: Report) -> None:
+    """Run the checks, stopping as on Ctrl+C if the process is asked to stop."""
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None
+    # SIGTERM (a `kill`, a stop button, a time limit) and SIGHUP (a closed terminal) cancel
+    # this task, as Ctrl+C does, so a test order that may rest is cancelled first and any
+    # warning printed. Off Unix there are no such signals to handle. SIGKILL cannot be
+    # caught: after one, check your team's orders yourself.
+    handled = []
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.add_signal_handler(signum, stop, task, signum)
+            handled.append(signum)
+    try:
+        await run_checks(url, args, report)
+    finally:
+        for signum in handled:
+            loop.remove_signal_handler(signum)
+
+
+def stop(task: asyncio.Task[Any], signum: int) -> None:
+    """Stop the run on a signal: cancel its task, as Ctrl+C does, noting which signal."""
+    STOPPED_BY.append(signum)
+    task.cancel()
+
+
+# The signals that stopped the run, if any.
+STOPPED_BY: list[int] = []
+
+
+async def run_checks(url: str, args: argparse.Namespace, report: Report) -> None:
     failure = None
     try:
         opened_at = time.monotonic()
@@ -1479,6 +1554,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except asyncio.CancelledError:
+        # SIGTERM or SIGHUP: see run(). The exit status is 128 plus the signal's number.
+        signum = STOPPED_BY[0] if STOPPED_BY else signal.SIGTERM
+        print(f"stopped by {signal.Signals(signum).name}", file=sys.stderr)
+        return 128 + signum
     return report.finish()
 
 
