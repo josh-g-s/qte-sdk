@@ -11,7 +11,14 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fake_exchange import CONTRACT_VERSION, frame, serve_local, silent_server
+from fake_exchange import (
+    CONTRACT_VERSION,
+    LoopClock,
+    frame,
+    serve_local,
+    silent_server,
+    wait_until,
+)
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
@@ -61,11 +68,13 @@ class Server:
         self.hold_open = hold_open
         self.connections = 0
         self.received: list[dict] = []
+        self.first_received = asyncio.Event()
         self.client_closed = asyncio.Event()
 
     async def __call__(self, ws: ServerConnection) -> None:
         self.connections += 1
         self.received.append(json.loads(await ws.recv()))
+        self.first_received.set()
         for reply in self.replies:
             await ws.send(reply)
         if self.hold_open:
@@ -372,11 +381,17 @@ async def test_an_undecodable_ack_is_an_error():
         await asyncio.wait_for(server.client_closed.wait(), 5)
 
 
-async def test_no_ack_within_the_timeout_is_an_error_and_closes_the_connection():
+async def test_no_ack_within_the_timeout_is_an_error_and_closes_the_connection(monkeypatch):
+    clock = LoopClock(monkeypatch)
     server = Server()
     async with serve_local(server) as url:
-        with pytest.raises(TimeoutError):
-            await open_session(url, synthetic_token(), ack_timeout=0.2)
+        opening = asyncio.create_task(open_session(url, synthetic_token(), ack_timeout=10))
+        # The time runs out only once the exchange holds the auth it will never answer,
+        # however long connecting took.
+        await wait_until(opening, server.first_received)
+        clock.advance(10)
+        with pytest.raises(TimeoutError, match="not acknowledged within 10 s"):
+            await asyncio.wait_for(opening, 5)
         await asyncio.wait_for(server.client_closed.wait(), 5)
 
 
@@ -471,25 +486,32 @@ async def test_a_failed_connection_attempt_does_not_show_the_token(monkeypatch):
 
 
 async def test_a_stalled_auth_send_times_out_and_closes_the_connection(monkeypatch):
+    clock = LoopClock(monkeypatch)
     token = synthetic_token()
+    sending = asyncio.Event()
 
     async def stalled_send(self: ClientConnection, message: object) -> None:
+        sending.set()
         await asyncio.Event().wait()  # as if the socket never drains
 
+    connected = asyncio.Event()
     closed = asyncio.Event()
 
     async def idle(ws: ServerConnection) -> None:
+        connected.set()
         await ws.wait_closed()
         closed.set()
 
     monkeypatch.setattr(ClientConnection, "send", stalled_send)
     async with serve_local(idle) as url:
-        started = asyncio.get_running_loop().time()
-        with pytest.raises(TimeoutError) as caught:
-            await asyncio.wait_for(open_session(url, token, ack_timeout=0.2), 5)
-        elapsed = asyncio.get_running_loop().time() - started
+        opening = asyncio.create_task(open_session(url, token, ack_timeout=10))
+        # The time runs out only once the auth send has stalled, however long connecting
+        # took, and the timeout alone can end it.
+        await wait_until(opening, sending, connected)
+        clock.advance(10)
+        with pytest.raises(TimeoutError, match="not acknowledged within 10 s") as caught:
+            await asyncio.wait_for(opening, 5)
         await asyncio.wait_for(closed.wait(), 5)
-    assert elapsed < 2
     assert caught.value.__cause__ is None and caught.value.__context__ is None
     assert_token_absent(token, shown(caught.value))
 
@@ -497,12 +519,10 @@ async def test_a_stalled_auth_send_times_out_and_closes_the_connection(monkeypat
 async def test_the_timeout_also_bounds_the_opening_handshake():
     token = synthetic_token()
     async with silent_server() as url:
-        started = asyncio.get_running_loop().time()
-        with pytest.raises(TimeoutError) as caught:
-            # The handshake's own limit is longer, so only the session's limit can end it.
+        # The handshake's own limit is longer, so only the session's limit can end it, and
+        # it is the session's timeout that is raised.
+        with pytest.raises(TimeoutError, match="not acknowledged within 0.2 s") as caught:
             await asyncio.wait_for(open_session(url, token, ack_timeout=0.2, open_timeout=10), 5)
-        elapsed = asyncio.get_running_loop().time() - started
-    assert elapsed < 2
     assert caught.value.__cause__ is None and caught.value.__context__ is None
     assert_token_absent(token, shown(caught.value))
 

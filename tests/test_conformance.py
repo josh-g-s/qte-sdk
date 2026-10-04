@@ -32,6 +32,12 @@ behind for the next. Steps 3 to 14 need the instrument's session to be open; if 
 not, they are skipped. Step 16 runs only after step 14 has closed the session in the same
 run.
 
+Every timestamp on the wire is a count of milliseconds since the Unix epoch, UTC, as the
+vendored steps state. The steps only compare timestamps with each other, subtract one from
+another, or add to a `receipt_time` the order delay learnt as `release_time` minus
+`receipt_time`, so all of their timestamp arithmetic is in milliseconds. The waits are in
+seconds of this machine's clock and are never compared with a timestamp.
+
 The steps' preconditions are things the exchange under test provides, and some need its
 operators. A step whose precondition cannot be met is skipped with the reason. These are
 declared by setting a variable:
@@ -50,6 +56,14 @@ declared by setting a variable:
     QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>
         step 14: the exchange runs a single configured session and closes it within this
         many seconds of the step resting its order.
+    QTE_CONFORMANCE_RECORDED_SESSION=1
+        step 16: the exchange is fed the recorded market session the published step names,
+        holding one valid quote of QTEA, a bid of 99.99 and an ask of 100.01 at the session
+        open, never replaced, and no quote of QTEB or QTEC. QTE_CONFORMANCE_INSTRUMENT must
+        then be QTEA, or step 16 fails. Step 16 then checks that QTEA's `official_close`
+        has the value 100000000 and that QTEB and QTEC get none. Without this variable it
+        makes its other checks and then skips those. If the exchange rejects QTEB or QTEC
+        as unknown, it makes every other check, QTEA's value included, and then skips.
 
 The instrument must be an equity whose buy collar is mark x 1.05, the figure steps 10
 and 11 name; an option's wider guard does not fit them.
@@ -136,6 +150,13 @@ pytestmark = pytest.mark.skipif(
 # steps require of the exchange under test, not a value trading code may rely on: take it
 # from CONFORMANCE.md again whenever that file is re-vendored.
 STEP_10_MARK_FACTOR = (105, 100)
+
+# Step 16 names the official close its recorded session must give: QTEA's is the midpoint of
+# its one quote, 99.99 and 100.01, and QTEB and QTEC, never quoted, get none. These too are
+# what the vendored steps require, so take them from CONFORMANCE.md again on re-vendoring.
+STEP_16_QUOTED = "QTEA"
+STEP_16_OFFICIAL_CLOSE = 100_000_000  # 100.000000 in micro-dollars
+STEP_16_UNQUOTED = ("QTEB", "QTEC")
 
 
 def old_price(state: OrderState) -> int | None:
@@ -375,7 +396,7 @@ def check_release_time(accepted: Accepted) -> None:
     the steps check (4, 5 and 13).
 
     The delay is the exchange's setting, so it is learnt from the first `accepted` checked
-    rather than assumed.
+    rather than assumed. Like both timestamps, it is in milliseconds.
     """
     delay = accepted.release_time - accepted.receipt_time
     assert delay > 0, "release_time is not after receipt_time"
@@ -899,7 +920,8 @@ async def test_step_10_collar(market: Client):
         start,
     )
     # A reject carries no release time: it is its receipt time plus the order delay, which
-    # the set-up's mass cancel `accepted` already showed.
+    # the set-up's mass cancel `accepted` already showed. All three are timestamps, so the
+    # delay added is in milliseconds, as the vendored steps require.
     if isinstance(reply, Accepted):
         release = reply.release_time
     else:
@@ -1172,14 +1194,52 @@ async def test_step_15_heartbeat_and_resume():
     raise NotImplementedError
 
 
+def unknown_among(reject: Reject, names: tuple[str, ...]) -> bool:
+    """Whether `reject` refuses a subscription because the exchange does not know one of
+    `names`."""
+    return (
+        reject.reason_code == ReasonCodes.UNKNOWN_INSTRUMENT
+        and reject.HasField("instrument")
+        and reject.instrument in names
+    )
+
+
 async def test_step_16_subscribe_outside_a_session(client: Client):
+    c = client
+    instrument = c.config.instrument
+    # The step's expected value needs the recorded session it names. That session quotes
+    # only QTEA, so QTEA must be the instrument, and the subscribe then also names the two
+    # it never quotes, which must get no official close.
+    recorded = os.environ.get("QTE_CONFORMANCE_RECORDED_SESSION") == "1"
+    if recorded and instrument != STEP_16_QUOTED:
+        pytest.fail(
+            "QTE_CONFORMANCE_RECORDED_SESSION=1 needs "
+            f"QTE_CONFORMANCE_INSTRUMENT={STEP_16_QUOTED}, the one instrument that recorded "
+            f"session quotes, not {instrument}"
+        )
     if not _CLOSED_BY_STEP_14:
         pytest.skip("precondition: step 14 closed the instrument's session in this run")
     closed = _CLOSED_BY_STEP_14[0]
-    c = client
+    unquoted = STEP_16_UNQUOTED if recorded else ()
+    unknown: list[str] = []
     start = c.mark()
-    await subscribe(c.session, [c.config.instrument])
-    state = await c.next_session_state(start)
+    await subscribe(c.session, [instrument, *unquoted])
+    reply = await c.wait_for(
+        lambda m: isinstance(m, SessionState | Reject), "session_state for the subscribe", start
+    )
+    if isinstance(reply, Reject) and unknown_among(reply, unquoted):
+        # A rejected subscribe is not applied at all, so the exchange, which does not know
+        # QTEB or QTEC, is asked again for the instrument alone, for the step's other checks.
+        unknown.append(reply.instrument)
+        start = c.mark()
+        await subscribe(c.session, [instrument])
+        reply = await c.wait_for(
+            lambda m: isinstance(m, SessionState | Reject), "session_state for the subscribe", start
+        )
+    assert not isinstance(reply, Reject), (
+        f"subscribe rejected: {reason_code_name(reply.reason_code)}"
+    )
+    state = reply
     assert state.state == CLOSED, "the session is open again since step 14 closed it"
     assert (state.session_date, state.open_time, state.close_time) == (
         closed.session_date,
@@ -1195,13 +1255,37 @@ async def test_step_16_subscribe_outside_a_session(client: Client):
     else:
         assert calendar.next_open == expected_next
     official = await c.wait_for(
-        lambda m: isinstance(m, OfficialClose) and m.instrument == c.config.instrument,
+        lambda m: isinstance(m, OfficialClose) and m.instrument == instrument,
         "official_close",
         start,
     )
     assert official.session_date == closed.session_date
     await c.drain(min(2.0, c.config.timeout))
     after = c.seen[start:]
+    unknown += [m.instrument for m in c.since(start, Reject) if unknown_among(m, unquoted)]
+    rejected = [m for m in c.since(start, Reject) if not unknown_among(m, unquoted)]
+    assert not rejected, f"subscribe rejected: {reason_code_name(rejected[0].reason_code)}"
     assert len([m for m in after if isinstance(m, SessionState)]) == 1
-    assert len([m for m in after if isinstance(m, OfficialClose)]) == 1
     assert not [m for m in after if isinstance(m, Book | Trades | Mark)]
+    closes = [m for m in after if isinstance(m, OfficialClose)]
+    if recorded:
+        assert not [m for m in closes if m.instrument in STEP_16_UNQUOTED], (
+            "an official_close for QTEB or QTEC, which have no valid mark in the close window"
+        )
+    assert [m.instrument for m in closes] == [instrument], (
+        "not exactly one official_close, for the instrument"
+    )
+    if not recorded:
+        pytest.skip(
+            "precondition: the exchange is fed the recorded session step 16 names "
+            "(QTE_CONFORMANCE_RECORDED_SESSION=1); QTEA's official close value and that QTEB "
+            "and QTEC get none were not checked"
+        )
+    assert official.value == STEP_16_OFFICIAL_CLOSE, (
+        f"{STEP_16_QUOTED}'s official close is {official.value}, not {STEP_16_OFFICIAL_CLOSE}"
+    )
+    if unknown:
+        pytest.skip(
+            "precondition: the exchange knows QTEB and QTEC, which step 16's recorded session "
+            f"never quotes; rejected as unknown: {', '.join(unknown)}"
+        )

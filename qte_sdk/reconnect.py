@@ -92,7 +92,9 @@ from the exchange (see `qte_sdk.connection.DEFAULT_LIVENESS_TIMEOUT`; pass
 `liveness_timeout` to change it). The check starts with the first heartbeat on the
 connection, so it never drops a link to an exchange that does not send heartbeats. The
 heartbeats are absorbed, and a quiet market does not trip it. A dead link is a disconnect
-like any other.
+like any other. `heartbeats_received`, `last_heartbeat_at` and `last_heartbeat_sent_at`
+show whether heartbeats are arriving, on one connection at a time: from each `Connected`
+they describe that session's connection, and they start again with the next.
 
 A session the exchange acknowledged but that failed before it could be delivered as
 `Connected` (for example because its subscription could not be sent) is reported with a
@@ -138,6 +140,7 @@ from websockets.exceptions import ConnectionClosed
 from qte_sdk.connection import (
     TERM_CHANGE_CLOSE_CODE,
     Connected,
+    Connection,
     DataUncertain,
     Disconnected,
     Event,
@@ -294,7 +297,9 @@ class ReconnectingSession:
     `liveness_timeout` (see `qte_sdk.connection.Connection`).
 
     `calendar` is the session calendar the exchange sent on the current session; see
-    `qte_sdk.calendar`.
+    `qte_sdk.calendar`. `heartbeats_received`, `last_heartbeat_at` and
+    `last_heartbeat_sent_at` describe the heartbeats read on the latest session's
+    connection.
 
     Raises `MissingToken` or `MissingURL` here, before any connection, if there is no token
     or no address.
@@ -327,6 +332,8 @@ class ReconnectingSession:
         self._session: Session | None = None
         self._up = False
         self._info: SessionInfo | None = None
+        # The connection of the latest session delivered as `Connected`, for its heartbeats.
+        self._latest: Connection | None = None
         self._calendar: Calendar | None = None
         self._iterated = False
         self._closed = False
@@ -368,6 +375,31 @@ class ReconnectingSession:
         None.
         """
         return self._calendar
+
+    @property
+    def heartbeats_received(self) -> int:
+        """How many heartbeats the connection of the latest session delivered as
+        `Connected` has read since it opened, or 0 before the first `Connected`.
+
+        It is not a total across sessions. It describes one connection at a time: it goes
+        on counting while that session is up, keeps its final value after the session's
+        `Disconnected`, and changes to the new connection's own count when the next
+        `Connected` is delivered. That count may already be above 0, since a new session
+        reads ahead while it waits for the calendar and `resume_ack`. See
+        `qte_sdk.session.Session.heartbeats_received`."""
+        return 0 if self._latest is None else self._latest.heartbeats_received
+
+    @property
+    def last_heartbeat_at(self) -> float | None:
+        """When the latest heartbeat on the same connection as `heartbeats_received` was
+        read, on the `time.monotonic()` clock, or None if it has read none."""
+        return None if self._latest is None else self._latest.last_heartbeat_at
+
+    @property
+    def last_heartbeat_sent_at(self) -> int | None:
+        """The exchange's send time of that heartbeat, in milliseconds since the Unix
+        epoch, UTC, or None if there is none or it carried none."""
+        return None if self._latest is None else self._latest.last_heartbeat_sent_at
 
     @property
     def last_report_seq(self) -> int | None:
@@ -462,6 +494,7 @@ class ReconnectingSession:
 
                 assert session is not None
                 self._info = session.info
+                self._latest = session.connection
                 self._calendar = session.calendar
                 if self._calendar is not None:
                     self._enter_term(_term_of(self._calendar), strict=False)
