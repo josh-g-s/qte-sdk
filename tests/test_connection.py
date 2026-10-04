@@ -715,7 +715,9 @@ async def test_cancelling_the_handshake_keeps_request_headers_out_of_the_traceba
 async def deaf_server() -> AsyncIterator[str]:
     """Completes the opening handshake, then stops reading, so the client's writes back up.
 
-    A small receive buffer makes them back up after a few hundred kilobytes.
+    A small receive buffer makes them back up after a few hundred kilobytes. It sends no
+    keepalive pings, whose unanswered pongs would end the connection however slowly the
+    test runs.
     """
     released = asyncio.Event()
 
@@ -730,7 +732,7 @@ async def deaf_server() -> AsyncIterator[str]:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
     sock.bind(("127.0.0.1", 0))
     try:
-        async with serve(stop_reading, sock=sock) as server:
+        async with serve(stop_reading, sock=sock, ping_interval=None) as server:
             try:
                 yield f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
             finally:
@@ -759,7 +761,8 @@ async def test_close_is_bounded_when_the_peer_stops_reading(monkeypatch):
     clock = LoopClock(monkeypatch)
     loop = asyncio.get_running_loop()
     async with deaf_server() as url:
-        conn = Connection(url, close_timeout=10, compression=None)
+        # No keepalive either, so that nothing but close()'s own bound can end it.
+        conn = Connection(url, close_timeout=10, compression=None, ping_interval=None)
         await conn.open()
         stalled = await fill_until_stalled(conn)
 
@@ -771,8 +774,7 @@ async def test_close_is_bounded_when_the_peer_stops_reading(monkeypatch):
         closing = asyncio.create_task(close())
         # The close frame is queued behind the stalled writes, and close() waits for them
         # until its 10 s are up. The clock moves half a second at a time, letting whatever
-        # comes due run, until close() returns, for 15 s at most: well short of the 20 s
-        # keepalive ping, which would end even an unbounded close.
+        # comes due run, until close() returns, for 15 s at most.
         for _ in range(30):
             clock.advance(0.5)
             for _ in range(20):
