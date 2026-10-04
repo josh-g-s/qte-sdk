@@ -2792,6 +2792,33 @@ async def test_the_smoke_tests_cleanup_after_an_interruption_is_bounded():
     assert "WARNING: the test order may still be resting at BUY 1 TEST @ 99.960000" in stderr
 
 
+async def test_the_smoke_tests_cleanup_sends_its_cancel_through_repeated_stops():
+    # Several more SIGTERMs arrive while a slow send of the cleanup's cancel is under way:
+    # none of them cuts the short grace for that send.
+    smoke = load_example(SMOKE_TEST)
+    sent: list[str] = []
+
+    class SlowSession:
+        async def send(self, type_: str, payload: Any) -> None:
+            await asyncio.sleep(0.1)
+            sent.append(type_)
+
+    watcher = smoke.Watcher(SlowSession(), 0.5)
+    order = smoke.ProbeOrder(INSTRUMENT, "smoke", 99_960_000)
+    order.sent = True
+    watcher.order = order
+    cleaning = asyncio.create_task(smoke.clean_up(watcher, order, 0.5))
+    async with asyncio.timeout(RUN_LIMIT):
+        await asyncio.sleep(0)
+        for _ in range(3):
+            cleaning.cancel()
+            await asyncio.sleep(0.02)
+        with pytest.raises(asyncio.CancelledError):
+            await cleaning
+        assert sent == ["cancel"]
+        await asyncio.sleep(0.6)  # the shielded cancel ends within its own 0.5 s bound
+
+
 async def test_the_smoke_tests_cleanup_sends_its_cancel_before_a_further_stop():
     # A further SIGTERM lands before the cleanup's cancel task has run at all: the stop
     # still waits for that cancel to go out before it goes on.

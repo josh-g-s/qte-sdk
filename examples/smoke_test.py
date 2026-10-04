@@ -1379,9 +1379,15 @@ async def clean_up(watcher: Watcher, order: ProbeOrder, seconds: float) -> None:
         # Interrupted again (or stopped by a signal while cleaning up after an error): stop
         # waiting for the confirmation, and stop as that asks, once the cancel is out. The
         # warning that follows says what may rest.
-        if not sent.is_set() and not cancelling.done():
-            with contextlib.suppress(BaseException):
-                async with asyncio.timeout(min(cleanup_seconds, 1.0)):
+        # Further stops within that grace do not cut it short: its end is fixed.
+        loop = asyncio.get_running_loop()
+        grace_ends = loop.time() + min(cleanup_seconds, 1.0)
+        while not sent.is_set() and not cancelling.done():
+            left = grace_ends - loop.time()
+            if left <= 0:
+                break
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                async with asyncio.timeout(left):
                     await asyncio.shield(sent.wait())
         raise
     except Exception:
@@ -1630,9 +1636,11 @@ def stopped(status: int) -> int:
             with contextlib.suppress(OSError, ValueError):
                 fd = stream.fileno()
                 devnull = os.open(os.devnull, os.O_WRONLY)
-                os.dup2(devnull, fd)
-                if devnull != fd:
-                    os.close(devnull)
+                try:
+                    os.dup2(devnull, fd)
+                finally:
+                    if devnull != fd:
+                        os.close(devnull)
     return status
 
 
