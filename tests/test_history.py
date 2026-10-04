@@ -316,9 +316,31 @@ class LocalServer(ThreadingHTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
 
+class LocalServer6(LocalServer):
+    address_family = socket.AF_INET6
+
+
+def ipv6_loopback_available() -> bool:
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+            sock.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+needs_ipv6 = pytest.mark.skipif(
+    not ipv6_loopback_available(), reason="needs an IPv6 loopback address"
+)
+
+
 @contextmanager
-def serve_history(fake: FakeHistory, tls: ssl.SSLContext | None = None) -> Iterator[str]:
-    """Serve `fake` over http, or over https with `tls`, a server context."""
+def serve_history(
+    fake: FakeHistory, tls: ssl.SSLContext | None = None, host: str = "127.0.0.1"
+) -> Iterator[str]:
+    """Serve `fake` over http, or over https with `tls`, a server context, on `host`."""
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -329,14 +351,15 @@ def serve_history(fake: FakeHistory, tls: ssl.SSLContext | None = None) -> Itera
         def log_message(self, format: str, *args: Any) -> None:
             pass
 
-    server = LocalServer(("127.0.0.1", 0), Handler)
+    server = (LocalServer6 if ":" in host else LocalServer)((host, 0), Handler)
     if tls is not None:
         server.socket = tls.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
     thread.start()
     try:
         scheme = "http" if tls is None else "https"
-        yield f"{scheme}://127.0.0.1:{server.server_address[1]}"
+        name = f"[{host}]" if ":" in host else host
+        yield f"{scheme}://{name}:{server.server_address[1]}"
     finally:
         server.shutdown()
         server.server_close()
@@ -778,11 +801,41 @@ def test_a_token_is_required(monkeypatch):
         "ws://127.0.0.1:1",
         "https://user:pass@history.example.test",
         "https://history.example.test?key=1",
+        "http://[2001:db8::1]/",
+        "http://[2001:db8::1]:8080/",
+        "http://[::ffff:192.0.2.1]/",
     ],
 )
 def test_an_unsafe_address_is_refused(url):
     with pytest.raises(ValueError):
         HistoryClient(url, synthetic_token())
+
+
+@pytest.mark.parametrize(
+    ("url", "host", "port"),
+    [
+        ("http://[::1]/", "::1", 80),
+        ("http://[::1]:8080/", "::1", 8080),
+        ("https://[2001:db8::1]/", "2001:db8::1", 443),
+        ("https://[2001:db8::1]:8443/", "2001:db8::1", 8443),
+        ("https://history.example.test/", "history.example.test", 443),
+        ("http://127.0.0.1/", "127.0.0.1", 80),
+    ],
+)
+async def test_an_ipv6_address_reaches_its_host_and_port(monkeypatch, url, host, port):
+    # The request goes to the address's host and port, with or without an explicit port:
+    # http.client would otherwise split "::1" into the host ":" and the port 1.
+    reached: list[tuple[str, int]] = []
+
+    def refuse(address: tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
+        reached.append(address)
+        raise ConnectionRefusedError("refused by the test")
+
+    monkeypatch.setattr(history.http.client.socket, "create_connection", refuse)
+    client = HistoryClient(url, synthetic_token())
+    with pytest.raises(ConnectionRefusedError):
+        await collect(client.fetch(DAY, "TEST", "book"))
+    assert reached and set(reached) == {(host, port)}
 
 
 # Token safety, to the standard of qte_sdk.connection.
@@ -1891,3 +1944,26 @@ async def test_a_drop_while_discarding_the_repeated_prefix_resumes_again(states_
     assert items == await uninterrupted(token)
     assert len(fake.requests) == 3
     assert fake.requests[2][1]["range"] == f"bytes={cut}-"
+
+
+@needs_ipv6
+async def test_http_works_on_the_ipv6_loopback():
+    token = synthetic_token()
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(3)})
+    with serve_history(fake, host="::1") as url:
+        assert url.startswith("http://[::1]:")
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert [item.grid_time for item in items] == [1000, 2000, 3000]
+    assert fake.requests
+
+
+@needs_ipv6
+async def test_https_works_on_an_ipv6_address(tmp_path):
+    token = synthetic_token()
+    certificate = make_certificate(tmp_path, "IP:::1")
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(3)})
+    with serve_history(fake, server_context(certificate), host="::1") as url:
+        assert url.startswith("https://[::1]:")
+        client = HistoryClient(url, token, ssl_context=trusting(certificate))
+        items = await collect(client.fetch(DAY, "TEST", "book"))
+    assert [item.grid_time for item in items] == [1000, 2000, 3000]
