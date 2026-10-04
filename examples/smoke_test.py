@@ -79,8 +79,10 @@ history service that answers very slowly, a little at a time, can hold the exit 
 Stopping. Ctrl+C, SIGTERM (a `kill`, an editor's stop button, a time limit) and SIGHUP (a
 closed terminal) all stop the run the same way: if the test order may rest, the script
 first tries for a few seconds to cancel its level, and warns if it cannot confirm that. It
-does so even when the terminal is gone and nothing it writes can be seen. A signal that is
-already ignored when it starts (as under `nohup`) is left ignored. SIGKILL (`kill -9`)
+does so even when the terminal is gone and nothing it writes can be seen. A further SIGTERM
+or SIGHUP stops the wait once that cancel is out; a second Ctrl+C stops at once, even before
+it is, and the warning names the level. A signal that is already ignored when it starts (as
+under `nohup`) is left ignored. SIGKILL (`kill -9`)
 cannot be caught, so after one, check your team's orders yourself.
 """
 
@@ -1115,9 +1117,12 @@ def left_alone(order: ProbeOrder) -> tuple[str, str]:
     return FAIL, f"{order.where} {rested} by the exchange: {reason}; nothing is left resting"
 
 
-async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> str | None:
+async def cancel_level(
+    watcher: Watcher, order: ProbeOrder, seconds: float, on_sent: asyncio.Event | None = None
+) -> str | None:
     """Cancel the test order's level until the order leaves the book or the exchange reports
-    nothing there. Returns None then, else why it could not confirm either."""
+    nothing there. Returns None then, else why it could not confirm either. `on_sent`, if
+    given, is set once a cancel has been sent."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
     grid_points = 1
@@ -1144,6 +1149,8 @@ async def cancel_level(watcher: Watcher, order: ProbeOrder, seconds: float) -> s
             deadline,
         ):
             return "the cancel could not be sent: the connection closed or stalled"
+        if on_sent is not None:
+            on_sent.set()
         answered = await watcher.until(
             lambda ref=ref: (
                 order.gone or order.interfered or isinstance(order.replies.get(ref), Reject)
@@ -1358,15 +1365,24 @@ async def clean_up(watcher: Watcher, order: ProbeOrder, seconds: float) -> None:
     """A bounded, best-effort cancel of exactly the test order's level after an interruption.
 
     It runs in a task of its own behind `asyncio.shield`, so the interruption that started it
-    does not stop it; a further interruption stops only the wait for it. The task is made
-    before anything is said, so nothing can keep the cancel from being sent."""
-    cancelling = asyncio.ensure_future(cancel_level(watcher, order, min(seconds, CLEANUP_SECONDS)))
+    does not stop it. The task is made before anything is said, so nothing can keep the
+    cancel from being sent. A further SIGTERM or SIGHUP stops the wait for the confirmation,
+    but not before the cancel itself has gone out (a second at most). A second Ctrl+C is
+    Python's own "stop now", which ends every task at once."""
+    sent = asyncio.Event()
+    cleanup_seconds = min(seconds, CLEANUP_SECONDS)
+    cancelling = asyncio.ensure_future(cancel_level(watcher, order, cleanup_seconds, sent))
     say(f"interrupted: cancelling the test order's level ({order.where}) before stopping")
     try:
         await asyncio.shield(cancelling)
     except (asyncio.CancelledError, KeyboardInterrupt):
         # Interrupted again (or stopped by a signal while cleaning up after an error): stop
-        # waiting, and stop as that asks. The warning that follows says what may rest.
+        # waiting for the confirmation, and stop as that asks, once the cancel is out. The
+        # warning that follows says what may rest.
+        if not sent.is_set() and not cancelling.done():
+            with contextlib.suppress(BaseException):
+                async with asyncio.timeout(min(cleanup_seconds, 1.0)):
+                    await asyncio.shield(sent.wait())
         raise
     except Exception:
         pass  # the cancel failed: the warning that follows says so
@@ -1612,7 +1628,11 @@ def stopped(status: int) -> int:
             stream.flush()
         except (OSError, ValueError):
             with contextlib.suppress(OSError, ValueError):
-                os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
+                fd = stream.fileno()
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, fd)
+                if devnull != fd:
+                    os.close(devnull)
     return status
 
 
