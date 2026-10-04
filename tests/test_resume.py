@@ -391,6 +391,39 @@ async def test_a_reconnect_starts_the_heartbeat_count_again():
     assert first <= second <= latest
 
 
+async def test_a_heartbeat_that_skips_ahead_is_counted_before_its_gap_is_delivered():
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.send(ack())  # seq 1
+        await ws.send(frame("heartbeat", {}, 5, sent_at="15000"))  # 2 to 4 are missing
+        await ws.send(frame("book", {"instrument": "AAPL", "grid_time": "1"}, 6))
+        await ws.wait_closed()
+
+    start = time.monotonic()
+    async with serve_local(handler) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            assert await take(session, 1) == [SeqGap(2, 5)]
+            # The heartbeat behind the gap is already counted, stamped when it was read.
+            assert heartbeats_seen(session) == (1, 15_000)
+            at_gap = session.last_heartbeat_at
+            assert at_gap is not None and start <= at_gap <= time.monotonic()
+            # Reading on neither counts it again nor stamps it later.
+            assert kinds(await take(session, 1)) == ["book:None"]
+            assert heartbeats_seen(session) == (1, 15_000)
+            assert session.last_heartbeat_at == at_gap
+
+    async def skips_ahead(ws: ServerConnection) -> None:
+        await ws.send(frame("heartbeat", {}, 3, sent_at="15000"))  # 1 and 2 are missing
+        await ws.wait_closed()
+
+    async with serve_local(skips_ahead) as url, Connection(url) as conn:
+        async with aclosing(conn.events()) as events:
+            assert await anext(events) == SeqGap(1, 3)
+        # Closed at the gap, before the connection read on: the heartbeat stays counted.
+        assert (conn.heartbeats_received, conn.last_heartbeat_sent_at) == (1, 15_000)
+        assert conn.last_heartbeat_at is not None
+
+
 # Report numbers on one session
 
 
