@@ -766,12 +766,15 @@ async def test_close_is_bounded_when_the_peer_stops_reading(monkeypatch):
         stalled = await fill_until_stalled(conn)
         closing = asyncio.create_task(conn.close())
         # The close frame is queued behind the stalled writes, and close() waits for them
-        # until its 10 s are up.
+        # until its 10 s are up: still waiting after 5 s, done once the other 5 s pass.
         async with asyncio.timeout(5):
             while ws.state is not State.CLOSING:
                 await asyncio.sleep(0)
+        clock.advance(5)
+        for _ in range(20):  # time for whatever came due to run
+            await asyncio.sleep(0)
         assert not closing.done()
-        clock.advance(10)
+        clock.advance(5)
         await asyncio.wait_for(closing, 5)
         # The stalled send ends too, rather than waiting on the dropped socket.
         await asyncio.wait_for(asyncio.gather(stalled, return_exceptions=True), 5)

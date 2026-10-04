@@ -44,11 +44,14 @@ async def wait_until(task: "asyncio.Future[Any]", *events: asyncio.Event) -> Non
     For a task bounded by a timeout of its own, so no other limit is needed. A task that
     ends first, with an error say, raises it when the test awaits it, rather than leaving
     the test waiting for the fake exchange in vain."""
-    waiting = asyncio.gather(*(event.wait() for event in events))
+    waits = [asyncio.ensure_future(event.wait()) for event in events]
     try:
-        await asyncio.wait({waiting, task}, return_when=asyncio.FIRST_COMPLETED)
+        while not task.done() and not all(waiting.done() for waiting in waits):
+            pending = {task, *(waiting for waiting in waits if not waiting.done())}
+            await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        waiting.cancel()
+        for waiting in waits:
+            waiting.cancel()
 
 
 def frame(type_: str, payload: Any, seq: int | None = None, **extra: Any) -> str:
