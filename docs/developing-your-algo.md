@@ -45,7 +45,7 @@ asyncio.run(main())
 
 ## 2. Run your strategy's loop on a replay
 
-`qte_sdk.replay.replay` takes one closed session's books, trades, marks and market session state for the instruments you name and merges them into one stream in time order, like the live feed. It yields the same classes as `market_data(session)`, so the code that handles market data in your live loop runs on a replay unchanged. Put that code in one place that both can feed:
+`qte_sdk.replay.replay` takes one closed session's books, trades, marks and market session state for the instruments you name and merges them into one stream, grid point by grid point, as a live connection delivers them. It yields the same classes as `market_data(session)`, so the code that handles market data in your live loop runs on a replay unchanged. Put that code in one place that both can feed:
 
 ```python
 from qte_sdk.books import LatestBooks
@@ -118,7 +118,7 @@ async def live() -> None:
 What to know about a replay:
 
 - **Time comes from the messages.** Take "now" from the messages' own times, as `Strategy.now` does above, never from your machine's clock: during a session a `SessionState` arrives at every grid point, live or replayed. A replay runs as fast as your loop reads it unless you pass `speed`: `speed=1.0` replays at the pace the session ran, `speed=10.0` ten times as fast.
-- **The order within one grid point is not promised.** A replay puts the messages of one instant in a fixed order: books, then trades, then marks, then the session state, each by instrument. The contract does not say what order the live feed uses there, so treat the messages of one grid point as arriving together and do not depend on their order.
+- **Grid points come in order; the messages within one do not.** Every message of one grid point comes before any message of the next, live and in a replay. The messages of one grid point (books, trades, marks and the session state, across instruments) come in no promised order: treat them as a set, and do not rely on any order within it. A grid point's session state, for example, may come before or after its books. A replay of the same data comes out the same way each time, so you can repeat a run, but the order it uses within a grid point may change.
 - **Each instrument and channel is its own download**, held open while the replay runs and read only as far as it needs, so a whole day never has to fit in memory. Name only the instruments you need.
 - **Stop it with `aclosing`**, as above: leaving the block, by `break` or an error, closes every download.
 - **Messages it cannot use are passed on.** `Unknown` (a type this SDK does not know) and `DecodeFailed` come where they were in their stream. Report them; a book may have been lost with one.

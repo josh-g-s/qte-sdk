@@ -72,6 +72,25 @@ def label(item: Any) -> tuple[Any, ...]:
     return (type(item).__name__,)
 
 
+def grid_points(items: list[Any]) -> list[tuple[Any, list[tuple[Any, ...]]]]:
+    """The items as the grid points they came in: one (time, labels) for each run of
+    items at the same time, in the order the runs came. The order within a grid point is
+    not promised, so its labels are sorted."""
+    runs: list[tuple[Any, list[tuple[Any, ...]]]] = []
+    for item in items:
+        tag = label(item)
+        if runs and runs[-1][0] == tag[0]:
+            runs[-1][1].append(tag)
+        else:
+            runs.append((tag[0], [tag]))
+    return [(moment, sorted(tags)) for moment, tags in runs]
+
+
+def point(*tags: tuple[Any, ...]) -> tuple[Any, list[tuple[Any, ...]]]:
+    """One expected grid point: its time and its labels, in any order."""
+    return (tags[0][0], sorted(tags))
+
+
 async def replayed(fake: FakeHistory, *args: Any, **options: Any) -> list[Any]:
     with serve_history(fake) as url:
         items = replay.replay(HistoryClient(url, fake.token), *args, **options)
@@ -138,23 +157,20 @@ def a_session(token: str) -> FakeHistory:
     return FakeHistory(token, objects)
 
 
-async def test_a_session_is_merged_into_one_stream_in_time_order():
+async def test_a_session_comes_grid_point_by_grid_point():
     fake = a_session(synthetic_token())
     items = await replayed(fake, DAY, ["BBB", "AAA"])
-    assert [label(item) for item in items] == [
-        (1000, "book", "AAA"),
-        (1000, "book", "BBB"),
-        (1000, "mark", "AAA"),
-        (1000, "mark", "BBB"),
-        (1000, "session_state"),
-        (1100, "book", "BBB"),
-        (1100, "trades", "AAA"),
-        (1100, "session_state"),
-        (1200, "book", "AAA"),
-        (1200, "session_state"),
-        (2000, "mark", "AAA"),
-        (2000, "mark", "BBB"),
-        (2000, "session_state"),
+    assert grid_points(items) == [
+        point(
+            (1000, "book", "AAA"),
+            (1000, "book", "BBB"),
+            (1000, "mark", "AAA"),
+            (1000, "mark", "BBB"),
+            (1000, "session_state"),
+        ),
+        point((1100, "book", "BBB"), (1100, "trades", "AAA"), (1100, "session_state")),
+        point((1200, "book", "AAA"), (1200, "session_state")),
+        point((2000, "mark", "AAA"), (2000, "mark", "BBB"), (2000, "session_state")),
     ]
     # One download per instrument and channel, and one for the session state.
     assert requested(fake) == sorted(
@@ -163,7 +179,7 @@ async def test_a_session_is_merged_into_one_stream_in_time_order():
     )
 
 
-async def test_messages_at_one_time_come_by_type_then_by_instrument():
+async def test_one_grid_point_brings_each_message_once_in_a_repeatable_order():
     instruments = ("CCC", "AAA", "BBB")
     objects: dict[tuple[str, str | None, str], bytes] = {
         (DAY, None, "session_state"): state_at(1000)
@@ -176,29 +192,14 @@ async def test_messages_at_one_time_come_by_type_then_by_instrument():
     # CCC is outside the fake's usual universe, so let it be served like the others.
     fake.status_override.update({key: "ready" for key in objects})
     items = await replayed(fake, DAY, ["CCC", "AAA", "BBB", "CCC"])
-    order = [(kind, name) for kind in CHANNELS[:3] for name in sorted(instruments)]
-    assert [label(item) for item in items] == [
-        *((1000, kind, name) for kind, name in order),
-        (1000, "session_state"),
-    ]
+    tags = [(1000, kind, name) for kind in CHANNELS[:3] for name in instruments]
+    assert grid_points(items) == [point(*tags, (1000, "session_state"))]
     # An instrument named twice is fetched and replayed once.
     assert len(fake.requests) == 3 * 3 + 1
-
-
-async def test_the_session_state_follows_the_other_messages_of_its_grid_point():
-    objects = {
-        (DAY, "AAA", "book"): book_at(1100, "AAA"),
-        (DAY, None, "session_state"): state_at(1000) + state_at(1100) + state_at(1200),
-    }
-    items = await replayed(
-        FakeHistory(synthetic_token(), objects), DAY, ["AAA"], ["book", "session_state"]
-    )
-    assert [label(item) for item in items] == [
-        (1000, "session_state"),
-        (1100, "book", "AAA"),
-        (1100, "session_state"),
-        (1200, "session_state"),
-    ]
+    # The order within the grid point is not promised, but the same data, however the
+    # instruments are named, comes out the same way again.
+    again = await replayed(fake, DAY, ["BBB", "CCC", "AAA"])
+    assert [label(item) for item in again] == [label(item) for item in items]
 
 
 async def test_unusable_messages_stay_where_they_were_in_their_stream():
@@ -298,18 +299,16 @@ async def test_stopping_early_closes_every_download(closes, stop):
             ) as items:
                 async for item in items:
                     got.append(item)
-                    if len(got) == 4:
+                    if len(got) == 3:
                         assert closes == []  # each download is still open, part way through
                         if stop == "raise":
                             raise StopHere
                         break
         except StopHere:
             pass
-    assert [label(item) for item in got] == [
-        (1000, "book", "AAA"),
-        (1000, "session_state"),
-        (1050, "book", "BBB"),
-        (1100, "book", "AAA"),
+    assert grid_points(got) == [
+        point((1000, "book", "AAA"), (1000, "session_state")),
+        point((1050, "book", "BBB")),
     ]
     assert closes == [200, 200, 200]
     assert len(fake.requests) == 3
@@ -388,12 +387,11 @@ async def test_a_speed_paces_the_replay_by_the_messages_own_times(clock):
     }
     fake = FakeHistory(synthetic_token(), objects)
     items = await replayed(fake, DAY, ["AAA"], ["book", "session_state"], speed=2.0)
-    assert [label(item) for item in items] == [
-        (1000, "book", "AAA"),
-        (1000, "session_state"),
-        (1100, "session_state"),
-        (1500, "book", "AAA"),
-        (3000, "session_state"),
+    assert grid_points(items) == [
+        point((1000, "book", "AAA"), (1000, "session_state")),
+        point((1100, "session_state")),
+        point((1500, "book", "AAA")),
+        point((3000, "session_state")),
     ]
     # Twice as fast: 100 ms of the session in 50 ms, then 400 ms in 200 ms, 1500 in 750.
     assert clock.sleeps == pytest.approx([0.05, 0.2, 0.75])

@@ -1269,10 +1269,14 @@ async def test_replay_book_prints_the_best_bid_and_ask_as_the_book_changes():
             QTE_HISTORY_URL=history_url,
         )
     assert code == 0, err
-    assert out.splitlines() == [
-        f"replaying TEST on {test_history.DAY} (times in UTC)",
+    lines = out.splitlines()
+    assert lines[0] == f"replaying TEST on {test_history.DAY} (times in UTC)"
+    # The first grid point's book and session state, in no promised order.
+    assert sorted(lines[1:3]) == [
         "00:00:01.000  TEST  bid 99.950000  ask 100.050000",
         "00:00:01.000  market session OPEN",
+    ]
+    assert lines[3:] == [
         "00:00:02.000  TEST  bid 99.960000  ask 100.050000",
         # The participant's bid at 99.99 is better than the wall's.
         "00:00:03.000  TEST  bid 99.990000  ask 100.050000",

@@ -513,7 +513,7 @@ except HistoryPending as error:
 
 - History tells you what the market published, not how your own orders would have filled against it.
 
-To run your strategy's loop over a whole past session, `replay(client, date, instruments)` from `qte_sdk.replay` merges that session's books, trades, marks and market session state into one stream in time order, as the same classes `market_data` yields, so the code that handles live market data runs on it unchanged. It is market data only: it sends no orders and fills nothing. [Developing your algo](developing-your-algo.md) shows how to use it, and the path from there to the exchange.
+To run your strategy's loop over a whole past session, `replay(client, date, instruments)` from `qte_sdk.replay` merges that session's books, trades, marks and market session state into one stream, as the same classes `market_data` yields, so the code that handles live market data runs on it unchanged. Grid points come in order, as on a live connection; the messages of one grid point come in no promised order, live or replayed, so treat them as a set. It is market data only: it sends no orders and fills nothing. [Developing your algo](developing-your-algo.md) shows how to use it, and the path from there to the exchange.
 
 ## 11. Worked examples
 

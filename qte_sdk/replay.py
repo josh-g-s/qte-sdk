@@ -23,15 +23,16 @@ day, with whatever was really traded then, your own team's orders and trades inc
 it traded. It cannot add an order that was not there, or work out what one would have
 done.
 
-Order. Each message is placed by its time: `grid_time` for `Book`, `Trades` and
-`SessionState`, and `sampled_at` for `Mark`, which is published on its own one-second
-grid. Messages at the same time come in this order: every `Book`, then every `Trades`,
-then every `Mark`, then the `SessionState`, and within each type by instrument id. The
-contract does not say in what order the live feed sends the messages of one grid point;
-this order is the SDK's assumption, taken from the order the contract lists the message
-types in. Do not build on it: treat the messages of one grid point as arriving together.
-Within one stream, the history service's publication order is kept. An `Unknown` or a
-`DecodeFailed` stays where it was in its stream, right after the message before it there.
+Order. Grid points come in order: every message of one grid point comes before any
+message of the next, as on a live connection. A message's grid point is its `grid_time`
+(`Book`, `Trades`, `SessionState`), or its `sampled_at` for a `Mark`, which is published
+on its own one-second grid. The messages of one grid point (books, trades, marks and the
+session state, across instruments) come in no promised order, live or in a replay: treat
+them as a set, and do not rely on any order within it. A replay of the same data comes
+out the same way each time, so a run can be repeated, but the order it uses within a grid
+point is not part of this API and may change. Within one stream, the history service's
+publication order is kept: an `Unknown` or a `DecodeFailed` stays where it was in its
+stream, right after the message before it there.
 
 Memory. Each (instrument, channel) is its own download, plus one for the session state,
 and all of them stay open while the replay runs: each is read only as far as the merge
@@ -73,7 +74,7 @@ from qte_sdk.history import HistoryClient, HistoryItem, _date_text
 __all__ = ["CHANNELS", "replay"]
 
 CHANNELS: tuple[str, ...] = ("book", "trades", "mark", "session_state")
-"""The channels a replay can merge, in the order messages at the same time come out."""
+"""The channels a replay can merge."""
 
 _PER_INSTRUMENT = frozenset({"book", "trades", "mark"})
 # Before any timestamp, for an unusable message at the start of its stream.
@@ -149,7 +150,9 @@ class _Stream:
 
 
 # (time, channel rank, instrument, a counter that keeps each stream's own order, the
-# message, its stream). The counter is unique, so the message is never compared.
+# message, its stream). The counter is unique, so the message is never compared. The
+# channel rank and instrument only make the order within one grid point repeatable; that
+# order is not promised to callers.
 _Entry = tuple[int, int, str, int, HistoryItem, _Stream]
 
 
