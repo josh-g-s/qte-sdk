@@ -10,10 +10,12 @@ from typing import Any
 
 import pytest
 from fake_exchange import LoopClock, exchange, frame, serve_local, silent_server
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from qte_sdk.connection import (
+    TERM_CHANGE_CLOSE_CODE,
     Connection,
     ContractVersionMismatch,
     DecodeFailed,
@@ -474,6 +476,43 @@ def assert_withheld(error: BaseException, token: str) -> None:
     assert_no_token(shown, token)
 
 
+class _Recording:
+    """A connection factory that records what it makes. Empty, it is falsy, which must not
+    make it look absent."""
+
+    def __init__(self) -> None:
+        self.made: list[ClientConnection] = []
+
+    def __len__(self) -> int:
+        return len(self.made)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> ClientConnection:
+        self.made.append(ClientConnection(*args, **kwargs))
+        return self.made[-1]
+
+
+async def test_a_connection_factory_passed_in_is_still_used():
+    factory = _Recording()
+    assert not factory
+    async with exchange([]) as url:
+        async with Connection(url, create_connection=factory) as conn:
+            assert [event async for event in conn] == []
+            assert len(factory.made) == 1 and conn._open_ws() is factory.made[0]
+            assert conn._close_code_received() == 1000
+
+
+def test_the_close_code_received_falls_back_to_the_public_one():
+    from types import SimpleNamespace
+
+    conn = Connection("ws://127.0.0.1:1")
+    assert conn._close_code_received() is None
+    # A websockets whose protocol has no close_rcvd: the public close_code serves.
+    conn._ws = SimpleNamespace(protocol=SimpleNamespace(), close_code=4001)  # type: ignore[assignment]
+    assert conn._close_code_received() == 4001
+    conn._ws = SimpleNamespace(close_code=None)  # type: ignore[assignment]
+    assert conn._close_code_received() is None
+
+
 async def test_a_close_reason_carrying_the_token_is_withheld_from_the_error():
     token = secrets.token_hex(16)
 
@@ -488,6 +527,27 @@ async def test_a_close_reason_carrying_the_token_is_withheld_from_the_error():
                 [event async for event in conn]
     assert caught.value.rcvd is not None and caught.value.rcvd.code == 4000
     assert caught.value.rcvd_then_sent is True
+    assert_withheld(caught.value, token)
+
+
+@pytest.mark.parametrize(
+    "reason", ["term change {token}", "Term change", "term change ", "{token} term change"]
+)
+async def test_only_the_exact_term_change_reason_is_kept(reason: str):
+    token = secrets.token_hex(16)
+    reason = reason.format(token=token)
+
+    async def close_at_term_change(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(TERM_CHANGE_CLOSE_CODE, reason)
+
+    async with serve_local(close_at_term_change) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            with pytest.raises(ConnectionClosedError) as caught:
+                [event async for event in conn]
+    assert caught.value.rcvd is not None
+    assert (caught.value.rcvd.code, caught.value.rcvd.reason) == (4001, "<withheld>")
     assert_withheld(caught.value, token)
 
 

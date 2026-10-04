@@ -27,7 +27,7 @@ import asyncio
 import json
 import os
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from google.protobuf.message import Message
@@ -43,6 +43,8 @@ from qte_sdk.connection import (
     SeqGap,
     SessionInfo,
     SessionRejected,
+    _close_detail,
+    _received_close_code,
 )
 from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import Reject
@@ -69,7 +71,15 @@ class MissingURL(ValueError):
 
 class SessionNotAcknowledged(Exception):
     """The connection ended, or the acknowledgement could not be read, before the session
-    was acknowledged."""
+    was acknowledged.
+
+    `close_code` is the close code the exchange sent, when it closed the connection, for
+    example `qte_sdk.connection.TERM_CHANGE_CLOSE_CODE`; otherwise None.
+    """
+
+    def __init__(self, *args: object, close_code: int | None = None) -> None:
+        super().__init__(*args)
+        self.close_code = close_code
 
 
 class AuthNotSent(SessionNotAcknowledged):
@@ -477,7 +487,12 @@ class Session:
             if isinstance(self._failure, SessionRejected):
                 # The exchange refused the session itself; that is the error to report.
                 raise self._failure
-            raise ResumeNotAcknowledged("the connection closed before resume_ack")
+            failure = self._failure
+            detail = _close_detail(failure) if isinstance(failure, ConnectionClosed) else ""
+            raise ResumeNotAcknowledged(
+                f"the connection closed before resume_ack{detail}",
+                close_code=_received_close_code(failure),
+            )
         if isinstance(answer, DecodeFailed):
             raise ResumeNotAcknowledged(f"resume_ack could not be decoded: {answer.error}")
         assert isinstance(answer, Received)
@@ -776,8 +791,23 @@ async def open_session(
     """
     secret = _Secret(resolve_token(token))
     del token
-    url = resolve_url(url)
+    return await _open_session(
+        resolve_url(url), secret, ack_timeout=ack_timeout, **connection_options
+    )
 
+
+async def _open_session(
+    url: str,
+    secret: "_Secret",
+    *,
+    ack_timeout: float | None,
+    on_close: Callable[[int], None] | None = None,
+    **connection_options: Any,
+) -> Session:
+    """`open_session`, for a resolved address and token. `on_close`, if given, is called
+    with the close code the exchange sent, if it closed the connection before the session
+    was acknowledged, even when a cancellation then replaces the error; `ReconnectingSession`
+    uses it."""
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)
     interrupted = False
@@ -789,6 +819,12 @@ async def open_session(
             ack, early = await _wait_for_ack(conn)
     except BaseException as error:
         interrupted = await _finish_closing(conn)
+        # For `ReconnectingSession`: the close code the exchange sent, if any, is passed on
+        # even when a cancellation replaces the error, which is never chained (it may
+        # repeat the token). A code is a number, so it cannot.
+        close_code = conn._close_code_received()
+        if on_close is not None and close_code is not None:
+            on_close(close_code)
         if isinstance(error, TimeoutError) and deadline.expired():
             # A fresh error, not the one asyncio chained to the cancelled step.
             safe = TimeoutError(f"the session was not acknowledged within {ack_timeout} s")
@@ -839,7 +875,7 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
             text = f"could not send auth: {type(error).__name__}; details withheld"
         else:
             text = f"could not send auth: {type(error).__name__}: {error}"
-        replacement: BaseException = kind(text)
+        replacement: BaseException = kind(text, close_code=_received_close_code(error))
     except BaseException as error:
         # Cancellation and interrupts keep their type, so they behave as they otherwise would.
         replacement = type(error)(*error.args)
@@ -851,6 +887,7 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
 async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
     early: list[Event] = []
     events = conn.events()
+    detail = ""
     close_code: int | None = None
     try:
         async for event in events:
@@ -871,12 +908,15 @@ async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
                 raise SessionNotAcknowledged(f"session_ack could not be decoded: {event.error}")
             early.append(event)
     except ConnectionClosed as error:
-        # Only the code is kept: the close reason is server text and could echo the token.
-        close_code = error.rcvd.code if error.rcvd is not None else None
+        # Only the code and a known reason are kept: any other close reason is server text
+        # and could echo the token.
+        detail = _close_detail(error)
+        close_code = _received_close_code(error)
     finally:
         await events.aclose()
-    detail = f" (close code {close_code})" if close_code is not None else ""
-    raise SessionNotAcknowledged(f"the connection closed before session_ack{detail}")
+    raise SessionNotAcknowledged(
+        f"the connection closed before session_ack{detail}", close_code=close_code
+    )
 
 
 class _Secret:
@@ -1042,5 +1082,5 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
         return type(error)(error.reason_code, detail, reason_name=name)
     withheld = f"{type(error).__name__}; details withheld, since they repeated the token"
     if isinstance(error, SessionNotAcknowledged):
-        return type(error)(withheld)
-    return SessionNotAcknowledged(withheld)
+        return type(error)(withheld, close_code=error.close_code)
+    return SessionNotAcknowledged(withheld, close_code=_received_close_code(error))
