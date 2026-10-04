@@ -12,6 +12,7 @@ from test_session import ack, assert_token_absent, session_reject, synthetic_tok
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
+from websockets.frames import Close
 from websockets.protocol import State
 
 import qte_sdk.reconnect
@@ -640,6 +641,7 @@ async def test_a_session_rejected_while_open_is_flagged_then_raised():
     ("error", "retryable"),
     [
         (ConnectionClosedError(None, None), True),
+        (ConnectionClosedError(Close(4001, "term change"), None), True),
         (ConnectionRefusedError(), True),
         (ssl.SSLCertVerificationError(), False),
         (TimeoutError(), True),
@@ -820,7 +822,7 @@ async def test_closing_ends_iteration_in_a_task_that_once_caught_a_cancellation(
 
 
 async def test_cancelling_just_as_a_session_opens_closes_that_session(monkeypatch):
-    real_open = qte_sdk.reconnect.open_session
+    real_open = qte_sdk.reconnect._open_session
     consumer: asyncio.Task | None = None
 
     async def open_then_cancel(*args, **kwargs):
@@ -830,7 +832,7 @@ async def test_cancelling_just_as_a_session_opens_closes_that_session(monkeypatc
         asyncio.get_running_loop().call_soon(consumer.cancel)
         return opened
 
-    monkeypatch.setattr(qte_sdk.reconnect, "open_session", open_then_cancel)
+    monkeypatch.setattr(qte_sdk.reconnect, "_open_session", open_then_cancel)
     exchange = Exchange(session())
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(url, synthetic_token())
