@@ -40,13 +40,13 @@ at once, with or without a resume and whether or not either term is known, witho
 waiting for the next calendar: the next session asks from 0 and gets a snapshot, or, with
 `resume=False`, counts the new term's reports from the first it reads, as a first session
 does. The same holds when the exchange closes an attempt to connect with 4001 before it is
-up, even if the attempt is then cancelled or the session closed. The close is retried like
-any other drop. One exception: if the exchange rejects a new session while it waits for
-the calendar, just before closing it with 4001, the rejection can end the session before
-the close is seen, and then `last_report_seq` keeps the old number. The rejection is not
-retried, so that number is never sent. A client that was not connected when the term
-changed is not sent the close; for it, the check of the new session's calendar, described
-here and below, is what forgets the number.
+up, or while a session that failed or was cancelled is being closed, a cancellation
+included. The close is retried like any other drop. One exception: if the exchange rejects
+a new session while it waits for the calendar, just before closing it with 4001, the
+rejection can end the session before the close is seen, and then `last_report_seq` keeps
+the old number. The rejection is not retried, so that number is never sent. A client that
+was not connected when the term changed is not sent the close; for it, the check of the
+new session's calendar, described here and below, is what forgets the number.
 
 With `resume=False` the report number is carried over too, so that a report missed while
 disconnected is noticed (see below). It is forgotten when the new session's calendar names
@@ -538,7 +538,7 @@ class ReconnectingSession:
                 disconnected = Disconnected(failure)
                 if self.resting is not None:
                     self.resting.apply(disconnected)
-                await _close(session)
+                await self._close_session(session)
                 self._session = None
                 if self._closed:
                     return
@@ -558,7 +558,7 @@ class ReconnectingSession:
                 self.resting.mark_incomplete()
             session = self._session
             if session is not None:
-                await _close(session)
+                await self._close_session(session)
                 self._session = None
 
     async def close(self) -> None:
@@ -590,10 +590,10 @@ class ReconnectingSession:
             if cancelling is None or not cancelling():
                 pending.cancel()
             await asyncio.wait({pending})
-            await _close_result(pending)
+            await self._close_result(pending)
         session = self._session
         if session is not None:
-            await _close(session)
+            await self._close_session(session)
             if self._session is session:
                 self._session = None
 
@@ -711,7 +711,7 @@ class ReconnectingSession:
                 # It may repeat the token, so it is not kept in this frame while the close
                 # below is awaited, where a cancellation would show it in the traceback.
                 del drained
-            await _close(session)
+            await self._close_session(session)
             self._session = None
             session = None
         elif failure is not None and term_changed:
@@ -735,7 +735,7 @@ class ReconnectingSession:
             if current is not None and current.cancelling() > cancelling:
                 # This task was cancelled. A session the attempt opened just before is
                 # closed rather than left behind.
-                await _close_result(task)
+                await self._close_result(task)
                 raise
             if self._closed and task.cancelled():
                 return _CLOSED
@@ -765,6 +765,26 @@ class ReconnectingSession:
             reports.restore((None, frozenset()))
         if term is not None or reports.cursor is None:
             self._reports_term = term
+
+    async def _close_session(self, session: Session) -> None:
+        """Close `session` as `_close` does. If the exchange closed its connection for a term
+        change at any point up to then, a cancellation while closing included, the cursor
+        is forgotten, and the attempt under way, if any, is told."""
+        try:
+            await _close(session)
+        finally:
+            if session.connection._close_code_received() == TERM_CHANGE_CLOSE_CODE:
+                # The flag too: an attempt that is being cancelled puts its saved cursor
+                # back after this, then forgets it again on seeing the flag.
+                self._term_change_seen = True
+                self._forget_cursor()
+
+    async def _close_result(self, task: "asyncio.Future[Any]") -> None:
+        """Close the session `task` opened, if it finished with one."""
+        if task.done() and not task.cancelled() and task.exception() is None:
+            result = task.result()
+            if isinstance(result, Session):
+                await self._close_session(result)
 
     def _note_close(self, code: int) -> None:
         """Told by `open_session` the close code the exchange sent, even when the opening
@@ -831,14 +851,6 @@ def _term_of(calendar: Calendar | None) -> tuple[str, str] | None:
     if calendar is None or not (calendar.term_start and calendar.term_end):
         return None
     return calendar.term_start, calendar.term_end
-
-
-async def _close_result(task: "asyncio.Future[Any]") -> None:
-    """Close the session `task` opened, if it finished with one."""
-    if task.done() and not task.cancelled() and task.exception() is None:
-        result = task.result()
-        if isinstance(result, Session):
-            await _close(result)
 
 
 async def _close(session: Session) -> None:
