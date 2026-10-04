@@ -32,11 +32,14 @@ listed because a position is open in it. Each contract has a role: `OPTION_ROLE_
 `OPTION_ROLE_RETAINED` (reducing-only). The chain is fixed for its session. It reaches a
 connection once that connection holds a subscription to at least one option contract:
 in the answer to the `subscribe` that gives it its first one, and again when the next
-session's chain is published, between the close and the next open. So the first option
-subscribe must name a listed contract that you work out yourself, from the symbol rules
-and the strike increment; a subscribe naming a contract that is not listed is rejected
-`UNKNOWN_INSTRUMENT`. `chain_contracts` filters a chain, and `expiry_date` and
-`limit_scope` read an expiry:
+session's chain is published, between the close and the next open. There is no request
+for the chain, so the first option subscribe must name a listed contract; a subscribe
+naming a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. The exchange's
+instruments message is to list each underlying's listed contracts by symbol, with its
+strike increment, and is where that first contract will come from once it is published;
+it is not on the wire yet, so until then you work one out yourself from the symbol rules.
+
+`chain_contracts` filters a chain, and `expiry_date` and `limit_scope` read an expiry:
 
     >>> from qte_sdk.contract.v1.market_data_pb2 import OptionChain
     >>> chain = OptionChain(session_date="2026-10-26")
@@ -86,10 +89,15 @@ this SDK does not know as `OPTION_SUSPENDED`, the most restrictive, rather than 
 field itself. An option contract's wall is
 one level per side, or none at all while it is suspended or its quote is not two-sided.
 
-Not published yet: options reject reasons; a way to get the chain without first
-subscribing to a listed contract; the residual print of an option trade; and options in
-the history service, which serves no `option_chain` or `option_greeks`, so
-`qte_sdk.replay` replays no Greeks.
+Not settled or not published yet:
+
+- The instruments message that lists each underlying's contracts (above).
+- Reject reasons for options, such as a contract that is not listed, suspended or
+  reducing-only. This SDK maps none; read any reject by its `reason_code` as usual.
+- Options in the history service: it serves no `option_chain` or `option_greeks`, so
+  `qte_sdk.replay` replays no Greeks.
+- The residual print of an option trade. It is to be marked by a new optional flag on
+  `TapePrint`; until that is published, nothing marks it.
 """
 
 import re

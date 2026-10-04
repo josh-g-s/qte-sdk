@@ -297,10 +297,10 @@ book = books.get("SPY261120C00665000")
 may_open = book is not None and trading_state(book) == OPTION_TRADING
 ```
 
-The `qte_sdk.options` docstring covers when each message arrives. Not published by the exchange yet:
-- a way to get the chain before subscribing to a listed contract, so your first option subscribe must name one you work out from the symbol rules;
-- options reject reasons;
-- options in the history service.
+The `qte_sdk.options` docstring covers when each message arrives. There is no request for the chain, so your first option subscribe must name a listed contract; a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. The exchange's instruments message is to list each underlying's listed contracts by symbol, with its strike increment, but it is not on the wire yet: until it is, work out a listed contract from the symbol rules. Not settled yet:
+- reject reasons for options, which this SDK does not map, so read a reject by its `reason_code` as usual;
+- options in the history service;
+- the flag that will mark an option trade's residual print in `trades`.
 
 ## 6. Place and cancel an order
 

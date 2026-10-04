@@ -4,7 +4,7 @@
 # bytes against it.
 
 repo = "qte-platform"
-commit = "2c5af0f50b8511fe90cb9f61c8dde82708d407a1"
+commit = "4234d63da9717eb2790631a9da47eb2a2cc82e8e"
 path = "schemas/proto/qte/contract/v1"
 
 [blobs]
