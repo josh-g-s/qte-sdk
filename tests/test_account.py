@@ -21,6 +21,7 @@ from qte_sdk.contract.v1.common_pb2 import (
 )
 from qte_sdk.contract.v1.order_events_pb2 import ObligationState, Reject
 from qte_sdk.contract.v1.session_pb2 import AccountQuery
+from qte_sdk.options import is_option_symbol
 from qte_sdk.orders import is_order_event, reason_code_name, request_ref_of
 
 PREVIOUS_CLOSE_EQUITY = 12_000_000_000
@@ -418,8 +419,8 @@ async def test_query_accepts_a_request_ref_of_exactly_32_bytes():
 
 
 async def test_an_option_position_is_named_by_its_occ_symbol():
-    occ = "AAPL  261218C00200000"
-    assert len(occ) == 21
+    occ = "AAPL261218C00200000"  # unpadded, with no spaces
+    assert is_option_symbol(occ)
     [event] = await received(
         frame(
             "account_state",

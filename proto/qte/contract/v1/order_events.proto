@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.15
+// **Version:** 1.16
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -134,8 +134,10 @@ message OrderState {
 message LimitUtilisation {
   LimitKind kind = 1; // SPEC 11.1
   // The instrument, sector or underlying the row is for; absent for a
-  // whole-book limit. How an options underlying-and-expiry is named is not
-  // yet specified.
+  // whole-book limit. An options underlying-and-expiry is named by the
+  // underlying's symbol, one space and the expiry date in ISO 8601, for
+  // example "SPY 2026-11-20": the underlying and expiry of an
+  // OptionChainExpiry. SPEC 18.7
   optional string scope = 2;
   // int64-micro. The amount held, as a magnitude. For the Fundamentals entry
   // limits (LIMIT_INSTRUMENT, LIMIT_SECTOR, LIMIT_GROSS, LIMIT_SHORT_OF_GROSS)
@@ -203,8 +205,8 @@ message AccountSummary {
 // on the public feed: it carries no other desk's information (SPEC 4.3,
 // SPEC 15.4). It is defined for equity Market Making desks. Whether it also
 // covers an Options market making desk, for its own obligated contracts under
-// SPEC 18.5, is not yet confirmed, and option contracts are not yet identified
-// on the wire.
+// SPEC 18.5, is not yet confirmed. If it does, an entry names the contract by
+// Alpaca's OCC option symbol, unpadded, in `instrument`.
 message ObligationState {
   // One entry for every instrument assigned to the desk, in no required order.
   repeated ObligationEntry entries = 1;
@@ -273,7 +275,7 @@ message RiskNotice {
 // One position in an `account_state` reply (SPEC 7.1, SPEC 12.2).
 message PositionValue {
   // id. The instrument held. An equity is named by its symbol; an option
-  // contract by its 21-character OCC option symbol, as Alpaca uses.
+  // contract by Alpaca's OCC option symbol, unpadded.
   string instrument = 1;
   // int64-qty. Signed: positive long, negative short. Shares of an equity; a
   // whole number of contracts for an option (SPEC 18.1).

@@ -10,6 +10,8 @@
                 ...
             case OfficialClose():
                 last_close = to_decimal(item.value)  # outside a session only
+            case OptionChain() | OptionGreeks():
+                ...  # options only: see `qte_sdk.options`
             case SeqGap() | Disconnected() | DecodeFailed():
                 ...  # messages were lost: treat what you hold as uncertain
             case Reject():
@@ -39,6 +41,14 @@ reply, and are absent when the term has no later session or the exchange predate
 it. The calendar (`qte_sdk.calendar`) stays the full schedule; these fields are a
 convenience on that reply.
 
+Option contracts are instruments too, named by their OCC symbol (`qte_sdk.options`), and
+their `Book`, `Trades`, `Mark` and `OfficialClose` are these same messages, with sizes in
+contracts rather than shares. An option contract's `Book` also carries `trading_state`,
+absent on every other book. Two messages are for options only: `OptionChain`, the day's
+listed contracts, and `OptionGreeks`, a contract's published Greeks. Neither reaches a
+connection with no option subscription, so a program that trades only equities sees no
+change. `qte_sdk.options` describes them.
+
 Messages are the generated contract classes. Prices are `int` micro-dollars and sizes are
 `int` shares, exact at any size; use `qte_sdk.units.to_decimal` for exact `Decimal`
 dollars. Each instrument's condition is the `condition` field of `Book` and of `Mark`
@@ -66,6 +76,9 @@ from qte_sdk.contract.v1.market_data_pb2 import (
     InstrumentCondition,
     Mark,
     OfficialClose,
+    OptionChain,
+    OptionGreeks,
+    OptionTradingState,
     SessionState,
     StudentLevel,
     TapePrint,
@@ -86,6 +99,9 @@ __all__ = [
     "MarketData",
     "MarketDataEvent",
     "OfficialClose",
+    "OptionChain",
+    "OptionGreeks",
+    "OptionTradingState",
     "Reject",
     "SeqGap",
     "SessionState",
@@ -100,7 +116,7 @@ __all__ = [
     "until_next_open",
 ]
 
-MarketData = Book | Trades | Mark | SessionState | OfficialClose
+MarketData = Book | Trades | Mark | SessionState | OfficialClose | OptionChain | OptionGreeks
 """One market-data message."""
 
 MarketDataEvent = MarketData | Reject | SeqGap | Disconnected | DecodeFailed
@@ -108,7 +124,15 @@ MarketDataEvent = MarketData | Reject | SeqGap | Disconnected | DecodeFailed
 messages were lost (`SeqGap`, `Disconnected` from a reconnecting session, `DecodeFailed`)."""
 
 MARKET_DATA_TYPES: frozenset[str] = frozenset(
-    {"book", "trades", "mark", "session_state", "official_close"}
+    {
+        "book",
+        "trades",
+        "mark",
+        "session_state",
+        "official_close",
+        "option_chain",
+        "option_greeks",
+    }
 )
 """The envelope `type` tokens of market-data messages."""
 
@@ -143,13 +167,13 @@ def as_market_data(event: Event | Disconnected | object) -> MarketDataEvent | No
     """The market-data meaning of one connection event, or None if it has none.
 
     Use this in your own loop over a connection when you also handle order events there.
-    Returns the message for `book`, `trades`, `mark`, `session_state` and
-    `official_close`; a `Reject` of a `subscribe` or `unsubscribe`; every `SeqGap` and
-    `Disconnected` (any `DataUncertain` but `ReportGap`, which concerns only the team's
-    private order reports), since messages may have been missed; and every
-    `DecodeFailed`, since a message that could not be decoded may have been market data
-    or a refused subscription, and sequence tracking has already counted it, so no later
-    gap will report it.
+    Returns the message for `book`, `trades`, `mark`, `session_state`, `official_close`,
+    `option_chain` and `option_greeks`; a `Reject` of a `subscribe` or `unsubscribe`;
+    every `SeqGap` and `Disconnected` (any `DataUncertain` but `ReportGap`, which
+    concerns only the team's private order reports), since messages may have been
+    missed; and every `DecodeFailed`, since a message that could not be decoded may have
+    been market data or a refused subscription, and sequence tracking has already counted
+    it, so no later gap will report it.
     """
     if isinstance(event, Received):
         if event.type in MARKET_DATA_TYPES:

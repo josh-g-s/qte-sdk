@@ -535,12 +535,90 @@ def test_as_market_data_classifies_single_events():
     assert as_market_data(failed) is failed
 
 
-def test_no_option_chain_types_are_exposed():
-    public = set(md.__all__) | {n for n in dir(md) if not n.startswith("_")}
-    assert not [name for name in public if "option" in name.lower()]
-    messages = market_data_pb2.DESCRIPTOR.message_types_by_name
-    assert not [name for name in messages if "option" in name.lower()]
-    assert md.MARKET_DATA_TYPES == {"book", "trades", "mark", "session_state", "official_close"}
+def test_the_option_messages_are_market_data():
+    assert md.MARKET_DATA_TYPES == {
+        "book",
+        "trades",
+        "mark",
+        "session_state",
+        "official_close",
+        "option_chain",
+        "option_greeks",
+    }
+    assert md.OptionChain is market_data_pb2.OptionChain
+    assert md.OptionGreeks is market_data_pb2.OptionGreeks
+    chain = md.OptionChain(session_date="2026-10-26")
+    assert as_market_data(Received("option_chain", chain, 1)) is chain
+    greeks = md.OptionGreeks(instrument="SPY261120C00665000")
+    assert as_market_data(Received("option_greeks", greeks, 1)) is greeks
+
+
+async def test_an_option_chain_and_greeks_decode_from_the_wire():
+    chain = {
+        "session_date": "2026-10-26",
+        "expiries": [
+            {
+                "underlying": "SPY",
+                "expiry": "2026-11-20",
+                "window_status": "OPTION_WINDOW_COMPUTED",
+                "reducing_only": False,
+                "contracts": [
+                    {"instrument": "SPY261120C00665000", "role": "OPTION_ROLE_OBLIGATED"},
+                    {"instrument": "SPY261120P00665000", "role": "OPTION_ROLE_ACTIVE"},
+                ],
+            }
+        ],
+    }
+    greeks = {
+        "instrument": "SPY261120C00665000",
+        "grid_time": "1000",
+        "status": "OPTION_GREEKS_VALID",
+        "calculated_at": "1000",
+        "forward": "665200000",
+        "implied_vol": "18000000",
+        "delta": "500000000000",
+        "gamma": "20000000000",
+        "vega": "741900",
+        "theta": "-310000",
+    }
+    none = {"instrument": "SPY261120P00660000", "grid_time": "1000", "status": "OPTION_GREEKS_NONE"}
+    got_chain, got_greeks, got_none = await received(
+        [
+            frame("option_chain", chain, 1),
+            frame("option_greeks", greeks, 2),
+            frame("option_greeks", none, 3),
+        ]
+    )
+    assert isinstance(got_chain, md.OptionChain)
+    [expiry] = got_chain.expiries
+    assert expiry.window_status == market_data_pb2.OPTION_WINDOW_COMPUTED
+    assert [c.role for c in expiry.contracts] == [
+        market_data_pb2.OPTION_ROLE_OBLIGATED,
+        market_data_pb2.OPTION_ROLE_ACTIVE,
+    ]
+    assert isinstance(got_greeks, md.OptionGreeks)
+    assert (got_greeks.delta, got_greeks.theta, got_greeks.forward) == (
+        500_000_000_000,
+        -310_000,
+        665_200_000,
+    )
+    assert got_none.status == market_data_pb2.OPTION_GREEKS_NONE
+    assert not got_none.HasField("delta") and not got_none.HasField("calculated_at")
+
+
+async def test_an_option_book_carries_its_trading_state_and_an_equity_book_none():
+    option = book_payload(
+        "SPY261120C00665000",
+        bid_levels=[{"price": "4850000", "size": "10"}],
+        ask_levels=[{"price": "5160000", "size": "10"}],
+        trading_state="OPTION_REDUCING_ONLY",
+    )
+    got_option, got_equity = await received(
+        [frame("book", option, 1), frame("book", book_payload("AAPL"), 2)]
+    )
+    assert got_option.HasField("trading_state")
+    assert got_option.trading_state == market_data_pb2.OPTION_REDUCING_ONLY
+    assert not got_equity.HasField("trading_state")
 
 
 def test_a_disconnect_is_passed_on_as_a_sign_that_messages_were_lost():

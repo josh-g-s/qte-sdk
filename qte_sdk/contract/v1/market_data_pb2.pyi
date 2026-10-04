@@ -17,6 +17,33 @@ class InstrumentCondition(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     FROZEN: _ClassVar[InstrumentCondition]
     REFERENCE_UNAVAILABLE: _ClassVar[InstrumentCondition]
     DISABLED: _ClassVar[InstrumentCondition]
+
+class OptionTradingState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    OPTION_TRADING_STATE_UNSPECIFIED: _ClassVar[OptionTradingState]
+    OPTION_TRADING: _ClassVar[OptionTradingState]
+    OPTION_REDUCING_ONLY: _ClassVar[OptionTradingState]
+    OPTION_SUSPENDED: _ClassVar[OptionTradingState]
+
+class OptionWindowStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    OPTION_WINDOW_STATUS_UNSPECIFIED: _ClassVar[OptionWindowStatus]
+    OPTION_WINDOW_COMPUTED: _ClassVar[OptionWindowStatus]
+    OPTION_WINDOW_RETAINED: _ClassVar[OptionWindowStatus]
+
+class OptionContractRole(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    OPTION_CONTRACT_ROLE_UNSPECIFIED: _ClassVar[OptionContractRole]
+    OPTION_ROLE_ACTIVE: _ClassVar[OptionContractRole]
+    OPTION_ROLE_OBLIGATED: _ClassVar[OptionContractRole]
+    OPTION_ROLE_RETAINED: _ClassVar[OptionContractRole]
+
+class OptionGreeksStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    OPTION_GREEKS_STATUS_UNSPECIFIED: _ClassVar[OptionGreeksStatus]
+    OPTION_GREEKS_VALID: _ClassVar[OptionGreeksStatus]
+    OPTION_GREEKS_UNAVAILABLE: _ClassVar[OptionGreeksStatus]
+    OPTION_GREEKS_NONE: _ClassVar[OptionGreeksStatus]
 INSTRUMENT_CONDITION_UNSPECIFIED: InstrumentCondition
 LIVE: InstrumentCondition
 ONE_SIDED: InstrumentCondition
@@ -24,6 +51,21 @@ EMPTY: InstrumentCondition
 FROZEN: InstrumentCondition
 REFERENCE_UNAVAILABLE: InstrumentCondition
 DISABLED: InstrumentCondition
+OPTION_TRADING_STATE_UNSPECIFIED: OptionTradingState
+OPTION_TRADING: OptionTradingState
+OPTION_REDUCING_ONLY: OptionTradingState
+OPTION_SUSPENDED: OptionTradingState
+OPTION_WINDOW_STATUS_UNSPECIFIED: OptionWindowStatus
+OPTION_WINDOW_COMPUTED: OptionWindowStatus
+OPTION_WINDOW_RETAINED: OptionWindowStatus
+OPTION_CONTRACT_ROLE_UNSPECIFIED: OptionContractRole
+OPTION_ROLE_ACTIVE: OptionContractRole
+OPTION_ROLE_OBLIGATED: OptionContractRole
+OPTION_ROLE_RETAINED: OptionContractRole
+OPTION_GREEKS_STATUS_UNSPECIFIED: OptionGreeksStatus
+OPTION_GREEKS_VALID: OptionGreeksStatus
+OPTION_GREEKS_UNAVAILABLE: OptionGreeksStatus
+OPTION_GREEKS_NONE: OptionGreeksStatus
 
 class WallLevel(_message.Message):
     __slots__ = ("price", "size")
@@ -42,7 +84,7 @@ class StudentLevel(_message.Message):
     def __init__(self, price: _Optional[int] = ..., size: _Optional[int] = ...) -> None: ...
 
 class Book(_message.Message):
-    __slots__ = ("instrument", "grid_time", "bid_levels", "ask_levels", "student_bid_levels", "student_ask_levels", "condition")
+    __slots__ = ("instrument", "grid_time", "bid_levels", "ask_levels", "student_bid_levels", "student_ask_levels", "condition", "trading_state")
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
     GRID_TIME_FIELD_NUMBER: _ClassVar[int]
     BID_LEVELS_FIELD_NUMBER: _ClassVar[int]
@@ -50,6 +92,7 @@ class Book(_message.Message):
     STUDENT_BID_LEVELS_FIELD_NUMBER: _ClassVar[int]
     STUDENT_ASK_LEVELS_FIELD_NUMBER: _ClassVar[int]
     CONDITION_FIELD_NUMBER: _ClassVar[int]
+    TRADING_STATE_FIELD_NUMBER: _ClassVar[int]
     instrument: str
     grid_time: int
     bid_levels: _containers.RepeatedCompositeFieldContainer[WallLevel]
@@ -57,7 +100,8 @@ class Book(_message.Message):
     student_bid_levels: _containers.RepeatedCompositeFieldContainer[StudentLevel]
     student_ask_levels: _containers.RepeatedCompositeFieldContainer[StudentLevel]
     condition: InstrumentCondition
-    def __init__(self, instrument: _Optional[str] = ..., grid_time: _Optional[int] = ..., bid_levels: _Optional[_Iterable[_Union[WallLevel, _Mapping]]] = ..., ask_levels: _Optional[_Iterable[_Union[WallLevel, _Mapping]]] = ..., student_bid_levels: _Optional[_Iterable[_Union[StudentLevel, _Mapping]]] = ..., student_ask_levels: _Optional[_Iterable[_Union[StudentLevel, _Mapping]]] = ..., condition: _Optional[_Union[InstrumentCondition, str]] = ...) -> None: ...
+    trading_state: OptionTradingState
+    def __init__(self, instrument: _Optional[str] = ..., grid_time: _Optional[int] = ..., bid_levels: _Optional[_Iterable[_Union[WallLevel, _Mapping]]] = ..., ask_levels: _Optional[_Iterable[_Union[WallLevel, _Mapping]]] = ..., student_bid_levels: _Optional[_Iterable[_Union[StudentLevel, _Mapping]]] = ..., student_ask_levels: _Optional[_Iterable[_Union[StudentLevel, _Mapping]]] = ..., condition: _Optional[_Union[InstrumentCondition, str]] = ..., trading_state: _Optional[_Union[OptionTradingState, str]] = ...) -> None: ...
 
 class TapePrint(_message.Message):
     __slots__ = ("price", "size", "aggressor_side", "timestamp", "kind")
@@ -128,3 +172,57 @@ class OfficialClose(_message.Message):
     value: int
     frozen: bool
     def __init__(self, instrument: _Optional[str] = ..., session_date: _Optional[str] = ..., value: _Optional[int] = ..., frozen: bool = ...) -> None: ...
+
+class OptionChainExpiry(_message.Message):
+    __slots__ = ("underlying", "expiry", "window_status", "reducing_only", "contracts")
+    UNDERLYING_FIELD_NUMBER: _ClassVar[int]
+    EXPIRY_FIELD_NUMBER: _ClassVar[int]
+    WINDOW_STATUS_FIELD_NUMBER: _ClassVar[int]
+    REDUCING_ONLY_FIELD_NUMBER: _ClassVar[int]
+    CONTRACTS_FIELD_NUMBER: _ClassVar[int]
+    underlying: str
+    expiry: str
+    window_status: OptionWindowStatus
+    reducing_only: bool
+    contracts: _containers.RepeatedCompositeFieldContainer[OptionChainContract]
+    def __init__(self, underlying: _Optional[str] = ..., expiry: _Optional[str] = ..., window_status: _Optional[_Union[OptionWindowStatus, str]] = ..., reducing_only: bool = ..., contracts: _Optional[_Iterable[_Union[OptionChainContract, _Mapping]]] = ...) -> None: ...
+
+class OptionChainContract(_message.Message):
+    __slots__ = ("instrument", "role")
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    ROLE_FIELD_NUMBER: _ClassVar[int]
+    instrument: str
+    role: OptionContractRole
+    def __init__(self, instrument: _Optional[str] = ..., role: _Optional[_Union[OptionContractRole, str]] = ...) -> None: ...
+
+class OptionChain(_message.Message):
+    __slots__ = ("session_date", "expiries")
+    SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
+    EXPIRIES_FIELD_NUMBER: _ClassVar[int]
+    session_date: str
+    expiries: _containers.RepeatedCompositeFieldContainer[OptionChainExpiry]
+    def __init__(self, session_date: _Optional[str] = ..., expiries: _Optional[_Iterable[_Union[OptionChainExpiry, _Mapping]]] = ...) -> None: ...
+
+class OptionGreeks(_message.Message):
+    __slots__ = ("instrument", "grid_time", "status", "calculated_at", "forward", "implied_vol", "delta", "gamma", "vega", "theta")
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    GRID_TIME_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    CALCULATED_AT_FIELD_NUMBER: _ClassVar[int]
+    FORWARD_FIELD_NUMBER: _ClassVar[int]
+    IMPLIED_VOL_FIELD_NUMBER: _ClassVar[int]
+    DELTA_FIELD_NUMBER: _ClassVar[int]
+    GAMMA_FIELD_NUMBER: _ClassVar[int]
+    VEGA_FIELD_NUMBER: _ClassVar[int]
+    THETA_FIELD_NUMBER: _ClassVar[int]
+    instrument: str
+    grid_time: int
+    status: OptionGreeksStatus
+    calculated_at: int
+    forward: int
+    implied_vol: int
+    delta: int
+    gamma: int
+    vega: int
+    theta: int
+    def __init__(self, instrument: _Optional[str] = ..., grid_time: _Optional[int] = ..., status: _Optional[_Union[OptionGreeksStatus, str]] = ..., calculated_at: _Optional[int] = ..., forward: _Optional[int] = ..., implied_vol: _Optional[int] = ..., delta: _Optional[int] = ..., gamma: _Optional[int] = ..., vega: _Optional[int] = ..., theta: _Optional[int] = ...) -> None: ...
