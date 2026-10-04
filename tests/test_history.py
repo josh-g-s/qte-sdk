@@ -10,6 +10,7 @@ import socket
 import socketserver
 import ssl
 import subprocess
+import sys
 import threading
 import traceback
 from collections.abc import Iterator
@@ -1166,11 +1167,14 @@ async def test_closing_a_fetch_part_way_closes_its_connection(closes):
 # woken by the cancel.
 
 
+WORKER = "history-test-worker"
+
+
 class RecordingExecutor(ThreadPoolExecutor):
     """An event loop's default executor that keeps every call it is given."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(thread_name_prefix=WORKER)
         self.calls: list[Future[Any]] = []
 
     def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Future[Any]:
@@ -1186,14 +1190,30 @@ def worker_calls() -> list[Future[Any]]:
     return executor.calls
 
 
+def in_a_socket_read() -> bool:
+    """Whether a worker thread is inside a socket read. It then holds the lock of the
+    response's buffered reader, so closing the response cannot get in before the read:
+    only shutting the connection down wakes it."""
+    frames = sys._current_frames()
+    for thread in threading.enumerate():
+        frame = frames.get(thread.ident or 0) if thread.name.startswith(WORKER) else None
+        while frame is not None:
+            if frame.f_code is socket.SocketIO.readinto.__code__:
+                return True
+            frame = frame.f_back
+    return False
+
+
 async def workers_end(calls: list[Future[Any]], token: str) -> list[BaseException]:
     """Wait for every call in `calls` to end, and return what they raised. The client
-    discards a cancelled worker's error, but it must not carry the token either."""
+    discards a cancelled worker's error, but it must not carry the token either, and a
+    worker that ran out its timeout was not woken."""
     assert calls
     await eventually(lambda: all(call.done() for call in calls))
     raised = [call.exception() for call in calls if not call.cancelled()]
     errors = [error for error in raised if error is not None]
     for error in errors:
+        assert not isinstance(error, TimeoutError)
         assert_token_absent(token, shown(error))
     return errors
 
@@ -1285,10 +1305,9 @@ async def test_cancelling_during_a_download_ends_the_worker_and_closes_its_conne
     with serve_history(fake) as url, released(release):
         stream = HistoryClient(url, token, timeout=60).fetch(DAY, "TEST", "book")
         await anext(stream)
-        started = len(calls)
         reading = asyncio.ensure_future(anext(stream))
         # The read of the rest, which the service is holding.
-        await eventually(lambda: len(calls) > started and calls[-1].running())
+        await eventually(in_a_socket_read)
         reading.cancel()
         with pytest.raises(asyncio.CancelledError) as caught:
             await reading
@@ -1347,11 +1366,11 @@ async def test_a_fetch_cancelled_while_connecting_sends_nothing(monkeypatch, con
 
 
 @pytest.fixture
-def held_replies(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[threading.Event, threading.Event]]:
+def held_replies(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
     """Holds the worker just after it has read a response's status and headers: the first
-    event is set when it gets there, and it goes on once the second is set."""
+    event is set when it gets there, and it goes on once the second is set. The test
+    releases it, since a fixture's teardown would come after the event loop waits for its
+    worker threads."""
     arrived, go_on = threading.Event(), threading.Event()
     build = history._Reply.__init__
 
@@ -1361,8 +1380,7 @@ def held_replies(
         go_on.wait(HOLD_LIMIT)
 
     monkeypatch.setattr(history._Reply, "__init__", held)
-    with released(go_on):
-        yield arrived, go_on
+    return arrived, go_on
 
 
 async def test_a_response_that_arrives_as_the_fetch_is_cancelled_is_closed(
@@ -1372,7 +1390,7 @@ async def test_a_response_that_arrives_as_the_fetch_is_cancelled_is_closed(
     token = synthetic_token()
     calls = worker_calls()
     fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(5)})
-    with serve_history(fake) as url:
+    with serve_history(fake) as url, released(go_on):
         client = HistoryClient(url, token, timeout=60)
         fetching = asyncio.ensure_future(collect(client.fetch(DAY, "TEST", "book")))
         await eventually(arrived.is_set)
@@ -1494,9 +1512,8 @@ async def test_cancelling_an_https_fetch_ends_the_worker_at_once(certificate, he
             await eventually(lambda: fake.requests)
         else:
             await anext(stream)
-            started = len(calls)
             fetching = asyncio.ensure_future(anext(stream))
-            await eventually(lambda: len(calls) > started and calls[-1].running())
+            await eventually(in_a_socket_read)
         fetching.cancel()
         with pytest.raises(asyncio.CancelledError) as caught:
             await fetching
