@@ -9,6 +9,12 @@ Run it first, before any other program, and again whenever something seems wrong
 these checks in order and prints one line for each, PASS, FAIL or SKIP with a one-line
 reason, then a summary:
 
+    sdk-version      whether the installed SDK is the latest release, as
+                     `python -m qte_sdk.update` reports it, before anything else and even
+                     with no token. A FAIL when a newer release is out, or when the SDK is
+                     too old to have the check, with the command that updates; a PASS that
+                     notes any newer commits on main; a SKIP when it cannot tell (a local
+                     or editable install, say, or GitHub could not be reached).
     token, address   where the SDK finds your token and the exchange address, as
                      `python -m qte_sdk.token check` reports them. Neither is shown.
     dotenv           only when git does not ignore the .env the SDK read: a FAIL, since
@@ -114,73 +120,86 @@ from urllib.parse import urlsplit
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
-from qte_sdk.account import AccountState, ValuationBasis, is_account_state, send_account_query
-from qte_sdk.books import LatestBooks
-from qte_sdk.calendar import Calendar, CalendarSession, next_session, session_open_at
-from qte_sdk.connection import (
-    ContractVersionMismatch,
-    Received,
-    ReportGap,
-    SessionRejected,
-    Unknown,
-)
-from qte_sdk.contract.v1.common_pb2 import (
-    BUY,
-    LIMIT,
-    RESTING,
-    STALE,
-    MarketSessionPhase,
-    ReasonCodes,
-)
-from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, OrderState
-from qte_sdk.dotenv import DOTENV_NAME, DotenvNotIgnored, dotenv_path
-from qte_sdk.history import (
-    HISTORY_URL_ENV_VAR,
-    HistoryClient,
-    HistoryError,
-    HistoryNotImplemented,
-    HistoryPending,
-)
-from qte_sdk.instruments import (
-    InstrumentInfo,
-    Instruments,
-    InstrumentStatus,
-    can_trade,
-    instruments_by_id,
-    tradable_instruments,
-)
-from qte_sdk.market_data import (
-    Book,
-    DecodeFailed,
-    InstrumentCondition,
-    Mark,
-    OfficialClose,
-    Reject,
-    SeqGap,
-    SessionState,
-    Trades,
-    as_market_data,
-    subscribe,
-)
-from qte_sdk.orders import (
-    ORDER_EVENT_TYPES,
-    is_order_event,
-    new_request_ref,
-    reason_code_name,
-    request_ref_of,
-    send_cancel,
-    send_new,
-)
-from qte_sdk.session import (
-    TOKEN_FILE_ENV_VAR,
-    MissingToken,
-    MissingURL,
-    Session,
-    open_session,
-    token_source,
-    url_source,
-)
-from qte_sdk.units import to_datetime, to_decimal, to_micros, to_timedelta
+# An SDK older than this script lacks a module or a name it imports. Run as a script, it
+# then reports that as the sdk-version check does, with the command that updates, rather
+# than with a traceback. An import error from anything else is raised as usual.
+try:
+    from qte_sdk.account import AccountState, ValuationBasis, is_account_state, send_account_query
+    from qte_sdk.books import LatestBooks
+    from qte_sdk.calendar import Calendar, CalendarSession, next_session, session_open_at
+    from qte_sdk.connection import (
+        ContractVersionMismatch,
+        Received,
+        ReportGap,
+        SessionRejected,
+        Unknown,
+    )
+    from qte_sdk.contract.v1.common_pb2 import (
+        BUY,
+        LIMIT,
+        RESTING,
+        STALE,
+        MarketSessionPhase,
+        ReasonCodes,
+    )
+    from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, OrderState
+    from qte_sdk.dotenv import DOTENV_NAME, DotenvNotIgnored, dotenv_path
+    from qte_sdk.history import (
+        HISTORY_URL_ENV_VAR,
+        HistoryClient,
+        HistoryError,
+        HistoryNotImplemented,
+        HistoryPending,
+    )
+    from qte_sdk.instruments import (
+        InstrumentInfo,
+        Instruments,
+        InstrumentStatus,
+        can_trade,
+        instruments_by_id,
+        tradable_instruments,
+    )
+    from qte_sdk.market_data import (
+        Book,
+        DecodeFailed,
+        InstrumentCondition,
+        Mark,
+        OfficialClose,
+        Reject,
+        SeqGap,
+        SessionState,
+        Trades,
+        as_market_data,
+        subscribe,
+    )
+    from qte_sdk.orders import (
+        ORDER_EVENT_TYPES,
+        is_order_event,
+        new_request_ref,
+        reason_code_name,
+        request_ref_of,
+        send_cancel,
+        send_new,
+    )
+    from qte_sdk.session import (
+        TOKEN_FILE_ENV_VAR,
+        MissingToken,
+        MissingURL,
+        Session,
+        open_session,
+        token_source,
+        url_source,
+    )
+    from qte_sdk.units import to_datetime, to_decimal, to_micros, to_timedelta
+except ImportError as error:
+    if __name__ != "__main__" or not (error.name or "").startswith("qte_sdk."):
+        raise
+    print(
+        f"FAIL  {'sdk-version':<14}  the installed SDK is older than this script and cannot "
+        'check itself: update it with pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"'
+    )
+    print("summary: 0 passed, 1 failed, 0 skipped")
+    sys.exit(1)
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 NAME_WIDTH = 14
@@ -438,6 +457,38 @@ def best_text(book: Book) -> str:
     bid_text = f"bid {to_decimal(bid.price)} x {bid.size}" if bid is not None else "no bid"
     ask_text = f"ask {to_decimal(ask.price)} x {ask.size}" if ask is not None else "no ask"
     return f"{bid_text}, {ask_text} ({name_of(InstrumentCondition, book.condition)})"
+
+
+# The SDK's version
+
+# The command that updates an SDK too old to say it itself.
+OLD_SDK_UPDATE = 'pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"'
+
+
+def check_sdk_version(report: Report) -> None:
+    """Report whether the installed SDK is the latest release. It reads the SDK's
+    repository on GitHub, so it is the one check that needs neither the exchange nor the
+    token."""
+    try:
+        from qte_sdk.update import Status, check_for_update
+    except ImportError as error:
+        # Only an SDK too old to have the check; a missing dependency still raises.
+        if not (error.name or "").startswith("qte_sdk."):
+            raise
+        report.add(
+            FAIL,
+            "sdk-version",
+            f"the installed SDK is older than this script and cannot check itself: update "
+            f"it with {OLD_SDK_UPDATE}",
+        )
+        return
+    try:
+        result = check_for_update()
+    except Exception as error:
+        report.add(SKIP, "sdk-version", f"cannot tell ({type(error).__name__})")
+        return
+    status = {Status.CURRENT: PASS, Status.BEHIND: FAIL}.get(result.status, SKIP)
+    report.add(status, "sdk-version", result.message)
 
 
 # Where the token and the address come from
@@ -1647,6 +1698,7 @@ async def run_checks(url: str, args: argparse.Namespace, report: Report) -> None
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     report = Report()
+    check_sdk_version(report)
     url, problems = check_setup(report)
     if problems or url is None:
         reason = "no token or no usable address"

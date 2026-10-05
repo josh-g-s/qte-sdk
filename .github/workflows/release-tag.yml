@@ -1,0 +1,33 @@
+name: Release tag
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.repository == 'josh-g-s/qte-sdk'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check the tag against __version__ and CHANGELOG.md
+        run: python scripts/check_release_tag.py "$GITHUB_REF_NAME"
+      - name: Check the tagged commit is on main
+        run: git merge-base --is-ancestor HEAD origin/main
+      - run: pip install build
+      - run: python -m build
+      - name: Check the wheel and sdist carry the tag's version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ls dist
+          test -f "dist/qte_sdk-${version}-py3-none-any.whl"
+          test -f "dist/qte_sdk-${version}.tar.gz"
+          test "$(ls dist | wc -l)" -eq 2

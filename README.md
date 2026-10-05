@@ -21,6 +21,18 @@ pip install "git+https://github.com/josh-g-s/qte-sdk"
 
 This installs the `qte_sdk` package only, not the [worked examples](examples/). Clone this repository only to run or read the examples; you do not need a clone to use the SDK.
 
+To see whether a newer release is out, run:
+
+```sh
+python -m qte_sdk.update
+```
+
+It says whether your SDK is the latest release and, if not, prints the command that updates it. It exits 0 when your SDK is current, 1 when a newer release is out and 2 when it cannot tell (an install from a local copy, say, or GitHub could not be reached). Each release is listed in the [changelog](CHANGELOG.md). To install one release and stay on it, name its tag:
+
+```sh
+pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"
+```
+
 ## A first program
 
 Put the exchange address and your token in a `.env` file in your project folder, the folder you run your programs from. The SDK's setup helper asks for both, reads the token without showing it, and writes the file. On macOS and Linux it makes the file readable only by you. On Windows it cannot, so before you run it, make sure your project folder is private: inside a folder only you can open, such as your user profile.
@@ -39,7 +51,7 @@ Before anything else, check the whole setup with the smoke test, from a clone of
 python examples/smoke_test.py --instruments XOM
 ```
 
-It reports where the SDK finds the token and the address, connects, reads the calendar, watches the market for a few seconds and asks for your team's account, printing `PASS`, `FAIL` or `SKIP` with a reason for each check. It sends no orders unless you add `--place-test-order`; step 2 of the [quickstart](docs/quickstart.md) says more.
+It says whether your SDK is the latest release, reports where the SDK finds the token and the address, connects, reads the calendar, watches the market for a few seconds and asks for your team's account, printing `PASS`, `FAIL` or `SKIP` with a reason for each check. It sends no orders unless you add `--place-test-order`; step 2 of the [quickstart](docs/quickstart.md) says more.
 
 Then run this. It opens a session, subscribes to one instrument and prints the best bid and ask as the book updates, for ten seconds. A book shows two kinds of depth: the wall (`bid_levels`, `ask_levels`) and participants' resting orders (`student_bid_levels`, `student_ask_levels`), each best price first, so the best bid and ask are taken across both.
 
@@ -105,6 +117,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |
 | [`qte_sdk.options`](qte_sdk/options.py) | `option_symbol`, `parse_option_symbol`, `is_option_symbol`: build and read option contracts' OCC symbols, such as `SPY240119C00470000`; `chain_contracts`, `expiry_date`, `limit_scope`: read the day's `OptionChain`; `LatestGreeks`, `greek_to_decimal`, `vol_to_decimal`: published Greeks, exactly; `trading_state`: what an option contract may do now; `option_underlyings`, `listed_contracts`, `strike_increment`: the listed contracts and strike increment of each underlying, from the instruments table, for a first option subscribe |
+| [`qte_sdk.update`](qte_sdk/update.py) | `check_for_update`: whether the installed SDK is the latest release, as `python -m qte_sdk.update` says |
 | [`qte_sdk.units`](qte_sdk/units.py) | `to_decimal`, `to_micros`: exact conversion between prices and micro-dollars; `to_datetime`, `to_timedelta`, `to_timestamp`: exchange timestamps (milliseconds since the epoch, UTC) as `datetime` and `timedelta` |
 
 ## Things to know before you trade
