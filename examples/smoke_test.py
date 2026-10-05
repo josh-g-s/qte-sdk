@@ -9,6 +9,12 @@ Run it first, before any other program, and again whenever something seems wrong
 these checks in order and prints one line for each, PASS, FAIL or SKIP with a one-line
 reason, then a summary:
 
+    sdk-version      whether the installed SDK is the latest release, as
+                     `python -m qte_sdk.update` reports it, before anything else and even
+                     with no token. A FAIL when a newer release is out, or when the SDK is
+                     too old to have the check, with the command that updates; a PASS that
+                     notes any newer commits on main; a SKIP when it cannot tell (a local
+                     or editable install, say, or GitHub could not be reached).
     token, address   where the SDK finds your token and the exchange address, as
                      `python -m qte_sdk.token check` reports them. Neither is shown.
     dotenv           only when git does not ignore the .env the SDK read: a FAIL, since
@@ -438,6 +444,35 @@ def best_text(book: Book) -> str:
     bid_text = f"bid {to_decimal(bid.price)} x {bid.size}" if bid is not None else "no bid"
     ask_text = f"ask {to_decimal(ask.price)} x {ask.size}" if ask is not None else "no ask"
     return f"{bid_text}, {ask_text} ({name_of(InstrumentCondition, book.condition)})"
+
+
+# The SDK's version
+
+# The command that updates an SDK too old to say it itself.
+OLD_SDK_UPDATE = 'pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"'
+
+
+def check_sdk_version(report: Report) -> None:
+    """Report whether the installed SDK is the latest release. It reads the SDK's
+    repository on GitHub, so it is the one check that needs neither the exchange nor the
+    token."""
+    try:
+        from qte_sdk.update import Status, check_for_update
+    except ImportError:
+        report.add(
+            FAIL,
+            "sdk-version",
+            f"the installed SDK is older than this script and cannot check itself: update "
+            f"it with {OLD_SDK_UPDATE}",
+        )
+        return
+    try:
+        result = check_for_update()
+    except Exception as error:
+        report.add(SKIP, "sdk-version", f"cannot tell ({type(error).__name__})")
+        return
+    status = {Status.CURRENT: PASS, Status.BEHIND: FAIL}.get(result.status, SKIP)
+    report.add(status, "sdk-version", result.message)
 
 
 # Where the token and the address come from
@@ -1647,6 +1682,7 @@ async def run_checks(url: str, args: argparse.Namespace, report: Report) -> None
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     report = Report()
+    check_sdk_version(report)
     url, problems = check_setup(report)
     if problems or url is None:
         reason = "no token or no usable address"

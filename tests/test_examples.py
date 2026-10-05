@@ -7,6 +7,7 @@ student would start it, with the exchange URL and a synthetic token in its envir
 
 import asyncio
 import contextlib
+import dataclasses
 import importlib.util
 import json
 import os
@@ -33,6 +34,7 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk import replay as qte_replay
+from qte_sdk import update as qte_update
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
@@ -69,6 +71,7 @@ QUICKSTART = EXAMPLES_DIR.parent / "docs" / "quickstart.md"
 OUT_OF_HOURS = EXAMPLES_DIR.parent / "docs" / "out-of-hours.md"
 DEVELOPING = EXAMPLES_DIR.parent / "docs" / "developing-your-algo.md"
 SDK_INSTALL_URL = "git+https://github.com/josh-g-s/qte-sdk"
+NO_NETWORK = Path(__file__).resolve().parent / "no_network"
 INSTRUMENT = "TEST"
 BID, ASK = 99_950_000, 100_050_000
 TICK = 10_000
@@ -98,8 +101,10 @@ def test_each_example_compiles_and_imports_without_running(path: Path, tmp_path:
 )
 def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path):
     for url in re.findall(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\")]+", path.read_text()):
-        if url == SDK_INSTALL_URL:
-            continue  # where pip installs the SDK from, not an exchange
+        if url == SDK_INSTALL_URL or re.fullmatch(
+            rf"{re.escape(SDK_INSTALL_URL)}@v\d+\.\d+\.\d+", url
+        ):
+            continue  # where pip installs the SDK from, or one release of it, not an exchange
         parts = urlsplit(url)
         assert parts.scheme == "ws", url
         assert parts.hostname == "127.0.0.1", url
@@ -700,10 +705,19 @@ class FakeExchange:
         }
 
 
+def example_env(drop: tuple[str, ...] = ("QTE_",)) -> dict[str, str]:
+    """The environment an example runs in: this one without the variables whose names
+    start with any of `drop`, and with `tests/no_network` on PYTHONPATH, so that its
+    sitecustomize.py keeps every urllib request on this machine."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(drop)}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(NO_NETWORK), env.get("PYTHONPATH")]))
+    return env
+
+
 async def run_example(
     name: str, url: str | None, token: str | None, *args: str, **extra_env: str
 ) -> tuple[int, str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env = example_env()
     env.update(extra_env)
     if url is not None:
         env["QTE_URL"] = url
@@ -1264,7 +1278,7 @@ async def test_the_fake_accepts_a_cut_to_nothing_at_the_wall_without_a_price_tes
 
 
 async def start_quoter(url: str, *args: str) -> asyncio.subprocess.Process:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env = example_env()
     env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
     return await asyncio.create_subprocess_exec(
         sys.executable,
@@ -2197,7 +2211,9 @@ async def test_the_smoke_test_checks_a_setup_during_a_session_and_sends_no_order
         "SKIP",
         "none received: this exchange does not send the table",
     )
-    assert out.splitlines()[-1] == "summary: 7 passed, 0 failed, 5 skipped"
+    # The SDK under test is a local copy, so the update check cannot tell, and reads nothing.
+    assert found["sdk-version"][0] == "SKIP"
+    assert out.splitlines()[-1] == "summary: 7 passed, 0 failed, 6 skipped"
     assert exchange.types() == ["auth", "subscribe", "account_query"]
 
 
@@ -2628,6 +2644,96 @@ async def test_the_smoke_test_fails_a_dotenv_that_git_does_not_ignore():
     assert url not in out + err
 
 
+def test_the_examples_run_where_urllib_cannot_leave_this_machine():
+    guard = "import urllib.request; urllib.request.urlopen('https://github.com/', timeout=5)"
+    env = {**os.environ, "PYTHONPATH": str(NO_NETWORK)}
+    done = subprocess.run(
+        [sys.executable, "-c", guard], env=env, capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 1
+    assert "the tests make no network requests" in done.stderr
+
+
+async def test_the_smoke_test_checks_the_sdks_version_first_even_with_no_token():
+    code, out, err = await run_example(SMOKE_TEST, None, None)
+    assert code == 2
+    first = out.splitlines()[0]
+    assert CHECK_LINE.fullmatch(first) is not None
+    assert first.split()[:2] == ["SKIP", "sdk-version"]
+    assert "cannot tell whether qte-sdk" in first
+
+
+def sdk_version_line(monkeypatch: pytest.MonkeyPatch, capsys: Any, update: Any) -> tuple[str, str]:
+    """The smoke test's sdk-version check, run with `update` in place of the installed
+    `qte_sdk.update` (None for an SDK that has none)."""
+    smoke = load_example(SMOKE_TEST)
+    monkeypatch.setitem(sys.modules, "qte_sdk.update", update)
+    smoke.check_sdk_version(smoke.Report())
+    return checks(capsys.readouterr().out)["sdk-version"]
+
+
+def update_returning(status: qte_update.Status, message: str, **fields: Any) -> SimpleNamespace:
+    """A stand-in for `qte_sdk.update` whose check finds `status`."""
+    result = qte_update.UpdateCheck(
+        status=status,
+        installed_version="1.0.0",
+        installed_commit="1" * 40,
+        installed_revision=None,
+        latest_release="v1.0.0",
+        main_commit="2" * 40,
+        main_ahead=False,
+        command=None,
+        message=message,
+    )
+    result = dataclasses.replace(result, **fields)
+    return SimpleNamespace(Status=qte_update.Status, check_for_update=lambda: result)
+
+
+def test_the_smoke_test_fails_an_sdk_behind_a_release(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    message = "qte-sdk 1.0.0 is behind the latest release, v1.0.1: update with pip install ..."
+    update = update_returning(qte_update.Status.BEHIND, message, latest_release="v1.0.1")
+    assert sdk_version_line(monkeypatch, capsys, update) == ("FAIL", message)
+
+
+def test_the_smoke_test_passes_a_current_sdk_and_notes_newer_commits(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    message = "qte-sdk 1.0.0 is the latest release, v1.0.0; main has newer commits than ..."
+    update = update_returning(qte_update.Status.CURRENT, message, main_ahead=True)
+    assert sdk_version_line(monkeypatch, capsys, update) == ("PASS", message)
+
+
+def test_the_smoke_test_skips_an_sdk_it_cannot_tell_about(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    message = "cannot tell whether qte-sdk 1.0.0 is current: github.com/... could not be reached"
+    update = update_returning(qte_update.Status.UNKNOWN, message)
+    assert sdk_version_line(monkeypatch, capsys, update) == ("SKIP", message)
+
+
+def test_the_smoke_test_skips_when_the_check_itself_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    def broken() -> None:
+        raise RuntimeError("anything")
+
+    update = SimpleNamespace(Status=qte_update.Status, check_for_update=broken)
+    assert sdk_version_line(monkeypatch, capsys, update) == ("SKIP", "cannot tell (RuntimeError)")
+
+
+def test_the_smoke_test_fails_an_sdk_too_old_to_check_itself(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    status, reason = sdk_version_line(monkeypatch, capsys, None)
+    assert status == "FAIL"
+    assert reason == (
+        "the installed SDK is older than this script and cannot check itself: update it with "
+        f"{qte_update.update_command()}"
+    )
+
+
 async def test_the_smoke_test_needs_a_strategy_for_the_test_order():
     code, out, err = await run_example(SMOKE_TEST, None, synthetic_token(), "--place-test-order")
     assert code == 2
@@ -2890,7 +2996,7 @@ async def test_the_smoke_test_cancels_its_orders_level_even_when_its_terminal_is
     # must still be the signal's.
     confirm = asyncio.Event()
     exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=confirm)
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("QTE_", "PYTHONUNBUFFERED"))}
+    env = example_env(("QTE_", "PYTHONUNBUFFERED"))
     out_reader, out_writer = os.pipe()
     err_reader, err_writer = os.pipe()
     readers = [out_reader, err_reader]
@@ -2941,7 +3047,7 @@ async def test_the_smoke_test_started_with_closed_output_still_exits_with_the_si
     # A SIGTERM must still send the cleanup cancel and end with the signal's status.
     confirm = asyncio.Event()
     exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=confirm)
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("QTE_", "PYTHONUNBUFFERED"))}
+    env = example_env(("QTE_", "PYTHONUNBUFFERED"))
     async with serve_local(exchange) as url:
         env.update(QTE_URL=url, QTE_TOKEN=synthetic_token())
         process = await asyncio.create_subprocess_exec(
@@ -2984,7 +3090,7 @@ def ignored_sighup() -> None:
 async def test_the_smoke_test_leaves_an_ignored_sighup_ignored():
     # Started under nohup, SIGHUP is ignored: the run goes on to its end.
     exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env = example_env()
     async with serve_local(exchange) as url:
         env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
         process = await asyncio.create_subprocess_exec(
@@ -3023,7 +3129,7 @@ async def test_the_smoke_test_cancels_its_orders_level_when_interrupted(
     # the same way.
     confirm = asyncio.Event()
     exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=confirm)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env = example_env()
     async with serve_local(exchange) as url:
         env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
         process = await asyncio.create_subprocess_exec(
@@ -3062,7 +3168,7 @@ async def test_the_smoke_tests_cleanup_after_an_interruption_is_bounded():
     exchange = FakeExchange(
         calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=asyncio.Event()
     )
-    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env = example_env()
     loop = asyncio.get_running_loop()
     async with serve_local(exchange) as url:
         env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")

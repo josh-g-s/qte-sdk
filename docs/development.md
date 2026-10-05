@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.8
+**Version:** 0.9
 
 ## Requirements
 
@@ -49,6 +49,31 @@ python3 -m venv /tmp/sdist-venv
 ```
 
 It clears earlier builds first, so it can be run again and each path matches one file.
+
+## Releases
+
+A release is a `vX.Y.Z` tag on a merge commit on `main`, whose number matches `__version__` in `qte_sdk/__init__.py`, with an entry in `CHANGELOG.md`. To make one:
+
+1. In a pull request, set `__version__` to the new number and, in `CHANGELOG.md`, rename the "Unreleased" heading to the number (`## 1.0.1`) and start a new empty "Unreleased" section above it.
+2. Merge it.
+3. On the merge commit, check the tag before you make it:
+
+   ```sh
+   git switch main && git pull
+   python scripts/check_release_tag.py v1.0.1
+   ```
+
+   It checks the tag's form, that it matches `__version__`, and that `CHANGELOG.md` has an entry for it.
+4. Tag that commit and push the tag:
+
+   ```sh
+   git tag -a v1.0.1 -m "qte-sdk 1.0.1"
+   git push origin v1.0.1
+   ```
+
+A change to the dependencies in `pyproject.toml` must ship in a new release, with a version bump: `python -m qte_sdk.update` takes newer commits between releases with `--force-reinstall --no-deps`, which does not reinstall dependencies, while its update to a new release resolves them as usual.
+
+The `Release tag` workflow runs on every pushed `v*` tag. It runs the same script, builds the package and checks that the wheel and sdist carry the tag's version, and that the tagged commit is on `main`, and fails if not. A tag that fails it should be deleted and made again on the right commit. `python -m qte_sdk.update` reads the tags, so a release is what participants are told to update to as soon as its tag is pushed.
 
 ## Contract types
 
