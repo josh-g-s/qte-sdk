@@ -120,73 +120,86 @@ from urllib.parse import urlsplit
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
-from qte_sdk.account import AccountState, ValuationBasis, is_account_state, send_account_query
-from qte_sdk.books import LatestBooks
-from qte_sdk.calendar import Calendar, CalendarSession, next_session, session_open_at
-from qte_sdk.connection import (
-    ContractVersionMismatch,
-    Received,
-    ReportGap,
-    SessionRejected,
-    Unknown,
-)
-from qte_sdk.contract.v1.common_pb2 import (
-    BUY,
-    LIMIT,
-    RESTING,
-    STALE,
-    MarketSessionPhase,
-    ReasonCodes,
-)
-from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, OrderState
-from qte_sdk.dotenv import DOTENV_NAME, DotenvNotIgnored, dotenv_path
-from qte_sdk.history import (
-    HISTORY_URL_ENV_VAR,
-    HistoryClient,
-    HistoryError,
-    HistoryNotImplemented,
-    HistoryPending,
-)
-from qte_sdk.instruments import (
-    InstrumentInfo,
-    Instruments,
-    InstrumentStatus,
-    can_trade,
-    instruments_by_id,
-    tradable_instruments,
-)
-from qte_sdk.market_data import (
-    Book,
-    DecodeFailed,
-    InstrumentCondition,
-    Mark,
-    OfficialClose,
-    Reject,
-    SeqGap,
-    SessionState,
-    Trades,
-    as_market_data,
-    subscribe,
-)
-from qte_sdk.orders import (
-    ORDER_EVENT_TYPES,
-    is_order_event,
-    new_request_ref,
-    reason_code_name,
-    request_ref_of,
-    send_cancel,
-    send_new,
-)
-from qte_sdk.session import (
-    TOKEN_FILE_ENV_VAR,
-    MissingToken,
-    MissingURL,
-    Session,
-    open_session,
-    token_source,
-    url_source,
-)
-from qte_sdk.units import to_datetime, to_decimal, to_micros, to_timedelta
+# An SDK older than this script lacks a module or a name it imports. Run as a script, it
+# then reports that as the sdk-version check does, with the command that updates, rather
+# than with a traceback. An import error from anything else is raised as usual.
+try:
+    from qte_sdk.account import AccountState, ValuationBasis, is_account_state, send_account_query
+    from qte_sdk.books import LatestBooks
+    from qte_sdk.calendar import Calendar, CalendarSession, next_session, session_open_at
+    from qte_sdk.connection import (
+        ContractVersionMismatch,
+        Received,
+        ReportGap,
+        SessionRejected,
+        Unknown,
+    )
+    from qte_sdk.contract.v1.common_pb2 import (
+        BUY,
+        LIMIT,
+        RESTING,
+        STALE,
+        MarketSessionPhase,
+        ReasonCodes,
+    )
+    from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, OrderState
+    from qte_sdk.dotenv import DOTENV_NAME, DotenvNotIgnored, dotenv_path
+    from qte_sdk.history import (
+        HISTORY_URL_ENV_VAR,
+        HistoryClient,
+        HistoryError,
+        HistoryNotImplemented,
+        HistoryPending,
+    )
+    from qte_sdk.instruments import (
+        InstrumentInfo,
+        Instruments,
+        InstrumentStatus,
+        can_trade,
+        instruments_by_id,
+        tradable_instruments,
+    )
+    from qte_sdk.market_data import (
+        Book,
+        DecodeFailed,
+        InstrumentCondition,
+        Mark,
+        OfficialClose,
+        Reject,
+        SeqGap,
+        SessionState,
+        Trades,
+        as_market_data,
+        subscribe,
+    )
+    from qte_sdk.orders import (
+        ORDER_EVENT_TYPES,
+        is_order_event,
+        new_request_ref,
+        reason_code_name,
+        request_ref_of,
+        send_cancel,
+        send_new,
+    )
+    from qte_sdk.session import (
+        TOKEN_FILE_ENV_VAR,
+        MissingToken,
+        MissingURL,
+        Session,
+        open_session,
+        token_source,
+        url_source,
+    )
+    from qte_sdk.units import to_datetime, to_decimal, to_micros, to_timedelta
+except ImportError as error:
+    if __name__ != "__main__" or not (error.name or "").startswith("qte_sdk."):
+        raise
+    print(
+        f"FAIL  {'sdk-version':<14}  the installed SDK is older than this script and cannot "
+        'check itself: update it with pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"'
+    )
+    print("summary: 0 passed, 1 failed, 0 skipped")
+    sys.exit(1)
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 NAME_WIDTH = 14

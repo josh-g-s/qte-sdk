@@ -2726,12 +2726,68 @@ def test_the_smoke_test_skips_when_the_check_itself_fails(
 def test_the_smoke_test_fails_an_sdk_too_old_to_check_itself(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
-    status, reason = sdk_version_line(monkeypatch, capsys, None)
-    assert status == "FAIL"
-    assert reason == (
-        "the installed SDK is older than this script and cannot check itself: update it with "
-        f"{qte_update.update_command()}"
+    assert sdk_version_line(monkeypatch, capsys, None) == ("FAIL", OLD_SDK_FAIL)
+
+
+OLD_SDK_FAIL = (
+    "the installed SDK is older than this script and cannot check itself: update it with "
+    f"{qte_update.update_command()}"
+)
+
+
+def run_smoke_test_with_sdk(tmp_path: Path, change: Callable[[Path], None]) -> Any:
+    """Run the smoke test with a copy of the SDK, changed by `change`, first on the path:
+    an SDK older than the script, say."""
+    copy = tmp_path / "sdk"
+    shutil.copytree(
+        EXAMPLES_DIR.parent / "qte_sdk",
+        copy / "qte_sdk",
+        ignore=shutil.ignore_patterns("__pycache__"),
     )
+    change(copy / "qte_sdk")
+    env = example_env()
+    env["PYTHONPATH"] = os.pathsep.join([str(copy), env["PYTHONPATH"]])
+    return subprocess.run(
+        [sys.executable, str(EXAMPLES_DIR / SMOKE_TEST), "--instruments", INSTRUMENT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=RUN_LIMIT,
+    )
+
+
+def remove_instruments(sdk: Path) -> None:
+    (sdk / "instruments.py").unlink()
+
+
+def empty_instruments(sdk: Path) -> None:
+    (sdk / "instruments.py").write_text('"""An older module, without the names used now."""\n')
+
+
+@pytest.mark.parametrize("change", [remove_instruments, empty_instruments])
+def test_the_smoke_test_fails_an_sdk_missing_what_it_imports_without_a_traceback(
+    tmp_path: Path, change: Callable[[Path], None]
+):
+    done = run_smoke_test_with_sdk(tmp_path, change)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert done.stderr == ""
+    assert done.stdout.splitlines() == [
+        f"FAIL  sdk-version     {OLD_SDK_FAIL}",
+        "summary: 0 passed, 1 failed, 0 skipped",
+    ]
+    assert checks(done.stdout) == {"sdk-version": ("FAIL", OLD_SDK_FAIL)}
+
+
+def test_the_smoke_test_still_raises_an_import_error_from_outside_the_sdk(tmp_path: Path):
+    def needs_a_missing_package(sdk: Path) -> None:
+        books = sdk / "books.py"
+        books.write_text("import qte_test_package_that_is_not_installed\n" + books.read_text())
+
+    done = run_smoke_test_with_sdk(tmp_path, needs_a_missing_package)
+    assert done.returncode == 1
+    assert "Traceback" in done.stderr
+    assert "No module named 'qte_test_package_that_is_not_installed'" in done.stderr
+    assert "sdk-version" not in done.stdout
 
 
 async def test_the_smoke_test_needs_a_strategy_for_the_test_order():
