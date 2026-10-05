@@ -1,15 +1,15 @@
 // Session and subscription messages.
 //
-// **Version:** 1.7
+// **Version:** 1.8
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
-// `calendar`, `session_reject`, `heartbeat`, `resume`, `resume_ack`,
-// `order_snapshot`, `subscribe`, `unsubscribe`, `account_query`.
+// `calendar`, `instruments`, `session_reject`, `heartbeat`, `resume`,
+// `resume_ack`, `order_snapshot`, `subscribe`, `unsubscribe`, `account_query`.
 //
 // Status: PROVISIONAL. The session layer is partly specified. Auth.token,
-// Calendar, Heartbeat, Resume, ResumeAck and OrderSnapshot are decided. The
-// other messages are a working proposal, so clients have something to build
-// against; their shape may change.
+// Calendar, Instruments, Heartbeat, Resume, ResumeAck and OrderSnapshot are
+// decided. The other messages are a working proposal, so clients have
+// something to build against; their shape may change.
 //
 // Every `timestamp` field is a signed 64-bit count of milliseconds since the
 // Unix epoch, UTC (SPEC 8.1, SPEC 9.2, SPEC 13.1), carried on the wire as a
@@ -91,6 +91,116 @@ message Calendar {
   // configured range ends 18 June 2027, Juneteenth observed, the day after
   // its last actual session on 17 June 2027. SPEC 13.2
   string term_end = 7;
+}
+
+// What kind of instrument an InstrumentInfo describes. This enum is open to
+// extension: a new value is an additive change, and a client that meets one it
+// does not know treats the entry as an instrument of unknown kind.
+enum InstrumentKind {
+  INSTRUMENT_KIND_UNSPECIFIED = 0; // proto3's required zero value; never valid on the wire.
+  EQUITY = 1; // A listed US equity or ETF, ordered in whole shares. SPEC 3.1
+  OPTION = 2; // A listed option contract, ordered in whole contracts. SPEC 18.1
+}
+
+// The instrument's own condition, the same for every team. It says nothing of
+// whether this team may trade it: that is InstrumentInfo.tradable. This enum
+// is open to extension: a new value is an additive change.
+enum InstrumentStatus {
+  INSTRUMENT_STATUS_UNSPECIFIED = 0; // proto3's required zero value; never valid on the wire.
+  // The instrument accepts orders (from a team entitled to send them).
+  INSTRUMENT_TRADING = 1;
+  // The platform has flagged the instrument and disabled it until the
+  // Directors review it: it accepts no orders from any team and shows no wall.
+  // SPEC 3.3
+  INSTRUMENT_DISABLED = 2;
+  // A listed option contract outside the day's active window that students
+  // still hold: it accepts only orders that reduce a position and never cross
+  // zero. SPEC 18.1
+  INSTRUMENT_REDUCING_ONLY = 3;
+}
+
+// Whether an option contract is a call or a put. SPEC 18.1
+enum OptionRight {
+  OPTION_RIGHT_UNSPECIFIED = 0; // proto3's required zero value; never valid on the wire.
+  CALL = 1;
+  PUT = 2;
+}
+
+// The terms of one option contract (SPEC 18.1), carried by an InstrumentInfo
+// whose kind is OPTION. Together they are what the contract's id spells.
+message OptionTerms {
+  string underlying = 1;  // id. The underlying equity's id, for example SPY or GOOGL. SPEC 18.1
+  string expiry = 2;      // string. The listed expiry date, ISO 8601, a third Friday. SPEC 18.1
+  OptionRight right = 3;  // SPEC 18.1
+  int64 strike = 4;       // int64-micro. The strike price in micro-dollars. SPEC 18.1
+  int64 multiplier = 5;   // int64-qty. Shares of the underlying per contract: 100. SPEC 18.1
+}
+
+// One instrument of the exchange as the authenticated team sees it, an entry
+// of Instruments.instruments.
+message InstrumentInfo {
+  // id. The instrument's id, the string every other message and every order
+  // names it by. An equity is its ticker; an option contract is its OCC option
+  // symbol in the form Alpaca uses, the root unpadded, then YYMMDD, then C or P,
+  // then the strike times 1000 in eight digits, for example SPY240119C00470000.
+  // SPEC 3.1, SPEC 18.1
+  string instrument = 1;
+  // string, optional. A human-readable name. Absent when the exchange has none
+  // to give; a client never parses it and falls back to `instrument`.
+  optional string display_name = 2;
+  InstrumentKind kind = 3;
+  // int64-micro. The smallest price step: every order price is a multiple of it.
+  // An equity's tick is $0.01 (10,000 micro-dollars); an option's is its premium
+  // tick. SPEC 3.3, SPEC 18.1
+  int64 tick_size = 4;
+  // int64-qty. The smallest order size and the step orders are sized in: one
+  // share for an equity, one contract for an option. SPEC 8.2, SPEC 18.1
+  int64 lot_size = 5;
+  InstrumentStatus status = 6;
+  // bool. True when the authenticated team may send orders in this instrument
+  // at all; false when its arm or its assignment rules it out, for example a
+  // Market Making desk's instrument outside its assigned names, an instrument
+  // of a kind its arm may not trade, or any instrument for an account with no
+  // market access. Always present, false included. It reflects what the team's
+  // entitlement allows and nothing else: whether the instrument itself is
+  // disabled is `status`, and a limit or a halt the team is under is not part
+  // of it. SPEC 2.2, SPEC 9.4.3
+  bool tradable = 7;
+  // Present if and only if `kind` is OPTION.
+  optional OptionTerms option = 8;
+}
+
+// One underlying of the option chain, an entry of
+// Instruments.option_underlyings: its strike increment and the ids of the
+// option contracts listed on it, so a client never guesses a listed symbol.
+message OptionUnderlying {
+  string underlying = 1;        // id. The underlying equity's id, for example SPY or GOOGL. SPEC 18.1
+  int64 strike_increment = 2;   // int64-micro. The published strike increment in micro-dollars: $5.00 for SPY, $2.50 for GOOGL. SPEC 18.1
+  // array of id. The ids of every option contract listed on this underlying,
+  // sorted ascending by byte order: each is also an InstrumentInfo of kind
+  // OPTION in Instruments.instruments. Empty while no contract is listed.
+  repeated string contracts = 3;
+}
+
+// Outbound. The instruments of the exchange, and which of them the
+// authenticated team may trade. Sent on the connection immediately after the
+// Calendar that follows every SessionAck, at any hour, whether inside a
+// session or not. The three messages arrive back to back.
+//
+// It lists every instrument the exchange runs, sorted ascending by the byte
+// order of `instrument`, one entry each. A client builds its instrument table
+// from it and never hard-codes the universe or an option's symbol. It is the
+// whole table, not a change to one: whenever the exchange resends it on a
+// connection, because an instrument was listed, delisted or changed status,
+// the new message replaces the client's table entirely.
+//
+// `option_underlyings` names each option underlying, sorted by byte order of
+// its id, with its strike increment and its listed contracts. It is always
+// sent, to every team, with each underlying present even when it has no
+// listed contract yet.
+message Instruments {
+  repeated InstrumentInfo instruments = 1;
+  repeated OptionUnderlying option_underlyings = 2;
 }
 
 // Outbound.
