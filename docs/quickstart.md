@@ -209,7 +209,7 @@ else:
         print("AAPL tick:", to_decimal(info.tick_size), "lot:", info.lot_size)
 ```
 
-- Like `wait_for_calendar`, `wait_for_instrument_table` keeps every event it reads. It returns `None` at once when the message after the calendar is something else, since an older exchange never sends the table, so your program must still work without it.
+- Like `wait_for_calendar`, `wait_for_instrument_table` keeps every event it reads. It returns `None` as soon as the message after the calendar is something else, or at its timeout, since an older exchange never sends the table, so your program must still work without it.
 - `can_trade` is true only when the instrument's status is `INSTRUMENT_TRADING` and `tradable` is true for your team. A reducing-only option contract (`INSTRUMENT_REDUCING_ONLY`) still accepts orders that reduce a position. A kind or status from a newer contract than your SDK knows decodes as unspecified: treat it as one you cannot trade.
 - `tradable` says only what your team's arm and assignment allow. Limits, the price collar and the session's state still apply to every order.
 - A `ReconnectingSession` keeps the latest table of its current session in `instrument_table`, `None` again after each reconnect until the new session's table arrives.

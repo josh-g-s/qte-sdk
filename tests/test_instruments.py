@@ -364,3 +364,34 @@ def test_the_chain_bootstrap_helpers():
     assert strike_increment(t, "GOOGL") == 2_500_000
     assert strike_increment(t, "AAPL") is None
     assert option_underlyings(Instruments()) == []
+
+
+def test_a_kind_this_sdk_has_no_name_for_is_not_tradable():
+    info = InstrumentInfo(instrument="A", kind=99, status=INSTRUMENT_TRADING, tradable=True)
+    assert not can_trade(info)
+    assert tradable_instruments(Instruments(instruments=[info])) == []
+
+
+async def test_a_table_read_ahead_is_never_replaced_by_an_older_one():
+    # Both tables are read ahead before the resume_ack, while the attempt resumes: the
+    # newer is already in force at `Connected`, and delivering the older event later must
+    # not bring it back.
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "before_resume": [instruments(2), instruments(3, CHANGED)],
+            "answer": [resume_ack()],
+            "after": [order_state(1), book(7)],
+        }
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs:
+            seen = []
+            async with asyncio.timeout(5):
+                async for event in rs:
+                    seen.append(rs.instrument_table)
+                    if isinstance(event, Received) and event.type == "book":
+                        break
+    assert seen[0] == table(CHANGED)
+    assert all(t == table(CHANGED) for t in seen)

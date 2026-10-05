@@ -550,8 +550,10 @@ class ReconnectingSession:
                             # too late for the attempt to check may name a new term.
                             self._enter_term(_term_of(event.message), strict=False)
                         elif isinstance(event, Received) and event.type == "instruments":
-                            assert isinstance(event.message, Instruments)
-                            self._instrument_table = event.message
+                            # The session's latest, not this event's: a later table may
+                            # already have been read ahead while this one waited to be
+                            # delivered, and an older one must never replace it.
+                            self._instrument_table = session.instrument_table
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event

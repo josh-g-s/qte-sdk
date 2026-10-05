@@ -422,7 +422,9 @@ class Session:
         Returns it, at once if it has already arrived, or None if it does not arrive in
         time, if the connection ends or it cannot be decoded first, or as soon as the
         message read straight after the calendar is something else, which means the
-        exchange predates it. It never raises for any of these.
+        exchange predates it. Heartbeats are not counted as that message, so an older
+        exchange that sends nothing after the calendar but heartbeats is waited for until
+        `timeout`. It never raises for any of these.
 
         Like `wait_for_calendar`, it reads the session's events ahead of you and keeps them:
         iterating the session afterwards still delivers every event, in order. Call it from

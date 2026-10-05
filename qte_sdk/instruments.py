@@ -19,15 +19,16 @@ An `InstrumentInfo` carries:
 - `instrument`, the id every other message and every order names it by: an equity's
   ticker, or an option contract's OCC symbol (see `qte_sdk.options`);
 - `display_name`, a name to show, absent when the exchange has none; never parse it;
-- `kind`, `EQUITY` or `OPTION`. `INSTRUMENT_KIND_UNSPECIFIED` means a kind this SDK does
-  not know, from a newer exchange: treat the instrument as one you cannot trade;
+- `kind`, `EQUITY` or `OPTION`. Any other value, `INSTRUMENT_KIND_UNSPECIFIED` or a
+  number, is a kind this SDK does not know, from a newer exchange: treat the instrument
+  as one you cannot trade;
 - `tick_size`, the smallest price step in micro-dollars: every order price is a multiple
   of it. It is set by the exchange, so read it from here and never hard-code it;
 - `lot_size`, the smallest order size and the step sizes go in: shares for an equity,
   contracts for an option;
 - `status`: `INSTRUMENT_TRADING`, `INSTRUMENT_DISABLED` (no orders from anyone), or
   `INSTRUMENT_REDUCING_ONLY` (an option contract outside the day's window: only orders
-  that reduce a position, never crossing zero). `INSTRUMENT_STATUS_UNSPECIFIED` means a
+  that reduce a position, never crossing zero). Any other value is a
   status this SDK does not know: treat it as not trading;
 - `tradable`, whether your team may send orders in it at all, given its arm and
   assignment. It says nothing of the instrument's own status, or of a limit or halt your
@@ -77,6 +78,10 @@ __all__ = [
 ]
 
 
+# A kind from a newer contract may arrive as a number this SDK has no name for.
+_KNOWN_KINDS = (EQUITY, OPTION)
+
+
 def instruments_by_id(table: Instruments) -> dict[str, InstrumentInfo]:
     """Every instrument in `table`, keyed by its id. Build it once per table when you look
     up many instruments; a later table replaces this one entirely."""
@@ -99,11 +104,7 @@ def can_trade(info: InstrumentInfo) -> bool:
     check `info.status == INSTRUMENT_REDUCING_ONLY` for those. True does not mean an order
     will be accepted: limits, the price collar and the session's state still apply.
     """
-    return (
-        info.tradable
-        and info.status == INSTRUMENT_TRADING
-        and info.kind != INSTRUMENT_KIND_UNSPECIFIED
-    )
+    return info.tradable and info.status == INSTRUMENT_TRADING and info.kind in _KNOWN_KINDS
 
 
 def tradable_instruments(
