@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.28
+**Version:** 0.29
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -131,7 +131,7 @@ python examples/smoke_test.py --instruments AAPL MSFT
 
 It reports where the SDK finds the token and the address, without showing either; connects and names your team; reads the calendar; subscribes to each instrument and watches the market for `--seconds` (5 by default), and during a session waits up to `--book-wait` (60 by default, never less than `--seconds`) for the first book of an instrument that has none yet, since one with no valid quote has none; asks for your team's account; says whether the exchange's heartbeats arrived, and about how far apart (a `SKIP` if none came, since the interval may be longer than the run); and, when `QTE_HISTORY_URL` is set, reads the start of the last closed session's books from the history service. Each check prints `PASS`, `FAIL` or `SKIP` with a one-line reason, then a summary, and the exit status is not 0 if any check failed. A `SKIP` is something it could not check, such as an official close for an instrument that has none yet, or an account query the exchange does not answer; the reason says which. Its output never shows your token or any account figure (only a fill of the test order is named, with its quantity and price), so you can send it to the course team when you ask for help.
 
-It sends no orders unless you add `--place-test-order --strat-id <your strategy> --tick <tick>`, giving the instruments' tick in dollars (for example `0.01`), which the exchange does not send. Then, only while the market is open and no outage is in force, it places one buy of one share one tick above the wall's best bid, at least three ticks below every ask, waits for the exchange to report it resting, cancels exactly that price level and confirms the cancel; it never sends a mass cancel. It is a real order and can fill, since there is no post-only order: a fill fails the check, and a line on stderr names the position your team then holds. In a scored session it places nothing unless you also add `--allow-scored`. Use a strategy nothing else is trading during the test: if something else acts on its buy orders on the instrument meanwhile, the test order can no longer be told apart and the check fails. If it cannot confirm the cancel, it fails and names the level where the order may still rest; if you interrupt it while the order may rest (Ctrl+C, or a SIGTERM or SIGHUP such as a closed terminal), it first tries to cancel that level. A SIGKILL cannot be caught, so after one, check your team's orders yourself.
+It sends no orders unless you add `--place-test-order --strat-id <your strategy> --tick <tick>`, giving the instruments' tick in dollars (for example `0.01`). The instruments table gives each instrument's tick, but the script still asks for it so that it works with an exchange that sends no table. Then, only while the market is open and no outage is in force, it places one buy of one share one tick above the wall's best bid, at least three ticks below every ask, waits for the exchange to report it resting, cancels exactly that price level and confirms the cancel; it never sends a mass cancel. It is a real order and can fill, since there is no post-only order: a fill fails the check, and a line on stderr names the position your team then holds. In a scored session it places nothing unless you also add `--allow-scored`. Use a strategy nothing else is trading during the test: if something else acts on its buy orders on the instrument meanwhile, the test order can no longer be told apart and the check fails. If it cannot confirm the cancel, it fails and names the level where the order may still rest; if you interrupt it while the order may rest (Ctrl+C, or a SIGTERM or SIGHUP such as a closed terminal), it first tries to cancel that level. A SIGKILL cannot be caught, so after one, check your team's orders yourself.
 
 ## 3. Open a session
 
@@ -190,6 +190,29 @@ else:
 - `next_open` skips days with no session. It returns `None` once the term's last session has opened, and `next_close` returns `None` once it has closed.
 - The calendar is the schedule. Whether the market is open right now is what `SessionState` reports (step 4).
 - A `ReconnectingSession` (step 9) keeps the calendar of its current session in its `calendar` attribute, which is `None` again after each reconnect until the new session's calendar arrives.
+
+### Reading the instruments
+
+Straight after the calendar, the exchange sends an `instruments` message: every instrument it runs, with its kind (equity or option), tick size, lot size and status, and whether your team may trade it, plus each option underlying with its strike increment and listed contracts. Build your list of instruments, and your tick sizes, from it rather than writing them into your code. It is the whole table, not a change: the exchange sends it again whenever an instrument is listed, delisted or changes status, and each one replaces the last. `session.instrument_table` keeps the latest, and `qte_sdk.instruments` reads it:
+
+```python
+from qte_sdk.instruments import can_trade, instrument_info, tradable_instruments
+from qte_sdk.units import to_decimal
+
+table = await session.wait_for_instrument_table(timeout=5)
+if table is None:
+    print("no instruments table from this exchange")
+else:
+    print("you may trade:", tradable_instruments(table))
+    info = instrument_info(table, "AAPL")
+    if info is not None and can_trade(info):
+        print("AAPL tick:", to_decimal(info.tick_size), "lot:", info.lot_size)
+```
+
+- Like `wait_for_calendar`, `wait_for_instrument_table` keeps every event it reads. It returns `None` at once when the message after the calendar is something else, since an older exchange never sends the table, so your program must still work without it.
+- `can_trade` is true only when the instrument's status is `INSTRUMENT_TRADING` and `tradable` is true for your team. A reducing-only option contract (`INSTRUMENT_REDUCING_ONLY`) still accepts orders that reduce a position. A kind or status from a newer contract than your SDK knows decodes as unspecified: treat it as one you cannot trade.
+- `tradable` says only what your team's arm and assignment allow. Limits, the price collar and the session's state still apply to every order.
+- A `ReconnectingSession` keeps the latest table of its current session in `instrument_table`, `None` again after each reconnect until the new session's table arrives.
 
 ## 4. Subscribe to market data
 
@@ -297,7 +320,7 @@ book = books.get("SPY261120C00665000")
 may_open = book is not None and trading_state(book) == OPTION_TRADING
 ```
 
-The `qte_sdk.options` docstring covers when each message arrives. There is no request for the chain, so your first option subscribe must name a listed contract; a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. The exchange's instruments message is to list each underlying's listed contracts by symbol, with its strike increment, but it is not on the wire yet: until it is, work out a listed contract from the symbol rules. Not settled yet:
+The `qte_sdk.options` docstring covers when each message arrives. There is no request for the chain, so your first option subscribe must name a listed contract; a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. Take it from the instruments table (step 3): `qte_sdk.options.listed_contracts(table, "SPY")` gives the underlying's listed contracts, and `strike_increment(table, "SPY")` its strike increment. An underlying with no contract listed yet has none. With an exchange that sends no table, work out a listed contract from the symbol rules. Not settled yet:
 - reject reasons for options, which this SDK does not map, so read a reject by its `reason_code` as usual;
 - options in the history service;
 - the flag that will mark an option trade's residual print in `trades`.
@@ -475,7 +498,7 @@ The query is not an order message: the exchange does not hold it for the order d
 
 **Every order message you send (new, cancel, amend and mass cancel) is held by the exchange for its order delay before it is applied. The delay is currently 150 ms.** An `accepted` therefore arrives at least that long after you send, and the book you acted on is at least that old by the time your order reaches it. Plan for it rather than around it.
 
-The delay, the minimum time an order must rest before you may cancel or amend it, the price collar and your team's message budgets are all set by the exchange and can change. Do not build them into your code as constants. Instead:
+The delay, the minimum time an order must rest before you may cancel or amend it, the price collar, your team's message budgets, and each instrument's tick and lot size are all set by the exchange and can change. Read tick and lot sizes from the instruments table (step 3). Do not build them into your code as constants. Instead:
 
 - act on what the exchange reports: cancel or amend an order after its `order_state` arrives, not after a fixed sleep;
 - keep your message rate well inside your budgets, and handle the rejects that say you went over one.

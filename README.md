@@ -97,13 +97,14 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.market_data`](qte_sdk/market_data.py) | `subscribe`, `unsubscribe`, `market_data`: the book, trades, marks and market state |
 | [`qte_sdk.books`](qte_sdk/books.py) | `LatestBooks`: the latest book of each instrument, since a book is sent only when it changes |
 | [`qte_sdk.calendar`](qte_sdk/calendar.py) | `next_open`, `next_close`: when the market next opens and closes, from the exchange's calendar |
+| [`qte_sdk.instruments`](qte_sdk/instruments.py) | `instrument_info`, `can_trade`, `tradable_instruments`, `on_tick`: the exchange's table of instruments, with each one's tick and lot size and whether your team may trade it |
 | [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
 | [`qte_sdk.replay`](qte_sdk/replay.py) | `replay`: a past session's market data in one stream, in time order, to run your loop on; market data only, with no orders or fills |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
 | [`qte_sdk.account`](qte_sdk/account.py) | `send_account_query`, `is_account_state`: your team's positions, cash, equity and limit use; `AccountReports`: count each fill once against a reply |
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |
-| [`qte_sdk.options`](qte_sdk/options.py) | `option_symbol`, `parse_option_symbol`, `is_option_symbol`: build and read option contracts' OCC symbols, such as `SPY240119C00470000`; `chain_contracts`, `expiry_date`, `limit_scope`: read the day's `OptionChain`; `LatestGreeks`, `greek_to_decimal`, `vol_to_decimal`: published Greeks, exactly; `trading_state`: what an option contract may do now |
+| [`qte_sdk.options`](qte_sdk/options.py) | `option_symbol`, `parse_option_symbol`, `is_option_symbol`: build and read option contracts' OCC symbols, such as `SPY240119C00470000`; `chain_contracts`, `expiry_date`, `limit_scope`: read the day's `OptionChain`; `LatestGreeks`, `greek_to_decimal`, `vol_to_decimal`: published Greeks, exactly; `trading_state`: what an option contract may do now; `option_underlyings`, `listed_contracts`, `strike_increment`: the listed contracts and strike increment of each underlying, from the instruments table, for a first option subscribe |
 | [`qte_sdk.units`](qte_sdk/units.py) | `to_decimal`, `to_micros`: exact conversion between prices and micro-dollars; `to_datetime`, `to_timedelta`, `to_timestamp`: exchange timestamps (milliseconds since the epoch, UTC) as `datetime` and `timedelta` |
 
 ## Things to know before you trade

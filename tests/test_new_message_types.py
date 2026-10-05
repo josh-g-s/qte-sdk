@@ -1,10 +1,9 @@
-"""A message type newer than this SDK, such as the exchange's `instruments`, is passed over.
+"""A message type newer than this SDK is passed over.
 
-The exchange is to send `instruments` straight after `session_ack` and `calendar` on every
-authentication, and again whenever the option listing changes. This SDK does not decode it
-yet. These tests pin what it does meanwhile: the message arrives as an `Unknown` event in
-its place in the stream, counts towards the sequence, and disturbs nothing around it: not
-the calendar, the resume, market data or later events.
+An exchange may add a message type the installed SDK does not know, even inside the group
+it sends on authentication. These tests pin what the SDK does with one: the message
+arrives as an `Unknown` event in its place in the stream, counts towards the sequence, and
+disturbs nothing around it: not the calendar, the resume, market data or later events.
 """
 
 import asyncio
@@ -23,46 +22,32 @@ from qte_sdk.market_data import as_market_data, market_data
 from qte_sdk.reconnect import Connected, Disconnected, ReconnectingSession
 from qte_sdk.session import open_session
 
-# A plausible `instruments` payload. Its exact shape does not matter here: this SDK does
+# A payload of a message type newer than this SDK. Its shape does not matter: the SDK does
 # not know the type, so it never reads the payload.
-INSTRUMENTS = {
-    "instruments": [
-        {
-            "instrument": "SPY",
-            "kind": "EQUITY",
-            "tick_size": "10000",
-            "lot_size": "1",
-            "status": "INSTRUMENT_TRADING",
-            "tradable": True,
-        }
-    ],
-    "option_underlyings": [
-        {"underlying": "SPY", "strike_increment": "1000000", "contracts": []},
-    ],
-}
+NEWER = {"entries": [{"id": "SPY", "flag": True}], "count": "1"}
 
 
-def instruments(seq: int | None = None) -> str:
-    return frame("instruments", INSTRUMENTS, seq)
+def newer(seq: int | None = None) -> str:
+    return frame("newer_kind", NEWER, seq)
 
 
 def numbered_book(seq: int) -> str:
     return frame("book", {"instrument": "SPY", "grid_time": str(seq)}, seq)
 
 
-# The exchange's order on authentication: the ack, the calendar, then `instruments`; later
-# a book, `instruments` again when the listing changes, and another book.
+# The ack, the calendar, then a newer message in the authentication group; later a book,
+# the newer message again, and another book.
 AUTH_GROUP = [
     ack(),
     calendar_frame(2),
-    instruments(3),
+    newer(3),
     numbered_book(4),
-    instruments(5),
+    newer(5),
     numbered_book(6),
 ]
 
 
-async def test_the_calendar_is_still_found_and_instruments_follows_it_in_order():
+async def test_the_calendar_is_still_found_and_a_newer_message_follows_it_in_order():
     server = Server(*AUTH_GROUP, hold_open=False)
     async with serve_local(server) as url:
         async with await open_session(url, synthetic_token()) as session:
@@ -77,12 +62,12 @@ async def test_the_calendar_is_still_found_and_instruments_follows_it_in_order()
         "Received",
     ]
     assert isinstance(events[0], Received) and isinstance(events[0].message, Calendar)
-    assert events[1] == Unknown("instruments", INSTRUMENTS, 3)
-    assert events[3] == Unknown("instruments", INSTRUMENTS, 5)
+    assert events[1] == Unknown("newer_kind", NEWER, 3)
+    assert events[3] == Unknown("newer_kind", NEWER, 5)
     assert not any(isinstance(e, SeqGap) for e in events)
 
 
-async def test_market_data_passes_over_instruments():
+async def test_market_data_passes_over_a_newer_message():
     server = Server(*AUTH_GROUP, hold_open=False)
     async with serve_local(server) as url:
         async with await open_session(url, synthetic_token()) as session:
@@ -91,16 +76,16 @@ async def test_market_data_passes_over_instruments():
         Book(instrument="SPY", grid_time=4),
         Book(instrument="SPY", grid_time=6),
     ]
-    assert as_market_data(Unknown("instruments", INSTRUMENTS, 3)) is None
+    assert as_market_data(Unknown("newer_kind", NEWER, 3)) is None
 
 
-async def test_a_first_connect_resumes_with_instruments_before_and_after_the_resume():
+async def test_a_first_connect_resumes_with_a_newer_message_before_and_after_the_resume():
     exchange = Scripted(
         {
             "term": TERM,
-            "before_resume": [instruments(2)],
+            "before_resume": [newer(2)],
             "answer": [resume_ack()],
-            "after": [instruments(3), order_state(1), book(7)],
+            "after": [newer(3), order_state(1), book(7)],
         }
     )
     async with serve_local(exchange) as url:
@@ -125,30 +110,30 @@ async def test_a_first_connect_resumes_with_instruments_before_and_after_the_res
     ]
     assert rs.last_report_seq == 1
     assert [e for e in events if isinstance(e, Unknown)] == [
-        Unknown("instruments", INSTRUMENTS, 2),
-        Unknown("instruments", INSTRUMENTS, 3),
+        Unknown("newer_kind", NEWER, 2),
+        Unknown("newer_kind", NEWER, 3),
     ]
 
 
 @pytest.mark.parametrize("where", ["before the resume_ack", "right after the resume_ack"])
-async def test_a_reconnect_resumes_with_instruments_in_the_auth_group(where: str):
+async def test_a_reconnect_resumes_with_a_newer_message_in_the_auth_group(where: str):
     if where == "before the resume_ack":
         second = {
             "term": TERM,
-            "before_resume": [instruments(2)],
+            "before_resume": [newer(2)],
             "answer": [resume_ack(True, 2), order_state(2)],
-            "after": [instruments(3), order_state(3)],
+            "after": [newer(3), order_state(3)],
         }
     else:
         second = {
             "term": TERM,
-            "answer": [resume_ack(True, 2), instruments(2), order_state(2)],
-            "after": [instruments(3), order_state(3)],
+            "answer": [resume_ack(True, 2), newer(2), order_state(2)],
+            "after": [newer(3), order_state(3)],
         }
     exchange = Scripted(
         {
             "term": TERM,
-            "before_resume": [instruments(2)],
+            "before_resume": [newer(2)],
             "answer": [resume_ack()],
             "after": [order_state(1)],
             "drop": True,
@@ -171,7 +156,7 @@ async def test_a_reconnect_resumes_with_instruments_in_the_auth_group(where: str
     assert names[:3] == ["Disconnected", "Retrying", "Connected"]
     assert isinstance(reconnected[2], Connected) and reconnected[2].resume is not None
     assert reconnected[2].resume.replayed
-    # Every report arrives once and in order, the resume completes, and each `instruments`
+    # Every report arrives once and in order, the resume completes, and each newer message
     # keeps its place in the stream.
     in_group = (
         ["Unknown", "resume_ack:None"]
@@ -187,8 +172,8 @@ async def test_a_reconnect_resumes_with_instruments_in_the_auth_group(where: str
         "order_state:3",
     ]
     assert [e for e in reconnected if isinstance(e, Unknown)] == [
-        Unknown("instruments", INSTRUMENTS, 2),
-        Unknown("instruments", INSTRUMENTS, 3),
+        Unknown("newer_kind", NEWER, 2),
+        Unknown("newer_kind", NEWER, 3),
     ]
     assert not any(isinstance(e, SeqGap) for e in events)
     assert sum(isinstance(e, ResumeComplete) for e in events) == 2

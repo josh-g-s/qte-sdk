@@ -159,7 +159,13 @@ from qte_sdk.connection import (
     ResumeComplete,
     SessionRejected,
 )
-from qte_sdk.contract.v1.session_pb2 import Calendar, ResumeAck, Subscribe, Unsubscribe
+from qte_sdk.contract.v1.session_pb2 import (
+    Calendar,
+    Instruments,
+    ResumeAck,
+    Subscribe,
+    Unsubscribe,
+)
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     DEFAULT_ACK_TIMEOUT,
@@ -343,6 +349,7 @@ class ReconnectingSession:
         # The connection of the latest session delivered as `Connected`, for its heartbeats.
         self._latest: Connection | None = None
         self._calendar: Calendar | None = None
+        self._instrument_table: Instruments | None = None
         self._iterated = False
         self._closed = False
         self._pending: asyncio.Future[Any] | None = None
@@ -386,6 +393,19 @@ class ReconnectingSession:
         None.
         """
         return self._calendar
+
+    @property
+    def instrument_table(self) -> Instruments | None:
+        """The latest `instruments` message the exchange sent on the current session, or
+        None if none has arrived on it yet.
+
+        The exchange sends one straight after the calendar of each session, and again
+        whenever the table changes; it is delivered as an ordinary event too. Like
+        `calendar`, each new session starts with None here until its own arrives, since a
+        table from an earlier session may be out of date. An exchange that predates the
+        message never sends one. Look instruments up in it with `qte_sdk.instruments`.
+        """
+        return self._instrument_table
 
     @property
     def heartbeats_received(self) -> int:
@@ -507,6 +527,7 @@ class ReconnectingSession:
                 self._info = session.info
                 self._latest = session.connection
                 self._calendar = session.calendar
+                self._instrument_table = session.instrument_table
                 if self._calendar is not None:
                     self._enter_term(_term_of(self._calendar), strict=False)
                 self._up = True
@@ -528,6 +549,9 @@ class ReconnectingSession:
                             # Before any later report is counted: a calendar that arrived
                             # too late for the attempt to check may name a new term.
                             self._enter_term(_term_of(event.message), strict=False)
+                        elif isinstance(event, Received) and event.type == "instruments":
+                            assert isinstance(event.message, Instruments)
+                            self._instrument_table = event.message
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event

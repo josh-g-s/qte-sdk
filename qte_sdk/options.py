@@ -34,10 +34,23 @@ connection once that connection holds a subscription to at least one option cont
 in the answer to the `subscribe` that gives it its first one, and again when the next
 session's chain is published, between the close and the next open. There is no request
 for the chain, so the first option subscribe must name a listed contract; a subscribe
-naming a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. The exchange's
-instruments message is to list each underlying's listed contracts by symbol, with its
-strike increment, and is where that first contract will come from once it is published;
-it is not on the wire yet, so until then you work one out yourself from the symbol rules.
+naming a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. Take that first
+contract from the exchange's `instruments` message (`Session.instrument_table`, see
+`qte_sdk.instruments`), which names each option underlying with its strike increment and
+the ids of its listed contracts: `option_underlyings` lists the underlyings,
+`listed_contracts` an underlying's contracts and `strike_increment` its increment. An
+underlying with no contract listed yet has an empty list. An exchange that predates the
+`instruments` message sends none; then you work a contract out from the symbol rules.
+
+    >>> from qte_sdk.contract.v1.session_pb2 import Instruments
+    >>> table = Instruments()
+    >>> _ = table.option_underlyings.add(
+    ...     underlying="SPY", strike_increment=5_000_000,
+    ...     contracts=["SPY261120C00665000", "SPY261120P00665000"])
+    >>> listed_contracts(table, "SPY")
+    ('SPY261120C00665000', 'SPY261120P00665000')
+    >>> strike_increment(table, "SPY")
+    5000000
 
 `chain_contracts` filters a chain, and `expiry_date` and `limit_scope` read an expiry:
 
@@ -91,7 +104,6 @@ one level per side, or none at all while it is suspended or its quote is not two
 
 Not settled or not published yet:
 
-- The instruments message that lists each underlying's contracts (above).
 - Reject reasons for options, such as a contract that is not listed, suspended or
   reducing-only. This SDK maps none; read any reject by its `reason_code` as usual.
 - Options in the history service: it serves no `option_chain` or `option_greeks`, so
@@ -128,6 +140,7 @@ from qte_sdk.contract.v1.market_data_pb2 import (
     OptionGreeksStatus,
     OptionTradingState,
 )
+from qte_sdk.contract.v1.session_pb2 import Instruments, OptionUnderlying
 
 __all__ = [
     "CALL",
@@ -157,8 +170,11 @@ __all__ = [
     "greek_to_decimal",
     "is_option_symbol",
     "limit_scope",
+    "listed_contracts",
+    "option_underlyings",
     "option_symbol",
     "parse_option_symbol",
+    "strike_increment",
     "trading_state",
     "vol_to_decimal",
 ]
@@ -283,6 +299,34 @@ def chain_contracts(
         for contract in entry.contracts
         if role is None or contract.role == role
     ]
+
+
+def option_underlyings(table: Instruments) -> list[str]:
+    """The id of every option underlying in the exchange's `instruments` message, in its
+    order, including those with no contract listed yet."""
+    return [entry.underlying for entry in table.option_underlyings]
+
+
+def listed_contracts(table: Instruments, underlying: str) -> tuple[str, ...]:
+    """The ids of the option contracts listed on `underlying`, as the exchange's
+    `instruments` message gives them (sorted by byte order). Empty if none is listed yet
+    or if the table does not name `underlying` as an option underlying."""
+    entry = _underlying(table, underlying)
+    return () if entry is None else tuple(entry.contracts)
+
+
+def strike_increment(table: Instruments, underlying: str) -> int | None:
+    """The published strike increment of `underlying`, in micro-dollars, or None if the
+    table does not name it as an option underlying."""
+    entry = _underlying(table, underlying)
+    return None if entry is None else entry.strike_increment
+
+
+def _underlying(table: Instruments, underlying: str) -> OptionUnderlying | None:
+    for entry in table.option_underlyings:
+        if entry.underlying == underlying:
+            return entry
+    return None
 
 
 def trading_state(book: Book) -> OptionTradingState.ValueType | None:

@@ -25,6 +25,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
 from qte_sdk.contract.v1.session_pb2 import (
     Calendar,
     Heartbeat,
+    Instruments,
     OrderSnapshot,
     ResumeAck,
     SessionAck,
@@ -39,6 +40,7 @@ CONTRACT_VERSION = "0.x"
 INBOUND: dict[str, type[Message]] = {
     "session_ack": SessionAck,
     "calendar": Calendar,
+    "instruments": Instruments,
     "session_reject": SessionReject,
     "heartbeat": Heartbeat,
     "resume_ack": ResumeAck,
