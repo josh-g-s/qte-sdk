@@ -33,6 +33,7 @@ from qte_sdk.connection import (
     SeqGap,
     SessionRejected,
 )
+from qte_sdk.contract import codec
 from qte_sdk.contract.v1.common_pb2 import BUY, RESTING, SELL, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import OrderState, Reject
 from qte_sdk.contract.v1.session_pb2 import Calendar, OrderSnapshot, ResumeAck
@@ -2472,3 +2473,30 @@ async def test_without_resume_a_calendar_that_does_not_come_keeps_the_cursor(
     assert kinds(events)[-3:] == ["Connected", "ReportGap", "order_state:4"]
     assert events[-2] == ReportGap(2, 4)
     assert last == 1
+
+
+async def test_a_calendar_read_ahead_is_never_replaced_by_an_older_one():
+    # The calendar after the ack and a newer one for the same term (a later update) are
+    # both read ahead before the resume_ack: the newer is already in force at `Connected`,
+    # and delivering the older event later must not bring it back.
+    later = {**CALENDAR_PAYLOAD, "next_open": str(int(CALENDAR_PAYLOAD["next_open"]) + 1)}
+    newer = codec.from_dict(later, Calendar)
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "before_resume": [calendar_frame(None, later)],
+            "answer": [resume_ack()],
+            "after": [order_state(1), book(7)],
+        }
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs:
+            seen = []
+            async with asyncio.timeout(5):
+                async for event in rs:
+                    seen.append(rs.calendar)
+                    if isinstance(event, Received) and event.type == "book":
+                        break
+    assert seen[0] == newer
+    assert all(c == newer for c in seen)
