@@ -530,6 +530,8 @@ Some rejects you are likely to meet while learning (the exchange's rules decide 
 
 A reason from a newer contract than your SDK knows decodes as `REASON_CODE_UNSPECIFIED`; `event.unknown_enum_names()` returns the name the exchange sent.
 
+**The term-end trading cutoff.** On the final session of a term, Market Making, Market Taking, Options MM and Options Taking teams stop trading five minutes before the close. Other teams trade on to the close. At the cutoff the exchange cancels each of your resting orders with an `order_cancelled` whose reason is `TERM_CUTOFF`. A new or amend still waiting out its order delay at that moment is dropped with no answer, while a cancel or mass cancel you sent before the cutoff, still waiting out its delay, still applies. Any order message of yours that the exchange receives at or after the cutoff is rejected `TRADING_CUTOFF`, even one you sent just before it. No `SessionState` phase marks the cutoff, so these two reasons are how your program learns of it. This SDK does not name them yet, so until it does they decode as `REASON_CODE_UNSPECIFIED`, and `event.unknown_enum_names()` returns `{"reason_code": "TRADING_CUTOFF"}` or `{"reason_code": "TERM_CUTOFF"}`. Their numbers are 1007 and 1815.
+
 ## 9. If the connection drops
 
 Iterating a session ends normally when the exchange closes the connection, and raises `websockets.exceptions.ConnectionClosedError` if it drops. A session from `open_session` does not reconnect, and neither do the worked examples: open a new session yourself. Your orders may still be resting after a drop, so check before you trade again.
