@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   check:
+    if: github.repository == 'josh-g-s/qte-sdk'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

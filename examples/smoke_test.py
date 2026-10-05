@@ -471,7 +471,10 @@ def check_sdk_version(report: Report) -> None:
     token."""
     try:
         from qte_sdk.update import Status, check_for_update
-    except ImportError:
+    except ImportError as error:
+        # Only an SDK too old to have the check; a missing dependency still raises.
+        if not (error.name or "").startswith("qte_sdk."):
+            raise
         report.add(
             FAIL,
             "sdk-version",

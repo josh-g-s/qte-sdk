@@ -6,6 +6,7 @@ student would start it, with the exchange URL and a synthetic token in its envir
 """
 
 import asyncio
+import builtins
 import contextlib
 import dataclasses
 import importlib.util
@@ -2727,6 +2728,25 @@ def test_the_smoke_test_fails_an_sdk_too_old_to_check_itself(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     assert sdk_version_line(monkeypatch, capsys, None) == ("FAIL", OLD_SDK_FAIL)
+
+
+def test_the_smoke_tests_version_check_lets_a_missing_dependency_raise(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    smoke = load_example(SMOKE_TEST)
+    monkeypatch.delitem(sys.modules, "qte_sdk.update", raising=False)
+    real_import = builtins.__import__
+
+    def without_websockets(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "qte_sdk.update":
+            raise ModuleNotFoundError("No module named 'websockets'", name="websockets")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_websockets)
+    with pytest.raises(ModuleNotFoundError) as raised:
+        smoke.check_sdk_version(smoke.Report())
+    assert raised.value.name == "websockets"
+    assert "sdk-version" not in capsys.readouterr().out
 
 
 OLD_SDK_FAIL = (
