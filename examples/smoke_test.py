@@ -15,6 +15,10 @@ reason, then a summary:
                      the token could be committed.
     connect          opens a session and names the team it authenticated as.
     calendar         reads the exchange's calendar: the next open and the last close.
+    instruments      the exchange's table of instruments: how many it lists, how many your
+                     team may trade now, its option underlyings, and any of --instruments
+                     that is not listed or not open to your team. A SKIP from an exchange
+                     that does not send the table.
     session-state    subscribes to each instrument and watches for --seconds: the market
                      session's state, OPEN during a session and CLOSED outside one.
     market:<name>    during a session, the instrument's best bid and ask and what arrived.
@@ -48,7 +52,8 @@ also pass --allow-scored: there the order is a real order of your team like any 
 Its price is one tick above the wall's best bid, the lowest at which a buy can rest: your
 orders rest only strictly inside the band between the wall's best bid and best ask, and
 one at the wall's own price or beyond it is not left resting (`order_cancelled` with
-REMAINDER_OUTSIDE_BAND). The exchange does not send the tick, so you give it with --tick.
+REMAINDER_OUTSIDE_BAND). You give the tick with --tick: the exchange's instruments table
+carries each instrument's tick, but this script also runs against an exchange without one.
 The price must be at least three ticks below every ask, or the check is a SKIP: try
 another instrument.
 
@@ -135,6 +140,14 @@ from qte_sdk.history import (
     HistoryError,
     HistoryNotImplemented,
     HistoryPending,
+)
+from qte_sdk.instruments import (
+    InstrumentInfo,
+    Instruments,
+    InstrumentStatus,
+    can_trade,
+    instruments_by_id,
+    tradable_instruments,
 )
 from qte_sdk.market_data import (
     Book,
@@ -518,6 +531,32 @@ def time_text(timestamp: int, now: int) -> str:
     return f"{when:%Y-%m-%d %H:%M} UTC, " + (
         f"in {span}" if wait >= timedelta(0) else f"{span} ago"
     )
+
+
+def check_instruments(report: Report, table: Instruments | None, requested: list[str]) -> None:
+    """The exchange's table of instruments, as the session last received it. Never a FAIL:
+    an instrument the exchange does not know already fails its market check."""
+    if table is None:
+        report.add(SKIP, "instruments", "none received: this exchange does not send the table")
+        return
+    by_id = instruments_by_id(table)
+    parts = [
+        f"{len(by_id)} listed, {len(tradable_instruments(table))} your team may trade now",
+        f"{len(table.option_underlyings)} option underlying(s)",
+    ]
+    for name in requested:
+        info = by_id.get(name)
+        if info is None:
+            parts.append(f"{name} is not listed")
+        elif not can_trade(info):
+            parts.append(f"{name} {why_not_tradable(info)}")
+    report.add(PASS, "instruments", "; ".join(parts))
+
+
+def why_not_tradable(info: InstrumentInfo) -> str:
+    if not info.tradable:
+        return "is not open to your team"
+    return f"is {name_of(InstrumentStatus, info.status)}"
 
 
 def check_calendar(report: Report, calendar: Calendar | None, now: int, seconds: float) -> None:
@@ -1480,7 +1519,8 @@ async def check_history(
 
 
 def skip_after_connect(report: Report, reason: str) -> None:
-    for name in ("calendar", "market", "account", "test-order", "heartbeat", "history"):
+    names = ("calendar", "instruments", "market", "account", "test-order", "heartbeat", "history")
+    for name in names:
         report.add(SKIP, name, reason)
 
 
@@ -1597,6 +1637,9 @@ async def run_checks(url: str, args: argparse.Namespace, report: Report) -> None
             await session_checks(report, watcher, args, opened_at)
         finally:
             reader.cancel()
+        # Read at the end, not waited for: an exchange that does not send it would hold up
+        # every check after it, and the watcher has read the session meanwhile.
+        check_instruments(report, session.instrument_table, args.instruments)
         known = [name for name in args.instruments if name not in watcher.unknown_instruments]
     await check_history(report, args, calendar, info.server_time, known)
 

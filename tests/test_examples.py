@@ -157,10 +157,13 @@ class FakeExchange:
         refill_level: bool = False,
         heartbeat_every: float | None = None,
         instruments: dict[str, Any] | None = None,
+        newer: dict[str, Any] | None = None,
     ) -> None:
-        # With `instruments`, an `instruments` message, a type newer than this SDK, follows
-        # the calendar, as a newer exchange sends it on every authentication.
+        # With `instruments`, an `instruments` message follows the calendar, as the exchange
+        # sends it on every authentication.
         self.instruments = instruments
+        # With `newer`, a message of a type newer than this SDK follows them.
+        self.newer = newer
         # With `heartbeat_every`, a heartbeat is sent that often, in seconds, from the ack
         # on, each carrying a send time that many seconds after the ack's server_time.
         self.heartbeat_every = heartbeat_every
@@ -296,6 +299,8 @@ class FakeExchange:
             await self.send(ws, "calendar", self.calendar)
         if self.instruments is not None:
             await self.send(ws, "instruments", self.instruments)
+        if self.newer is not None:
+            await self.send(ws, "newer_kind", self.newer)
         ticker: asyncio.Task | None = None
         beats = None if self.heartbeat_every is None else asyncio.create_task(self.beat(ws))
         try:
@@ -2187,23 +2192,72 @@ async def test_the_smoke_test_checks_a_setup_during_a_session_and_sends_no_order
     status, reason = found["history"]
     assert status == "SKIP"
     assert "QTE_HISTORY_URL is not set" in reason
-    assert out.splitlines()[-1] == "summary: 7 passed, 0 failed, 4 skipped"
+    # This fake predates the instruments message.
+    assert found["instruments"] == (
+        "SKIP",
+        "none received: this exchange does not send the table",
+    )
+    assert out.splitlines()[-1] == "summary: 7 passed, 0 failed, 5 skipped"
     assert exchange.types() == ["auth", "subscribe", "account_query"]
 
 
 async def test_the_smoke_test_passes_a_message_type_it_does_not_know_and_names_it():
-    exchange = FakeExchange(
-        calendar=CALENDAR, server_time=SERVER_TIME, instruments={"instruments": []}
-    )
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, newer={"x": 1})
     code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
     assert code == 0, out + err
     assert found["calendar"][0] == "PASS"
     status, reason = found["feed"]
     assert status == "PASS"
     assert reason.endswith(
-        "; message types this SDK does not know: instruments (a newer SDK may read them)"
+        "; message types this SDK does not know: newer_kind (a newer SDK may read them)"
     )
     assert not any(status == "FAIL" for status, _ in found.values())
+
+
+def listed(instrument: str, status: str = "INSTRUMENT_TRADING", tradable: bool = True) -> dict:
+    return {
+        "instrument": instrument,
+        "kind": "EQUITY",
+        "tick_size": "10000",
+        "lot_size": "1",
+        "status": status,
+        "tradable": tradable,
+    }
+
+
+async def test_the_smoke_test_reads_the_instruments_table():
+    table = {
+        "instruments": [listed("AAPL"), listed(INSTRUMENT)],
+        "option_underlyings": [{"underlying": "SPY", "strike_increment": "5000000"}],
+    }
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, instruments=table)
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    assert found["instruments"] == (
+        "PASS",
+        "2 listed, 2 your team may trade now; 1 option underlying(s)",
+    )
+    # A known type now: the feed names no unknown one.
+    assert found["feed"][0] == "PASS"
+    assert "does not know" not in found["feed"][1]
+
+
+@pytest.mark.parametrize(
+    ("entries", "note"),
+    [
+        ([listed(INSTRUMENT, status="INSTRUMENT_DISABLED")], "is INSTRUMENT_DISABLED"),
+        ([listed(INSTRUMENT, tradable=False)], "is not open to your team"),
+        ([listed("AAPL", tradable=False)], "is not listed"),
+    ],
+)
+async def test_the_smoke_test_names_a_requested_instrument_it_cannot_trade(entries, note):
+    table = {"instruments": entries}
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, instruments=table)
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert found["instruments"] == (
+        "PASS",
+        f"1 listed, 0 your team may trade now; 0 option underlying(s); {INSTRUMENT} {note}",
+    )
 
 
 async def test_the_smoke_test_reports_the_heartbeats_and_about_how_far_apart_they_came():

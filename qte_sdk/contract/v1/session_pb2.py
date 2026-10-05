@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from qte_sdk.contract.v1 import common_pb2 as qte_dot_contract_dot_v1_dot_common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dqte/contract/v1/session.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"\x15\n\x04\x41uth\x12\r\n\x05token\x18\x01 \x01(\t\"o\n\nSessionAck\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04team\x18\x02 \x01(\t\x12\x13\n\x0bserver_time\x18\x03 \x01(\x03\x12\x18\n\x10\x63ontract_version\x18\x04 \x01(\t\x12\x10\n\x08unscored\x18\x05 \x01(\x08\"c\n\x0f\x43\x61lendarSession\x12\x14\n\x0csession_date\x18\x01 \x01(\t\x12\x11\n\topen_time\x18\x02 \x01(\x03\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x13\n\x0b\x65\x61rly_close\x18\x04 \x01(\x08\"%\n\x07Holiday\x12\x0c\n\x04\x64\x61te\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\"\xed\x01\n\x08\x43\x61lendar\x12\x1a\n\x12term_first_session\x18\x01 \x01(\t\x12\x19\n\x11term_last_session\x18\x02 \x01(\t\x12\x32\n\x08sessions\x18\x03 \x03(\x0b\x32 .qte.contract.v1.CalendarSession\x12*\n\x08holidays\x18\x04 \x03(\x0b\x32\x18.qte.contract.v1.Holiday\x12\x16\n\tnext_open\x18\x05 \x01(\x03H\x00\x88\x01\x01\x12\x12\n\nterm_start\x18\x06 \x01(\t\x12\x10\n\x08term_end\x18\x07 \x01(\tB\x0c\n\n_next_open\"{\n\rSessionReject\x12<\n\x0breason_code\x18\x01 \x01(\x0e\x32\'.qte.contract.v1.ReasonCodes.ReasonCode\x12\x1a\n\rreason_detail\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\x10\n\x0e_reason_detail\"\x0b\n\tHeartbeat\"L\n\x06Resume\x12\x17\n\x0flast_report_seq\x18\x03 \x01(\x03J\x04\x08\x01\x10\x02J\x04\x08\x02\x10\x03R\nsession_idR\x11last_seq_received\"O\n\tResumeAck\x12\x10\n\x08replayed\x18\x01 \x01(\x08\x12\x18\n\x10\x61s_of_report_seq\x18\x02 \x01(\x03\x12\x16\n\x0esnapshot_count\x18\x03 \x01(\x05\"\xb4\x01\n\rOrderSnapshot\x12\x10\n\x08strat_id\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x16\n\x0eremaining_size\x18\x06 \x01(\x03\x12\x11\n\ttimestamp\x18\x08 \x01(\x03J\x04\x08\x05\x10\x06J\x04\x08\x07\x10\x08R\x05stateR\x0bstale_since\" \n\tSubscribe\x12\x13\n\x0binstruments\x18\x01 \x03(\t\"\"\n\x0bUnsubscribe\x12\x13\n\x0binstruments\x18\x01 \x03(\t\"#\n\x0c\x41\x63\x63ountQuery\x12\x13\n\x0brequest_ref\x18\x01 \x01(\tB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dqte/contract/v1/session.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"\x15\n\x04\x41uth\x12\r\n\x05token\x18\x01 \x01(\t\"o\n\nSessionAck\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04team\x18\x02 \x01(\t\x12\x13\n\x0bserver_time\x18\x03 \x01(\x03\x12\x18\n\x10\x63ontract_version\x18\x04 \x01(\t\x12\x10\n\x08unscored\x18\x05 \x01(\x08\"c\n\x0f\x43\x61lendarSession\x12\x14\n\x0csession_date\x18\x01 \x01(\t\x12\x11\n\topen_time\x18\x02 \x01(\x03\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x13\n\x0b\x65\x61rly_close\x18\x04 \x01(\x08\"%\n\x07Holiday\x12\x0c\n\x04\x64\x61te\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\"\xed\x01\n\x08\x43\x61lendar\x12\x1a\n\x12term_first_session\x18\x01 \x01(\t\x12\x19\n\x11term_last_session\x18\x02 \x01(\t\x12\x32\n\x08sessions\x18\x03 \x03(\x0b\x32 .qte.contract.v1.CalendarSession\x12*\n\x08holidays\x18\x04 \x03(\x0b\x32\x18.qte.contract.v1.Holiday\x12\x16\n\tnext_open\x18\x05 \x01(\x03H\x00\x88\x01\x01\x12\x12\n\nterm_start\x18\x06 \x01(\t\x12\x10\n\x08term_end\x18\x07 \x01(\tB\x0c\n\n_next_open\"\x82\x01\n\x0bOptionTerms\x12\x12\n\nunderlying\x18\x01 \x01(\t\x12\x0e\n\x06\x65xpiry\x18\x02 \x01(\t\x12+\n\x05right\x18\x03 \x01(\x0e\x32\x1c.qte.contract.v1.OptionRight\x12\x0e\n\x06strike\x18\x04 \x01(\x03\x12\x12\n\nmultiplier\x18\x05 \x01(\x03\"\xa7\x02\n\x0eInstrumentInfo\x12\x12\n\ninstrument\x18\x01 \x01(\t\x12\x19\n\x0c\x64isplay_name\x18\x02 \x01(\tH\x00\x88\x01\x01\x12-\n\x04kind\x18\x03 \x01(\x0e\x32\x1f.qte.contract.v1.InstrumentKind\x12\x11\n\ttick_size\x18\x04 \x01(\x03\x12\x10\n\x08lot_size\x18\x05 \x01(\x03\x12\x31\n\x06status\x18\x06 \x01(\x0e\x32!.qte.contract.v1.InstrumentStatus\x12\x10\n\x08tradable\x18\x07 \x01(\x08\x12\x31\n\x06option\x18\x08 \x01(\x0b\x32\x1c.qte.contract.v1.OptionTermsH\x01\x88\x01\x01\x42\x0f\n\r_display_nameB\t\n\x07_option\"S\n\x10OptionUnderlying\x12\x12\n\nunderlying\x18\x01 \x01(\t\x12\x18\n\x10strike_increment\x18\x02 \x01(\x03\x12\x11\n\tcontracts\x18\x03 \x03(\t\"\x82\x01\n\x0bInstruments\x12\x34\n\x0binstruments\x18\x01 \x03(\x0b\x32\x1f.qte.contract.v1.InstrumentInfo\x12=\n\x12option_underlyings\x18\x02 \x03(\x0b\x32!.qte.contract.v1.OptionUnderlying\"{\n\rSessionReject\x12<\n\x0breason_code\x18\x01 \x01(\x0e\x32\'.qte.contract.v1.ReasonCodes.ReasonCode\x12\x1a\n\rreason_detail\x18\x02 \x01(\tH\x00\x88\x01\x01\x42\x10\n\x0e_reason_detail\"\x0b\n\tHeartbeat\"L\n\x06Resume\x12\x17\n\x0flast_report_seq\x18\x03 \x01(\x03J\x04\x08\x01\x10\x02J\x04\x08\x02\x10\x03R\nsession_idR\x11last_seq_received\"O\n\tResumeAck\x12\x10\n\x08replayed\x18\x01 \x01(\x08\x12\x18\n\x10\x61s_of_report_seq\x18\x02 \x01(\x03\x12\x16\n\x0esnapshot_count\x18\x03 \x01(\x05\"\xb4\x01\n\rOrderSnapshot\x12\x10\n\x08strat_id\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x16\n\x0eremaining_size\x18\x06 \x01(\x03\x12\x11\n\ttimestamp\x18\x08 \x01(\x03J\x04\x08\x05\x10\x06J\x04\x08\x07\x10\x08R\x05stateR\x0bstale_since\" \n\tSubscribe\x12\x13\n\x0binstruments\x18\x01 \x03(\t\"\"\n\x0bUnsubscribe\x12\x13\n\x0binstruments\x18\x01 \x03(\t\"#\n\x0c\x41\x63\x63ountQuery\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t*I\n\x0eInstrumentKind\x12\x1f\n\x1bINSTRUMENT_KIND_UNSPECIFIED\x10\x00\x12\n\n\x06\x45QUITY\x10\x01\x12\n\n\x06OPTION\x10\x02*\x84\x01\n\x10InstrumentStatus\x12!\n\x1dINSTRUMENT_STATUS_UNSPECIFIED\x10\x00\x12\x16\n\x12INSTRUMENT_TRADING\x10\x01\x12\x17\n\x13INSTRUMENT_DISABLED\x10\x02\x12\x1c\n\x18INSTRUMENT_REDUCING_ONLY\x10\x03*>\n\x0bOptionRight\x12\x1c\n\x18OPTION_RIGHT_UNSPECIFIED\x10\x00\x12\x08\n\x04\x43\x41LL\x10\x01\x12\x07\n\x03PUT\x10\x02\x42\x38Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,6 +33,12 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'qte_sdk.contract.v1.session
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1'
+  _globals['_INSTRUMENTKIND']._serialized_start=1832
+  _globals['_INSTRUMENTKIND']._serialized_end=1905
+  _globals['_INSTRUMENTSTATUS']._serialized_start=1908
+  _globals['_INSTRUMENTSTATUS']._serialized_end=2040
+  _globals['_OPTIONRIGHT']._serialized_start=2042
+  _globals['_OPTIONRIGHT']._serialized_end=2104
   _globals['_AUTH']._serialized_start=80
   _globals['_AUTH']._serialized_end=101
   _globals['_SESSIONACK']._serialized_start=103
@@ -43,20 +49,28 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_HOLIDAY']._serialized_end=354
   _globals['_CALENDAR']._serialized_start=357
   _globals['_CALENDAR']._serialized_end=594
-  _globals['_SESSIONREJECT']._serialized_start=596
-  _globals['_SESSIONREJECT']._serialized_end=719
-  _globals['_HEARTBEAT']._serialized_start=721
-  _globals['_HEARTBEAT']._serialized_end=732
-  _globals['_RESUME']._serialized_start=734
-  _globals['_RESUME']._serialized_end=810
-  _globals['_RESUMEACK']._serialized_start=812
-  _globals['_RESUMEACK']._serialized_end=891
-  _globals['_ORDERSNAPSHOT']._serialized_start=894
-  _globals['_ORDERSNAPSHOT']._serialized_end=1074
-  _globals['_SUBSCRIBE']._serialized_start=1076
-  _globals['_SUBSCRIBE']._serialized_end=1108
-  _globals['_UNSUBSCRIBE']._serialized_start=1110
-  _globals['_UNSUBSCRIBE']._serialized_end=1144
-  _globals['_ACCOUNTQUERY']._serialized_start=1146
-  _globals['_ACCOUNTQUERY']._serialized_end=1181
+  _globals['_OPTIONTERMS']._serialized_start=597
+  _globals['_OPTIONTERMS']._serialized_end=727
+  _globals['_INSTRUMENTINFO']._serialized_start=730
+  _globals['_INSTRUMENTINFO']._serialized_end=1025
+  _globals['_OPTIONUNDERLYING']._serialized_start=1027
+  _globals['_OPTIONUNDERLYING']._serialized_end=1110
+  _globals['_INSTRUMENTS']._serialized_start=1113
+  _globals['_INSTRUMENTS']._serialized_end=1243
+  _globals['_SESSIONREJECT']._serialized_start=1245
+  _globals['_SESSIONREJECT']._serialized_end=1368
+  _globals['_HEARTBEAT']._serialized_start=1370
+  _globals['_HEARTBEAT']._serialized_end=1381
+  _globals['_RESUME']._serialized_start=1383
+  _globals['_RESUME']._serialized_end=1459
+  _globals['_RESUMEACK']._serialized_start=1461
+  _globals['_RESUMEACK']._serialized_end=1540
+  _globals['_ORDERSNAPSHOT']._serialized_start=1543
+  _globals['_ORDERSNAPSHOT']._serialized_end=1723
+  _globals['_SUBSCRIBE']._serialized_start=1725
+  _globals['_SUBSCRIBE']._serialized_end=1757
+  _globals['_UNSUBSCRIBE']._serialized_start=1759
+  _globals['_UNSUBSCRIBE']._serialized_end=1793
+  _globals['_ACCOUNTQUERY']._serialized_start=1795
+  _globals['_ACCOUNTQUERY']._serialized_end=1830
 # @@protoc_insertion_point(module_scope)

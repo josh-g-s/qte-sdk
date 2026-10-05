@@ -1,6 +1,6 @@
 # Developing your algo
 
-**Version:** 0.2
+**Version:** 0.3
 
 This guide is one path from an idea to a program trading on the exchange: explore past market data, run your strategy's loop on a replay of a past session, keep its order logic separate so you can test it, check your setup with the smoke test, then try it on the exchange during a session. Most of it works at any hour, so you can do it while the market is closed.
 
@@ -155,7 +155,7 @@ from qte_sdk.units import to_micros
 
 from strategy import quote_prices
 
-TICK = to_micros("0.01")  # your own choice, passed in: the exchange does not send it
+TICK = to_micros("0.01")  # in a live run, the instrument's tick_size from qte_sdk.instruments
 
 
 def book(bid: str, ask: str) -> Book:

@@ -43,12 +43,20 @@ from qte_sdk.connection import (
     SeqGap,
     SessionInfo,
     SessionRejected,
+    Unknown,
     _close_detail,
     _received_close_code,
 )
 from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
 from qte_sdk.contract.v1.order_events_pb2 import Reject
-from qte_sdk.contract.v1.session_pb2 import Auth, Calendar, Resume, ResumeAck, SessionAck
+from qte_sdk.contract.v1.session_pb2 import (
+    Auth,
+    Calendar,
+    Instruments,
+    Resume,
+    ResumeAck,
+    SessionAck,
+)
 from qte_sdk.dotenv import DOTENV_NAME, read_value
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
@@ -302,14 +310,16 @@ class Session:
     `qte_sdk.orders` and `qte_sdk.market_data` accept it.
 
     `calendar` is the exchange's session calendar, once it has arrived; see
-    `wait_for_calendar` and `qte_sdk.calendar`.
+    `wait_for_calendar` and `qte_sdk.calendar`. `instrument_table` is the exchange's
+    latest `instruments` message, its table of instruments; see `wait_for_instrument_table`
+    and `qte_sdk.instruments`.
 
     Heartbeats are absorbed and never delivered as events. `heartbeats_received`,
     `last_heartbeat_at` and `last_heartbeat_sent_at` say whether they are arriving: they
     describe this session's connection from the moment it opened, before the
     acknowledgement included, and a new session starts again from none. A heartbeat is
     counted as it is read, so they move only while the session is read: by iterating it,
-    or by `wait_for_calendar` or `resume` reading ahead.
+    or by `wait_for_calendar`, `wait_for_instrument_table` or `resume` reading ahead.
 
     Private reports: each of the team's order reports that the exchange can replay carries
     a `report_seq`, numbered per team without gaps. The session delivers them in that order
@@ -331,6 +341,12 @@ class Session:
         self._buffer: deque[Event] = deque()
         self._calendar: Calendar | None = None
         self._calendar_unreadable = False
+        self._instrument_table: Instruments | None = None
+        self._instrument_table_unreadable = False
+        # Set when the message read straight after the calendar was not `instruments`: an
+        # exchange that sends it sends it there, so this one predates it.
+        self._instrument_table_absent = False
+        self._after_calendar = False
         self._source: AsyncIterator[Event] | None = None
         self._reading = False
         self._ended = False
@@ -382,6 +398,53 @@ class Session:
             if not deadline.expired():
                 raise
         return self._calendar
+
+    @property
+    def instrument_table(self) -> Instruments | None:
+        """The latest `instruments` message the exchange sent on this session, or None if
+        none has been read yet.
+
+        The exchange sends it straight after the calendar that follows its acknowledgement,
+        and again, whole, whenever an instrument is listed, delisted or changes status: each
+        one replaces the one before. Like the calendar, it is set once iterating the session
+        (or `wait_for_instrument_table`) reads it. An exchange that predates the message
+        never sends one, so it can stay None for the whole session. Look instruments up in
+        it with `qte_sdk.instruments`.
+        """
+        return self._instrument_table
+
+    async def wait_for_instrument_table(
+        self, timeout: float | None = DEFAULT_CALENDAR_TIMEOUT
+    ) -> Instruments | None:
+        """Wait up to `timeout` seconds (None for no limit) for the exchange's
+        `instruments` message.
+
+        Returns it, at once if it has already arrived, or None if it does not arrive in
+        time, if the connection ends or it cannot be decoded first, or as soon as the
+        message read straight after the calendar is something else, which means the
+        exchange predates it. Heartbeats are not counted as that message, so an older
+        exchange that sends nothing after the calendar but heartbeats is waited for until
+        `timeout`. It never raises for any of these.
+
+        Like `wait_for_calendar`, it reads the session's events ahead of you and keeps them:
+        iterating the session afterwards still delivers every event, in order. Call it from
+        the task that iterates the session.
+        """
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                while (
+                    self._instrument_table is None
+                    and not self._instrument_table_unreadable
+                    and not self._instrument_table_absent
+                ):
+                    if self._ended:
+                        break
+                    await self._read_one()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+        return self._instrument_table
 
     @property
     def heartbeats_received(self) -> int:
@@ -604,11 +667,25 @@ class Session:
 
     def _keep(self, event: Event) -> None:
         self._unrouted.append(event)
-        if isinstance(event, Received) and event.type == "calendar":
+        if not isinstance(event, (Received, DecodeFailed, Unknown)):
+            return  # not a message, such as a SeqGap: it says nothing of what came next
+        after_calendar = self._after_calendar
+        self._after_calendar = False
+        kind = event.type
+        if isinstance(event, Received) and kind == "calendar":
             assert isinstance(event.message, Calendar)
             self._calendar = event.message
-        elif isinstance(event, DecodeFailed) and event.type == "calendar":
+            self._after_calendar = True
+        elif isinstance(event, DecodeFailed) and kind == "calendar":
             self._calendar_unreadable = True
+            self._after_calendar = True
+        elif isinstance(event, Received) and kind == "instruments":
+            assert isinstance(event.message, Instruments)
+            self._instrument_table = event.message
+        elif isinstance(event, DecodeFailed) and kind == "instruments":
+            self._instrument_table_unreadable = True
+        elif after_calendar and self._instrument_table is None:
+            self._instrument_table_absent = True
 
     async def send(self, type_: str, payload: Message) -> None:
         """Send one message on this session's connection, as `Connection.send` does."""
