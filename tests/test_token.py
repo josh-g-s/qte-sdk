@@ -231,6 +231,63 @@ def test_set_with_redirected_input_refuses_and_shows_nothing(tmp_path):
     assert not (tmp_path / "home").exists()
 
 
+class Stdin:
+    """Standing in for `sys.stdin`: a device (`isatty` true) on a given descriptor."""
+
+    def __init__(self, tty: bool) -> None:
+        self.tty = tty
+
+    def isatty(self) -> bool:
+        return self.tty
+
+    def fileno(self) -> int:
+        return 7
+
+
+@pytest.mark.parametrize(
+    ("tty", "console", "expected"),
+    [
+        (True, True, True),  # a console
+        (True, False, False),  # NUL, a device that is not a console
+        (False, True, False),  # a pipe or a file
+    ],
+)
+def test_on_windows_a_terminal_must_be_a_console(monkeypatch, tty, console, expected):
+    asked: list[int] = []
+
+    def is_console(fileno: int) -> bool:
+        asked.append(fileno)
+        return console
+
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
+    monkeypatch.setattr(helper, "_is_console", is_console)
+    monkeypatch.setattr(helper.sys, "stdin", Stdin(tty))
+    assert helper._has_terminal() is expected
+    assert asked == ([7] if tty else [])
+
+
+def test_off_windows_a_terminal_need_not_be_a_console(monkeypatch):
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: False)
+    monkeypatch.setattr(helper, "_is_console", lambda fileno: False)
+    monkeypatch.setattr(helper.sys, "stdin", Stdin(True))
+    assert helper._has_terminal() is True
+
+
+def test_the_console_check_fails_closed_off_windows():
+    # No msvcrt or ctypes.WinDLL here, which stands in for any failure to ask.
+    assert helper._is_console(0) is False
+
+
+def test_set_with_input_from_nul_on_windows_refuses_without_asking(monkeypatch, capsys):
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
+    monkeypatch.setattr(helper, "_is_console", lambda fileno: False)
+    monkeypatch.setattr(helper.sys, "stdin", Stdin(True))
+    for argv in (["set"], ["set", "--file"]):
+        assert helper.main(argv, ask=never, ask_secret=never) == 1
+        assert "needs a terminal" in capsys.readouterr().err
+    assert not dotenv().exists()
+
+
 def test_a_token_that_cannot_be_read_without_echo_is_not_read(capsys):
     import getpass
 
@@ -699,7 +756,11 @@ def test_set_on_windows_warns_when_broad_groups_can_read_the_file(windows, capsy
         assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
     out, err = capsys.readouterr()
     assert "Warning:" in out
-    assert "NT AUTHORITY\\Authenticated Users and BUILTIN\\Users" in out
+    assert (
+        "lets NT AUTHORITY\\Authenticated Users read or change it, and BUILTIN\\Users read it"
+        in out
+    )
+    assert "change QTE_URL in it to a server of their own" in out
     assert "%USERPROFILE%" in out and f'icacls "{Path.cwd()}"' in out
     assert "No group of other users" not in out
     assert_token_absent(token, out + err)
@@ -710,7 +771,7 @@ def test_set_on_windows_says_when_no_broad_group_can_read_the_file(windows, caps
     token = synthetic_token()
     assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
     out, err = capsys.readouterr()
-    assert "No group of other users, such as Everyone or Users, can read it." in out
+    assert "No group of other users, such as Everyone or Users, can read or change it." in out
     assert "Warning:" not in out and "readable only by you" not in out
     assert_token_absent(token, out + err)
 
@@ -793,7 +854,7 @@ def test_check_on_windows_reports_a_private_token_file(windows, monkeypatch, tmp
     monkeypatch.setenv(URL_ENV_VAR, URL)
     assert run(["check"]) == 0
     out, err = capsys.readouterr()
-    assert f"({path}); no group of other users, such as Everyone or Users, can read it" in out
+    assert f"({path}); no group of other users, such as Everyone or Users, can read or" in out
     assert "warning:" not in out
     assert_token_absent(token, out + err)
 

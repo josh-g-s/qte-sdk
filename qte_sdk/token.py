@@ -22,18 +22,21 @@ offers to add it to `.gitignore`.
 On macOS and Linux the modes make the files readable only by you. Windows does not apply
 them, and this command does not change Windows access lists. Instead, once the file is
 written, it reads the file's access list and says whether a broad group of users, such as
-Everyone, Authenticated Users or Users, can read it, and if so how to fix that: keep the
+Everyone, Authenticated Users or Users, can read or change it, and if so how to fix that: keep the
 file in a folder under your user profile (%USERPROFILE%), which is private by default. If
 the access list cannot be read, it says to keep the file in such a folder.
 
 `check` reports where the SDK would take the token and the address from, as
 `qte_sdk.session.resolve_token` and `resolve_url` would, without showing the token. On
-Windows it also reports whether a broad group of users can read the file the token is in.
+Windows it also reports whether a broad group of users can read or change the file the
+token is in.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
 a terminal: it refuses to run with its input redirected, rather than read the token from
-somewhere that could echo it.
+somewhere that could echo it. On Windows that means a console: input redirected from `NUL`
+(a device, so it passes for a terminal) is refused too, rather than wait for a key that
+can never come.
 """
 
 import argparse
@@ -151,7 +154,33 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _has_terminal() -> bool:
-    return sys.stdin.isatty()
+    """Whether the input is a terminal a person can type the token at. On Windows that is a
+    console: `NUL` is a character device, so `isatty` is true for it, but `getpass` would
+    wait for ever there, on a console that does not exist."""
+    if not sys.stdin.isatty():
+        return False
+    if _fileaccess.on_windows():
+        return _is_console(sys.stdin.fileno())
+    return True
+
+
+def _is_console(fileno: int) -> bool:
+    """Whether `fileno` is a Windows console, which `GetConsoleMode` accepts and any other
+    handle (`NUL`, a pipe, a file) fails. False if that cannot be asked. Only on Windows:
+    `msvcrt` and `ctypes.WinDLL` exist nowhere else."""
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_console_mode = kernel32.GetConsoleMode
+        get_console_mode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        get_console_mode.restype = wintypes.BOOL
+        handle = msvcrt.get_osfhandle(fileno)
+        return bool(get_console_mode(handle, ctypes.byref(wintypes.DWORD())))
+    except Exception:
+        return False
 
 
 # set: ./.env
@@ -434,7 +463,7 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
     secret = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")
     del secret
-    print(f"Saved the token to {path}{_privacy(path)}")
+    print(f"Saved the token to {path}{_privacy(path, sets_address=False)}")
     interrupted = False
     try:
         _offer_gitignore(path, ask)
@@ -511,21 +540,22 @@ def _unset_advice(names: list[str], purpose: str) -> str:
 # Writing
 
 
-def _privacy(path: Path) -> str:
+def _privacy(path: Path, *, sets_address: bool = True) -> str:
     """The end of the message saying where the token was saved: what protects it. On
     Windows, what the file's access list says: a warning naming the broad groups that can
-    read it, or that none can; or, if the list cannot be read, where to keep the file."""
+    read or change it, or that none can; or, if the list cannot be read, where to keep the
+    file. `sets_address` says whether the file is a `.env`, which can set the address."""
     if not _fileaccess.on_windows():
         return ", readable only by you."
-    readers = _fileaccess.broad_readers(path)
-    if readers is None:
+    access = _fileaccess.broad_access(path)
+    if access is None:
         return (
             ". Windows does not apply the file's private mode, so keep it in a folder only you "
             "can open, such as your user profile, and do not share that folder."
         )
-    if not readers:
-        return ". No group of other users, such as Everyone or Users, can read it."
-    return f".\nWarning: {shared_message(path, readers)}"
+    if not access:
+        return ". No group of other users, such as Everyone or Users, can read or change it."
+    return f".\nWarning: {shared_message(path, access, sets_address=sets_address)}"
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -609,16 +639,18 @@ def _check() -> int:
 
 
 def _access_note(source: str) -> str:
-    """On Windows, a note that no broad group of users can read the file the token comes
-    from, when its access list says so. A file they can read gets a warning instead."""
+    """On Windows, a note that no broad group of users can read or change the file the
+    token comes from, when its access list says so. A file they can gets a warning
+    instead."""
     if source == DOTENV_NAME:
         path = dotenv_path()
     elif source == TOKEN_FILE_ENV_VAR:
         path = Path(os.environ[TOKEN_FILE_ENV_VAR])
     else:
         return ""
-    if _fileaccess.broad_readers(path) == []:
-        return "; no group of other users, such as Everyone or Users, can read it"
+    access = _fileaccess.broad_access(path)
+    if access is not None and not access:
+        return "; no group of other users, such as Everyone or Users, can read or change it"
     return ""
 
 

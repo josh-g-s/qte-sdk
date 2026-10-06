@@ -1,21 +1,22 @@
-"""Which broad groups of users Windows lets read a file.
+"""Which broad groups of users Windows lets read or change a file.
 
 On Windows a file's access is set by its access list (its DACL), not by POSIX modes, and a
 file inherits the list of its folder. A folder under your user profile is private by
-default, but one on another drive, such as `D:\\`, usually lets Authenticated Users and
-Users read everything in it. `broad_readers` reads a file's list through the Windows API
-(with `ctypes`, so no extra package is needed) and names the broad groups it lets read the
-file. `readers_in_sddl` does the parsing, on the list in its text form (SDDL), and runs on
-any system, so it can be tested anywhere.
+default, but one on another drive, such as `D:\\`, usually lets Users read everything in it
+and Authenticated Users change it too. `broad_access` reads a file's list through the
+Windows API (with `ctypes`, so no extra package is needed) and names the broad groups it
+lets read the file and those it lets change it. `access_in_sddl` does the parsing, on the
+list in its text form (SDDL), and runs on any system, so it can be tested anywhere.
 
 Only paths and access lists are handled here, never a file's contents.
 """
 
 import os
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["BROAD_GROUPS", "broad_readers", "on_windows", "readers_in_sddl"]
+__all__ = ["BROAD_GROUPS", "BroadAccess", "access_in_sddl", "broad_access", "on_windows"]
 
 # The broad groups, by the names `icacls` shows. Each is matched by its SDDL alias or its
 # SID; Domain Users is matched by its well-known last part (513), in any domain. On a
@@ -45,6 +46,9 @@ _DOMAIN_USERS_RID = "-513"
 # The rights that let a user read a file's data: FILE_READ_DATA, GENERIC_READ and
 # GENERIC_ALL. GENERIC_EXECUTE (GX) and FILE_GENERIC_EXECUTE (FX) do not.
 _READ_MASK = 0x1 | 0x80000000 | 0x10000000
+# The rights that let a user change a file, or take control of it and then change it:
+# FILE_WRITE_DATA, FILE_APPEND_DATA, GENERIC_WRITE, GENERIC_ALL, WRITE_DAC and WRITE_OWNER.
+_WRITE_MASK = 0x2 | 0x4 | 0x40000000 | 0x10000000 | 0x40000 | 0x80000
 # The two-letter access rights SDDL writes, as masks. A file's list may use the directory
 # service names for the low bits: CC is 0x1, which for a file is FILE_READ_DATA.
 _RIGHTS = {
@@ -82,15 +86,30 @@ _ALLOW_TYPES = frozenset({"A", "XA"})
 _DACL_FLAGS = ("NO_ACCESS_CONTROL", "AI", "AR", "P")
 
 
+@dataclass(frozen=True)
+class BroadAccess:
+    """The broad groups an access list lets read a file, and those it lets change it (or
+    take control of it), each in the order of `BROAD_GROUPS`. False when both are empty."""
+
+    read: tuple[str, ...] = ()
+    write: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.read or self.write)
+
+
+_NO_DACL = BroadAccess(read=(EVERYONE,), write=(EVERYONE,))
+
+
 def on_windows() -> bool:
-    """Whether this is Windows, where access lists, not modes, say who can read a file."""
+    """Whether this is Windows, where access lists, not modes, say who can open a file."""
     return os.name == "nt"
 
 
-def broad_readers(path: Path | str) -> list[str] | None:
-    """The broad groups (see `BROAD_GROUPS`) that Windows lets read `path`, in that order:
-    empty if none may, or None if that cannot be told, for example when this is not
-    Windows, the file does not exist or the access list cannot be read. Never raises."""
+def broad_access(path: Path | str) -> BroadAccess | None:
+    """The broad groups (see `BROAD_GROUPS`) that Windows lets read or change `path`, or
+    None if that cannot be told, for example when this is not Windows, the file does not
+    exist or the access list cannot be read. Never raises."""
     if not on_windows():
         return None
     try:
@@ -99,31 +118,34 @@ def broad_readers(path: Path | str) -> list[str] | None:
         return None
     if sddl is None:
         return None
-    return readers_in_sddl(sddl)
+    return access_in_sddl(sddl)
 
 
-def readers_in_sddl(sddl: str) -> list[str] | None:
-    """The broad groups that the access list in `sddl` lets read the object it belongs to,
-    in the order of `BROAD_GROUPS`: empty if none may, or None if `sddl` cannot be parsed.
+def access_in_sddl(sddl: str) -> BroadAccess | None:
+    """The broad groups that the access list in `sddl` lets read, and change, the object it
+    belongs to, or None if `sddl` cannot be parsed.
 
     An allow entry counts when it applies to the object itself (it is not inherit-only)
-    and grants FILE_READ_DATA, GENERIC_READ or GENERIC_ALL to a broad group. Deny entries
-    are ignored, which can only add a warning, never hide one: Windows applies them first,
-    so a deny could take away a read that an allow here gives. A string with no DACL (no
-    `D:` part, or `D:NO_ACCESS_CONTROL`) means Windows checks nothing, so Everyone may read.
+    and grants a broad group FILE_READ_DATA, GENERIC_READ or GENERIC_ALL (read), or
+    FILE_WRITE_DATA, FILE_APPEND_DATA, GENERIC_WRITE, GENERIC_ALL, WRITE_DAC or WRITE_OWNER
+    (change). Deny entries are ignored, which can only add a warning, never hide one:
+    Windows applies them first, so a deny could take away what an allow here gives. A
+    string with no DACL (no `D:` part, or `D:NO_ACCESS_CONTROL`) means Windows checks
+    nothing, so Everyone may read and change the object.
     """
     sections = _sections(sddl)
     if sections is None:
         return None
     dacl = sections.get("D")
     if dacl is None:
-        return [EVERYONE]
+        return _NO_DACL
     flags, aces = _split_dacl(dacl)
     if flags is None or aces is None:
         return None
     if "NO_ACCESS_CONTROL" in flags:
-        return [EVERYONE]
-    found: set[str] = set()
+        return _NO_DACL
+    read: set[str] = set()
+    write: set[str] = set()
     for ace in aces:
         fields = ace.split(";", 6)
         if len(fields) < 6:
@@ -135,9 +157,16 @@ def readers_in_sddl(sddl: str) -> list[str] | None:
         if kind not in _ALLOW_TYPES or "IO" in _pairs(ace_flags):
             continue
         group = _group(sid)
-        if group is not None and mask & _READ_MASK:
-            found.add(group)
-    return [group for group in BROAD_GROUPS if group in found]
+        if group is None:
+            continue
+        if mask & _READ_MASK:
+            read.add(group)
+        if mask & _WRITE_MASK:
+            write.add(group)
+    return BroadAccess(
+        read=tuple(g for g in BROAD_GROUPS if g in read),
+        write=tuple(g for g in BROAD_GROUPS if g in write),
+    )
 
 
 def _sections(sddl: str) -> dict[str, str] | None:
