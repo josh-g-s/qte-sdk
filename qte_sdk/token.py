@@ -554,7 +554,7 @@ def _privacy(path: Path, *, sets_address: bool = True) -> str:
             "can open, such as your user profile, and do not share that folder."
         )
     if not access:
-        return ". No group of other users, such as Everyone or Users, can read or change it."
+        return f". {_none_of_the_checked_groups()}."
     return f".\nWarning: {shared_message(path, access, sets_address=sets_address)}"
 
 
@@ -650,8 +650,18 @@ def _access_note(source: str) -> str:
         return ""
     access = _fileaccess.broad_access(path)
     if access is not None and not access:
-        return "; no group of other users, such as Everyone or Users, can read or change it"
+        text = _none_of_the_checked_groups()
+        return f"; {text[0].lower()}{text[1:]}"
     return ""
+
+
+def _none_of_the_checked_groups() -> str:
+    """What a clean Windows access check shows: none of the broad groups it looks at may
+    read or change the file. It looks at no other group or user, so it never says the file
+    is private to you."""
+    names = [group.rsplit("\\", 1)[-1] for group in _fileaccess.BROAD_GROUPS]
+    listed = ", ".join(names[:-1]) + f" or {names[-1]}"
+    return f"None of {listed} can read or change it (other groups and users are not checked)"
 
 
 def _describe(source: str) -> str:

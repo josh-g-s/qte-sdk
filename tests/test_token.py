@@ -762,7 +762,7 @@ def test_set_on_windows_warns_when_broad_groups_can_read_the_file(windows, capsy
     )
     assert "change QTE_URL in it to a server of their own" in out
     assert "%USERPROFILE%" in out and f'icacls "{Path.cwd()}"' in out
-    assert "No group of other users" not in out
+    assert "None of Everyone" not in out
     assert_token_absent(token, out + err)
 
 
@@ -771,7 +771,10 @@ def test_set_on_windows_says_when_no_broad_group_can_read_the_file(windows, caps
     token = synthetic_token()
     assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
     out, err = capsys.readouterr()
-    assert "No group of other users, such as Everyone or Users, can read or change it." in out
+    assert (
+        "None of Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users can read or "
+        "change it (other groups and users are not checked)."
+    ) in out
     assert "Warning:" not in out and "readable only by you" not in out
     assert_token_absent(token, out + err)
 
@@ -841,7 +844,7 @@ def test_check_on_windows_warns_about_a_shared_dotenv(windows, capsys):
     out, err = capsys.readouterr()
     assert out.count("warning:") == 1
     assert "BUILTIN\\Users" in out and "icacls" in out
-    assert "no group of other users" not in out
+    assert "none of Everyone" not in out
     assert_token_absent(token, out + err)
 
 
@@ -868,7 +871,8 @@ def test_check_on_windows_reports_a_private_token_file(windows, monkeypatch, tmp
     monkeypatch.setenv(URL_ENV_VAR, URL)
     assert run(["check"]) == 0
     out, err = capsys.readouterr()
-    assert f"({path}); no group of other users, such as Everyone or Users, can read or" in out
+    assert f"({path}); none of Everyone, Authenticated Users, Users, INTERACTIVE or" in out
+    assert "(other groups and users are not checked)" in out
     assert "warning:" not in out
     assert_token_absent(token, out + err)
 
