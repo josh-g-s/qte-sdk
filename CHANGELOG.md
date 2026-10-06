@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.4
+**Version:** 0.5
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,8 +8,8 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-- On Windows, the SDK reads the access list of a `.env` that holds the token, and of the file named by `QTE_TOKEN_FILE`, and gives a `TokenFileShared` warning if Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users may read or change it, naming the groups and how to fix it. It gives an `AddressFileShared` warning if one of them may change a `.env` that sets only `QTE_URL`, since a changed address could capture your token. Both are kinds of `FileShared`. `python -m qte_sdk.token set` and `check` report the same. A folder on a second drive, such as `D:\`, is usually readable, and often changeable, by every local user; keep your project under your user profile. On macOS and Linux nothing changes: a `.env` others can read is still refused.
-- A later release will refuse, as macOS and Linux already do, a token or `.env` file that other users can read or change on Windows. If you keep your project on a shared drive, move it under your user profile now.
+- On Windows, the SDK reads the access list of a `.env` that holds the token, and of the file named by `QTE_TOKEN_FILE`, and gives a `TokenFileShared` warning if Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users may read or change it, naming the groups and how to fix it. It gives an `AddressFileShared` warning if one of them may change a `.env` that sets only `QTE_URL`, since a changed address could capture your token. Both are kinds of `FileShared`. `python -m qte_sdk.token set` and `check` report the same. A folder on a second drive, such as `D:\`, is usually readable, and often changeable, by every local user; keep your project under your user profile. On macOS and Linux nothing changes: a `.env` that holds the token and that other users can read is still refused, and nothing else is checked there.
+- A later release will refuse, on Windows, a token or `.env` file that other users can read or change, rather than warn. (macOS and Linux refuse only a `.env` holding the token that other users can read.) If you keep your project on a shared drive, move it under your user profile now.
 - On Windows, `python -m qte_sdk.token` gives PowerShell and cmd commands instead of `unset` and `export`.
 - On Windows, `python -m qte_sdk.token set` refuses to run without a console, as it does without a terminal elsewhere, instead of waiting for ever with its input redirected from `NUL` (in a CI job, a scheduled task or an IDE without a console, say).
 
