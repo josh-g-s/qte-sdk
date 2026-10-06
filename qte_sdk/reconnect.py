@@ -545,7 +545,9 @@ class ReconnectingSession:
                             break  # closed while events were still buffered
                         if isinstance(event, Received) and event.type == "calendar":
                             assert isinstance(event.message, Calendar)
-                            self._calendar = event.message
+                            # The session's latest, as for the instruments table below: a
+                            # later calendar may already have been read ahead.
+                            self._calendar = session.calendar
                             # Before any later report is counted: a calendar that arrived
                             # too late for the attempt to check may name a new term.
                             self._enter_term(_term_of(event.message), strict=False)
