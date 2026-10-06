@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from qte_sdk import _fileaccess
 from qte_sdk import dotenv as dotenv_module
 from qte_sdk import token as helper
 from qte_sdk.session import TOKEN_ENV_VAR, TOKEN_FILE_ENV_VAR, URL_ENV_VAR, resolve_token
@@ -230,6 +231,63 @@ def test_set_with_redirected_input_refuses_and_shows_nothing(tmp_path):
     assert not (tmp_path / "home").exists()
 
 
+class Stdin:
+    """Standing in for `sys.stdin`: a device (`isatty` true) on a given descriptor."""
+
+    def __init__(self, tty: bool) -> None:
+        self.tty = tty
+
+    def isatty(self) -> bool:
+        return self.tty
+
+    def fileno(self) -> int:
+        return 7
+
+
+@pytest.mark.parametrize(
+    ("tty", "console", "expected"),
+    [
+        (True, True, True),  # a console
+        (True, False, False),  # NUL, a device that is not a console
+        (False, True, False),  # a pipe or a file
+    ],
+)
+def test_on_windows_a_terminal_must_be_a_console(monkeypatch, tty, console, expected):
+    asked: list[int] = []
+
+    def is_console(fileno: int) -> bool:
+        asked.append(fileno)
+        return console
+
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
+    monkeypatch.setattr(helper, "_is_console", is_console)
+    monkeypatch.setattr(helper.sys, "stdin", Stdin(tty))
+    assert helper._has_terminal() is expected
+    assert asked == ([7] if tty else [])
+
+
+def test_off_windows_a_terminal_need_not_be_a_console(monkeypatch):
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: False)
+    monkeypatch.setattr(helper, "_is_console", lambda fileno: False)
+    monkeypatch.setattr(helper.sys, "stdin", Stdin(True))
+    assert helper._has_terminal() is True
+
+
+def test_the_console_check_fails_closed_off_windows():
+    # No msvcrt or ctypes.WinDLL here, which stands in for any failure to ask.
+    assert helper._is_console(0) is False
+
+
+def test_set_with_input_from_nul_on_windows_refuses_without_asking(monkeypatch, capsys):
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
+    monkeypatch.setattr(helper, "_is_console", lambda fileno: False)
+    monkeypatch.setattr(helper.sys, "stdin", Stdin(True))
+    for argv in (["set"], ["set", "--file"]):
+        assert helper.main(argv, ask=never, ask_secret=never) == 1
+        assert "needs a terminal" in capsys.readouterr().err
+    assert not dotenv().exists()
+
+
 def test_a_token_that_cannot_be_read_without_echo_is_not_read(capsys):
     import getpass
 
@@ -323,7 +381,9 @@ def test_a_failed_write_reports_the_reason_without_the_token(tmp_path, monkeypat
 def test_a_token_already_in_the_environment_is_pointed_out(monkeypatch, capsys):
     monkeypatch.setenv(TOKEN_ENV_VAR, synthetic_token())
     assert run(["set"], ask=answers(URL), ask_secret=answers(synthetic_token())) == 0
-    assert "Unset it" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Run `unset QTE_TOKEN`, and remove it from your shell profile" in out
+    assert "Remove-Item" not in out
 
 
 # set: the .gitignore offer
@@ -657,11 +717,169 @@ def test_outside_a_repository_git_is_not_needed(monkeypatch):
     assert run(["set"], ask=answers(URL), ask_secret=answers(synthetic_token())) == 0
 
 
-def test_the_saved_message_does_not_promise_privacy_on_windows():
-    assert "readable only by you" in helper._privacy("posix")
-    message = helper._privacy("nt")
+# On simulated Windows. `os.name` itself cannot be changed: `pathlib` would then fail to
+# make a path, so the SDK's own test for Windows is replaced, with each access list.
+
+PROFILE = "D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-1-2-3-1001)"
+SECOND_DRIVE = "D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1301bf;;;AU)(A;ID;0x1200a9;;;BU)"
+
+
+@pytest.fixture
+def windows(monkeypatch) -> Callable[[str | None], None]:
+    """Act as on Windows; call the result with the access list every file is to have."""
+    sddl: list[str | None] = [None]
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
+    monkeypatch.setattr(_fileaccess, "_read_sddl", lambda path: sddl[0])
+
+    def set_sddl(value: str | None) -> None:
+        sddl[0] = value
+
+    return set_sddl
+
+
+def test_the_saved_message_promises_privacy_only_off_windows():
+    assert "readable only by you" in helper._privacy(dotenv())
+
+
+def test_the_saved_message_does_not_promise_privacy_when_windows_cannot_tell(windows):
+    windows(None)
+    message = helper._privacy(dotenv())
     assert "readable only by you" not in message
     assert "user profile" in message
+
+
+def test_set_on_windows_warns_when_broad_groups_can_read_the_file(windows, capsys):
+    windows(SECOND_DRIVE)
+    token = synthetic_token()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    assert "Warning:" in out
+    assert (
+        "lets NT AUTHORITY\\Authenticated Users read or change it, and BUILTIN\\Users read it"
+        in out
+    )
+    assert "change QTE_URL in it to a server of their own" in out
+    assert "%USERPROFILE%" in out and f'icacls "{Path.cwd()}"' in out
+    assert "No group of other users" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_set_on_windows_says_when_no_broad_group_can_read_the_file(windows, capsys):
+    windows(PROFILE)
+    token = synthetic_token()
+    assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    assert "No group of other users, such as Everyone or Users, can read or change it." in out
+    assert "Warning:" not in out and "readable only by you" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_set_file_on_windows_reports_access_and_prints_windows_commands(windows, tmp_path, capsys):
+    windows("D:(A;;FR;;;WD)")
+    path = tmp_path / "it's here" / "token"
+    token = synthetic_token()
+    assert run(["set", "--file", str(path)], ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    real = path.parent.resolve() / path.name
+    assert f"Warning: {real} holds your token, and Windows lets Everyone read it" in out
+    quoted = "'" + str(real).replace("'", "''") + "'"
+    assert f"$env:QTE_TOKEN_FILE = {quoted}" in out
+    assert f"[Environment]::SetEnvironmentVariable('QTE_TOKEN_FILE', {quoted}, 'User')" in out
+    assert f'set "QTE_TOKEN_FILE={real}"' in out and f'setx QTE_TOKEN_FILE "{real}"' in out
+    assert "export" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_set_file_on_windows_gives_no_cmd_line_for_a_path_cmd_would_expand(
+    windows, tmp_path, capsys
+):
+    windows(PROFILE)
+    path = tmp_path / "!USERNAME!" / "token"
+    assert run(["set", "--file", str(path)], ask_secret=answers(synthetic_token())) == 0
+    out = capsys.readouterr().out
+    assert "$env:QTE_TOKEN_FILE = '" in out
+    assert "setx" not in out and "In cmd" not in out
+
+
+def test_powershell_quoting_doubles_every_kind_of_single_quote():
+    assert helper._powershell_quote("C:\\it's") == "'C:\\it''s'"
+    assert helper._powershell_quote("a\u2019b$c") == "'a\u2019\u2019b$c'"
+
+
+@pytest.mark.parametrize("argv", [["set"], ["set", "--file", "token"]])
+def test_the_unset_hint_on_windows_gives_powershell_and_cmd(windows, monkeypatch, argv, capsys):
+    windows(PROFILE)
+    monkeypatch.setenv(TOKEN_ENV_VAR, synthetic_token())
+    ask = answers(URL) if argv == ["set"] else never
+    assert run(argv, ask=ask, ask_secret=answers(synthetic_token())) == 0
+    out = capsys.readouterr().out
+    assert "`Remove-Item Env:QTE_TOKEN`" in out
+    assert "`set QTE_TOKEN=`" in out
+    assert "`[Environment]::SetEnvironmentVariable('QTE_TOKEN', $null, 'User')`" in out
+    assert "`unset" not in out
+
+
+def test_the_unset_hint_names_the_token_file_variable_when_that_is_set(
+    windows, monkeypatch, capsys
+):
+    windows(PROFILE)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, "elsewhere")
+    assert run(["set"], ask=answers(URL), ask_secret=answers(synthetic_token())) == 0
+    out = capsys.readouterr().out
+    assert "`Remove-Item Env:QTE_TOKEN_FILE`" in out
+    assert "Env:QTE_TOKEN`" not in out
+
+
+def test_check_on_windows_warns_about_a_shared_dotenv(windows, capsys):
+    windows(SECOND_DRIVE)
+    token = synthetic_token()
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
+    dotenv().chmod(0o600)
+    assert run(["check"]) == 0
+    out, err = capsys.readouterr()
+    assert out.count("warning:") == 1
+    assert "BUILTIN\\Users" in out and "icacls" in out
+    assert "no group of other users" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_check_on_windows_warns_about_a_dotenv_others_can_change_the_address_in(
+    windows, monkeypatch, capsys
+):
+    windows("D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;FA;;;AU)(A;ID;0x1200a9;;;BU)")
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    dotenv().write_text(f"QTE_URL={URL}\n")
+    assert run(["check"]) == 0
+    out, err = capsys.readouterr()
+    assert out.count("warning:") == 1
+    assert "sets QTE_URL, the exchange address" in out
+    assert_token_absent(token, out + err)
+
+
+def test_check_on_windows_reports_a_private_token_file(windows, monkeypatch, tmp_path, capsys):
+    windows(PROFILE)
+    token = synthetic_token()
+    path = tmp_path / "token"
+    path.write_text(token)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    monkeypatch.setenv(URL_ENV_VAR, URL)
+    assert run(["check"]) == 0
+    out, err = capsys.readouterr()
+    assert f"({path}); no group of other users, such as Everyone or Users, can read or" in out
+    assert "warning:" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_check_on_windows_says_nothing_extra_when_it_cannot_tell(windows, capsys):
+    windows(None)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    assert run(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "warning:" not in out and "no group" not in out
 
 
 # check
