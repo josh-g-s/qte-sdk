@@ -325,15 +325,7 @@ def _archive_revision(url: str) -> str | None:
     if parts.scheme.lower() not in ("https", "http") or host is None or parts.query:
         return None
     segments = parts.path.split("/")
-    if (
-        len(segments) < 5
-        or segments[0]
-        or [s.lower() for s in segments[1:3]]
-        != [
-            "josh-g-s",
-            "qte-sdk",
-        ]
-    ):
+    if len(segments) < 5 or segments[0] or "/".join(segments[1:3]).lower() != "josh-g-s/qte-sdk":
         return None
     kind, rest = segments[3], segments[4:]
     if host.lower() == "github.com" and kind == "archive":
