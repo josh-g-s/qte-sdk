@@ -1,7 +1,8 @@
 """Check a setup end to end and say plainly what works. Sends no orders unless asked.
 
 Set QTE_URL and QTE_TOKEN first, in ./.env or the environment (see docs/quickstart.md),
-then, from a clone of this repository:
+then, from your project folder (the one holding .env) with this examples folder copied into
+it from a clone or a release's source zip:
 
     python examples/smoke_test.py --instruments AAPL MSFT
 
@@ -13,8 +14,9 @@ reason, then a summary:
                      `python -m qte_sdk.update` reports it, before anything else and even
                      with no token. A FAIL when a newer release is out, or when the SDK is
                      too old to have the check, with the command that updates; a PASS that
-                     notes any newer commits on main; a SKIP when it cannot tell (a local
-                     or editable install, say, or GitHub could not be reached).
+                     notes any newer commits on main; a SKIP when it cannot tell (GitHub
+                     could not be reached, say, or a local or editable install that is not
+                     behind the latest release).
     token, address   where the SDK finds your token and the exchange address, as
                      `python -m qte_sdk.token check` reports them. Neither is shown.
     dotenv           only when git does not ignore the .env the SDK read: a FAIL, since

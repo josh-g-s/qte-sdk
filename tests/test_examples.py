@@ -72,6 +72,7 @@ QUICKSTART = EXAMPLES_DIR.parent / "docs" / "quickstart.md"
 OUT_OF_HOURS = EXAMPLES_DIR.parent / "docs" / "out-of-hours.md"
 DEVELOPING = EXAMPLES_DIR.parent / "docs" / "developing-your-algo.md"
 SDK_INSTALL_URL = "git+https://github.com/josh-g-s/qte-sdk"
+SDK_ARCHIVE_URL = "https://github.com/josh-g-s/qte-sdk/archive/refs/tags/"
 NO_NETWORK = Path(__file__).resolve().parent / "no_network"
 INSTRUMENT = "TEST"
 BID, ASK = 99_950_000, 100_050_000
@@ -102,8 +103,10 @@ def test_each_example_compiles_and_imports_without_running(path: Path, tmp_path:
 )
 def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path):
     for url in re.findall(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s`'\")]+", path.read_text()):
-        if url == SDK_INSTALL_URL or re.fullmatch(
-            rf"{re.escape(SDK_INSTALL_URL)}@v\d+\.\d+\.\d+", url
+        if (
+            url == SDK_INSTALL_URL
+            or re.fullmatch(rf"{re.escape(SDK_INSTALL_URL)}@v\d+\.\d+\.\d+", url)
+            or re.fullmatch(rf"{re.escape(SDK_ARCHIVE_URL)}v\d+\.\d+\.\d+\.zip", url)
         ):
             continue  # where pip installs the SDK from, or one release of it, not an exchange
         parts = urlsplit(url)
