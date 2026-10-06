@@ -28,6 +28,7 @@ import json
 import os
 from collections import deque
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 from google.protobuf.message import Message
@@ -57,7 +58,7 @@ from qte_sdk.contract.v1.session_pb2 import (
     ResumeAck,
     SessionAck,
 )
-from qte_sdk.dotenv import DOTENV_NAME, read_value
+from qte_sdk.dotenv import DOTENV_NAME, read_value, shared_readers, warn_shared
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
 TOKEN_FILE_ENV_VAR = "QTE_TOKEN_FILE"
@@ -724,7 +725,8 @@ def resolve_token(token: str | None = None) -> str:
     Raises `MissingToken` if there is no token; if the file named by `QTE_TOKEN_FILE`
     cannot be read, is not UTF-8 text, or holds nothing but whitespace (the `.env` is then
     not tried); or if the `.env` cannot be read or parsed, or, on POSIX, holds the token
-    and other users can read it.
+    and other users can read it. On Windows, a file that holds the token and that a broad
+    group of users may read gives a `qte_sdk.dotenv.TokenFileShared` warning instead.
     """
     token, _, problem = _find_token(token)
     if problem is not None:
@@ -812,6 +814,9 @@ def _token_from_file() -> tuple[str | None, str | None]:
     """The token in the file named by `QTE_TOKEN_FILE` and None, or None and what is wrong
     with the file. (None, None) if the variable is unset or empty.
 
+    On Windows, a `qte_sdk.dotenv.TokenFileShared` warning is issued if a broad group of
+    users may read the file.
+
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected and an
     `OSError` keeps the path (which a mistaken setting could make the token itself), so
     neither may reach the caller's exception as its cause or context.
@@ -819,6 +824,9 @@ def _token_from_file() -> tuple[str | None, str | None]:
     path = os.environ.get(TOKEN_FILE_ENV_VAR)
     if not path:
         return None, None
+    # Read before the file is, so no frame that holds the token calls the Windows API.
+    file_path = Path(os.path.abspath(path))
+    readers = shared_readers(file_path)
     try:
         with open(path, "rb") as file:
             data = file.read()
@@ -834,6 +842,8 @@ def _token_from_file() -> tuple[str | None, str | None]:
         text = text[:-1]
     if not text.strip():
         return None, "is empty or holds only whitespace"
+    if readers:
+        warn_shared(file_path, readers)
     return text, None
 
 

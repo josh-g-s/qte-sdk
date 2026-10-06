@@ -143,7 +143,7 @@ try:
         ReasonCodes,
     )
     from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, OrderState
-    from qte_sdk.dotenv import DOTENV_NAME, DotenvNotIgnored, dotenv_path
+    from qte_sdk.dotenv import DOTENV_NAME, DotenvNotIgnored, TokenFileShared, dotenv_path
     from qte_sdk.history import (
         HISTORY_URL_ENV_VAR,
         HistoryClient,
@@ -532,6 +532,7 @@ def check_setup(report: Report) -> tuple[str | None, list[str]]:
     url = None
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DotenvNotIgnored)
+        warnings.simplefilter("always", TokenFileShared)
         try:
             source = token_source()
         except MissingToken as error:
@@ -556,6 +557,10 @@ def check_setup(report: Report) -> tuple[str | None, list[str]]:
     for warning in caught:
         if issubclass(warning.category, DotenvNotIgnored):
             report.add(FAIL, "dotenv", str(warning.message))
+            break
+    for warning in caught:
+        if issubclass(warning.category, TokenFileShared):
+            report.add(FAIL, "token-file", str(warning.message))
             break
     return url, problems
 

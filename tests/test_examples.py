@@ -34,6 +34,7 @@ from test_history import book as history_book
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
+from qte_sdk import _fileaccess
 from qte_sdk import replay as qte_replay
 from qte_sdk import update as qte_update
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
@@ -2643,6 +2644,25 @@ async def test_the_smoke_test_fails_a_dotenv_that_git_does_not_ignore():
     assert found["connect"][0] == "PASS"
     assert token not in out + err
     assert url not in out + err
+
+
+def test_the_smoke_test_fails_a_token_file_others_can_read_on_windows(monkeypatch, capsys):
+    # Simulated Windows: the access list says Users may read every file.
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
+    monkeypatch.setattr(_fileaccess, "_read_sddl", lambda path: "D:(A;ID;0x1200a9;;;BU)")
+    monkeypatch.delenv("QTE_TOKEN", raising=False)
+    monkeypatch.delenv("QTE_TOKEN_FILE", raising=False)
+    token = synthetic_token()
+    dotenv = Path.cwd() / ".env"
+    dotenv.write_text(f"QTE_URL=ws://127.0.0.1:8080/ws\nQTE_TOKEN={token}\n")
+    dotenv.chmod(0o600)
+    smoke = load_example(SMOKE_TEST)
+    smoke.check_setup(smoke.Report())
+    out, err = capsys.readouterr()
+    status, reason = checks(out)["token-file"]
+    assert status == "FAIL"
+    assert "BUILTIN\\Users" in reason and "%USERPROFILE%" in reason
+    assert token not in out + err
 
 
 def test_the_examples_run_where_urllib_cannot_leave_this_machine():

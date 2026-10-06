@@ -11,7 +11,7 @@ existing `.env` is replaced in one step, keeping its other lines.
 
 `set --file [PATH]` writes only the token, to `PATH` or by default `~/.qte/token` (in a
 directory made 0700), and prints the `export QTE_TOKEN_FILE=...` line to add to your shell
-profile.
+profile (on Windows, the PowerShell and cmd commands that set `QTE_TOKEN_FILE`).
 
 For either destination, if it is in a git working tree: when git tracks the file, `set`
 stops before asking for the token and says to run `git rm --cached`, since `.gitignore`
@@ -20,11 +20,15 @@ say), `set` stops too, rather than guess; and when git does not ignore the file,
 offers to add it to `.gitignore`.
 
 On macOS and Linux the modes make the files readable only by you. Windows does not apply
-them, and this command does not change Windows access lists, so there it says so: keep the
-file in a folder only you can open, such as your user profile.
+them, and this command does not change Windows access lists. Instead, once the file is
+written, it reads the file's access list and says whether a broad group of users, such as
+Everyone, Authenticated Users or Users, can read it, and if so how to fix that: keep the
+file in a folder under your user profile (%USERPROFILE%), which is private by default. If
+the access list cannot be read, it says to keep the file in such a folder.
 
 `check` reports where the SDK would take the token and the address from, as
-`qte_sdk.session.resolve_token` and `resolve_url` would, without showing the token.
+`qte_sdk.session.resolve_token` and `resolve_url` would, without showing the token. On
+Windows it also reports whether a broad group of users can read the file the token is in.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
@@ -42,16 +46,19 @@ import warnings
 from collections.abc import Callable
 from pathlib import Path
 
+from qte_sdk import _fileaccess
 from qte_sdk.dotenv import (
     DOTENV_NAME,
     MAX_DOTENV_SIZE,
     DotenvNotIgnored,
+    TokenFileShared,
     dotenv_path,
     is_ignored_by_git,
     is_inside_git_work_tree,
     is_tracked_by_git,
     parse_assignment,
     read_value,
+    shared_message,
     tracked_ignoring_case,
 )
 from qte_sdk.session import (
@@ -165,13 +172,13 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
         raise _Refused(f"{path} would be larger than the SDK reads; make it smaller first")
     _write_private(path, text)
     del text, secret
-    print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}{_privacy()}")
+    print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}{_privacy(path)}")
     print("Run your programs from this folder, so the SDK finds it.")
     if os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR):
         print(
             f"Note: {TOKEN_ENV_VAR} or {TOKEN_FILE_ENV_VAR} is set in this terminal, and the "
-            f"SDK uses it before {DOTENV_NAME}. Unset it, and remove it from your shell "
-            "profile, to use the new token."
+            f"SDK uses it before {DOTENV_NAME}. "
+            + _unset_advice([TOKEN_ENV_VAR, TOKEN_FILE_ENV_VAR], "to use the new token")
         )
     if os.environ.get(URL_ENV_VAR) and os.environ[URL_ENV_VAR] != address:
         print(
@@ -204,7 +211,9 @@ def _existing_lines(path: Path) -> list[str]:
 
 def _ask_address(url: str | None, ask: Prompt) -> str:
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DotenvNotIgnored)  # `set` offers its own fix
+        # `set` offers its own fix for each, once the file is written.
+        warnings.simplefilter("ignore", DotenvNotIgnored)
+        warnings.simplefilter("ignore", TokenFileShared)
         current = os.environ.get(URL_ENV_VAR) or read_value(URL_ENV_VAR)[0]
     if url is None:
         hint = " [Enter keeps the address already set]" if current else ""
@@ -425,7 +434,7 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
     secret = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")
     del secret
-    print(f"Saved the token to {path}{_privacy()}")
+    print(f"Saved the token to {path}{_privacy(path)}")
     interrupted = False
     try:
         _offer_gitignore(path, ask)
@@ -438,27 +447,85 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             file=sys.stderr,
         )
         return 130
-    line = f"export {TOKEN_FILE_ENV_VAR}={shlex.quote(str(path))}"
-    print("Add this line to your shell profile (~/.zshrc or ~/.bashrc), and run it here too:")
-    print()
-    print(f"    {line}")
-    print()
+    _print_token_file_setting(path)
     if os.environ.get(TOKEN_ENV_VAR):
-        print(f"Then run `unset {TOKEN_ENV_VAR}`: it is set here and would be used first.")
+        print(
+            f"{TOKEN_ENV_VAR} is set here and would be used first. "
+            + _unset_advice([TOKEN_ENV_VAR], "to use the token file")
+        )
     return 0
+
+
+def _print_token_file_setting(path: Path) -> None:
+    """Print the commands that set `QTE_TOKEN_FILE` to `path`, for this shell."""
+    if not _fileaccess.on_windows():
+        line = f"export {TOKEN_FILE_ENV_VAR}={shlex.quote(str(path))}"
+        print("Add this line to your shell profile (~/.zshrc or ~/.bashrc), and run it here too:")
+        print()
+        print(f"    {line}")
+        print()
+        return
+    quoted = _powershell_quote(str(path))
+    print("To use it, set QTE_TOKEN_FILE. In PowerShell, for this window:")
+    print()
+    print(f"    $env:{TOKEN_FILE_ENV_VAR} = {quoted}")
+    print()
+    print("and to keep it for new windows too:")
+    print()
+    print(f"    [Environment]::SetEnvironmentVariable('{TOKEN_FILE_ENV_VAR}', {quoted}, 'User')")
+    print()
+    if not any(c in str(path) for c in "%!"):  # cmd expands %NAME% and !NAME! in quotes
+        print(
+            f'In cmd, run `set "{TOKEN_FILE_ENV_VAR}={path}"` for this window and '
+            f'`setx {TOKEN_FILE_ENV_VAR} "{path}"` for new ones.'
+        )
+        print()
+
+
+def _powershell_quote(text: str) -> str:
+    """`text` as a PowerShell string that is taken as written, with no expansion. PowerShell
+    takes the curly single quotes as quotes too, so each is doubled like `'`."""
+    for quote in "'\u2018\u2019\u201a\u201b":
+        text = text.replace(quote, quote * 2)
+    return f"'{text}'"
+
+
+def _unset_advice(names: list[str], purpose: str) -> str:
+    """How to remove whichever of the environment variables `names` is set, `purpose` being
+    what that is for, such as "to use the new token"."""
+    names = [name for name in names if os.environ.get(name)] or names
+    if not _fileaccess.on_windows():
+        return f"Run `unset {' '.join(names)}`, and remove it from your shell profile, {purpose}."
+    here = " and ".join(f"`Remove-Item Env:{name}`" for name in names)
+    cmd = " and ".join(f"`set {name}=`" for name in names)
+    saved = " and ".join(
+        f"`[Environment]::SetEnvironmentVariable('{name}', $null, 'User')`" for name in names
+    )
+    return (
+        f"{purpose[:1].upper()}{purpose[1:]}, remove it: run {here} in PowerShell, or {cmd} "
+        f"in cmd. If you saved it as a user variable, also run {saved} in PowerShell, so new "
+        "windows do not have it."
+    )
 
 
 # Writing
 
 
-def _privacy(system: str | None = None) -> str:
-    """The end of the message saying where the token was saved: what protects it."""
-    if (system or os.name) == "posix":
+def _privacy(path: Path) -> str:
+    """The end of the message saying where the token was saved: what protects it. On
+    Windows, what the file's access list says: a warning naming the broad groups that can
+    read it, or that none can; or, if the list cannot be read, where to keep the file."""
+    if not _fileaccess.on_windows():
         return ", readable only by you."
-    return (
-        ". Windows does not apply the file's private mode, so keep it in a folder only you "
-        "can open, such as your user profile, and do not share that folder."
-    )
+    readers = _fileaccess.broad_readers(path)
+    if readers is None:
+        return (
+            ". Windows does not apply the file's private mode, so keep it in a folder only you "
+            "can open, such as your user profile, and do not share that folder."
+        )
+    if not readers:
+        return ". No group of other users, such as Everyone or Users, can read it."
+    return f".\nWarning: {shared_message(path, readers)}"
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -503,13 +570,14 @@ def _check() -> int:
     ok = True
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DotenvNotIgnored)
+        warnings.simplefilter("always", TokenFileShared)
         problem = None
         try:
             source = token_source()
         except MissingToken as error:
             problem = str(error)
         if problem is None:
-            print(f"token:   {_describe(source)}")
+            print(f"token:   {_describe(source)}{_access_note(source)}")
         else:
             ok = False
             print(f"token:   none usable. {problem}")
@@ -530,11 +598,28 @@ def _check() -> int:
         else:
             ok = False
             print(f"address: none. {problem}")
+    shown: set[str] = set()
     for warning in caught:
-        if issubclass(warning.category, DotenvNotIgnored):
-            print(f"warning: {warning.message}")
-            break
+        message = str(warning.message)
+        if issubclass(warning.category, (DotenvNotIgnored, TokenFileShared)):
+            if message not in shown:
+                shown.add(message)
+                print(f"warning: {message}")
     return 0 if ok else 1
+
+
+def _access_note(source: str) -> str:
+    """On Windows, a note that no broad group of users can read the file the token comes
+    from, when its access list says so. A file they can read gets a warning instead."""
+    if source == DOTENV_NAME:
+        path = dotenv_path()
+    elif source == TOKEN_FILE_ENV_VAR:
+        path = Path(os.environ[TOKEN_FILE_ENV_VAR])
+    else:
+        return ""
+    if _fileaccess.broad_readers(path) == []:
+        return "; no group of other users, such as Everyone or Users, can read it"
+    return ""
 
 
 def _describe(source: str) -> str:

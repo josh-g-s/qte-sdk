@@ -8,6 +8,8 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- On Windows, the SDK reads the access list of a `.env` that holds the token, and of the file named by `QTE_TOKEN_FILE`, and gives a `TokenFileShared` warning if Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users may read it, naming the groups and how to fix it. `python -m qte_sdk.token set` and `check` report the same. A folder on a second drive, such as `D:\`, is usually readable by every local user; keep your project under your user profile. On macOS and Linux nothing changes: a `.env` others can read is still refused.
+- On Windows, `python -m qte_sdk.token` gives PowerShell and cmd commands instead of `unset` and `export`.
 - `ReconnectingSession.calendar` no longer goes back to the previous session's calendar for a moment after a reconnect.
 - The docs say that `tradable` is an entitlement only (use `can_trade`), to show `instrument` when `display_name` is absent, that `session_id` is unique only within one run of the exchange, what carries over into a new term for each arm, and that positions and cash start afresh at the start of the 7 October 2026 session, a one-off within the term.
 

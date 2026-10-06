@@ -17,10 +17,16 @@ escapes and no `$VARIABLE` expansion. An unquoted value ends at whitespace follo
 and may not hold whitespace or quotes. If a name appears more than once, the last line
 wins. Lines for other names are not read, so the rest of the file may use any syntax.
 
-Two safeguards apply:
+Three safeguards apply:
 
 - On POSIX, a `.env` that holds `QTE_TOKEN` and that other users can read is refused, and
   nothing in it is used (`chmod 600 .env` fixes it).
+- On Windows, where files have access lists rather than modes, a `TokenFileShared`
+  warning is issued, once per process for each file, if the access list of a `.env` that
+  holds `QTE_TOKEN` lets a broad group read it: Everyone, Authenticated Users, Users,
+  INTERACTIVE or Domain Users. A folder under your user profile is private by default; a
+  folder on another drive, such as `D:\\`, usually is not. The file is still used. The
+  same check applies to the file named by `QTE_TOKEN_FILE` (see `qte_sdk.session`).
 - If the `.env`, or the file it links to, is inside a git working tree and git tracks
   it or does not ignore it, a `DotenvNotIgnored` warning is issued, once per process,
   since the token could be committed. It never stops the SDK: if a warnings filter makes
@@ -43,13 +49,18 @@ import unicodedata
 import warnings
 from pathlib import Path
 
-__all__ = ["DOTENV_NAME", "DotenvNotIgnored", "parse_assignment"]
+from qte_sdk import _fileaccess
+
+__all__ = ["DOTENV_NAME", "DotenvNotIgnored", "TokenFileShared", "parse_assignment"]
 
 DOTENV_NAME = ".env"
 _GIT_TIMEOUT = 5.0
 _INLINE_COMMENT = re.compile(r"(?:^|\s)#")
 MAX_DOTENV_SIZE = 64 * 1024
 _TOKEN_NAME = "QTE_TOKEN"
+# What cmd (%NAME%, and !NAME! with delayed expansion) or PowerShell ($, the backtick, and
+# its curly double quotes) treats specially inside double quotes.
+_UNSAFE_IN_DOUBLE_QUOTES = "%!$`\u201c\u201d\u201e"
 # What git needs to run and find your git configuration: nothing else is passed to it.
 _GIT_ENV = frozenset(
     {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "XDG_CONFIG_HOME", "LANG", "LC_ALL", "TMPDIR"}
@@ -57,10 +68,16 @@ _GIT_ENV = frozenset(
 
 _log = logging.getLogger(__name__)
 _git_checked: set[str] = set()  # the .env files already checked, so each warns once
+_shared_warned: set[str] = set()  # the token files already warned about on Windows
 
 
 class DotenvNotIgnored(UserWarning):
     """The `.env` the SDK read is inside a git working tree and git does not ignore it."""
+
+
+class TokenFileShared(UserWarning):
+    """On Windows, the `.env` or token file the SDK read the token from can be read by a
+    broad group of users, such as Everyone or Users."""
 
 
 def dotenv_path() -> Path:
@@ -124,13 +141,16 @@ def read_value(name: str) -> tuple[str | None, str | None]:
 
     (None, None) if there is no `./.env` or it does not assign `name`, or assigns it an
     empty value. On POSIX, a file that assigns `QTE_TOKEN` and that other users can read is
-    refused whichever name is asked for, and no value is returned.
+    refused whichever name is asked for, and no value is returned. On Windows, such a file
+    that a broad group may read gives a `TokenFileShared` warning and is still used.
 
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected, so
     neither it nor an `OSError` may reach the caller's exception as its cause or context.
     """
     path = dotenv_path()
     _warn_if_not_ignored(path)
+    # Read before the file is, so no frame that holds the token calls the Windows API.
+    readers = shared_readers(path)
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
         descriptor = os.open(path, flags)
@@ -162,11 +182,14 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     del data
     if text is None:
         return None, "is not UTF-8 text"
-    if os.name == "posix" and stat.S_IMODE(mode) & 0o044 and _assigns_token(text):
+    holds_token = _assigns_token(text)
+    if os.name == "posix" and stat.S_IMODE(mode) & 0o044 and holds_token:
         return None, (
             f"holds {_TOKEN_NAME} but other users can read it; run `chmod 600 {DOTENV_NAME}` "
             "so only you can"
         )
+    if readers and holds_token:
+        warn_shared(path, readers)
     value, problem = _parse(text, name)
     del text
     if problem is not None:
@@ -209,6 +232,61 @@ def _warn_if_not_ignored(path: Path) -> None:
         warnings.warn(message, DotenvNotIgnored, stacklevel=_caller_level())
     except Warning:
         _log.warning("%s", message)
+
+
+def shared_readers(path: Path) -> list[str] | None:
+    """The broad groups Windows lets read `path`, if this is Windows, the SDK has not
+    already warned about `path` in this process, and the access list can be read; None
+    otherwise. Takes only the path, so call it before the file is read."""
+    if not _fileaccess.on_windows() or os.path.abspath(path) in _shared_warned:
+        return None
+    return _fileaccess.broad_readers(path)
+
+
+def shared_message(path: Path, readers: list[str]) -> str:
+    """What to tell the person when `readers`, broad groups of users, can read `path`, a
+    file that holds the token. Names only the path and the groups."""
+    names = _join(readers)
+    their = "that group's" if len(readers) == 1 else "those groups'"
+    folder = os.path.dirname(os.path.abspath(path))
+    # A path with characters cmd or PowerShell would expand or end a quote at inside double
+    # quotes is not put in a command, so the command never names another folder.
+    if any(c in folder for c in _UNSAFE_IN_DOUBLE_QUOTES):
+        icacls = f"run icacls on the folder that holds it, {folder}"
+    else:
+        icacls = f'run `icacls "{folder}"`'
+    return (
+        f"{path} holds your token, and Windows lets {names} read it, so other people who "
+        "use this computer could read your token. Move it into a folder under your user "
+        f"profile (%USERPROFILE%), which is private by default, or remove {their} access. "
+        f"To see who can open the folder, {icacls}."
+    )
+
+
+def warn_shared(path: Path, readers: list[str]) -> None:
+    """Issue a `TokenFileShared` warning about `path`, once per process for each path. If a
+    warnings filter turns it into an error, it is logged instead, since this check must
+    never stop the SDK. Its caller may hold the token, so no exception, from the warning or
+    from a failure to show it (a closed stderr, say), is let out of this function."""
+    key = os.path.abspath(path)
+    if key in _shared_warned:
+        return
+    _shared_warned.add(key)
+    try:
+        message = shared_message(path, readers)
+        try:
+            warnings.warn(message, TokenFileShared, stacklevel=_caller_level())
+        except Warning:
+            _log.warning("%s", message)
+    except Exception:
+        pass
+
+
+def _join(names: list[str]) -> str:
+    """`names` as a list in a sentence: "A", "A and B" or "A, B and C"."""
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def _caller_level() -> int:
