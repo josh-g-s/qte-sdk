@@ -1,13 +1,15 @@
 # Quickstart
 
-**Version:** 0.33
+**Version:** 0.34
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
+
+The commands are for macOS and Linux. On Windows, type `py` where this guide says `python3`, and activate a virtual environment with `.venv\Scripts\Activate.ps1` in PowerShell or `.venv\Scripts\activate.bat` in cmd, where it says `source .venv/bin/activate`. Step 1 has the details.
 
 ## What you need
 
 - Python 3.11 or later.
-- A clone of this repository, but only to run or read the worked examples (step 11).
+- The `examples` folder of this repository, from a clone or the source zip of your release, but only to run or read the worked examples (step 11).
 - The address of the exchange you are trading on. The Head of Technology, Joshua, gives you the practice exchange's address; a test exchange you run on your own machine is usually `ws://127.0.0.1:8080/ws`.
 - Your team's practice token. The Head of Technology, Joshua, gives it to you. Treat it like a password: never put it in a source file, a notebook, a screenshot or a repository.
 - A strategy ID registered for your team, for any program that sends orders. Ask the Head of Technology, Joshua, to register one.
@@ -16,7 +18,7 @@ The practice exchange keeps the hours in the calendar it sends after you authent
 
 ## 1. Install
 
-Install the SDK into your own project's virtual environment:
+Install the SDK into your own project's virtual environment. On macOS and Linux:
 
 ```sh
 python3 -m venv .venv
@@ -24,7 +26,25 @@ source .venv/bin/activate
 pip install "git+https://github.com/josh-g-s/qte-sdk"
 ```
 
-This installs the `qte_sdk` package only. The worked examples (step 11) are not installed with it: to run or read them, clone this repository and run them from the root of the clone, inside a virtual environment where the SDK is installed. You do not need a clone for anything else in this guide.
+On Windows, first install Python 3.11 or later from python.org or with `winget install Python.Python.3.12`, then open a new terminal so it finds Python. Type `py`, not `python3`: on Windows `python3` is often only a stub that offers the Microsoft Store, even once Python is installed. (`python` works too if the installer added Python to your PATH.) In PowerShell:
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install "git+https://github.com/josh-g-s/qte-sdk"
+```
+
+In cmd, activate with `.venv\Scripts\activate.bat` instead. If PowerShell refuses to run `Activate.ps1` because running scripts is disabled, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once and activate again. Once the virtual environment is active, `python` and `pip` are its own, on Windows as elsewhere.
+
+The `git+https` install needs git (pip says it cannot find the command `git` without it). Either install git (on Windows, `winget install Git.Git`, then open a new terminal), or install a release from its zip, which needs no git:
+
+```sh
+pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip
+```
+
+That is the latest release, v1.0.1, as this is written; the [changelog](../CHANGELOG.md) lists each release. Later releases have the same address with their own tag, and the update check below prints it for you.
+
+This installs the `qte_sdk` package only. The worked examples (step 11) are not installed with it. To run or read them, clone this repository or, without git, download the source zip of the release you installed (the address above, or the repository's Releases or Tags page on GitHub) and unzip it, so the examples match your SDK. A zip of `main` may be newer than the release you installed. Then copy its `examples` folder into your project folder, the one that will hold your `.env` (step 2), and run the examples from the project folder, inside the virtual environment where the SDK is installed: the SDK reads `.env` only from the folder you run in. You do not need the examples for anything else in this guide.
 
 The SDK has numbered releases, each a `vX.Y.Z` tag listed in the [changelog](../CHANGELOG.md). To see whether yours is the latest, run:
 
@@ -32,7 +52,7 @@ The SDK has numbered releases, each a `vX.Y.Z` tag listed in the [changelog](../
 python -m qte_sdk.update
 ```
 
-It prints the version and commit you have installed and one of three results: current (exit status 0), behind a newer release (1), with the command that updates, or that it cannot tell (2), for an install from a local copy or when GitHub cannot be reached. An install that follows `main`, the default, is also told when `main` has newer commits than the release. Nothing checks for updates unless you run this, or the smoke test (step 2), which runs the same check; importing `qte_sdk` never uses the network. To install one release and stay on it, name its tag:
+It prints the version you have installed, with its commit or the release zip it came from, and one of three results: current (exit status 0), behind a newer release (1), with the command that updates, or that it cannot tell (2), when GitHub cannot be reached, say. After an install from a release zip, the command installs the latest release's zip, so it needs no git either. An install it cannot trace to the repository, such as an editable install of a local copy, is never called current: it is behind (1) when its version is lower than the latest release, and otherwise it cannot tell (2). A git install that follows `main`, the default, is also told when `main` has newer commits than the release; an install from a zip of `main` is not, since a zip records no commit. Nothing checks for updates unless you run this, or the smoke test (step 2), which runs the same check; importing `qte_sdk` never uses the network. To install one release and stay on it, name its tag:
 
 ```sh
 pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"
@@ -137,11 +157,13 @@ Whichever you choose, never put the token in a source file or a notebook. The SD
 
 ### Check your setup
 
-Before you write any code, run the smoke test from a clone of this repository (step 11 says how to run the examples), naming an instrument or two:
+Before you write any code, run the smoke test from your project folder, with the `examples` folder copied into it as step 1 says, naming an instrument or two:
 
 ```sh
 python examples/smoke_test.py --instruments AAPL MSFT
 ```
+
+On Windows, type `py examples\smoke_test.py --instruments AAPL MSFT`. To run them from any other folder, such as a clone, the SDK must find the address and token there some other way: run `python -m qte_sdk.token set` in that folder too, or set `QTE_URL` and `QTE_TOKEN_FILE` (a token file) in the environment, as above.
 
 It first says whether your SDK is the latest release, as `python -m qte_sdk.update` does (step 1): a `FAIL` with the command that updates when a newer release is out, or when your SDK is too old to have the check. It then reports where the SDK finds the token and the address, without showing either; connects and names your team; reads the calendar; subscribes to each instrument and watches the market for `--seconds` (5 by default), and during a session waits up to `--book-wait` (60 by default, never less than `--seconds`) for the first book of an instrument that has none yet, since one with no valid quote has none; asks for your team's account; says whether the exchange's heartbeats arrived, and about how far apart (a `SKIP` if none came, since the interval may be longer than the run); and, when `QTE_HISTORY_URL` is set, reads the start of the last closed session's books from the history service. Each check prints `PASS`, `FAIL` or `SKIP` with a one-line reason, then a summary, and the exit status is not 0 if any check failed. A `SKIP` is something it could not check, such as an official close for an instrument that has none yet, or an account query the exchange does not answer; the reason says which. Its output never shows your token or any account figure (only a fill of the test order is named, with its quantity and price), so you can send it to the course team when you ask for help.
 
@@ -620,7 +642,7 @@ To run your strategy's loop over a whole past session, `replay(client, date, ins
 
 ## 11. Worked examples
 
-Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the environment or a `.env` in the folder you run it from, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` (`--instruments` for the smoke test) or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
+Run the examples from your project folder, with the `examples` folder copied into it (step 1), and on Windows type `py examples\print_book.py` and so on. Each example reads `QTE_URL` and `QTE_TOKEN` as step 2 describes, from the environment or a `.env` in the folder you run it from, runs for a bounded time and then stops by itself, prints every reject with its reason, and exits with status 0 when it has run cleanly. The instrument comes from `--instrument` (`--instruments` for the smoke test) or `QTE_INSTRUMENT`, and the examples that send orders take your strategy ID from `--strat-id` or `QTE_STRAT_ID`. Run any of them with `--help` for its options.
 
 | Example | What it shows |
 |---|---|

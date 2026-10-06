@@ -1,16 +1,16 @@
 # Using qte-sdk
 
-**Version:** 1.14
+**Version:** 1.15
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
 ## What this is
 
 - `qte_sdk` is the Python client for the QTE exchange. You run your program on your own machine and it trades through the exchange's API, using the exchange address and team token the course team gives you.
-- Install it into your own project with `pip install "git+https://github.com/josh-g-s/qte-sdk"`. Clone this repository only to read or run the worked examples in `examples/`.
+- Install it into your own project with `pip install "git+https://github.com/josh-g-s/qte-sdk"`, or, with no git, from a release's zip (`pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip`). Clone this repository, or unzip that release's source, only to read or run the worked examples in `examples/`; copy that folder into the project folder that holds `.env` and run the examples from there, since `.env` is read only from the working directory. On Windows, use `py`, not `python3`.
 - `python -m qte_sdk.update` says whether the installed SDK is the latest release and prints the command to update it; pin a release with `@v1.0.0` on the install URL.
 - Start with the [README](https://github.com/josh-g-s/qte-sdk#readme), then the [quickstart](https://github.com/josh-g-s/qte-sdk/blob/main/docs/quickstart.md), which covers sessions, market data, orders, the values the exchange sets, reconnecting and past market data.
-- To check a setup end to end, have the person run `python examples/smoke_test.py --instruments <symbols>` from a clone. It prints PASS, FAIL or SKIP per check and sends no orders unless given `--place-test-order`.
+- To check a setup end to end, have the person run `python examples/smoke_test.py --instruments <symbols>` from the project folder, with `examples/` copied into it. It prints PASS, FAIL or SKIP per check and sends no orders unless given `--place-test-order`.
 
 ## The token
 

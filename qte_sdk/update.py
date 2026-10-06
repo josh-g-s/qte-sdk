@@ -8,32 +8,41 @@ check compares the installed `qte_sdk.__version__` with the highest release tag 
 one of three results, with its exit status:
 
     current         0   the installed version is the latest release (or newer). For an
-                        install that follows `main` (installed with no `@revision`, or with
-                        `@main`), it also says whether `main` has newer commits, with the
-                        command that takes them.
+                        install that follows `main` (installed with git and no `@revision`,
+                        or with `@main`), it also says whether `main` has newer commits,
+                        with the command that takes them.
     behind          1   a newer release is out. It prints the command that updates.
     can't tell      2   the install is not one pip made from the repository on GitHub (a
-                        local or editable copy, an archive or wheel, another repository),
-                        its install record cannot be read, no release is tagged yet, or the
-                        repository could not be reached.
+                        local or editable copy, a wheel, another repository) and is not
+                        behind a release, its install record cannot be read, no release is
+                        tagged yet, or the repository could not be reached.
+
+An install from a release archive of the repository, such as
+`pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip`, which needs
+no git, is current or behind like any other. So is one from an archive of a branch, such as
+`main.zip`, though the check cannot say whether that branch has moved since.
 
 `check_for_update()` returns the same result as an `UpdateCheck`, so a program can log it
 when it starts. Nothing here runs when `qte_sdk` is imported: only that function and this
 command use the network.
 
-The installed commit comes from the record pip keeps of where it installed the SDK from
+The install comes from the record pip keeps of where it installed the SDK from
 (`direct_url.json`, PEP 610). The repository's tags and `main` come from git's own list of
 references, read over HTTPS the way `git ls-remote` reads it, so neither `git` nor the
 GitHub API is needed. The request carries no information about you beyond a
-`qte-sdk/<version>` user agent. The install is identified before anything is fetched, so an
-install the check cannot tell about makes no network request at all.
+`qte-sdk/<version>` user agent. The install is identified before anything is fetched. An
+install the check cannot place is never called current, but it is still compared with the
+latest release, so a version below it is behind. Only when the install record cannot be
+read, or does not describe the `qte_sdk` imported, is nothing fetched at all.
 
 The command it prints depends on the case. Behind a release, it is a plain
 `pip install --upgrade`, which installs the new version and resolves its dependencies as
-usual; an install pinned to a release tag is pointed at the latest release tag. For newer
-commits on `main` at the same version, pip would keep the install as it is, so the command
-reinstalls the SDK with `--force-reinstall --no-deps`, leaving your other packages alone.
-A change to the SDK's dependencies therefore always comes in a new release.
+usual; an install pinned to a release tag is pointed at the latest release tag. An install
+from an archive is pointed at the latest release's archive, which pip installs over the old
+version without `--upgrade`. For newer commits on `main` at the same version, pip would keep
+the install as it is, so the command reinstalls the SDK with `--force-reinstall --no-deps`,
+leaving your other packages alone. A change to the SDK's dependencies therefore always comes
+in a new release.
 """
 
 import argparse
@@ -44,16 +53,17 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 import qte_sdk
 
 __all__ = [
+    "ARCHIVE_URL",
     "DEFAULT_TIMEOUT",
     "INSTALL_URL",
     "Status",
@@ -66,6 +76,8 @@ __all__ = [
 DISTRIBUTION = "qte-sdk"
 REPOSITORY = "github.com/josh-g-s/qte-sdk"
 INSTALL_URL = f"git+https://{REPOSITORY}"
+# A release's archive, which pip installs with no git.
+ARCHIVE_URL = f"https://{REPOSITORY}/archive/refs/tags/{{tag}}.zip"
 DEFAULT_TIMEOUT = 5.0
 
 # Git's list of references, in the original protocol: no `Git-Protocol` header is sent.
@@ -99,7 +111,9 @@ class UpdateCheck:
 
     `installed_commit` and `installed_revision` are the commit pip installed and the
     `@revision` it was asked for (None for none), when the install came from the
-    repository. `latest_release` is the highest release tag, such as "v1.0.0", and
+    repository with git. `installed_archive` is the revision of the archive pip installed,
+    such as "v1.0.1" or "main", when the install came from an archive of the repository
+    instead (it has no commit). `latest_release` is the highest release tag, such as "v1.0.0", and
     `main_commit` the commit at the tip of `main`, when the repository was read.
     `main_ahead` is true when the install follows `main` and `main` has newer commits.
     `command` is the command that updates, when there is something to take, and `message`
@@ -114,6 +128,7 @@ class UpdateCheck:
     main_ahead: bool
     command: str | None
     message: str
+    installed_archive: str | None = None
 
     @property
     def exit_code(self) -> int:
@@ -121,10 +136,18 @@ class UpdateCheck:
         return _EXIT_CODES[self.status]
 
 
-def update_command(tag: str | None = None, *, reinstall: bool = False) -> str:
+def update_command(
+    tag: str | None = None, *, reinstall: bool = False, archive: bool = False
+) -> str:
     """The command that installs the SDK from `main`, or from release `tag`. With
     `reinstall`, it reinstalls the SDK alone, as is needed to take newer commits at the
-    same version number: pip keeps an install whose version is unchanged otherwise."""
+    same version number: pip keeps an install whose version is unchanged otherwise. With
+    `archive`, it installs release `tag` from its archive, which needs no git; pip replaces
+    an older version installed from an archive without `--upgrade`."""
+    if archive:
+        if tag is None or reinstall:
+            raise ValueError("an archive is installed from a release tag, and never reinstalled")
+        return f"pip install {ARCHIVE_URL.format(tag=tag)}"
     url = INSTALL_URL if tag is None else f"{INSTALL_URL}@{tag}"
     if reinstall:
         return f'pip install --upgrade --force-reinstall --no-deps "{url}"'
@@ -137,27 +160,58 @@ def check_for_update(timeout: float = DEFAULT_TIMEOUT) -> UpdateCheck:
     install came from it. Never raises: when the install or the repository cannot be read,
     the result is `Status.UNKNOWN`."""
     version = qte_sdk.__version__
-    commit = revision = None
+    install = _Install()
     try:
-        commit, revision = _installed(version)
-        return _compare(version, commit, revision, _parse_refs(_fetch_refs(timeout)))
+        try:
+            install = _installed(version)
+        except _Unplaced as unplaced:
+            return _compare_unplaced(version, unplaced, timeout)
+        return _compare(version, install, _parse_refs(_fetch_refs(timeout)))
     except _CannotTell as reason:
-        return _unknown(version, commit, revision, str(reason))
+        return _unknown(version, install, str(reason))
     except Exception as error:
         # Not expected: only the kind is shown, since the error's text could hold anything.
-        return _unknown(version, commit, revision, f"the check failed ({type(error).__name__})")
+        return _unknown(version, install, f"the check failed ({type(error).__name__})")
 
 
 class _CannotTell(Exception):
     """Why the check cannot tell, as a phrase. Never holds a path or an address."""
 
 
+class _Unplaced(_CannotTell):
+    """The SDK imported is the one pip installed, at a release number, but not from the
+    repository: it can still be compared with the latest release. `archive` is true when pip
+    installed it from an archive or wheel, which an archive of a release can replace. Unless
+    `advice` is given, the reason ends by saying how to install a release that can be
+    checked."""
+
+    def __init__(self, reason: str, *, archive: bool = False, advice: str | None = None) -> None:
+        super().__init__(f"{reason}; {advice or _INSTALL_ADVICE}")
+        self.archive = archive
+
+
+_INSTALL_ADVICE = (
+    f"to have it checked, install a release from {REPOSITORY}, with git or from the release's "
+    "zip, as its README says"
+)
+
+
+class _Install(NamedTuple):
+    """An install from the repository: with git, the commit pip installed and the revision
+    it was asked for; from an archive, the archive's revision."""
+
+    commit: str | None = None
+    revision: str | None = None
+    archive: str | None = None
+
+
 # The install
 
 
-def _installed(version: str) -> tuple[str, str | None]:
-    """The commit pip installed and the revision it was asked for, if pip installed the
-    SDK from the repository; otherwise `_CannotTell` says why not."""
+def _installed(version: str) -> _Install:
+    """How pip installed the SDK, if it installed it from the repository; otherwise
+    `_CannotTell` says why not, as `_Unplaced` when the install can still be compared with
+    the latest release."""
     try:
         distribution = metadata.distribution(DISTRIBUTION)
         recorded_version = distribution.version
@@ -166,10 +220,12 @@ def _installed(version: str) -> tuple[str, str | None]:
         raise _CannotTell("it is not installed as a package, so pip has no record of it") from None
     except (OSError, UnicodeDecodeError):
         raise _CannotTell("its install record (direct_url.json) cannot be read") from None
-    installed = _from_direct_url(text)
     try:
+        imported = Path(qte_sdk.__file__ or "").resolve()
         own = Path(str(distribution.locate_file("qte_sdk/__init__.py"))).resolve()
-        same = own == Path(qte_sdk.__file__ or "").resolve()
+        source = _editable_source(text)
+        # An editable install is imported from its source folder, not from site-packages.
+        same = own == imported or (source is not None and imported.is_relative_to(source))
     except (OSError, RuntimeError, ValueError):
         same = False
     if not same:
@@ -190,15 +246,32 @@ def _installed(version: str) -> tuple[str, str | None]:
         )
     if _VERSION.fullmatch(version) is None:
         raise _CannotTell(f"its version, {version}, is not a release number")
-    return installed
+    return _from_direct_url(text)
 
 
-def _from_direct_url(text: str | None) -> tuple[str, str | None]:
-    """The commit and requested revision in pip's `direct_url.json`, if it records an
-    install from the repository with git. The recorded address is never repeated: it can
+def _editable_source(text: str | None) -> Path | None:
+    """The local folder an editable install was made from, if `text` records one."""
+    try:
+        data = json.loads(text or "")
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("dir_info"), dict):
+        return None
+    url = data.get("url")
+    if data["dir_info"].get("editable") is not True or not isinstance(url, str):
+        return None
+    parts = urlsplit(url)
+    if parts.scheme.lower() != "file" or parts.netloc not in ("", "localhost"):
+        return None
+    return Path(urllib.request.url2pathname(parts.path)).resolve()
+
+
+def _from_direct_url(text: str | None) -> _Install:
+    """The install that pip's `direct_url.json` records, if it records an install from the
+    repository, with git or from an archive. The recorded address is never repeated: it can
     hold a password, and a local path can name you."""
     if text is None:
-        raise _CannotTell(
+        raise _Unplaced(
             "pip did not record where it came from (no direct_url.json), so it was not "
             f"installed from {REPOSITORY}"
         )
@@ -215,24 +288,29 @@ def _from_direct_url(text: str | None) -> tuple[str, str | None]:
     info = data[kind]
     if kind == "dir_info":
         if info.get("editable") is True:
-            raise _CannotTell(
-                "it is an editable install of a local copy (pip install -e); update that "
-                "copy with git"
+            raise _Unplaced(
+                "it is an editable install of a local copy (pip install -e)",
+                advice="update that copy with git",
             )
-        raise _CannotTell(f"it was installed from a local copy, not from {REPOSITORY}")
+        raise _Unplaced(f"it was installed from a local copy, not from {REPOSITORY}")
     if kind == "archive_info":
-        raise _CannotTell(f"it was installed from an archive or wheel, not from {REPOSITORY}")
+        archive = _archive_revision(data["url"])
+        if archive is None:
+            raise _Unplaced(
+                f"it was installed from an archive or wheel, not from {REPOSITORY}", archive=True
+            )
+        return _Install(archive=archive)
     if info.get("vcs") != "git":
-        raise _CannotTell("it was installed with another version control system, not git")
+        raise _Unplaced("it was installed with another version control system, not git")
     if not _is_repository(data["url"]):
-        raise _CannotTell(f"it was installed from another repository, not {REPOSITORY}")
+        raise _Unplaced(f"it was installed from another repository, not {REPOSITORY}")
     commit = info.get("commit_id")
     revision = info.get("requested_revision")
     if not isinstance(commit, str) or _OBJECT_ID.fullmatch(commit) is None:
-        raise _CannotTell("its install record names no commit it was installed from")
+        raise _Unplaced("its install record names no commit it was installed from")
     if revision is not None and not isinstance(revision, str):
         raise _CannotTell("its install record (direct_url.json) cannot be read")
-    return commit, revision
+    return _Install(commit=commit, revision=revision)
 
 
 def _is_repository(url: str) -> bool:
@@ -250,6 +328,39 @@ def _is_repository(url: str) -> bool:
         return False
     path = parts.path.rstrip("/").lower().removesuffix(".git")
     return path == "/josh-g-s/qte-sdk"
+
+
+def _archive_revision(url: str) -> str | None:
+    """The revision of the archive of the SDK's repository that GitHub serves at `url`, such
+    as "v1.0.1" for `.../archive/refs/tags/v1.0.1.zip`, or None when `url` is not one. Both
+    of GitHub's addresses for an archive are recognised, zip or tar.gz:
+    `github.com/josh-g-s/qte-sdk/archive/[refs/tags/|refs/heads/]<revision>.zip` and
+    `codeload.github.com/josh-g-s/qte-sdk/zip/[refs/tags/|refs/heads/]<revision>`."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        parts.port  # noqa: B018  # raises for a port that is not a number
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("https", "http") or host is None or parts.query:
+        return None
+    segments = parts.path.split("/")
+    if len(segments) < 5 or segments[0] or "/".join(segments[1:3]).lower() != "josh-g-s/qte-sdk":
+        return None
+    kind, rest = segments[3], segments[4:]
+    if host.lower() == "github.com" and kind == "archive":
+        name = rest[-1]
+        suffix = next((s for s in (".zip", ".tar.gz") if name.endswith(s)), None)
+        if suffix is None:
+            return None
+        rest = [*rest[:-1], name.removesuffix(suffix)]
+    elif host.lower() != "codeload.github.com" or kind not in ("zip", "tar.gz"):
+        return None
+    if len(rest) > 2 and rest[0] == "refs" and rest[1] in ("tags", "heads"):
+        rest = rest[2:]
+    if not all(rest):
+        return None
+    return "/".join(rest)
 
 
 # The repository
@@ -396,14 +507,28 @@ def _releases(refs: dict[str, str]) -> dict[str, tuple[tuple[int, int, int], str
 # The result
 
 
-def _compare(version: str, commit: str, revision: str | None, refs: dict[str, str]) -> UpdateCheck:
+def _number(version: str) -> tuple[int, int, int]:
     match = _VERSION.fullmatch(version)
     assert match is not None  # checked in _installed
-    installed = (int(match[1]), int(match[2]), int(match[3]))
+    return (int(match[1]), int(match[2]), int(match[3]))
+
+
+def _latest(releases: dict[str, tuple[tuple[int, int, int], str]]) -> str | None:
+    return max(releases, key=lambda tag: releases[tag][0], default=None)
+
+
+def _behind_message(version: str, latest: str, command: str) -> str:
+    return f"qte-sdk {version} is behind the latest release, {latest}: update with {command}"
+
+
+def _compare(version: str, install: _Install, refs: dict[str, str]) -> UpdateCheck:
+    installed = _number(version)
+    commit, revision, archive = install
     releases = _releases(refs)
-    latest = max(releases, key=lambda tag: releases[tag][0], default=None)
+    latest = _latest(releases)
     main = refs.get("refs/heads/main")
-    follows_main = revision in (None, "main")
+    # Only a git install knows its commit, so only it can say whether main has moved.
+    follows_main = commit is not None and revision in (None, "main")
     main_ahead = follows_main and main is not None and main != commit
     pinned = revision is not None and _RELEASE_TAG.fullmatch(revision) is not None
     newer = (
@@ -424,6 +549,7 @@ def _compare(version: str, commit: str, revision: str | None, refs: dict[str, st
             main_ahead=main_ahead,
             command=command,
             message=message,
+            installed_archive=archive,
         )
 
     if latest is None:
@@ -433,12 +559,11 @@ def _compare(version: str, commit: str, revision: str | None, refs: dict[str, st
             f"cannot tell whether qte-sdk {version} is current: no release is tagged yet{newer}",
         )
     if installed < releases[latest][0]:
-        command = update_command(latest if pinned else None)
-        return result(
-            Status.BEHIND,
-            command,
-            f"qte-sdk {version} is behind the latest release, {latest}: update with {command}",
-        )
+        if archive is not None:
+            command = update_command(latest, archive=True)
+        else:
+            command = update_command(latest if pinned else None)
+        return result(Status.BEHIND, command, _behind_message(version, latest, command))
     relation = "is" if installed == releases[latest][0] else "is newer than"
     text = f"qte-sdk {version} {relation} the latest release, {latest}"
     if follows_main and main is not None and not main_ahead:
@@ -447,17 +572,40 @@ def _compare(version: str, commit: str, revision: str | None, refs: dict[str, st
     return result(Status.CURRENT, command, text + newer)
 
 
-def _unknown(version: str, commit: str | None, revision: str | None, reason: str) -> UpdateCheck:
+def _compare_unplaced(version: str, unplaced: _Unplaced, timeout: float) -> UpdateCheck:
+    """An install the check cannot place is never current, but it can be behind. When the
+    repository cannot be read, the install's reason is given: it says more."""
+    unknown = _unknown(version, _Install(), str(unplaced))
+    try:
+        refs = _parse_refs(_fetch_refs(timeout))
+    except _CannotTell:
+        return unknown
+    releases = _releases(refs)
+    latest = _latest(releases)
+    unknown = replace(unknown, latest_release=latest, main_commit=refs.get("refs/heads/main"))
+    if latest is None or _number(version) >= releases[latest][0]:
+        return unknown
+    command = update_command(latest, archive=True) if unplaced.archive else update_command()
+    return replace(
+        unknown,
+        status=Status.BEHIND,
+        command=command,
+        message=_behind_message(version, latest, command),
+    )
+
+
+def _unknown(version: str, install: _Install, reason: str) -> UpdateCheck:
     return UpdateCheck(
         status=Status.UNKNOWN,
         installed_version=version,
-        installed_commit=commit,
-        installed_revision=revision,
+        installed_commit=install.commit,
+        installed_revision=install.revision,
         latest_release=None,
         main_commit=None,
         main_ahead=False,
         command=None,
         message=f"cannot tell whether qte-sdk {version} is current: {reason}",
+        installed_archive=install.archive,
     )
 
 
@@ -496,6 +644,14 @@ def _seconds(text: str) -> float:
 
 def _describe_install(result: UpdateCheck) -> str:
     text = f"qte-sdk {result.installed_version}"
+    archive = result.installed_archive
+    if archive is not None:
+        # As for a revision, a branch's name is not shown, other than main's.
+        if _RELEASE_TAG.fullmatch(archive):
+            return f"{text}, from the {archive} release archive"
+        if archive == "main":
+            return f"{text}, from an archive of main"
+        return f"{text}, from an archive of another revision"
     if result.installed_commit is None:
         return text
     revision = result.installed_revision

@@ -12,9 +12,10 @@ market session state the exchange answers with and, when that state names it, th
 until the next session opens. It stops after --seconds.
 
 Times are printed in UTC, and in New York time too where Python has time zone data. On
-Windows that needs the tzdata package (`pip install tzdata`); without it the example
-prints UTC only. New York time is only for reading: the trading hours come from the
-calendar, and "now" is the exchange's clock, never this computer's.
+Windows that comes from the tzdata package, which installing the SDK brings in there;
+without it (an SDK installed before 1.0.1, say) the example prints UTC only. New York time
+is only for reading: the trading hours come from the calendar, and "now" is the exchange's
+clock, never this computer's.
 
 Outside a session the state is CLOSED, and the reply carries each instrument's official
 close if it has one. The example prints the ones that arrive, and says so when none does,
@@ -65,7 +66,7 @@ CLOSE_SECONDS = 5.0
 
 def load_new_york() -> tzinfo | None:
     """New York's time zone, to show times in, or None where Python has no time zone data
-    (on Windows without the tzdata package)."""
+    (on Windows without the tzdata package, which the SDK installs there)."""
     try:
         return ZoneInfo("America/New_York")
     except ZoneInfoNotFoundError:
