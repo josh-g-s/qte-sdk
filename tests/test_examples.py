@@ -2665,6 +2665,24 @@ def test_the_smoke_test_fails_a_token_file_others_can_read_on_windows(monkeypatc
     assert token not in out + err
 
 
+def test_the_smoke_test_fails_an_address_file_others_can_change_on_windows(monkeypatch, capsys):
+    # Simulated Windows: Authenticated Users may change every file.
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
+    monkeypatch.setattr(_fileaccess, "_read_sddl", lambda path: "D:(A;ID;FA;;;AU)")
+    token = synthetic_token()
+    monkeypatch.setenv("QTE_TOKEN", token)
+    monkeypatch.delenv("QTE_TOKEN_FILE", raising=False)
+    (Path.cwd() / ".env").write_text("QTE_URL=ws://127.0.0.1:8080/ws\n")
+    smoke = load_example(SMOKE_TEST)
+    smoke.check_setup(smoke.Report())
+    out, err = capsys.readouterr()
+    found = checks(out)
+    assert "token-file" not in found
+    status, reason = found["address-file"]
+    assert status == "FAIL" and "sets QTE_URL" in reason
+    assert token not in out + err
+
+
 def test_the_examples_run_where_urllib_cannot_leave_this_machine():
     guard = "import urllib.request; urllib.request.urlopen('https://github.com/', timeout=5)"
     env = {**os.environ, "PYTHONPATH": str(NO_NETWORK)}

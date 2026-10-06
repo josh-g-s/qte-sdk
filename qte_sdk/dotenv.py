@@ -24,9 +24,10 @@ Three safeguards apply:
 - On Windows, where files have access lists rather than modes, a `TokenFileShared`
   warning is issued, once per process for each file, if the access list of a `.env` that
   holds `QTE_TOKEN` lets a broad group read or change it: Everyone, Authenticated Users,
-  Users, INTERACTIVE or Domain Users. It is also issued if such a group may change a
-  `.env` that sets only `QTE_URL`, since whoever changes the address can capture a token
-  kept elsewhere when you next connect. A folder under your user profile is private by
+  Users, INTERACTIVE or Domain Users. An `AddressFileShared` warning is issued instead if
+  such a group may change a `.env` that sets only `QTE_URL`, since whoever changes the
+  address can capture a token kept elsewhere when you next connect. Both are kinds of
+  `FileShared`. A folder under your user profile is private by
   default; a folder on another drive, such as `D:\\`, usually is not. The file is still
   used, though a later release will refuse it. The same check applies to the file named
   by `QTE_TOKEN_FILE` (see `qte_sdk.session`).
@@ -54,7 +55,14 @@ from pathlib import Path
 
 from qte_sdk import _fileaccess
 
-__all__ = ["DOTENV_NAME", "DotenvNotIgnored", "TokenFileShared", "parse_assignment"]
+__all__ = [
+    "DOTENV_NAME",
+    "AddressFileShared",
+    "DotenvNotIgnored",
+    "FileShared",
+    "TokenFileShared",
+    "parse_assignment",
+]
 
 DOTENV_NAME = ".env"
 _GIT_TIMEOUT = 5.0
@@ -79,10 +87,19 @@ class DotenvNotIgnored(UserWarning):
     """The `.env` the SDK read is inside a git working tree and git does not ignore it."""
 
 
-class TokenFileShared(UserWarning):
-    """On Windows, a broad group of users, such as Everyone or Users, may read or change the
-    `.env` or token file that holds the token, or change a `.env` that sets the exchange
-    address."""
+class FileShared(UserWarning):
+    """On Windows, a broad group of users, such as Everyone or Users, may read or change a
+    file the SDK reads its setup from. Catch this to handle both kinds below."""
+
+
+class TokenFileShared(FileShared):
+    """On Windows, a broad group of users may read or change the `.env`, or the file named
+    by `QTE_TOKEN_FILE`, that holds the token."""
+
+
+class AddressFileShared(FileShared):
+    """On Windows, a broad group of users may change a `.env` that sets `QTE_URL` but holds
+    no token. Whoever changes the address could capture a token kept elsewhere."""
 
 
 def dotenv_path() -> Path:
@@ -148,7 +165,7 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     empty value. On POSIX, a file that assigns `QTE_TOKEN` and that other users can read is
     refused whichever name is asked for, and no value is returned. On Windows, such a file
     that a broad group may read or change, or a file setting `QTE_URL` that a broad group
-    may change, gives a `TokenFileShared` warning and is still used.
+    may change, gives a `TokenFileShared` or `AddressFileShared` warning and is still used.
 
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected, so
     neither it nor an `OSError` may reach the caller's exception as its cause or context.
@@ -302,11 +319,11 @@ def warn_shared(
     holds_token: bool = True,
     sets_address: bool = True,
 ) -> None:
-    """Issue a `TokenFileShared` warning about `path` (see `shared_message`), once per
-    process for each path. If a warnings filter turns it into an error, it is logged
-    instead, since this check must never stop the SDK. Its caller may hold the token, so no
-    exception, from the warning or from a failure to show it (a closed stderr, say), is let
-    out of this function."""
+    """Issue a `TokenFileShared` warning about `path`, or an `AddressFileShared` one if it
+    does not hold the token (see `shared_message`), once per process for each path. If a
+    warnings filter turns it into an error, it is logged instead, since this check must
+    never stop the SDK. Its caller may hold the token, so no exception, from the warning or
+    from a failure to show it (a closed stderr, say), is let out of this function."""
     key = os.path.abspath(path)
     if key in _shared_warned:
         return
@@ -314,7 +331,8 @@ def warn_shared(
     try:
         message = shared_message(path, access, holds_token=holds_token, sets_address=sets_address)
         try:
-            warnings.warn(message, TokenFileShared, stacklevel=_caller_level())
+            category = TokenFileShared if holds_token else AddressFileShared
+            warnings.warn(message, category, stacklevel=_caller_level())
         except Warning:
             _log.warning("%s", message)
     except Exception:

@@ -845,6 +845,20 @@ def test_check_on_windows_warns_about_a_shared_dotenv(windows, capsys):
     assert_token_absent(token, out + err)
 
 
+def test_check_on_windows_warns_about_a_dotenv_others_can_change_the_address_in(
+    windows, monkeypatch, capsys
+):
+    windows("D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;FA;;;AU)(A;ID;0x1200a9;;;BU)")
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    dotenv().write_text(f"QTE_URL={URL}\n")
+    assert run(["check"]) == 0
+    out, err = capsys.readouterr()
+    assert out.count("warning:") == 1
+    assert "sets QTE_URL, the exchange address" in out
+    assert_token_absent(token, out + err)
+
+
 def test_check_on_windows_reports_a_private_token_file(windows, monkeypatch, tmp_path, capsys):
     windows(PROFILE)
     token = synthetic_token()

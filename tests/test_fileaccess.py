@@ -11,7 +11,13 @@ import pytest
 
 from qte_sdk import _fileaccess
 from qte_sdk._fileaccess import BroadAccess
-from qte_sdk.dotenv import TokenFileShared, read_value, shared_message
+from qte_sdk.dotenv import (
+    AddressFileShared,
+    FileShared,
+    TokenFileShared,
+    read_value,
+    shared_message,
+)
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     TOKEN_FILE_ENV_VAR,
@@ -260,10 +266,12 @@ def test_a_changeable_dotenv_setting_only_the_address_warns(windows, monkeypatch
     token = synthetic_token()
     monkeypatch.setenv(TOKEN_ENV_VAR, token)
     path = write_dotenv("QTE_URL=ws://127.0.0.1:8080/ws\n")
-    with pytest.warns(TokenFileShared) as caught:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         assert resolve_url() == "ws://127.0.0.1:8080/ws"
         assert resolve_token() == token
     assert len(caught) == 1
+    assert caught[0].category is AddressFileShared
     message = str(caught[0].message)
     assert message.startswith(f"{path} sets QTE_URL, the exchange address, and Windows lets ")
     assert f"lets {AUTHENTICATED} change it, so" in message
@@ -399,3 +407,40 @@ def test_no_icacls_command_is_given_for_a_folder_a_shell_would_expand(name, tmp_
 def test_the_icacls_command_quotes_the_folder(tmp_path):
     message = shared_message(tmp_path / "my project" / ".env", access([USERS], []))
     assert f'run `icacls "{tmp_path / "my project"}"`.' in message
+
+
+def test_the_two_kinds_of_shared_file_are_both_file_shared():
+    assert issubclass(TokenFileShared, FileShared)
+    assert issubclass(AddressFileShared, FileShared)
+    assert issubclass(FileShared, UserWarning)
+    assert not issubclass(TokenFileShared, AddressFileShared)
+    assert not issubclass(AddressFileShared, TokenFileShared)
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("QTE_URL=ws://127.0.0.1:8080/ws\nQTE_TOKEN={token}\n", TokenFileShared),
+        ("QTE_TOKEN={token}\n", TokenFileShared),
+        ("QTE_URL=ws://127.0.0.1:8080/ws\n", AddressFileShared),
+    ],
+)
+def test_each_kind_is_issued_and_caught_as_file_shared(windows, monkeypatch, text, kind):
+    windows.sddl = REAL_SECOND_DRIVE
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_ENV_VAR, token)  # used only when the .env has none
+    write_dotenv(text.format(token=token))
+    with pytest.warns(FileShared) as caught:
+        read_value("QTE_URL")
+    assert [w.category for w in caught] == [kind]
+    assert_token_absent(token, str(caught[0].message))
+
+
+def test_a_shared_token_file_issues_token_file_shared(windows, monkeypatch, tmp_path):
+    token = synthetic_token()
+    path = tmp_path / "token"
+    path.write_text(token)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    with pytest.warns(FileShared) as caught:
+        assert resolve_token() == token
+    assert [w.category for w in caught] == [TokenFileShared]

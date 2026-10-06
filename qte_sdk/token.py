@@ -54,7 +54,7 @@ from qte_sdk.dotenv import (
     DOTENV_NAME,
     MAX_DOTENV_SIZE,
     DotenvNotIgnored,
-    TokenFileShared,
+    FileShared,
     dotenv_path,
     is_ignored_by_git,
     is_inside_git_work_tree,
@@ -242,7 +242,7 @@ def _ask_address(url: str | None, ask: Prompt) -> str:
     with warnings.catch_warnings():
         # `set` offers its own fix for each, once the file is written.
         warnings.simplefilter("ignore", DotenvNotIgnored)
-        warnings.simplefilter("ignore", TokenFileShared)
+        warnings.simplefilter("ignore", FileShared)
         current = os.environ.get(URL_ENV_VAR) or read_value(URL_ENV_VAR)[0]
     if url is None:
         hint = " [Enter keeps the address already set]" if current else ""
@@ -600,7 +600,7 @@ def _check() -> int:
     ok = True
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DotenvNotIgnored)
-        warnings.simplefilter("always", TokenFileShared)
+        warnings.simplefilter("always", FileShared)
         problem = None
         try:
             source = token_source()
@@ -631,7 +631,7 @@ def _check() -> int:
     shown: set[str] = set()
     for warning in caught:
         message = str(warning.message)
-        if issubclass(warning.category, (DotenvNotIgnored, TokenFileShared)):
+        if issubclass(warning.category, (DotenvNotIgnored, FileShared)):
             if message not in shown:
                 shown.add(message)
                 print(f"warning: {message}")
