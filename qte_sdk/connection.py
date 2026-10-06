@@ -332,7 +332,12 @@ class Disconnected(DataUncertain):
 
 @dataclass(frozen=True)
 class SessionInfo:
-    """The exchange's acknowledgement of a session, field for field as `session_ack` carries it."""
+    """The exchange's acknowledgement of a session, field for field as `session_ack` carries it.
+
+    `session_id` names the session in logs and when you ask for help. It is unique only
+    within one run of the exchange: after the exchange restarts, an id can come round again,
+    so never use it as a key across restarts or days.
+    """
 
     session_id: str
     team: str

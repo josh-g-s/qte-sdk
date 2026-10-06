@@ -8,7 +8,8 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-Nothing yet.
+- `ReconnectingSession.calendar` no longer goes back to the previous session's calendar for a moment after a reconnect.
+- The docs say that `tradable` is an entitlement only (use `can_trade`), to show `instrument` when `display_name` is absent, that `session_id` is unique only within one run of the exchange, and that a new term can start from fresh accounts, as the term starting on 7 October 2026 does.
 
 ## 1.0.0
 

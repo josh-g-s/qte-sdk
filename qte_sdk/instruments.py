@@ -18,7 +18,9 @@ An `InstrumentInfo` carries:
 
 - `instrument`, the id every other message and every order names it by: an equity's
   ticker, or an option contract's OCC symbol (see `qte_sdk.options`);
-- `display_name`, a name to show, absent when the exchange has none; never parse it;
+- `display_name`, a name to show, absent when the exchange has none (it may leave it unset
+  for every instrument): show `instrument` instead, as
+  `info.display_name if info.HasField("display_name") else info.instrument`. Never parse it;
 - `kind`, `EQUITY` or `OPTION`. Any other value, `INSTRUMENT_KIND_UNSPECIFIED` or a
   number, is a kind this SDK does not know, from a newer exchange: treat the instrument
   as one you cannot trade;
@@ -30,9 +32,11 @@ An `InstrumentInfo` carries:
   `INSTRUMENT_REDUCING_ONLY` (an option contract outside the day's window: only orders
   that reduce a position, never crossing zero). Any other value is a
   status this SDK does not know: treat it as not trading;
-- `tradable`, whether your team may send orders in it at all, given its arm and
+- `tradable`, whether your team is entitled to send orders in it at all, given its arm and
   assignment. It says nothing of the instrument's own status, or of a limit or halt your
-  team is under;
+  team is under: an instrument can be `tradable` and `INSTRUMENT_DISABLED`. To decide
+  whether to send an order, use `can_trade` or `tradable_instruments`, never `tradable`
+  alone;
 - `option`, the contract's terms (underlying, expiry, right, strike in micro-dollars and
   multiplier), present only for an option.
 
