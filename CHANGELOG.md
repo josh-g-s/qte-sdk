@@ -1,12 +1,18 @@
 # Changelog
 
-**Version:** 0.5
+**Version:** 0.6
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+Nothing yet.
+
+## 1.0.2
+
+Update with `python -m qte_sdk.update` and follow what it prints. If you are still on 1.0.0 from a zip, upgrade once by hand: `pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.2.zip`.
 
 - On Windows, the SDK reads the access list of a `.env` that holds the token, and of the file named by `QTE_TOKEN_FILE`, and gives a `TokenFileShared` warning if Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users may read or change it, naming the groups and how to fix it. It gives an `AddressFileShared` warning if one of them may change a `.env` that sets only `QTE_URL`, since a changed address could capture your token. Both are kinds of `FileShared`. `python -m qte_sdk.token set` and `check` report the same. A folder on a second drive, such as `D:\`, is usually readable, and often changeable, by every local user; keep your project under your user profile. On macOS and Linux nothing changes: a `.env` that holds the token and that other users can read is still refused, and nothing else is checked there.
 - A later release will refuse, on Windows, a token or `.env` file that other users can read or change, rather than warn. (macOS and Linux refuse only a `.env` holding the token that other users can read.) If you keep your project on a shared drive, move it under your user profile now.
