@@ -225,7 +225,8 @@ def test_each_spelling_of_the_repositorys_address_is_recognised(
     assert "secret-password" not in result.message
 
 
-CANNOT_TELL = {
+# Installs it cannot place: they are compared with the latest release, but never current.
+UNPLACED = {
     "editable": (
         {"url": "file:///home/someone/qte-sdk", "dir_info": {"editable": True}},
         "it is an editable install of a local copy",
@@ -234,15 +235,15 @@ CANNOT_TELL = {
         {"url": "file:///home/someone/qte-sdk", "dir_info": {}},
         "it was installed from a local copy",
     ),
-    "archive": (
-        {
-            "url": "https://github.com/josh-g-s/qte-sdk/archive/refs/heads/main.zip",
-            "archive_info": {"hash": "sha256=" + "0" * 64},
-        },
-        "it was installed from an archive or wheel",
-    ),
     "wheel": (
         {"url": "file:///home/someone/qte_sdk-1.0.0-py3-none-any.whl", "archive_info": {}},
+        "it was installed from an archive or wheel",
+    ),
+    "another repository's archive": (
+        {
+            "url": "https://github.com/someone/qte-sdk/archive/refs/tags/v1.0.0.zip",
+            "archive_info": {"hash": "sha256=" + "0" * 64},
+        },
         "it was installed from an archive or wheel",
     ),
     "another vcs": (
@@ -256,40 +257,278 @@ CANNOT_TELL = {
     "a query": (git_install(url=f"{REPOSITORY_URL}?x=1"), "another repository"),
     "a bad port": (git_install(url="https://github.com:x/josh-g-s/qte-sdk"), "another"),
     "no file": (None, "pip did not record where it came from"),
-    "not json": ("{not json", "cannot be read"),
-    "not an object": ("[]", "cannot be read"),
-    "no url": ({"vcs_info": {"vcs": "git", "commit_id": INSTALLED}}, "cannot be read"),
-    "a url that is not text": ({"url": 1, "dir_info": {}}, "cannot be read"),
-    "no kind": ({"url": REPOSITORY_URL}, "cannot be read"),
-    "two kinds": ({**git_install(), "dir_info": {}}, "cannot be read"),
-    "a kind that is not an object": ({"url": REPOSITORY_URL, "vcs_info": "git"}, "cannot be read"),
     "no commit": ({"url": REPOSITORY_URL, "vcs_info": {"vcs": "git"}}, "names no commit"),
     "a short commit": (
         {"url": REPOSITORY_URL, "vcs_info": {"vcs": "git", "commit_id": "abc123"}},
         "names no commit",
     ),
-    "a revision that is not text": (
-        {"url": REPOSITORY_URL, "vcs_info": {**git_install()["vcs_info"], "requested_revision": 1}},
-        "cannot be read",
-    ),
+}
+# The installs an archive of the latest release can replace: the rest are told the git one.
+FROM_AN_ARCHIVE = {"wheel", "another repository's archive"}
+
+# Install records that cannot be read: nothing is fetched.
+UNREADABLE_RECORDS = {
+    "not json": "{not json",
+    "not an object": "[]",
+    "no url": {"vcs_info": {"vcs": "git", "commit_id": INSTALLED}},
+    "a url that is not text": {"url": 1, "dir_info": {}},
+    "no kind": {"url": REPOSITORY_URL},
+    "two kinds": {**git_install(), "dir_info": {}},
+    "a kind that is not an object": {"url": REPOSITORY_URL, "vcs_info": "git"},
+    "a revision that is not text": {
+        "url": REPOSITORY_URL,
+        "vcs_info": {**git_install()["vcs_info"], "requested_revision": 1},
+    },
 }
 
 
-@pytest.mark.parametrize("shape", CANNOT_TELL)
-def test_an_install_it_cannot_tie_to_the_repository_cannot_tell_and_uses_no_network(
+def assert_private(result: update.UpdateCheck) -> None:
+    # The recorded address is never repeated: it can hold a password or name a user.
+    assert "someone" not in result.message
+    assert "file://" not in result.message
+
+
+@pytest.mark.parametrize("shape", UNPLACED)
+def test_an_install_it_cannot_place_at_the_latest_release_cannot_tell(
     monkeypatch: pytest.MonkeyPatch, shape: str
 ):
-    record, reason = CANNOT_TELL[shape]
+    record, reason = UNPLACED[shape]
     installed(monkeypatch, record)
-    result = check_for_update()  # the autouse fixture fails the test on any network use
+    repository = answer(monkeypatch, refs_with((tag_for(VERSION), RELEASE_COMMIT)))
+    result = check_for_update()
     assert result.status is Status.UNKNOWN
     assert result.exit_code == 2
     assert result.command is None
     assert result.message.startswith(f"cannot tell whether qte-sdk {VERSION} is current: ")
     assert reason in result.message
-    # The recorded address is never repeated: it can hold a password or name a user.
-    assert "someone" not in result.message
-    assert "file://" not in result.message
+    assert result.latest_release == tag_for(VERSION)
+    assert result.installed_commit is None
+    assert result.installed_archive is None
+    assert len(repository.requests) == 1
+    assert_private(result)
+
+
+@pytest.mark.parametrize("shape", UNPLACED)
+def test_an_install_it_cannot_place_behind_a_release_is_behind(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+):
+    record, _ = UNPLACED[shape]
+    newer = tag_for(bumped(VERSION, 2))
+    installed(monkeypatch, record)
+    answer(monkeypatch, refs_with((tag_for(VERSION), RELEASE_COMMIT), (newer, MAIN)))
+    result = check_for_update()
+    assert result.status is Status.BEHIND
+    assert result.exit_code == 1
+    assert result.latest_release == newer
+    expected = archive_command(newer) if shape in FROM_AN_ARCHIVE else COMMAND
+    assert result.command == expected
+    assert result.message == (
+        f"qte-sdk {VERSION} is behind the latest release, {newer}: update with {expected}"
+    )
+    assert_private(result)
+
+
+@pytest.mark.parametrize("shape", ["editable", "wheel", "no file"])
+def test_an_install_it_cannot_place_newer_than_the_latest_release_is_not_current(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+):
+    if VERSION == "0.0.0":
+        pytest.skip("no release is older than 0.0.0")
+    installed(monkeypatch, UNPLACED[shape][0])
+    answer(monkeypatch, refs_with(("v0.0.0", RELEASE_COMMIT)))
+    assert check_for_update().status is Status.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("timed out"), urllib.error.URLError("http://user:pw@proxy.invalid")],
+)
+def test_an_install_it_cannot_place_gives_its_own_reason_when_github_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+):
+    installed(monkeypatch, UNPLACED["editable"][0])
+    answer(monkeypatch, error=error)
+    result = check_for_update()
+    assert result.status is Status.UNKNOWN
+    assert result.latest_release is None
+    assert result.message == (
+        f"cannot tell whether qte-sdk {VERSION} is current: it is an editable install of a "
+        "local copy (pip install -e); update that copy with git"
+    )
+
+
+@pytest.mark.parametrize("shape", sorted(set(UNPLACED) - {"editable"}))
+def test_an_install_it_cannot_place_says_how_to_install_one_it_can(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+):
+    installed(monkeypatch, UNPLACED[shape][0])
+    answer(monkeypatch, refs_with((tag_for(VERSION), RELEASE_COMMIT)))
+    assert check_for_update().message.endswith(
+        "; to have it checked, install a release from github.com/josh-g-s/qte-sdk, with git "
+        "or from the release's zip, as its README says"
+    )
+
+
+def test_a_local_copy_says_why_it_cannot_tell_and_what_to_do(monkeypatch: pytest.MonkeyPatch):
+    installed(monkeypatch, UNPLACED["local directory"][0])
+    answer(monkeypatch, refs_with((tag_for(VERSION), RELEASE_COMMIT)))
+    assert check_for_update().message == (
+        f"cannot tell whether qte-sdk {VERSION} is current: it was installed from a local "
+        "copy, not from github.com/josh-g-s/qte-sdk; to have it checked, install a release "
+        "from github.com/josh-g-s/qte-sdk, with git or from the release's zip, as its README "
+        "says"
+    )
+
+
+@pytest.mark.parametrize("shape", ["editable", "no file"])
+def test_an_install_it_cannot_place_with_no_release_cannot_tell(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+):
+    installed(monkeypatch, UNPLACED[shape][0])
+    answer(monkeypatch, refs_with())
+    result = check_for_update()
+    assert result.status is Status.UNKNOWN
+    assert UNPLACED[shape][1] in result.message
+
+
+@pytest.mark.parametrize("shape", UNREADABLE_RECORDS)
+def test_an_install_record_that_cannot_be_read_cannot_tell_and_uses_no_network(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+):
+    installed(monkeypatch, UNREADABLE_RECORDS[shape])
+    repository = answer(monkeypatch, refs_with((tag_for(bumped(VERSION, 0)), MAIN)))
+    result = check_for_update()
+    assert result.status is Status.UNKNOWN
+    assert result.exit_code == 2
+    assert result.command is None
+    assert result.message == (
+        f"cannot tell whether qte-sdk {VERSION} is current: its install record "
+        "(direct_url.json) cannot be read"
+    )
+    assert repository.requests == []
+
+
+# From a release archive, with no git
+
+ARCHIVE = "https://github.com/josh-g-s/qte-sdk/archive"
+CODELOAD = "https://codeload.github.com/josh-g-s/qte-sdk"
+
+
+def archive_command(tag: str) -> str:
+    return f"pip install {ARCHIVE}/refs/tags/{tag}.zip"
+
+
+def archive_install(url: str) -> dict[str, Any]:
+    return {"url": url, "archive_info": {"hashes": {"sha256": "0" * 64}}}
+
+
+ARCHIVE_URLS = {
+    f"{ARCHIVE}/refs/tags/v1.0.1.zip": "v1.0.1",
+    f"{ARCHIVE}/refs/tags/v1.0.1.tar.gz": "v1.0.1",
+    f"{ARCHIVE}/v1.0.1.zip": "v1.0.1",
+    f"{ARCHIVE}/v1.0.1.tar.gz": "v1.0.1",
+    f"{CODELOAD}/zip/refs/tags/v1.0.1": "v1.0.1",
+    f"{CODELOAD}/tar.gz/refs/tags/v1.0.1": "v1.0.1",
+    f"{CODELOAD}/zip/v1.0.1": "v1.0.1",
+    f"{ARCHIVE}/refs/heads/main.zip": "main",
+    f"{ARCHIVE}/main.zip": "main",
+    f"{ARCHIVE}/main.tar.gz": "main",
+    f"{CODELOAD}/zip/refs/heads/main": "main",
+    f"{ARCHIVE}/refs/heads/some/branch.zip": "some/branch",
+    f"{ARCHIVE}/{'a' * 40}.zip": "a" * 40,
+    "https://GitHub.com/Josh-G-S/QTE-SDK/archive/refs/tags/v1.0.1.zip": "v1.0.1",
+    "http://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip": "v1.0.1",
+    "https://someone:secret-password@github.com/josh-g-s/qte-sdk/archive/v1.0.1.zip": "v1.0.1",
+}
+
+
+@pytest.mark.parametrize("url", ARCHIVE_URLS)
+def test_each_form_of_an_archive_of_the_repository_is_recognised(url: str):
+    assert update._archive_revision(url) == ARCHIVE_URLS[url]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/someone/qte-sdk/archive/refs/tags/v1.0.1.zip",
+        "https://github.com/josh-g-s/qte-sdk-old/archive/refs/tags/v1.0.1.zip",
+        "https://gitlab.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip",
+        "https://example.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip",
+        "https://codeload.github.com/someone/qte-sdk/zip/refs/tags/v1.0.1",
+        "https://github.com/josh-g-s/qte-sdk/zip/refs/tags/v1.0.1",
+        "https://codeload.github.com/josh-g-s/qte-sdk/archive/v1.0.1.zip",
+        "https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1",
+        "https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.whl",
+        "https://github.com/josh-g-s/qte-sdk/archive/refs/tags/.zip",
+        "https://github.com/josh-g-s/qte-sdk/archive/.zip",
+        "https://github.com/josh-g-s/qte-sdk/archive//v1.0.1.zip",
+        "https://github.com/josh-g-s/qte-sdk/archive/v1.0.1.zip?x=1",
+        "https://github.com:x/josh-g-s/qte-sdk/archive/v1.0.1.zip",
+        "ftp://github.com/josh-g-s/qte-sdk/archive/v1.0.1.zip",
+        "file:///home/someone/josh-g-s/qte-sdk/archive/v1.0.1.zip",
+        "https://github.com/josh-g-s/qte-sdk/releases/download/v1.0.1/qte_sdk-1.0.1.whl",
+        "https://github.com/josh-g-s/qte-sdk",
+    ],
+)
+def test_an_archive_from_elsewhere_is_not_the_repositorys(url: str):
+    assert update._archive_revision(url) is None
+
+
+@pytest.mark.parametrize("url", ARCHIVE_URLS)
+def test_an_archive_install_at_the_latest_release_is_current(
+    monkeypatch: pytest.MonkeyPatch, url: str
+):
+    installed(monkeypatch, archive_install(url))
+    repository = answer(monkeypatch, refs_with((tag_for(VERSION), RELEASE_COMMIT)))
+    result = check_for_update()
+    assert result.status is Status.CURRENT
+    assert result.exit_code == 0
+    assert result.command is None
+    assert not result.main_ahead
+    assert result.installed_commit is None
+    assert result.installed_revision is None
+    assert result.installed_archive == ARCHIVE_URLS[url]
+    # An archive has no commit, so nothing is said about main.
+    assert result.message == f"qte-sdk {VERSION} is the latest release, {tag_for(VERSION)}"
+    assert len(repository.requests) == 1
+    assert "secret-password" not in result.message
+
+
+@pytest.mark.parametrize("url", ARCHIVE_URLS)
+def test_an_archive_install_behind_a_release_is_told_the_latest_releases_archive(
+    monkeypatch: pytest.MonkeyPatch, url: str
+):
+    newer = tag_for(bumped(VERSION, 1))
+    installed(monkeypatch, archive_install(url))
+    answer(monkeypatch, refs_with((tag_for(VERSION), RELEASE_COMMIT), (newer, MAIN)))
+    result = check_for_update()
+    assert result.status is Status.BEHIND
+    assert result.exit_code == 1
+    assert result.latest_release == newer
+    assert result.command == archive_command(newer)
+    assert result.command == update_command(newer, archive=True)
+    assert result.message == (
+        f"qte-sdk {VERSION} is behind the latest release, {newer}: update with "
+        f"pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/{newer}.zip"
+    )
+    assert "secret-password" not in result.message
+
+
+def test_an_archive_install_with_no_release_cannot_tell(monkeypatch: pytest.MonkeyPatch):
+    installed(monkeypatch, archive_install(f"{ARCHIVE}/main.zip"))
+    answer(monkeypatch, refs_with())
+    result = check_for_update()
+    assert result.status is Status.UNKNOWN
+    assert result.command is None
+    assert not result.main_ahead
+    assert result.message.endswith("no release is tagged yet")
+
+
+def test_an_archive_command_needs_a_release_tag():
+    with pytest.raises(ValueError):
+        update_command(archive=True)
+    with pytest.raises(ValueError):
+        update_command("v2.0.0", archive=True, reinstall=True)
 
 
 def test_no_installed_package_cannot_tell(monkeypatch: pytest.MonkeyPatch):
@@ -317,10 +556,12 @@ def test_an_unreadable_record_cannot_tell(monkeypatch: pytest.MonkeyPatch):
 def test_a_package_of_another_version_than_the_one_imported_cannot_tell(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    installed(monkeypatch, git_install(), version="0.0.1")
+    installed(monkeypatch, UNPLACED["editable"][0], version="0.0.1")
+    repository = answer(monkeypatch, refs_with((tag_for(bumped(VERSION, 0)), MAIN)))
     result = check_for_update()
     assert result.status is Status.UNKNOWN
     assert "not the same copy" in result.message
+    assert repository.requests == []
 
 
 def test_a_copy_that_is_not_the_one_pip_installed_cannot_tell_and_uses_no_network(
@@ -332,9 +573,11 @@ def test_a_copy_that_is_not_the_one_pip_installed_cannot_tell_and_uses_no_networ
     monkeypatch.setattr(
         update.metadata, "distribution", lambda name: FakeDistribution(text, package=str(other))
     )
+    repository = answer(monkeypatch, refs_with((tag_for(bumped(VERSION, 0)), MAIN)))
     result = check_for_update()
     assert result.status is Status.UNKNOWN
     assert "not the one pip installed" in result.message
+    assert repository.requests == []
     assert str(tmp_path) not in result.message
 
 
@@ -797,7 +1040,44 @@ def test_the_command_exits_2_when_it_cannot_tell(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     installed(monkeypatch, {"url": "file:///home/someone/qte-sdk", "dir_info": {"editable": True}})
+    answer(monkeypatch, refs_with((tag_for(VERSION), MAIN)))
     assert update.main([]) == 2
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == f"installed: qte-sdk {VERSION}"
+    assert "someone" not in out
+
+
+@pytest.mark.parametrize(
+    "url, described",
+    [
+        (f"{ARCHIVE}/refs/tags/v1.0.1.zip", "from the v1.0.1 release archive"),
+        (f"{CODELOAD}/tar.gz/refs/tags/v1.0.1", "from the v1.0.1 release archive"),
+        (f"{ARCHIVE}/main.zip", "from an archive of main"),
+        (f"{ARCHIVE}/refs/heads/x%1b%5b2Jy.zip", "from an archive of another revision"),
+        (f"{ARCHIVE}/refs/heads/some/branch.zip", "from an archive of another revision"),
+    ],
+)
+def test_the_command_says_which_archive_was_installed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], url: str, described: str
+):
+    newer = tag_for(bumped(VERSION, 2))
+    installed(monkeypatch, archive_install(url))
+    answer(monkeypatch, refs_with((newer, MAIN)))
+    assert update.main([]) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"installed: qte-sdk {VERSION}, {described}",
+        f"qte-sdk {VERSION} is behind the latest release, {newer}: update with "
+        f"{archive_command(newer)}",
+    ]
+
+
+def test_the_command_exits_1_for_an_editable_install_behind_a_release(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    newer = tag_for(bumped(VERSION, 2))
+    installed(monkeypatch, UNPLACED["editable"][0])
+    answer(monkeypatch, refs_with((newer, MAIN)))
+    assert update.main([]) == 1
     out = capsys.readouterr().out
     assert out.splitlines()[0] == f"installed: qte-sdk {VERSION}"
     assert "someone" not in out

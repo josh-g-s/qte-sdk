@@ -11,7 +11,7 @@ This repository contains only participant-facing material. Exchange internals (t
 
 ## Install
 
-Install the SDK into your own project's virtual environment:
+Install the SDK into your own project's virtual environment. On macOS and Linux:
 
 ```sh
 python3 -m venv .venv
@@ -19,7 +19,25 @@ source .venv/bin/activate
 pip install "git+https://github.com/josh-g-s/qte-sdk"
 ```
 
-This installs the `qte_sdk` package only, not the [worked examples](examples/). Clone this repository only to run or read the examples; you do not need a clone to use the SDK.
+On Windows, first install Python 3.11 or later from python.org or with `winget install Python.Python.3.12`, then open a new terminal. Type `py`, never `python3`: on Windows `python3` is a stub that only offers the Microsoft Store, even once Python is installed. (`python` works too if the installer added Python to your PATH.) In PowerShell:
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install "git+https://github.com/josh-g-s/qte-sdk"
+```
+
+In cmd, activate with `.venv\Scripts\activate.bat` instead. If PowerShell says running scripts is disabled, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once and activate again.
+
+The `git+https` install needs git. If you do not have it, either install git (on Windows, `winget install Git.Git`, then open a new terminal) or install a release from its zip, which needs no git:
+
+```sh
+pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip
+```
+
+That is the latest release, v1.0.1, as this is written. The [changelog](CHANGELOG.md) lists each release, and the update check below says when a newer one is out.
+
+This installs the `qte_sdk` package only, not the [worked examples](examples/); you do not need them to use the SDK. To run or read them, clone this repository or, without git, download the source zip of the release you installed (the address above, or the repository's Releases or Tags page on GitHub) and unzip it, so the examples match your SDK. A zip of `main` may be newer than the release you installed. Then copy its `examples` folder into your project folder, the one that holds your `.env` (below), and run the examples from the project folder: the SDK reads `.env` only from the folder you run in.
 
 To see whether a newer release is out, run:
 
@@ -27,7 +45,7 @@ To see whether a newer release is out, run:
 python -m qte_sdk.update
 ```
 
-It says whether your SDK is the latest release and, if not, prints the command that updates it. It exits 0 when your SDK is current, 1 when a newer release is out and 2 when it cannot tell (an install from a local copy, say, or GitHub could not be reached). Each release is listed in the [changelog](CHANGELOG.md). To install one release and stay on it, name its tag:
+It says whether your SDK is the latest release and, if not, prints the command that updates it; after an install from a release zip, that command installs the latest release's zip, so it needs no git either. It exits 0 when your SDK is current, 1 when a newer release is out and 2 when it cannot tell, as when GitHub cannot be reached. An install it cannot trace to the repository, such as an editable install of a local copy, is never called current: it gets 1 when its version is behind the latest release and 2 otherwise. Each release is listed in the [changelog](CHANGELOG.md). To install one release and stay on it, name its tag:
 
 ```sh
 pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"
@@ -45,11 +63,13 @@ If your project is a git repository, it offers to add `.env` to `.gitignore`; sa
 
 The SDK reads `QTE_URL` and `QTE_TOKEN` from `./.env` itself, only when they are not passed in or set as real environment variables, which always take precedence. For the token the order is `token=`, then `QTE_TOKEN`, then the file named by `QTE_TOKEN_FILE`, then `.env`. It refuses a `.env` holding the token that other users can read, and warns if git tracks it or does not ignore it. Step 2 of the [quickstart](docs/quickstart.md) explains the details and the alternatives: writing `.env` by hand, environment variables, or a private token file named by `QTE_TOKEN_FILE` (`python -m qte_sdk.token set --file` makes one).
 
-Before anything else, check the whole setup with the smoke test, from a clone of this repository:
+Before anything else, check the whole setup with the smoke test. Run it from your project folder, with the `examples` folder copied into it (see Install):
 
 ```sh
 python examples/smoke_test.py --instruments XOM
 ```
+
+On Windows, type `py examples\smoke_test.py --instruments XOM`. To run them from any other folder, such as a clone, the SDK must find the address and token there some other way: run `python -m qte_sdk.token set` in that folder too, or set `QTE_URL` and `QTE_TOKEN_FILE` (a token file) in the environment (step 2 of the [quickstart](docs/quickstart.md)).
 
 It says whether your SDK is the latest release, reports where the SDK finds the token and the address, connects, reads the calendar, watches the market for a few seconds and asks for your team's account, printing `PASS`, `FAIL` or `SKIP` with a reason for each check. It sends no orders unless you add `--place-test-order`; step 2 of the [quickstart](docs/quickstart.md) says more.
 
