@@ -1,12 +1,18 @@
 # Changelog
 
-**Version:** 0.2
+**Version:** 0.3
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+Nothing yet.
+
+## 1.0.1
+
+**If you installed 1.0.0 from a zip, upgrade once by hand:** `pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip`. The update check in 1.0.0 cannot check a zip install, so it never tells you about this release; from 1.0.1 on it does. If you installed with git, run `python -m qte_sdk.update` and follow what it prints.
 
 - The README and quickstart give the Windows steps (`py`, activating a virtual environment in PowerShell or cmd, the execution policy) and an install with no git, from a release's zip such as `pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip`, with the examples from the same zip.
 - `python -m qte_sdk.update` checks an install from a release zip (or a zip of a branch) of this repository: current, or behind with the command that installs the latest release's zip. An install it cannot trace to the repository, such as an editable one, is now reported as behind when its version is lower than the latest release, though still never as current.
