@@ -581,6 +581,39 @@ def test_a_copy_that_is_not_the_one_pip_installed_cannot_tell_and_uses_no_networ
     assert str(tmp_path) not in result.message
 
 
+def test_an_editable_install_imported_from_its_source_folder_is_compared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    # pip records the source folder; the package's own files are not in site-packages.
+    source = Path(qte_sdk.__file__).resolve().parent.parent
+    record = json.dumps({"url": source.as_uri(), "dir_info": {"editable": True}})
+    elsewhere = str(tmp_path / "site-packages" / "qte_sdk" / "__init__.py")
+    monkeypatch.setattr(
+        update.metadata, "distribution", lambda name: FakeDistribution(record, package=elsewhere)
+    )
+    newer = tag_for(bumped(VERSION, 2))
+    answer(monkeypatch, refs_with((newer, MAIN)))
+    result = check_for_update()
+    assert result.status is Status.BEHIND
+    assert result.command == COMMAND
+    assert str(source) not in result.message
+
+
+def test_an_editable_install_of_another_folder_is_not_the_one_imported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    record = json.dumps({"url": tmp_path.as_uri(), "dir_info": {"editable": True}})
+    elsewhere = str(tmp_path / "site-packages" / "qte_sdk" / "__init__.py")
+    monkeypatch.setattr(
+        update.metadata, "distribution", lambda name: FakeDistribution(record, package=elsewhere)
+    )
+    repository = answer(monkeypatch, refs_with((tag_for(bumped(VERSION, 0)), MAIN)))
+    result = check_for_update()
+    assert result.status is Status.UNKNOWN
+    assert "not the one pip installed" in result.message
+    assert repository.requests == []
+
+
 def test_a_version_that_is_not_a_release_number_cannot_tell(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(qte_sdk, "__version__", "1.0.0.dev1")
     installed(monkeypatch, git_install(), version="1.0.0.dev1")

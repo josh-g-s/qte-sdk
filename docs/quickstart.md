@@ -26,7 +26,7 @@ source .venv/bin/activate
 pip install "git+https://github.com/josh-g-s/qte-sdk"
 ```
 
-On Windows, first install Python 3.11 or later from python.org or with `winget install Python.Python.3.12`, then open a new terminal so it finds Python. Type `py`, never `python3`: on Windows `python3` is a stub that only offers the Microsoft Store, even once Python is installed. (`python` works too if the installer added Python to your PATH.) In PowerShell:
+On Windows, first install Python 3.11 or later from python.org or with `winget install Python.Python.3.12`, then open a new terminal so it finds Python. Type `py`, not `python3`: on Windows `python3` is often only a stub that offers the Microsoft Store, even once Python is installed. (`python` works too if the installer added Python to your PATH.) In PowerShell:
 
 ```powershell
 py -m venv .venv

@@ -221,8 +221,11 @@ def _installed(version: str) -> _Install:
     except (OSError, UnicodeDecodeError):
         raise _CannotTell("its install record (direct_url.json) cannot be read") from None
     try:
+        imported = Path(qte_sdk.__file__ or "").resolve()
         own = Path(str(distribution.locate_file("qte_sdk/__init__.py"))).resolve()
-        same = own == Path(qte_sdk.__file__ or "").resolve()
+        source = _editable_source(text)
+        # An editable install is imported from its source folder, not from site-packages.
+        same = own == imported or (source is not None and imported.is_relative_to(source))
     except (OSError, RuntimeError, ValueError):
         same = False
     if not same:
@@ -244,6 +247,23 @@ def _installed(version: str) -> _Install:
     if _VERSION.fullmatch(version) is None:
         raise _CannotTell(f"its version, {version}, is not a release number")
     return _from_direct_url(text)
+
+
+def _editable_source(text: str | None) -> Path | None:
+    """The local folder an editable install was made from, if `text` records one."""
+    try:
+        data = json.loads(text or "")
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("dir_info"), dict):
+        return None
+    url = data.get("url")
+    if data["dir_info"].get("editable") is not True or not isinstance(url, str):
+        return None
+    parts = urlsplit(url)
+    if parts.scheme.lower() != "file" or parts.netloc not in ("", "localhost"):
+        return None
+    return Path(urllib.request.url2pathname(parts.path)).resolve()
 
 
 def _from_direct_url(text: str | None) -> _Install:
