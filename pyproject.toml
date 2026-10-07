@@ -55,6 +55,7 @@ only-include = [
     "examples",
     "README.md",
     "CHANGELOG.md",
+    "releases.json",
     "LICENSE",
     "pyproject.toml",
 ]

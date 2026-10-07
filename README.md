@@ -45,7 +45,7 @@ To see whether a newer release is out, run:
 python -m qte_sdk.update
 ```
 
-It says whether your SDK is the latest release and, if not, prints the command that updates it; after an install from a release zip, that command installs the latest release's zip, so it needs no git either. It exits 0 when your SDK is current, 1 when a newer release is out and 2 when it cannot tell, as when GitHub cannot be reached. An install it cannot trace to the repository, such as an editable install of a local copy, is never called current: it gets 1 when its version is behind the latest release and 2 otherwise. Each release is listed in the [changelog](CHANGELOG.md). To install one release and stay on it, name its tag:
+It says whether your SDK is the latest release and, if not, prints the command that updates it, in a line that starts `QTE-UPDATE-AVAILABLE` and says when the update is a recommended one, and why; after an install from a release zip, that command installs the latest release's zip, so it needs no git either. It exits 0 when your SDK is current, 1 when a newer release is out and 2 when it cannot tell, as when GitHub cannot be reached. An install it cannot trace to the repository, such as an editable install of a local copy, is never called current: it gets 1 when its version is behind the latest release and 2 otherwise. Each release is listed in the [changelog](CHANGELOG.md), and [`releases.json`](releases.json) marks the ones that are recommended updates. Opening a session also runs this check in the background, at most once a day, and logs that line as a warning when a newer release is out; set `QTE_UPDATE_CHECK=0` to turn it off (see the [quickstart](docs/quickstart.md)). To install one release and stay on it, name its tag:
 
 ```sh
 pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"
@@ -138,7 +138,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |
 | [`qte_sdk.options`](qte_sdk/options.py) | `option_symbol`, `parse_option_symbol`, `is_option_symbol`: build and read option contracts' OCC symbols, such as `SPY240119C00470000`; `chain_contracts`, `expiry_date`, `limit_scope`: read the day's `OptionChain`; `LatestGreeks`, `greek_to_decimal`, `vol_to_decimal`: published Greeks, exactly; `trading_state`: what an option contract may do now; `is_feed_only`: an option trade's feed-only residual print; `option_underlyings`, `listed_contracts`, `strike_increment`: the listed contracts and strike increment of each underlying, from the instruments table, for a first option subscribe |
-| [`qte_sdk.update`](qte_sdk/update.py) | `check_for_update`: whether the installed SDK is the latest release, as `python -m qte_sdk.update` says |
+| [`qte_sdk.update`](qte_sdk/update.py) | `check_for_update`: whether the installed SDK is the latest release, and whether an update is recommended, as `python -m qte_sdk.update` says; the daily background check that `open_session` starts (`QTE_UPDATE_CHECK=0` turns it off) |
 | [`qte_sdk.units`](qte_sdk/units.py) | `to_decimal`, `to_micros`: exact conversion between prices and micro-dollars; `to_datetime`, `to_timedelta`, `to_timestamp`: exchange timestamps (milliseconds since the epoch, UTC) as `datetime` and `timedelta` |
 
 ## Things to know before you trade

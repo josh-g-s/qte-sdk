@@ -34,6 +34,7 @@ from test_history import book as history_book
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
+import qte_sdk
 from qte_sdk import _fileaccess
 from qte_sdk import replay as qte_replay
 from qte_sdk import update as qte_update
@@ -2765,9 +2766,63 @@ def update_returning(status: qte_update.Status, message: str, **fields: Any) -> 
 def test_the_smoke_test_fails_an_sdk_behind_a_release(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
-    message = "qte-sdk 1.0.0 is behind the latest release, v1.0.1: update with pip install ..."
+    message = "QTE-UPDATE-AVAILABLE: qte-sdk 1.0.0 is behind 1.0.1. Update with pip install ..."
     update = update_returning(qte_update.Status.BEHIND, message, latest_release="v1.0.1")
     assert sdk_version_line(monkeypatch, capsys, update) == ("FAIL", message)
+
+
+def behind_the_next_release(
+    monkeypatch: pytest.MonkeyPatch, recommended: bool, platforms: list[str]
+) -> str:
+    """Make the real update check find the installed SDK, installed with git and following
+    main, behind the next patch release, which releases.json marks as `recommended` on
+    `platforms`, with the reason "it fixes a freeze". Returns that release's version."""
+    major, minor, patch = (int(n) for n in qte_sdk.__version__.split("."))
+    newer = f"{major}.{minor}.{patch + 1}"
+    monkeypatch.setattr(qte_update, "_installed", lambda version: qte_update._Install("1" * 40))
+    monkeypatch.setattr(qte_update, "_fetch_refs", lambda timeout: b"")
+    refs = {"refs/heads/main": "2" * 40, f"refs/tags/v{newer}": "2" * 40}
+    monkeypatch.setattr(qte_update, "_parse_refs", lambda data: refs)
+    entry = {
+        "version": newer,
+        "recommended": recommended,
+        "why": "it fixes a freeze",
+        "platforms": platforms,
+    }
+    data = json.dumps([entry]).encode()
+    monkeypatch.setattr(qte_update, "_read_releases", lambda timeout: data)
+    return newer
+
+
+@pytest.mark.parametrize(
+    "recommended, platforms, said",
+    [
+        (True, [], ", a recommended update: it fixes a freeze"),
+        (True, [sys.platform], " on this platform: it fixes a freeze"),
+        (True, ["no_such_platform"], ""),
+        (False, [], ""),
+    ],
+)
+def test_the_smoke_test_says_whether_an_update_is_recommended_and_why(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    recommended: bool,
+    platforms: list[str],
+    said: str,
+):
+    newer = behind_the_next_release(monkeypatch, recommended, platforms)
+    status, line = sdk_version_line(monkeypatch, capsys, qte_update)
+    assert status == "FAIL"
+    command = 'pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"'
+    if said.startswith(" on this platform"):
+        name = {"win32": "Windows", "darwin": "macOS", "linux": "Linux"}.get(
+            sys.platform, sys.platform
+        )
+        said = f", a recommended update on {name}: it fixes a freeze"
+    assert line == (
+        f"QTE-UPDATE-AVAILABLE: qte-sdk {qte_sdk.__version__} is behind {newer}{said}. "
+        f"Update with {command}."
+    )
 
 
 def test_the_smoke_test_passes_a_current_sdk_and_notes_newer_commits(

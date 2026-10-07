@@ -5,6 +5,7 @@ import ssl
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
+from typing import Any
 
 import pytest
 from fake_exchange import frame, serve_local
@@ -16,6 +17,7 @@ from websockets.frames import Close
 from websockets.protocol import State
 
 import qte_sdk.reconnect
+from qte_sdk import update
 from qte_sdk.connection import (
     Connection,
     ContractVersionMismatch,
@@ -1173,3 +1175,35 @@ def test_the_docstrings_say_reports_are_resumed_and_market_data_is_not():
     disconnected_doc = " ".join((Disconnected.__doc__ or "").split())
     assert "Market data sent while disconnected is not recovered" in disconnected_doc
     assert "private order reports" in disconnected_doc and "resumes" in disconnected_doc
+
+
+async def test_the_update_check_starts_on_the_first_connect_only(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The check is on, as outside the tests; what it would do is recorded instead.
+    monkeypatch.delenv(update.UPDATE_CHECK_ENV_VAR, raising=False)
+    checked: list[str] = []
+    monkeypatch.setattr(update, "_check_and_log", lambda: checked.append("checked"))
+    calls: list[int] = []
+    real_start = update.check_in_background
+
+    def counting() -> Any:
+        calls.append(exchange.connections)
+        return real_start()
+
+    monkeypatch.setattr(update, "check_in_background", counting)
+    clock = Clock()
+    exchange = Exchange(session(then=close_normally), session())
+    async with serve_local(exchange) as url:
+        async with ReconnectingSession(url, synthetic_token(), sleep=clock.sleep) as rs:
+            async for event in rs:
+                if isinstance(event, Connected) and event.reconnected:
+                    await rs.close()
+    # Asked on each connect, before connecting, but started only on the first.
+    assert calls == [0, 1]
+    await asyncio.sleep(0)
+    for _ in range(100):
+        if checked:
+            break
+        await asyncio.sleep(0.01)
+    assert checked == ["checked"]

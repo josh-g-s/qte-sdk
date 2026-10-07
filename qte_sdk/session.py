@@ -34,6 +34,7 @@ from typing import Any
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
+from qte_sdk import update as _update
 from qte_sdk.connection import (
     Connection,
     DecodeFailed,
@@ -885,6 +886,10 @@ async def open_session(
     Raises `SessionNotAcknowledged` if the connection ends first, and `TimeoutError` if the
     session is not acknowledged within `ack_timeout` seconds. The connection is closed
     whenever no session is returned, which can take up to `close_timeout` seconds more.
+
+    It also starts the SDK's update check in the background, at most once a day, which
+    logs a WARNING when a newer release is out and never delays or fails the session; set
+    `QTE_UPDATE_CHECK=0` to turn it off (see `qte_sdk.update`).
     """
     secret = _Secret(resolve_token(token))
     del token
@@ -907,6 +912,8 @@ async def _open_session(
     was acknowledged, even when a cancellation then replaces the error; `ReconnectingSession`
     uses it. It is positional-only, so an `on_close=` among a caller's options is passed
     on with them and never reaches it."""
+    # In a daemon thread, at most once in a program and once a day: it never waits here.
+    _update.check_in_background()
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)
     interrupted = False

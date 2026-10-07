@@ -5,6 +5,8 @@ repository is answered by a canned list, and any other is an error."""
 import email.message
 import http.server
 import json
+import logging
+import os
 import socket
 import subprocess
 import sys
@@ -39,6 +41,15 @@ REINSTALL = (
 
 def tag_for(version: str) -> str:
     return f"v{version}"
+
+
+def behind_message(tag: str, command: str, recommended: str = "") -> str:
+    """The line behind release `tag`: `recommended` is the part that says the update is
+    recommended, such as ", a recommended update on Windows: <why>"."""
+    return (
+        f"QTE-UPDATE-AVAILABLE: qte-sdk {VERSION} is behind {tag.removeprefix('v')}"
+        f"{recommended}. Update with {command}."
+    )
 
 
 def bumped(version: str, part: int) -> str:
@@ -97,16 +108,37 @@ class FakeResponse:
 
 
 class Repository:
-    """Answers the update check's one request with `body`, or raises `error`, and records
-    the requests."""
+    """Answers the update check's request for the list of references with `body`, or raises
+    `error`, and records the requests in `requests`. A request for releases.json is answered
+    with `releases`, or raises `releases_error` (by default, as when the file is missing),
+    and is recorded in `release_requests`."""
 
-    def __init__(self, body: bytes = b"", error: BaseException | None = None, **kwargs: Any):
+    def __init__(
+        self,
+        body: bytes = b"",
+        error: BaseException | None = None,
+        releases: bytes | None = None,
+        releases_error: BaseException | None = None,
+        **kwargs: Any,
+    ):
         self.body = body
         self.error = error
+        self.releases = releases
+        self.releases_error = releases_error
         self.kwargs = kwargs
         self.requests: list[tuple[urllib.request.Request, float]] = []
+        self.release_requests: list[tuple[urllib.request.Request, float]] = []
 
     def __call__(self, request: urllib.request.Request, timeout: float) -> FakeResponse:
+        if request.full_url == update.RELEASES_URL:
+            self.release_requests.append((request, timeout))
+            if self.releases_error is not None:
+                raise self.releases_error
+            if self.releases is None:
+                raise urllib.error.HTTPError(
+                    request.full_url, 404, "Not Found", email.message.Message(), None
+                )
+            return FakeResponse(self.releases, request.full_url, "text/plain")
         self.requests.append((request, timeout))
         if self.error is not None:
             raise self.error
@@ -322,9 +354,7 @@ def test_an_install_it_cannot_place_behind_a_release_is_behind(
     assert result.latest_release == newer
     expected = archive_command(newer) if shape in FROM_AN_ARCHIVE else COMMAND
     assert result.command == expected
-    assert result.message == (
-        f"qte-sdk {VERSION} is behind the latest release, {newer}: update with {expected}"
-    )
+    assert result.message == behind_message(newer, expected)
     assert_private(result)
 
 
@@ -507,9 +537,8 @@ def test_an_archive_install_behind_a_release_is_told_the_latest_releases_archive
     assert result.latest_release == newer
     assert result.command == archive_command(newer)
     assert result.command == update_command(newer, archive=True)
-    assert result.message == (
-        f"qte-sdk {VERSION} is behind the latest release, {newer}: update with "
-        f"pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/{newer}.zip"
+    assert result.message == behind_message(
+        newer, f"pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/{newer}.zip"
     )
     assert "secret-password" not in result.message
 
@@ -941,9 +970,10 @@ def test_an_install_behind_a_release_is_told_the_command(monkeypatch: pytest.Mon
     assert result.exit_code == 1
     assert result.latest_release == newer
     assert result.command == COMMAND
-    assert result.message == (
-        f"qte-sdk {VERSION} is behind the latest release, {newer}: update with {COMMAND}"
-    )
+    assert result.message == behind_message(newer, COMMAND)
+    assert result.code == "QTE-UPDATE-AVAILABLE"
+    assert not result.recommended
+    assert result.why is None
 
 
 def test_an_install_pinned_to_a_release_is_pointed_at_the_latest_release(
@@ -1054,7 +1084,7 @@ def test_the_command_prints_the_install_and_the_result_and_exits_with_its_status
     out, err = capsys.readouterr()
     assert out.splitlines() == [
         f"installed: qte-sdk {VERSION}, commit {INSTALLED[:12]}, following main",
-        f"qte-sdk {VERSION} is behind the latest release, {newer}: update with {COMMAND}",
+        behind_message(newer, COMMAND),
     ]
     assert err == ""
 
@@ -1099,8 +1129,7 @@ def test_the_command_says_which_archive_was_installed(
     assert update.main([]) == 1
     assert capsys.readouterr().out.splitlines() == [
         f"installed: qte-sdk {VERSION}, {described}",
-        f"qte-sdk {VERSION} is behind the latest release, {newer}: update with "
-        f"{archive_command(newer)}",
+        behind_message(newer, archive_command(newer)),
     ]
 
 
@@ -1236,3 +1265,777 @@ def test_a_redirect_is_never_followed(local_server: Any):
     assert raised.value.code == 302
     assert Origin.requests == ["/"]
     assert Target.requests == []
+
+
+# Recommended updates: releases.json
+
+ROOT = Path(__file__).resolve().parent.parent
+ORIGINAL_CACHE_DIR = update._cache_dir
+
+
+def releases_json(*entries: dict[str, Any]) -> bytes:
+    return json.dumps(list(entries)).encode()
+
+
+def entry(
+    version: str,
+    recommended: bool = True,
+    why: str = "it fixes something serious",
+    platforms: list[str] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "version": version,
+        "recommended": recommended,
+        "why": why,
+        "platforms": [] if platforms is None else platforms,
+        **extra,
+    }
+
+
+def test_the_repositorys_releases_json_lists_every_release_in_the_expected_form():
+    data = (ROOT / "releases.json").read_bytes()
+    raw = json.loads(data)
+    parsed = update._parse_releases(data)
+    # Every entry is read, and none is changed by making it plain text.
+    assert len(parsed) == len(raw)
+    for item in raw:
+        number = tuple(int(n) for n in item["version"].split("."))
+        assert parsed[number].why == item["why"]
+    # Every release tagged so far, and the release in progress.
+    assert {(1, 0, 0), (1, 0, 1), (1, 0, 2), (1, 1, 0), (1, 1, 1)} <= set(parsed)
+    windows_fix = parsed[(1, 1, 1)]
+    assert windows_fix.recommended
+    assert windows_fix.platforms == ("win32",)
+    assert windows_fix.why.endswith("1.1.1 ends it at once")
+    # The current version has an entry before it is released.
+    assert tuple(int(n) for n in VERSION.split(".")) in parsed
+
+
+def test_valid_entries_are_read_and_unknown_keys_ignored():
+    data = releases_json(
+        entry("1.0.0", recommended=False, why=""),
+        entry("1.1.1", platforms=["win32", "linux"], severity="high", notes={"a": 1}),
+    )
+    assert update._parse_releases(data) == {
+        (1, 0, 0): update._Release((1, 0, 0), False, "", ()),
+        (1, 1, 1): update._Release(
+            (1, 1, 1), True, "it fixes something serious", ("win32", "linux")
+        ),
+    }
+
+
+INVALID_ENTRIES = {
+    "not an object": "1.1.1",
+    "no version": {k: v for k, v in entry("1.1.1").items() if k != "version"},
+    "a version with a v": entry("v1.1.1"),
+    "a short version": entry("1.1"),
+    "a version with a suffix": entry("1.1.1rc1"),
+    "a version with a leading zero": entry("1.01.1"),
+    "a version that is a number": entry(1.1),  # type: ignore[arg-type]
+    "no recommended": {k: v for k, v in entry("1.1.1").items() if k != "recommended"},
+    "recommended as text": entry("1.1.1", recommended="true"),  # type: ignore[arg-type]
+    "recommended as a number": entry("1.1.1", recommended=1),  # type: ignore[arg-type]
+    "no why": {k: v for k, v in entry("1.1.1").items() if k != "why"},
+    "a why that is not text": entry("1.1.1", why=["a", "b"]),  # type: ignore[arg-type]
+    "recommended with an empty why": entry("1.1.1", why=" \x1b​. "),
+    "no platforms": {k: v for k, v in entry("1.1.1").items() if k != "platforms"},
+    "platforms as text": {**entry("1.1.1"), "platforms": "win32"},
+    "a platform that is not text": entry("1.1.1", platforms=[32]),  # type: ignore[list-item]
+    "an upper-case platform": entry("1.1.1", platforms=["Win32"]),
+    "an empty platform": entry("1.1.1", platforms=[""]),
+    "a platform with an escape": entry("1.1.1", platforms=["win32\x1b[2J"]),
+}
+
+
+@pytest.mark.parametrize("case", INVALID_ENTRIES)
+def test_an_entry_not_in_the_expected_form_is_ignored_and_the_rest_are_read(case: str):
+    data = json.dumps([INVALID_ENTRIES[case], entry("1.0.2", recommended=False)]).encode()
+    assert set(update._parse_releases(data)) == {(1, 0, 2)}
+
+
+INVALID_FILES = {
+    "empty": b"",
+    "not json": b"{not json",
+    "an object": json.dumps({"releases": [entry("1.1.1")]}).encode(),
+    "text": b'"1.1.1"',
+    "not utf-8": b'[{"version": "1.1.1", "why": "\xff"}]',
+    "deeply nested": b"[" * 100_000,
+    "a web page": b"<!DOCTYPE html><html></html>",
+    "oversize": releases_json(entry("1.1.1", why="x" * (update._MAX_RELEASES_SIZE + 1))),
+}
+
+
+@pytest.mark.parametrize("case", INVALID_FILES)
+def test_a_file_not_in_the_expected_form_gives_no_entries(case: str):
+    assert update._parse_releases(INVALID_FILES[case]) == {}
+
+
+def test_a_version_listed_twice_is_ignored():
+    data = releases_json(entry("1.1.1"), entry("1.1.1", recommended=False), entry("1.1.0"))
+    assert set(update._parse_releases(data)) == {(1, 1, 0)}
+
+
+@pytest.mark.parametrize(
+    "why, shown",
+    [
+        ("plain words", "plain words"),
+        ("ends with a full stop.", "ends with a full stop"),
+        ("two\nlines\r\nand\ta tab", "two lines and a tab"),
+        ("an \x1b[2Jescape and a bell\x07", "an [2Jescape and a bell"),
+        ("a \x9b31m C1 control", "a 31m C1 control"),
+        ("right-to-left ‮override‬", "right-to-left override"),
+        ("zero​width and line separator", "zerowidth and line separator"),
+        ("  spaced   out  ", "spaced out"),
+    ],
+)
+def test_the_reason_is_plain_text_on_one_line(why: str, shown: str):
+    [release] = update._parse_releases(releases_json(entry("1.1.1", why=why))).values()
+    assert release.why == shown
+
+
+def test_a_long_reason_is_cut_short():
+    [release] = update._parse_releases(releases_json(entry("1.1.1", why="word " * 200))).values()
+    assert len(release.why) == update._MAX_WHY
+    assert release.why.endswith("...")
+
+
+# Recommended updates: what the check says
+
+WHY = "on Windows, a fetch could freeze the program"
+
+
+def behind_with(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    *entries: dict[str, Any],
+    tags: tuple[str, ...] = (),
+    releases: bytes | None = None,
+    **kwargs: Any,
+) -> tuple[update.UpdateCheck, Repository, str]:
+    """Check a git install of VERSION on `platform`, with release tags VERSION and the next
+    patch (and `tags`), and releases.json holding `entries` (or `releases`)."""
+    newer = tag_for(bumped(VERSION, 2))
+    monkeypatch.setattr(sys, "platform", platform)
+    installed(monkeypatch, git_install())
+    refs = refs_with((tag_for(VERSION), INSTALLED), (newer, MAIN), *((tag, MAIN) for tag in tags))
+    data = releases_json(*entries) if releases is None else releases
+    repository = answer(monkeypatch, refs, releases=data, **kwargs)
+    return check_for_update(), repository, newer
+
+
+@pytest.mark.parametrize("platform, name", [("win32", "Windows"), ("linux", "Linux")])
+def test_a_release_recommended_on_this_platform_says_so_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch, platform: str, name: str
+):
+    newer_version = bumped(VERSION, 2)
+    result, repository, newer = behind_with(
+        monkeypatch, platform, entry(newer_version, why=WHY, platforms=["win32", "linux"])
+    )
+    assert result.status is Status.BEHIND
+    assert result.exit_code == 1
+    assert result.recommended
+    assert result.why == WHY
+    assert result.code == "QTE-UPDATE-AVAILABLE"
+    assert result.message == behind_message(
+        newer, COMMAND, f", a recommended update on {name}: {WHY}"
+    )
+    assert len(repository.requests) == 1
+    assert len(repository.release_requests) == 1
+
+
+def test_a_release_recommended_on_every_platform_names_none(monkeypatch: pytest.MonkeyPatch):
+    result, _, newer = behind_with(monkeypatch, "darwin", entry(bumped(VERSION, 2), why=WHY))
+    assert result.recommended
+    assert result.message == behind_message(newer, COMMAND, f", a recommended update: {WHY}")
+
+
+def test_a_release_recommended_on_another_platform_is_an_ordinary_update(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    result, _, newer = behind_with(
+        monkeypatch, "darwin", entry(bumped(VERSION, 2), why=WHY, platforms=["win32"])
+    )
+    assert result.status is Status.BEHIND
+    assert not result.recommended
+    assert result.why is None
+    assert result.message == behind_message(newer, COMMAND)
+    assert "recommended" not in result.message
+
+
+def test_a_release_not_marked_recommended_is_an_ordinary_update(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    result, _, newer = behind_with(
+        monkeypatch, "win32", entry(bumped(VERSION, 2), recommended=False, why=WHY)
+    )
+    assert result.status is Status.BEHIND
+    assert not result.recommended
+    assert result.message == behind_message(newer, COMMAND)
+
+
+def test_a_recommended_release_between_the_installed_one_and_the_latest_counts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    middle, latest = bumped(VERSION, 2), bumped(bumped(VERSION, 2), 2)
+    result, _, newer = behind_with(
+        monkeypatch,
+        "win32",
+        entry(middle, why="the older reason"),
+        entry(latest, recommended=False),
+        tags=(tag_for(latest),),
+    )
+    assert newer == tag_for(middle)
+    assert result.latest_release == tag_for(latest)
+    assert result.recommended
+    assert result.message == behind_message(
+        tag_for(latest), COMMAND, ", a recommended update: the older reason"
+    )
+
+
+def test_the_highest_recommended_release_gives_the_reason(monkeypatch: pytest.MonkeyPatch):
+    middle, latest = bumped(VERSION, 2), bumped(bumped(VERSION, 2), 2)
+    result, _, _ = behind_with(
+        monkeypatch,
+        "win32",
+        entry(middle, why="the older reason"),
+        entry(latest, why="the newer reason"),
+        tags=(tag_for(latest),),
+    )
+    assert result.why == "the newer reason"
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        VERSION,  # the installed one
+        "0.0.0",  # older
+        "999.0.0",  # newer than any release tag: not released yet
+    ],
+)
+def test_a_recommended_release_not_above_the_installed_one_or_not_tagged_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, version: str
+):
+    result, _, newer = behind_with(monkeypatch, "win32", entry(version, why=WHY))
+    assert result.status is Status.BEHIND
+    assert result.latest_release == newer
+    assert not result.recommended
+    assert result.message == behind_message(newer, COMMAND)
+
+
+def test_releases_json_never_changes_the_latest_release_or_makes_a_current_install_behind(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(sys, "platform", "win32")
+    installed(monkeypatch, git_install(tag_for(VERSION)))
+    repository = answer(
+        monkeypatch,
+        refs_with((tag_for(VERSION), INSTALLED)),
+        releases=releases_json(entry("999.0.0", why=WHY)),
+    )
+    result = check_for_update()
+    assert result.status is Status.CURRENT
+    assert not result.recommended
+    # It is read only when behind a release.
+    assert repository.release_requests == []
+
+
+RELEASES_FAILURES = {
+    "missing": {},
+    "unreachable": {"releases_error": urllib.error.URLError("http://user:pw@proxy.invalid")},
+    "timed out": {"releases_error": TimeoutError("timed out")},
+    "a server error": {
+        "releases_error": urllib.error.HTTPError(
+            update.RELEASES_URL, 500, "Server Error", email.message.Message(), None
+        )
+    },
+    "a redirect": {
+        "releases_error": urllib.error.HTTPError(
+            update.RELEASES_URL, 302, "Found", email.message.Message(), None
+        )
+    },
+    "unreadable": {"releases": b"<html>"},
+    "oversize": {"releases": b"[" + b" " * (update._MAX_RELEASES_SIZE + 10) + b"]"},
+    "an unexpected error": {"releases_error": LookupError("/home/someone/private")},
+}
+
+
+@pytest.mark.parametrize("case", RELEASES_FAILURES)
+def test_when_releases_json_cannot_be_used_the_check_is_as_before(
+    monkeypatch: pytest.MonkeyPatch, case: str
+):
+    options = dict(RELEASES_FAILURES[case])
+    releases = options.pop("releases", None)
+    newer = tag_for(bumped(VERSION, 2))
+    monkeypatch.setattr(sys, "platform", "win32")
+    installed(monkeypatch, git_install())
+    repository = answer(
+        monkeypatch,
+        refs_with((tag_for(VERSION), INSTALLED), (newer, MAIN)),
+        releases=releases,
+        **options,
+    )
+    result = check_for_update()
+    assert result.status is Status.BEHIND
+    assert result.exit_code == 1
+    assert result.latest_release == newer
+    assert result.command == COMMAND
+    assert not result.recommended
+    assert result.message == behind_message(newer, COMMAND)
+    assert len(repository.release_requests) == 1
+    assert "pw@" not in result.message
+    assert "someone" not in result.message
+
+
+def test_releases_json_sent_elsewhere_is_not_used(monkeypatch: pytest.MonkeyPatch):
+    newer = tag_for(bumped(VERSION, 2))
+    monkeypatch.setattr(sys, "platform", "win32")
+    installed(monkeypatch, git_install())
+    body = refs_with((tag_for(VERSION), INSTALLED), (newer, MAIN))
+    data = releases_json(entry(bumped(VERSION, 2), why=WHY))
+
+    def elsewhere(request: urllib.request.Request, timeout: float) -> FakeResponse:
+        if request.full_url == update.RELEASES_URL:
+            return FakeResponse(data, "https://example.com/releases.json", "text/plain")
+        return FakeResponse(body, request.full_url)
+
+    monkeypatch.setattr(update, "_open", elsewhere)
+    result = check_for_update()
+    assert result.status is Status.BEHIND
+    assert not result.recommended
+
+
+def test_releases_json_is_asked_for_saying_only_the_sdks_version_within_the_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, repository, _ = behind_with(monkeypatch, "win32", entry(bumped(VERSION, 2)))
+    [(request, timeout)] = repository.release_requests
+    assert request.full_url == (
+        "https://raw.githubusercontent.com/josh-g-s/qte-sdk/main/releases.json"
+    )
+    assert request.get_method() == "GET"
+    assert dict(request.header_items()) == {"User-agent": f"qte-sdk/{VERSION}"}
+    assert request.data is None
+    # What is left of the check's own timeout.
+    assert 0 < timeout <= update.DEFAULT_TIMEOUT
+
+
+def test_a_releases_json_that_never_comes_is_not_waited_for_beyond_the_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    newer = tag_for(bumped(VERSION, 2))
+    installed(monkeypatch, git_install())
+    body = refs_with((tag_for(VERSION), INSTALLED), (newer, MAIN))
+    release = threading.Event()
+
+    def hanging(request: urllib.request.Request, timeout: float) -> FakeResponse:
+        if request.full_url == update.RELEASES_URL:
+            release.wait(30)
+            raise TimeoutError
+        return FakeResponse(body, request.full_url)
+
+    monkeypatch.setattr(update, "_open", hanging)
+    started = time.monotonic()
+    result = check_for_update(timeout=0.5)
+    release.set()
+    assert time.monotonic() - started < 5
+    assert result.status is Status.BEHIND
+    assert result.message == behind_message(newer, COMMAND)
+
+
+def test_an_install_it_cannot_place_behind_a_recommended_release_is_told_so(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    newer = tag_for(bumped(VERSION, 2))
+    monkeypatch.setattr(sys, "platform", "win32")
+    installed(monkeypatch, UNPLACED["wheel"][0])
+    answer(
+        monkeypatch,
+        refs_with((tag_for(VERSION), RELEASE_COMMIT), (newer, MAIN)),
+        releases=releases_json(entry(bumped(VERSION, 2), why=WHY, platforms=["win32"])),
+    )
+    result = check_for_update()
+    assert result.status is Status.BEHIND
+    assert result.recommended
+    assert result.message == behind_message(
+        newer, archive_command(newer), f", a recommended update on Windows: {WHY}"
+    )
+
+
+def test_the_command_says_when_an_update_is_recommended_and_why(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    newer = tag_for(bumped(VERSION, 2))
+    monkeypatch.setattr(sys, "platform", "win32")
+    installed(monkeypatch, git_install())
+    answer(
+        monkeypatch,
+        refs_with((newer, MAIN)),
+        releases=releases_json(entry(bumped(VERSION, 2), why=f"{WHY}\x1b[2J‮", platforms=["win32"])),
+    )
+    assert update.main([]) == 1
+    out, err = capsys.readouterr()
+    assert out.splitlines() == [
+        f"installed: qte-sdk {VERSION}, commit {INSTALLED[:12]}, following main",
+        behind_message(newer, COMMAND, f", a recommended update on Windows: {WHY}[2J"),
+    ]
+    assert "\x1b" not in out
+    assert "‮" not in out
+    assert err == ""
+
+
+# The automatic check
+
+
+@pytest.fixture
+def automatic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Turn the automatic check back on, as it is outside the tests, with its cache folder
+    in `tmp_path` (as the conftest sets it). Returns the file that records the last check."""
+    monkeypatch.delenv(update.UPDATE_CHECK_ENV_VAR, raising=False)
+    folder = update._cache_dir()
+    assert folder is not None and folder.is_relative_to(tmp_path)
+    return folder / "update-check"
+
+
+def run_in_background() -> threading.Thread | None:
+    """Start the automatic check as `open_session` does, and wait for it to end."""
+    thread = update.check_in_background()
+    if thread is not None:
+        thread.join(30)
+        assert not thread.is_alive()
+    return thread
+
+
+def new_program(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As if another program started, on the same computer."""
+    monkeypatch.setattr(update, "_automatic_done", False)
+
+
+def behind_a_release(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Repository:
+    newer = tag_for(bumped(VERSION, 2))
+    installed(monkeypatch, git_install())
+    return answer(monkeypatch, refs_with((tag_for(VERSION), INSTALLED), (newer, MAIN)), **kwargs)
+
+
+def update_records(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    return [r for r in caplog.records if r.name.startswith("qte_sdk")]
+
+
+def test_the_automatic_check_logs_a_warning_with_the_code_when_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    automatic: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+):
+    newer = tag_for(bumped(VERSION, 2))
+    monkeypatch.setattr(sys, "platform", "win32")
+    repository = behind_a_release(
+        monkeypatch,
+        releases=releases_json(entry(bumped(VERSION, 2), why=WHY, platforms=["win32"])),
+    )
+    caplog.set_level(logging.DEBUG)
+    assert run_in_background() is not None
+    [record] = update_records(caplog)
+    assert record.name == "qte_sdk.update"
+    assert record.levelno == logging.WARNING
+    assert record.code == "QTE-UPDATE-AVAILABLE"
+    assert record.getMessage() == behind_message(
+        newer, COMMAND, f", a recommended update on Windows: {WHY}"
+    )
+    assert len(repository.requests) == 1
+    assert len(repository.release_requests) == 1
+    # It never prints.
+    assert capsys.readouterr() == ("", "")
+
+
+def test_the_automatic_check_logs_an_ordinary_update_without_recommended(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path, caplog: pytest.LogCaptureFixture
+):
+    newer = tag_for(bumped(VERSION, 2))
+    behind_a_release(monkeypatch)
+    caplog.set_level(logging.DEBUG)
+    run_in_background()
+    [record] = update_records(caplog)
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == behind_message(newer, COMMAND)
+
+
+SILENT = {
+    "current": lambda m: (
+        installed(m, git_install(tag_for(VERSION))),
+        answer(m, refs_with((tag_for(VERSION), INSTALLED))),
+    ),
+    "main ahead": lambda m: (
+        installed(m, git_install()),
+        answer(m, refs_with((tag_for(VERSION), INSTALLED))),
+    ),
+    "cannot tell": lambda m: (installed(m, "{not json"),),
+    "no release": lambda m: (installed(m, git_install()), answer(m, refs_with())),
+    "network down": lambda m: (
+        installed(m, git_install()),
+        answer(m, error=urllib.error.URLError(OSError("nodename nor servname provided"))),
+    ),
+    "github error": lambda m: (
+        installed(m, git_install()),
+        answer(
+            m,
+            error=urllib.error.HTTPError(
+                "https://github.com/x", 503, "Unavailable", email.message.Message(), None
+            ),
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", SILENT)
+def test_the_automatic_check_is_silent_unless_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    automatic: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+):
+    SILENT[case](monkeypatch)
+    caplog.set_level(logging.DEBUG)
+    assert run_in_background() is not None
+    assert update_records(caplog) == []
+    assert capsys.readouterr() == ("", "")
+    # The check was still counted.
+    assert automatic.exists()
+
+
+def test_the_automatic_check_runs_at_most_once_a_day_on_a_computer(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(update.time, "time", lambda: now[0])
+    repository = behind_a_release(monkeypatch)
+    assert run_in_background() is not None
+    assert len(repository.requests) == 1
+    assert automatic.read_text() == "1800000000\n"
+    # Another program the same day starts no check.
+    for later in (1.0, 3600.0, update.CHECK_INTERVAL - 1):
+        new_program(monkeypatch)
+        now[0] = 1_800_000_000.0 + later
+        run_in_background()
+        assert len(repository.requests) == 1
+    # A day after the last one, it checks again.
+    new_program(monkeypatch)
+    now[0] = 1_800_000_000.0 + update.CHECK_INTERVAL
+    run_in_background()
+    assert len(repository.requests) == 2
+    assert automatic.read_text() == f"{1_800_000_000 + update.CHECK_INTERVAL}\n"
+
+
+def test_the_automatic_check_runs_once_in_a_program(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    repository = behind_a_release(monkeypatch)
+    assert run_in_background() is not None
+    automatic.unlink()  # even with no record of it
+    assert update.check_in_background() is None
+    assert len(repository.requests) == 1
+
+
+def test_a_program_that_checks_for_itself_is_not_checked_again(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    repository = behind_a_release(monkeypatch)
+    check_for_update()
+    assert update.check_in_background() is None
+    assert len(repository.requests) == 1
+    assert not automatic.exists()
+
+
+@pytest.mark.parametrize("stamp", ["not a time", "nan", "inf", "", "\xff", "9" * 400])
+def test_a_record_of_the_last_check_that_cannot_be_read_does_not_stop_it(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path, stamp: str
+):
+    automatic.parent.mkdir(parents=True)
+    automatic.write_bytes(stamp.encode("latin-1"))
+    repository = behind_a_release(monkeypatch)
+    run_in_background()
+    assert len(repository.requests) == 1
+
+
+def test_a_last_check_in_the_future_does_not_stop_it(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    # The clock was set back: the check is not put off until the time comes again.
+    automatic.parent.mkdir(parents=True)
+    automatic.write_text(f"{time.time() + 7 * 24 * 3600:.0f}\n")
+    repository = behind_a_release(monkeypatch)
+    run_in_background()
+    assert len(repository.requests) == 1
+
+
+def test_a_failed_check_is_still_counted_so_it_is_not_retried_that_day(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    installed(monkeypatch, git_install())
+    repository = answer(monkeypatch, error=TimeoutError("timed out"))
+    run_in_background()
+    new_program(monkeypatch)
+    run_in_background()
+    assert len(repository.requests) == 1
+
+
+def test_the_time_is_recorded_before_the_check_starts(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    seen: list[bool] = []
+
+    def checking(timeout: float = update.DEFAULT_TIMEOUT) -> update.UpdateCheck:
+        seen.append(automatic.exists())
+        raise RuntimeError("anything")
+
+    monkeypatch.setattr(update, "check_for_update", checking)
+    run_in_background()
+    assert seen == [True]
+
+
+def test_the_automatic_check_does_not_run_when_the_time_cannot_be_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, automatic: Path
+):
+    blocker = tmp_path / "a file"
+    blocker.write_text("")
+    monkeypatch.setattr(update, "_cache_dir", lambda: blocker / "qte-sdk")
+    repository = behind_a_release(monkeypatch)
+    run_in_background()
+    monkeypatch.setattr(update, "_cache_dir", lambda: None)
+    new_program(monkeypatch)
+    run_in_background()
+    assert repository.requests == []
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", " OFF ", "False"])
+def test_qte_update_check_0_turns_the_automatic_check_off(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path, value: str
+):
+    monkeypatch.setenv("QTE_UPDATE_CHECK", value)
+    repository = behind_a_release(monkeypatch)
+    assert update.check_in_background() is None
+    assert repository.requests == []
+    assert not automatic.exists()
+
+
+@pytest.mark.parametrize("value", ["1", "", "yes"])
+def test_other_values_of_qte_update_check_leave_it_on(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path, value: str
+):
+    monkeypatch.setenv("QTE_UPDATE_CHECK", value)
+    repository = behind_a_release(monkeypatch)
+    assert run_in_background() is not None
+    assert len(repository.requests) == 1
+
+
+def test_the_tests_turn_the_automatic_check_off(tmp_path: Path):
+    # As tests/conftest.py sets it for every test.
+    assert update.check_in_background() is None
+    assert update._cache_dir() == tmp_path / "cache" / "qte-sdk"
+
+
+def test_the_automatic_check_never_waits_for_the_network(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    installed(monkeypatch, git_install())
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hanging(request: object, timeout: float) -> None:
+        entered.set()
+        release.wait(30)
+        raise TimeoutError
+
+    monkeypatch.setattr(update, "_open", hanging)
+    started = time.monotonic()
+    thread = update.check_in_background()
+    took = time.monotonic() - started
+    try:
+        assert thread is not None and thread.daemon
+        assert entered.wait(10)
+        assert took < 1
+    finally:
+        release.set()
+        if thread is not None:
+            thread.join(30)
+
+
+def test_the_automatic_check_never_raises_or_prints(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path, capsys: pytest.CaptureFixture[str]
+):
+    raised: list[object] = []
+    monkeypatch.setattr(threading, "excepthook", raised.append)
+
+    def broken(timeout: float = update.DEFAULT_TIMEOUT) -> None:
+        raise SystemExit("/home/someone/private")
+
+    monkeypatch.setattr(update, "check_for_update", broken)
+    run_in_background()
+    assert raised == []
+    assert capsys.readouterr() == ("", "")
+
+
+def test_a_thread_that_cannot_start_is_no_error(monkeypatch: pytest.MonkeyPatch, automatic: Path):
+    def refuse(self: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", refuse)
+    assert update.check_in_background() is None
+
+
+# The cache folder
+
+
+@pytest.fixture
+def home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    folder = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: folder))
+    return folder
+
+
+def test_the_cache_folder_on_windows_is_under_localappdata(
+    monkeypatch: pytest.MonkeyPatch, home: Path, tmp_path: Path
+):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    assert ORIGINAL_CACHE_DIR() == tmp_path / "Local" / "qte-sdk"
+    monkeypatch.delenv("LOCALAPPDATA")
+    assert ORIGINAL_CACHE_DIR() == home / "AppData" / "Local" / "qte-sdk"
+
+
+def test_the_cache_folder_on_macos_is_under_library_caches(
+    monkeypatch: pytest.MonkeyPatch, home: Path, tmp_path: Path
+):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert ORIGINAL_CACHE_DIR() == home / "Library" / "Caches" / "qte-sdk"
+
+
+@pytest.mark.parametrize("platform", ["linux", "freebsd14"])
+def test_the_cache_folder_elsewhere_is_xdg_cache_home_or_dot_cache(
+    monkeypatch: pytest.MonkeyPatch, home: Path, tmp_path: Path, platform: str
+):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert ORIGINAL_CACHE_DIR() == tmp_path / "xdg" / "qte-sdk"
+    # The XDG specification ignores a relative path.
+    monkeypatch.setenv("XDG_CACHE_HOME", "relative/cache")
+    assert ORIGINAL_CACHE_DIR() == home / ".cache" / "qte-sdk"
+    monkeypatch.delenv("XDG_CACHE_HOME")
+    assert ORIGINAL_CACHE_DIR() == home / ".cache" / "qte-sdk"
+
+
+def test_no_home_folder_gives_no_cache_folder(monkeypatch: pytest.MonkeyPatch):
+    def no_home(cls: object) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    assert ORIGINAL_CACHE_DIR() is None
+
+
+@pytest.mark.windows
+def test_the_cache_folder_on_real_windows_is_under_localappdata():
+    assert ORIGINAL_CACHE_DIR() == Path(os.environ["LOCALAPPDATA"]) / "qte-sdk"
