@@ -27,8 +27,9 @@ Three safeguards apply:
   Users, INTERACTIVE or Domain Users. It is issued too if the access list of the file's
   folder lets such a group add or remove files there, since they could then replace the
   file with one of their own, or if the file's owner, or its folder's, is another account
-  than you, Administrators or SYSTEM, since an owner can change who may open the file, or
-  add or remove files in the folder. An `AddressFileShared` warning is issued instead if
+  than you, Administrators, SYSTEM or Windows' own TrustedInstaller, since an owner can
+  change who may open the file, or add or remove files in the folder. An
+  `AddressFileShared` warning is issued instead if
   such a group may change or replace, or another account owns, a `.env` that sets only
   `QTE_URL`, since whoever changes the address can capture a token kept elsewhere when you
   next connect. Both are kinds of `FileShared`. A folder under your user profile is

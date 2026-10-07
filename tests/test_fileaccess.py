@@ -39,6 +39,8 @@ USERS = "BUILTIN\\Users"
 INTERACTIVE = "NT AUTHORITY\\INTERACTIVE"
 DOMAIN_USERS = "Domain Users"
 
+# NT SERVICE\TrustedInstaller, as SDDL gives it: by its SID, having no alias.
+TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 # The user the tests run as, and another account on the same computer.
 USER_SID = "S-1-5-21-1111111111-2222222222-3333333333-1001"
 OTHER_SID = "S-1-5-21-1111111111-2222222222-3333333333-1002"
@@ -275,6 +277,11 @@ def test_a_malformed_folder_access_list_gives_unknown(sddl: str):
         ("O:SYD:(A;;FA;;;SY)", None, False),
         ("O:S-1-5-32-544G:SY", None, False),
         ("O:S-1-5-18", None, False),
+        # NT SERVICE\TrustedInstaller, which owns C:\ on current Windows: part of Windows.
+        (f"O:{TRUSTED_INSTALLER}D:(A;;FA;;;SY)", USER_SID, False),
+        (f"O:{TRUSTED_INSTALLER.lower()}", None, False),
+        # Another service's SID, of the same form, is not trusted.
+        ("O:S-1-5-80-1-2-3-4-5", USER_SID, True),
         # Another account, by SID.
         (f"O:{OTHER_SID}D:(A;;FA;;;{OTHER_SID})", USER_SID, True),
         ("O:S-1-5-21-9-9-9-1001D:", USER_SID, True),
@@ -2203,3 +2210,41 @@ def test_a_list_not_shown_is_read_before_the_token(windows, monkeypatch):
     with pytest.warns(TokenFileShared):
         assert resolve_token() == token
     assert calls == [f"list {path}", f"list {path.parent}", f"open {path}"]
+
+
+# NT SERVICE\TrustedInstaller owns folders of Windows itself, such as C:\, which holds the
+# junction C:\Documents and Settings: a folder or link folder it owns is no finding.
+# A list like that of C:\ on current Windows: Users may read and list it, Authenticated
+# Users may make folders in it (LC), and it is owned by TrustedInstaller.
+DRIVE_ROOT = (
+    f"O:{TRUSTED_INSTALLER}D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICIIO;GA;;;CO)"
+    "(A;OICI;0x1200a9;;;BU)(A;CIIO;SDGXGWGR;;;AU)(A;;LC;;;AU)"
+)
+
+
+def test_a_folder_trusted_installer_owns_is_no_finding(windows, tmp_path):
+    windows.sddl = PRIVATE_FILE
+    windows.folder_sddl = DRIVE_ROOT
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    assert found == access([], [], [], False, folder_owner=False)
+    assert not found
+
+
+def test_a_link_folder_trusted_installer_owns_is_no_finding(windows, tmp_path, monkeypatch):
+    link, target = linked(tmp_path, "root", "profile")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(link.parent): DRIVE_ROOT}
+    found = _fileaccess.broad_access(link)
+    assert found == BroadAccess(
+        folder=(), other_owner=False, link_folder=(), folder_owner=False, link_owner=False
+    )
+    assert not found
+    token = synthetic_token()
+    target.write_text(f"QTE_TOKEN={token}\n")
+    monkeypatch.chdir(link.parent)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert resolve_token() == token
+    assert [w for w in caught if issubclass(w.category, FileShared)] == []

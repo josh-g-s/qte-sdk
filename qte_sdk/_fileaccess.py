@@ -117,9 +117,14 @@ _RIGHTS = {
 _ALLOW_TYPES = frozenset({"A", "XA"})
 _DACL_FLAGS = ("NO_ACCESS_CONTROL", "AI", "AR", "P")
 # The owners that need no warning, besides the current user: BUILTIN\Administrators, who
-# may take any file anyway (and own the files an elevated administrator creates), and
-# SYSTEM.
-_TRUSTED_OWNERS = frozenset({"BA", "S-1-5-32-544", "SY", "S-1-5-18"})
+# may take any file anyway (and own the files an elevated administrator creates); SYSTEM;
+# and NT SERVICE\TrustedInstaller, the account Windows itself installs and updates its
+# own files as, which owns folders such as `C:\` on current Windows. Like SYSTEM it is
+# part of Windows, not an account another user can act as, so a path through `C:\` (the
+# junction `C:\Documents and Settings`, say) is no finding. SDDL has no alias for it, so
+# it is given by its SID.
+_TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+_TRUSTED_OWNERS = frozenset({"BA", "S-1-5-32-544", "SY", "S-1-5-18", _TRUSTED_INSTALLER})
 # The aliases SDDL may give an owner that a process can run as, by SID: LOCAL SERVICE and
 # NETWORK SERVICE. The local Administrator and Guest accounts (LA and LG) stand for a SID
 # in this computer's domain, which is not known here, so they cannot be compared.
@@ -573,8 +578,9 @@ def folder_access_in_sddl(sddl: str) -> tuple[str, ...] | None:
 
 def owner_is_other(sddl: str, user: str | None) -> bool | None:
     """Whether the owner in `sddl` (its `O:` part) is an account other than `user` (the
-    current user's SID), BUILTIN\\Administrators or SYSTEM; or None if that cannot be told,
-    because `sddl` has no owner or cannot be parsed, or `user` is None and is needed.
+    current user's SID), BUILTIN\\Administrators, SYSTEM or NT SERVICE\\TrustedInstaller
+    (which Windows itself installs its files as); or None if that cannot be told, because
+    `sddl` has no owner or cannot be parsed, or `user` is None and is needed.
 
     SDDL gives a well-known owner by its alias, such as `BA`, and any other by its SID. An
     alias other than those of an account a process may run as names a group or a

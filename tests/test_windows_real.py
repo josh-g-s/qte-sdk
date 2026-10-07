@@ -1006,3 +1006,42 @@ def test_a_link_that_cannot_be_looked_at_has_its_folder_checked(tmp_path, user_s
     finally:
         icacls(holder, "/remove:d", f"*{user_sid}")
         icacls(link, "/L", "/remove:d", f"*{user_sid}")
+
+
+# NT SERVICE\TrustedInstaller, the account Windows installs its own files as, owns folders
+# of Windows itself. It is trusted as an owner, like SYSTEM, so a path through them, such
+# as one through the junction C:\Documents and Settings, which C:\ holds, warns of nothing.
+
+
+def test_windows_own_folders_are_owned_by_no_other_account(user_sid, capsys):
+    folders = [Path("C:\\"), Path("C:\\Users"), Path(os.environ["USERPROFILE"])]
+    owners = {str(folder): owner(folder) for folder in folders}
+    with capsys.disabled():  # shown in CI's log, to say who owns them there
+        print(f"\nowners of Windows' own folders: {owners}")
+    for folder in folders:
+        assert _fileaccess.owner_is_other(sddl(folder), user_sid) is not True, owners
+
+
+def test_a_dotenv_reached_through_documents_and_settings_has_no_owner_finding(
+    private_folder, user_sid, monkeypatch, capsys
+):
+    junction = Path("C:\\Documents and Settings")
+    assert _fileaccess._is_link(str(junction)) is True
+    here = real(private_folder)
+    assert here.lower().startswith("c:\\users\\"), here
+    via = Path(str(junction) + here[len("C:\\Users") :])
+    path = write_dotenv(private_folder)
+    make_file_private(path, user_sid)
+    access = _fileaccess.broad_access(via / ".env")
+    assert access is not None
+    root = Path("C:\\")
+    with capsys.disabled():
+        print(f"\n{root} is owned by {owner(root)}; through {junction}: {access!r}")
+    assert access.links == (str(junction),)
+    assert [f.path for f in access.link_folders] == ["C:\\"]
+    assert access.link_owner is not True
+    assert not access, access
+
+    monkeypatch.chdir(via)
+    caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+    assert caught == []
