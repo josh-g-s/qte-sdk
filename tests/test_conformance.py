@@ -105,11 +105,13 @@ import asyncio
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 from collections.abc import Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
+from datetime import date
 from urllib.parse import urlsplit
 
 import pytest
@@ -164,10 +166,14 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     OrderState,
     Reject,
 )
+from qte_sdk.contract.v1.session_pb2 import CALL as RIGHT_CALL
+from qte_sdk.contract.v1.session_pb2 import PUT as RIGHT_PUT
 from qte_sdk.contract.v1.session_pb2 import Auth, OrderSnapshot, Resume, ResumeAck, Subscribe
-from qte_sdk.instruments import EQUITY, OPTION, instrument_info
+from qte_sdk.instruments import EQUITY, OPTION, InstrumentInfo, instrument_info
 from qte_sdk.market_data import as_market_data, subscribe
-from qte_sdk.options import is_option_symbol, option_underlyings, strike_increment
+from qte_sdk.options import CALL as CALL_LETTER
+from qte_sdk.options import PUT as PUT_LETTER
+from qte_sdk.options import option_underlyings, parse_option_symbol, strike_increment
 from qte_sdk.orders import (
     reason_code_name,
     request_ref_of,
@@ -579,6 +585,44 @@ async def test_step_01_connect_and_authenticate(client: Client):
     assert calendar.sessions, "the calendar lists no sessions"
 
 
+# Shares of the underlying per option contract, as the vendored contract's `OptionTerms`
+# states. Like the figures the steps name, take it from there again on re-vendoring.
+OPTION_MULTIPLIER = 100
+# An `OptionTerms.right` and the letter of an OCC option symbol that names it.
+_SYMBOL_RIGHTS = {RIGHT_CALL: CALL_LETTER, RIGHT_PUT: PUT_LETTER}
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def assert_option_entry(info: InstrumentInfo) -> None:
+    """Step 1a's `OPTION` entry: an id in Alpaca's unpadded OCC form and `option` terms
+    with every field set, which agree with the id. The id's root is the underlying, its
+    YYMMDD the expiry, its C or P the right, and its eight digits the strike in thousandths
+    of a dollar, which `parse_option_symbol` gives in micro-dollars like `strike`."""
+    name = info.instrument
+    try:
+        symbol = parse_option_symbol(name)
+    except ValueError:
+        raise AssertionError(f"{name} is not an unpadded OCC option symbol") from None
+    assert info.HasField("option"), f"option {name} carries no option terms"
+    terms = info.option
+    assert terms.underlying, f"option {name} has no underlying"
+    assert terms.expiry, f"option {name} has no expiry"
+    assert terms.right in _SYMBOL_RIGHTS, f"option {name} has no right, CALL or PUT"
+    assert terms.strike > 0, f"option {name} has no positive strike"
+    assert terms.multiplier == OPTION_MULTIPLIER, (
+        f"option {name} has a multiplier of {terms.multiplier}, not {OPTION_MULTIPLIER}"
+    )
+    assert terms.underlying == symbol.underlying, f"{name}'s underlying is {terms.underlying}"
+    assert _ISO_DATE.fullmatch(terms.expiry), f"{name}'s expiry is not an ISO 8601 date"
+    try:
+        expiry = date.fromisoformat(terms.expiry)
+    except ValueError:
+        raise AssertionError(f"{name}'s expiry is not a real date") from None
+    assert expiry == symbol.expiry, f"{name}'s expiry is {terms.expiry}"
+    assert _SYMBOL_RIGHTS[terms.right] == symbol.right, f"{name}'s right does not match"
+    assert terms.strike == symbol.strike, f"{name}'s strike is {terms.strike} micro-dollars"
+
+
 # The fields step 1a names on each instrument, which must be on the wire even at their
 # zero value: `tradable` "present, `false` included".
 STEP_01A_FIELDS = ("kind", "tick_size", "lot_size", "status", "tradable")
@@ -624,10 +668,7 @@ async def test_step_01a_instruments():
         missing = [name for name in STEP_01A_FIELDS if name not in entry]
         assert not missing, f"{info.instrument} has no {', '.join(missing)}"
         if info.kind == OPTION:
-            assert info.HasField("option"), f"option {info.instrument} carries no option terms"
-            assert is_option_symbol(info.instrument), (
-                f"{info.instrument} is not an unpadded OCC option symbol"
-            )
+            assert_option_entry(info)
         else:
             assert info.kind == EQUITY, f"{info.instrument} is neither EQUITY nor OPTION"
             assert not info.HasField("option"), f"equity {info.instrument} carries option terms"
@@ -1922,10 +1963,12 @@ async def test_step_15d_resume_with_no_cursor_gets_a_snapshot(market: Client):
     c = market
     config = c.config
     low, middle, high = inside_prices(c.books.get(config.instrument), config.tick, 3)
+    # Rested out of level-key order, so a snapshot in the order the orders were accepted
+    # fails.
     orders = [
-        (config.strat_a, BUY, low),
-        (config.strat_b, BUY, middle),
         (config.strat_a, SELL, high),
+        (config.strat_b, BUY, middle),
+        (config.strat_a, BUY, low),
     ]
     async with await Wire.open(config.url, pong=True) as witness, AsyncExitStack() as stack:
         await witness.login(config.timeout)
@@ -2003,9 +2046,21 @@ async def test_step_15d_resume_with_no_cursor_gets_a_snapshot(market: Client):
     check_snapshots(as_received, [o for o in orders if o[1] == BUY], c)
 
 
+def restart_within() -> float:
+    """The seconds QTE_CONFORMANCE_RESTART_WITHIN allows, 120 if it is not set."""
+    text = os.environ.get(RESTART_WITHIN_VAR, "120")
+    try:
+        within = float(text)
+    except ValueError:
+        within = math.nan
+    if not (math.isfinite(within) and within > 0):
+        pytest.fail(f"{RESTART_WITHIN_VAR} must be a positive number of seconds")
+    return within
+
+
 async def restart_exchange() -> None:
     """Run the operator's restart command, as given, and wait for it to finish."""
-    within = float(os.environ.get(RESTART_WITHIN_VAR, "120"))
+    within = restart_within()
     process = await asyncio.create_subprocess_shell(os.environ[RESTART_VAR])
     try:
         async with asyncio.timeout(within):
@@ -2019,7 +2074,7 @@ async def restart_exchange() -> None:
 async def reopened(config: Settings) -> Wire:
     """A connection to the restarted exchange, once it accepts one: until it has caught up
     with its log, it refuses the handshake."""
-    within = float(os.environ.get(RESTART_WITHIN_VAR, "120"))
+    within = restart_within()
     loop = asyncio.get_running_loop()
     deadline = loop.time() + within
     while True:
@@ -2039,7 +2094,9 @@ async def test_step_15e_resume_across_a_restart(market: Client):
     c = market
     config = c.config
     low, high = inside_prices(c.books.get(config.instrument), config.tick, 2)
-    orders = [(config.strat_a, BUY, low), (config.strat_b, BUY, high)]
+    # Rested out of level-key order, so a snapshot in the order the orders were accepted
+    # fails.
+    orders = [(config.strat_b, BUY, high), (config.strat_a, BUY, low)]
     async with await Wire.open(config.url, pong=True) as witness:
         await witness.login(config.timeout)
         sent = await resting_reports(c, witness, orders)
