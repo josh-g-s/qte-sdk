@@ -21,15 +21,17 @@ offers to add it to `.gitignore`.
 
 On macOS and Linux the modes make the files readable only by you. Windows does not apply
 them, and this command does not change Windows access lists. Instead, once the file is
-written, it reads the file's access list and says whether a broad group of users, such as
-Everyone, Authenticated Users or Users, can read or change it, and if so how to fix that: keep the
-file in a folder under your user profile (%USERPROFILE%), which is private by default. If
-the access list cannot be read, it says to keep the file in such a folder.
+written, it reads the access lists of the file and its folder, and the file's owner, and
+says whether a broad group of users, such as Everyone, Authenticated Users or Users, can
+read or change the file or add or remove files in its folder, or another account owns it,
+and if so how to fix that: keep the file in a folder under your user profile
+(%USERPROFILE%), which is private by default. If the file's access list cannot be read, it
+says to keep the file in such a folder.
 
 `check` reports where the SDK would take the token and the address from, as
 `qte_sdk.session.resolve_token` and `resolve_url` would, without showing the token. On
 Windows it also reports whether a broad group of users can read or change the file the
-token is in.
+token is in, or add or remove files in its folder, and whether another account owns it.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
@@ -197,10 +199,11 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     _offer_gitignore(path, ask)
     text = _merge(lines, {URL_ENV_VAR: address, TOKEN_ENV_VAR: secret.value})
     if len(text.encode("utf-8")) > MAX_DOTENV_SIZE:
-        del text, secret
+        del text, secret, lines
         raise _Refused(f"{path} would be larger than the SDK reads; make it smaller first")
     _write_private(path, text)
-    del text, secret
+    # The old lines may hold the old token: none is kept for the access check below.
+    del text, secret, lines
     print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}{_privacy(path)}")
     print("Run your programs from this folder, so the SDK finds it.")
     if os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR):
@@ -542,9 +545,10 @@ def _unset_advice(names: list[str], purpose: str) -> str:
 
 def _privacy(path: Path, *, sets_address: bool = True) -> str:
     """The end of the message saying where the token was saved: what protects it. On
-    Windows, what the file's access list says: a warning naming the broad groups that can
-    read or change it, or that none can; or, if the list cannot be read, where to keep the
-    file. `sets_address` says whether the file is a `.env`, which can set the address."""
+    Windows, what the access lists of the file and its folder, and its owner, say: a
+    warning naming the broad groups that can read, change or replace it, or another owner,
+    or that none can; or, if the file's list cannot be read, where to keep the file.
+    `sets_address` says whether the file is a `.env`, which can set the address."""
     if not _fileaccess.on_windows():
         return ", readable only by you."
     access = _fileaccess.broad_access(path)
@@ -554,7 +558,7 @@ def _privacy(path: Path, *, sets_address: bool = True) -> str:
             "can open, such as your user profile, and do not share that folder."
         )
     if not access:
-        return f". {_none_of_the_checked_groups()}."
+        return f". {_none_of_the_checked_groups(access)}."
     return f".\nWarning: {shared_message(path, access, sets_address=sets_address)}"
 
 
@@ -639,9 +643,9 @@ def _check() -> int:
 
 
 def _access_note(source: str) -> str:
-    """On Windows, a note that no broad group of users can read or change the file the
-    token comes from, when its access list says so. A file they can gets a warning
-    instead."""
+    """On Windows, a note that no broad group of users can read, change or replace the file
+    the token comes from, when the access lists of the file and its folder say so. A file
+    they can, or that another account owns, gets a warning instead."""
     if source == DOTENV_NAME:
         path = dotenv_path()
     elif source == TOKEN_FILE_ENV_VAR:
@@ -650,18 +654,32 @@ def _access_note(source: str) -> str:
         return ""
     access = _fileaccess.broad_access(path)
     if access is not None and not access:
-        text = _none_of_the_checked_groups()
+        text = _none_of_the_checked_groups(access)
         return f"; {text[0].lower()}{text[1:]}"
     return ""
 
 
-def _none_of_the_checked_groups() -> str:
+def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:
     """What a clean Windows access check shows: none of the broad groups it looks at may
-    read or change the file. It looks at no other group or user, so it never says the file
-    is private to you."""
+    read or change the file, or add or remove files in its folder, and its owner is you,
+    Administrators or SYSTEM. It says which of the folder and the owner it could not check,
+    and it looks at no other group or user, so it never says the file is private to you."""
     names = [group.rsplit("\\", 1)[-1] for group in _fileaccess.BROAD_GROUPS]
     listed = ", ".join(names[:-1]) + f" or {names[-1]}"
-    return f"None of {listed} can read or change it (other groups and users are not checked)"
+    text = f"None of {listed} can read or change it"
+    if access.folder is not None:
+        text += ", or add or remove files in its folder"
+    if access.other_owner is False:
+        text += ", and it is owned by you, Administrators or SYSTEM"
+    unchecked = [
+        part
+        for part, known in (("its folder", access.folder), ("its owner", access.other_owner))
+        if known is None
+    ]
+    note = "other groups and users are not checked"
+    if unchecked:
+        note = f"{' and '.join(unchecked)} could not be checked, and {note}"
+    return f"{text} ({note})"
 
 
 def _describe(source: str) -> str:

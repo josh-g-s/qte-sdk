@@ -720,19 +720,37 @@ def test_outside_a_repository_git_is_not_needed(monkeypatch):
 # On simulated Windows. `os.name` itself cannot be changed: `pathlib` would then fail to
 # make a path, so the SDK's own test for Windows is replaced, with each access list.
 
-PROFILE = "D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-1-2-3-1001)"
+USER_SID = "S-1-5-21-1-2-3-1001"
+PROFILE = f"O:{USER_SID}D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;{USER_SID})"
 SECOND_DRIVE = "D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1301bf;;;AU)(A;ID;0x1200a9;;;BU)"
+# A file made private with icacls, in a second drive's folder that Authenticated Users may
+# add files to and remove them from.
+PRIVATE_FILE = f"O:{USER_SID}D:PAI(A;;FA;;;{USER_SID})"
+OPEN_FOLDER = "D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;AU)(A;OICIID;0x1200a9;;;BU)"
+CLEAN = (
+    "None of Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users can read or "
+    "change it, or add or remove files in its folder, and it is owned by you, Administrators "
+    "or SYSTEM (other groups and users are not checked)"
+)
+
+SAME = object()
 
 
 @pytest.fixture
-def windows(monkeypatch) -> Callable[[str | None], None]:
-    """Act as on Windows; call the result with the access list every file is to have."""
-    sddl: list[str | None] = [None]
+def windows(monkeypatch) -> Callable[..., None]:
+    """Act as on Windows; call the result with the access list every file is to have, and
+    optionally every folder's (by default the same) and the current user's SID."""
+    lists: dict[str, object] = {"file": None, "folder": None, "user": USER_SID}
     monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
-    monkeypatch.setattr(_fileaccess, "_read_sddl", lambda path: sddl[0])
+    monkeypatch.setattr(
+        _fileaccess,
+        "_read_sddl",
+        lambda path: lists["folder" if os.path.isdir(path) else "file"],
+    )
+    monkeypatch.setattr(_fileaccess, "_current_user_sid", lambda: lists["user"])
 
-    def set_sddl(value: str | None) -> None:
-        sddl[0] = value
+    def set_sddl(value: str | None, folder: object = SAME, user: str | None = USER_SID) -> None:
+        lists.update(file=value, folder=value if folder is SAME else folder, user=user)
 
     return set_sddl
 
@@ -771,11 +789,60 @@ def test_set_on_windows_says_when_no_broad_group_can_read_the_file(windows, caps
     token = synthetic_token()
     assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
     out, err = capsys.readouterr()
-    assert (
-        "None of Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users can read or "
-        "change it (other groups and users are not checked)."
-    ) in out
+    assert f"{CLEAN}." in out
     assert "Warning:" not in out and "readable only by you" not in out
+    assert_token_absent(token, out + err)
+
+
+@pytest.mark.parametrize(
+    ("folder", "user", "note"),
+    [
+        (None, USER_SID, "(its folder could not be checked, and other groups and users"),
+        (PROFILE, None, "(its owner could not be checked, and other groups and users"),
+        (None, None, "(its folder and its owner could not be checked, and other groups"),
+    ],
+)
+def test_set_on_windows_says_what_it_could_not_check(windows, capsys, folder, user, note):
+    windows(PROFILE, folder=folder, user=user)
+    token = synthetic_token()
+    assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    assert "None of Everyone" in out and note in out
+    assert ("add or remove files in its folder" in out) is (folder is not None)
+    assert ("owned by you" in out) is (user is not None)
+    assert "Warning:" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_set_on_windows_warns_about_an_open_folder(windows, capsys):
+    windows(PRIVATE_FILE, folder=OPEN_FOLDER)
+    token = synthetic_token()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    assert (
+        f".\nWarning: {dotenv()} holds your token, and other users can replace it: "
+        f"NT AUTHORITY\\Authenticated Users may add or remove files in {Path.cwd()}, so"
+    ) in out
+    assert f'run `icacls "{Path.cwd()}"` and `icacls "{dotenv()}"`' in out
+    assert "Windows lets" not in out and "None of Everyone" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_set_file_on_windows_warns_about_another_owner(windows, tmp_path, capsys):
+    windows(f"O:S-1-5-21-1-2-3-1002D:PAI(A;;FA;;;{USER_SID})", folder=PROFILE)
+    path = tmp_path / "token"
+    token = synthetic_token()
+    assert run(["set", "--file", str(path)], ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    real = path.parent.resolve() / path.name
+    assert (
+        f"Warning: {real} holds your token, and it is owned by another account, which can "
+        "change who may open it, so other people who use this computer could read your token "
+        "or replace your token."
+    ) in out
+    assert "Delete it and make it again yourself" in out
     assert_token_absent(token, out + err)
 
 
@@ -871,9 +938,42 @@ def test_check_on_windows_reports_a_private_token_file(windows, monkeypatch, tmp
     monkeypatch.setenv(URL_ENV_VAR, URL)
     assert run(["check"]) == 0
     out, err = capsys.readouterr()
-    assert f"({path}); none of Everyone, Authenticated Users, Users, INTERACTIVE or" in out
-    assert "(other groups and users are not checked)" in out
+    assert f"({path}); {CLEAN[0].lower()}{CLEAN[1:]}\n" in out
     assert "warning:" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_check_on_windows_warns_about_a_private_dotenv_in_an_open_folder(windows, capsys):
+    windows(PRIVATE_FILE, folder=OPEN_FOLDER)
+    token = synthetic_token()
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
+    dotenv().chmod(0o600)
+    assert run(["check"]) == 0
+    out, err = capsys.readouterr()
+    assert out.count("warning:") == 1
+    assert (
+        f"warning: {dotenv()} holds your token, and other users can replace it: "
+        f"NT AUTHORITY\\Authenticated Users may add or remove files in {Path.cwd()}, so"
+    ) in out
+    assert f'`icacls "{Path.cwd()}"` and `icacls "{dotenv()}"`' in out
+    assert "none of Everyone" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_check_on_windows_warns_about_a_token_file_owned_by_another_account(
+    windows, monkeypatch, tmp_path, capsys
+):
+    windows("O:BUD:PAI(A;;FA;;;BA)", folder=PROFILE)
+    token = synthetic_token()
+    path = tmp_path / "token"
+    path.write_text(token)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    monkeypatch.setenv(URL_ENV_VAR, URL)
+    assert run(["check"]) == 0
+    out, err = capsys.readouterr()
+    assert out.count("warning:") == 1
+    assert f"warning: {path} holds your token, and it is owned by another account" in out
+    assert "none of Everyone" not in out
     assert_token_absent(token, out + err)
 
 

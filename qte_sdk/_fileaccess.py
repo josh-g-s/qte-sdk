@@ -1,22 +1,34 @@
-"""Which broad groups of users Windows lets read or change a file.
+"""Which broad groups of users Windows lets read, change or replace a file.
 
 On Windows a file's access is set by its access list (its DACL), not by POSIX modes, and a
 file inherits the list of its folder. A folder under your user profile is private by
 default, but one on another drive, such as `D:\\`, usually lets Users read everything in it
 and Authenticated Users change it too. `broad_access` reads a file's list through the
 Windows API (with `ctypes`, so no extra package is needed) and names the broad groups it
-lets read the file and those it lets change it. `access_in_sddl` does the parsing, on the
-list in its text form (SDDL), and runs on any system, so it can be tested anywhere.
+lets read the file and those it lets change it. It also reads the list of the file's
+folder, since whoever may add or remove files there can replace the file with one of their
+own, and the file's owner, since an owner can always change the file's list.
+`access_in_sddl`, `folder_access_in_sddl` and `owner_is_other` do the parsing, on the lists
+in their text form (SDDL), and run on any system, so they can be tested anywhere.
 
 Only paths and access lists are handled here, never a file's contents.
 """
 
 import os
+import re
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-__all__ = ["BROAD_GROUPS", "BroadAccess", "access_in_sddl", "broad_access", "on_windows"]
+__all__ = [
+    "BROAD_GROUPS",
+    "BroadAccess",
+    "access_in_sddl",
+    "broad_access",
+    "folder_access_in_sddl",
+    "on_windows",
+    "owner_is_other",
+]
 
 # The broad groups, by the names `icacls` shows. Each is matched by its SDDL alias or its
 # SID; Domain Users is matched by its well-known last part (513), in any domain. On a
@@ -49,8 +61,17 @@ _READ_MASK = 0x1 | 0x80000000 | 0x10000000
 # The rights that let a user change a file, or take control of it and then change it:
 # FILE_WRITE_DATA, FILE_APPEND_DATA, GENERIC_WRITE, GENERIC_ALL, WRITE_DAC and WRITE_OWNER.
 _WRITE_MASK = 0x2 | 0x4 | 0x40000000 | 0x10000000 | 0x40000 | 0x80000
-# The two-letter access rights SDDL writes, as masks. A file's list may use the directory
-# service names for the low bits: CC is 0x1, which for a file is FILE_READ_DATA.
+# The rights on a folder that let a user add a file to it or remove one from it, or take
+# control of the folder and then do so: FILE_ADD_FILE (the bit FILE_WRITE_DATA has on a
+# file), FILE_DELETE_CHILD, DELETE (of the folder itself, which lets it be renamed and
+# another put in its place), GENERIC_WRITE, GENERIC_ALL, WRITE_DAC and WRITE_OWNER.
+# FILE_LIST_DIRECTORY (0x1, CC) and FILE_ADD_SUBDIRECTORY (0x4, LC) do not.
+_FOLDER_MASK = 0x2 | 0x40 | 0x10000 | 0x40000000 | 0x10000000 | 0x40000 | 0x80000
+# The two-letter access rights SDDL writes, as masks, from Microsoft's table of ACE access
+# rights. A file's or folder's list may use the directory service names for the low bits:
+# CC is 0x1 (FILE_READ_DATA, or FILE_LIST_DIRECTORY on a folder), DC is 0x2
+# (FILE_WRITE_DATA, or FILE_ADD_FILE), LC is 0x4 (FILE_APPEND_DATA, or
+# FILE_ADD_SUBDIRECTORY) and DT is 0x40 (FILE_DELETE_CHILD on a folder).
 _RIGHTS = {
     "GA": 0x10000000,
     "GR": 0x80000000,
@@ -84,21 +105,51 @@ _RIGHTS = {
 # The ACE types that allow access: plain, and conditional (which may allow it).
 _ALLOW_TYPES = frozenset({"A", "XA"})
 _DACL_FLAGS = ("NO_ACCESS_CONTROL", "AI", "AR", "P")
+# The owners that need no warning, besides the current user: BUILTIN\Administrators, who
+# may take any file anyway (and own the files an elevated administrator creates), and
+# SYSTEM.
+_TRUSTED_OWNERS = frozenset({"BA", "S-1-5-32-544", "SY", "S-1-5-18"})
+# The aliases SDDL may give an owner that a process can run as, by SID: LOCAL SERVICE and
+# NETWORK SERVICE. The local Administrator and Guest accounts (LA and LG) stand for a SID
+# in this computer's domain, which is not known here, so they cannot be compared.
+_SERVICE_OWNERS = {"LS": "S-1-5-19", "NS": "S-1-5-20"}
+# The other SID aliases Microsoft documents for SDDL (its "SID Strings" list), each a group
+# or a well-known identity, never the current user. An owner given by LA, LG or an alias in
+# none of these lists cannot be told, so it is unknown.
+_GROUP_OWNERS = frozenset(
+    "AA AC AN AO AP AS AU BG BO BU CA CD CG CN CO CY DA DC DD DG DU EA ED EK ER ES HA HI IS "
+    "IU KA LU LW ME MP MS MU NO NU OW PA PO PS PU RA RC RD RE RM RO RS RU SA SI SO SS SU UD "
+    "WD WR".split()
+)
+_SID = re.compile(r"S-1-\d+(-\d+)+")
 
 
 @dataclass(frozen=True)
 class BroadAccess:
     """The broad groups an access list lets read a file, and those it lets change it (or
-    take control of it), each in the order of `BROAD_GROUPS`. False when both are empty."""
+    take control of it), each in the order of `BROAD_GROUPS`; the broad groups that may add
+    or remove files in its folder; and whether another account owns it.
+
+    `folder` is None when the folder's list was not read, and `other_owner` None when the
+    owner was not read or could not be compared with the current user. False when no broad
+    group may do any of these and no other account is known to own the file."""
 
     read: tuple[str, ...] = ()
     write: tuple[str, ...] = ()
+    folder: tuple[str, ...] | None = None
+    other_owner: bool | None = None
 
     def __bool__(self) -> bool:
-        return bool(self.read or self.write)
+        return bool(self.read or self.write or self.folder or self.other_owner)
+
+    @property
+    def changeable(self) -> bool:
+        """Whether a broad group may change the file or replace it with one of their own,
+        or another account owns it (and so may change it)."""
+        return bool(self.write or self.folder or self.other_owner)
 
 
-_NO_DACL = BroadAccess(read=(EVERYONE,), write=(EVERYONE,))
+_ALL_RIGHTS = 0xFFFFFFFF
 
 
 def on_windows() -> bool:
@@ -107,9 +158,11 @@ def on_windows() -> bool:
 
 
 def broad_access(path: Path | str) -> BroadAccess | None:
-    """The broad groups (see `BROAD_GROUPS`) that Windows lets read or change `path`, or
-    None if that cannot be told, for example when this is not Windows, the file does not
-    exist or the access list cannot be read. Never raises."""
+    """The broad groups (see `BROAD_GROUPS`) that Windows lets read or change `path`, and
+    add or remove files in the folder that holds it, and whether another account owns it;
+    or None if the file's access list cannot be told, for example when this is not Windows,
+    the file does not exist or the list cannot be read. If only the folder's list or the
+    owner cannot be told, that part is None (see `BroadAccess`). Never raises."""
     if not on_windows():
         return None
     try:
@@ -118,7 +171,21 @@ def broad_access(path: Path | str) -> BroadAccess | None:
         return None
     if sddl is None:
         return None
-    return access_in_sddl(sddl)
+    access = access_in_sddl(sddl)
+    if access is None:
+        return None
+    folder = None
+    try:
+        folder_sddl = _read_sddl(os.path.dirname(os.path.abspath(path)))
+        if folder_sddl is not None:
+            folder = folder_access_in_sddl(folder_sddl)
+    except Exception:
+        folder = None
+    try:
+        user = _current_user_sid()
+    except Exception:
+        user = None
+    return replace(access, folder=folder, other_owner=owner_is_other(sddl, user))
 
 
 def access_in_sddl(sddl: str) -> BroadAccess | None:
@@ -133,19 +200,71 @@ def access_in_sddl(sddl: str) -> BroadAccess | None:
     string with no DACL (no `D:` part, or `D:NO_ACCESS_CONTROL`) means Windows checks
     nothing, so Everyone may read and change the object.
     """
+    grants = _grants(sddl)
+    if grants is None:
+        return None
+    return BroadAccess(read=_holding(grants, _READ_MASK), write=_holding(grants, _WRITE_MASK))
+
+
+def folder_access_in_sddl(sddl: str) -> tuple[str, ...] | None:
+    """The broad groups that the access list in `sddl`, a folder's, lets add files to the
+    folder or remove files from it, in the order of `BROAD_GROUPS`; or None if `sddl`
+    cannot be parsed.
+
+    An allow entry counts when it applies to the folder itself (it is not inherit-only:
+    such an entry is for the files in the folder, which their own lists show) and grants a
+    broad group FILE_ADD_FILE, FILE_DELETE_CHILD, DELETE, GENERIC_WRITE, GENERIC_ALL,
+    WRITE_DAC or WRITE_OWNER. Deny entries are ignored, and a missing DACL lets Everyone do
+    anything, as for `access_in_sddl`.
+    """
+    grants = _grants(sddl)
+    if grants is None:
+        return None
+    return _holding(grants, _FOLDER_MASK)
+
+
+def owner_is_other(sddl: str, user: str | None) -> bool | None:
+    """Whether the owner in `sddl` (its `O:` part) is an account other than `user` (the
+    current user's SID), BUILTIN\\Administrators or SYSTEM; or None if that cannot be told,
+    because `sddl` has no owner or cannot be parsed, or `user` is None and is needed.
+
+    SDDL gives a well-known owner by its alias, such as `BA`, and any other by its SID. An
+    alias other than those of an account a process may run as names a group or a
+    well-known identity, so it is never the current user; an alias Microsoft does not
+    document gives None."""
+    sections = _sections(sddl)
+    if sections is None or "O" not in sections:
+        return None
+    owner = sections["O"].strip().upper()
+    if owner in _TRUSTED_OWNERS:
+        return False
+    if _SID.fullmatch(owner) is None:
+        if owner in _GROUP_OWNERS:
+            return True
+        if owner not in _SERVICE_OWNERS:
+            return None  # LA, LG, or not an alias at all
+        owner = _SERVICE_OWNERS[owner]
+    if user is None:
+        return None
+    return owner != user.strip().upper()
+
+
+def _grants(sddl: str) -> dict[str, int] | None:
+    """The rights the DACL in `sddl` allows each broad group on the object itself, as one
+    mask per group, or None if `sddl` cannot be parsed. With no DACL, Everyone has every
+    right."""
     sections = _sections(sddl)
     if sections is None:
         return None
     dacl = sections.get("D")
     if dacl is None:
-        return _NO_DACL
+        return {EVERYONE: _ALL_RIGHTS}
     flags, aces = _split_dacl(dacl)
     if flags is None or aces is None:
         return None
     if "NO_ACCESS_CONTROL" in flags:
-        return _NO_DACL
-    read: set[str] = set()
-    write: set[str] = set()
+        return {EVERYONE: _ALL_RIGHTS}
+    grants: dict[str, int] = {}
     for ace in aces:
         fields = ace.split(";", 6)
         if len(fields) < 6:
@@ -157,16 +276,14 @@ def access_in_sddl(sddl: str) -> BroadAccess | None:
         if kind not in _ALLOW_TYPES or "IO" in _pairs(ace_flags):
             continue
         group = _group(sid)
-        if group is None:
-            continue
-        if mask & _READ_MASK:
-            read.add(group)
-        if mask & _WRITE_MASK:
-            write.add(group)
-    return BroadAccess(
-        read=tuple(g for g in BROAD_GROUPS if g in read),
-        write=tuple(g for g in BROAD_GROUPS if g in write),
-    )
+        if group is not None:
+            grants[group] = grants.get(group, 0) | mask
+    return grants
+
+
+def _holding(grants: dict[str, int], rights: int) -> tuple[str, ...]:
+    """The groups in `grants` that have any of `rights`, in the order of `BROAD_GROUPS`."""
+    return tuple(g for g in BROAD_GROUPS if grants.get(g, 0) & rights)
 
 
 def _sections(sddl: str) -> dict[str, str] | None:
@@ -299,13 +416,14 @@ def _group(sid: str) -> str | None:
 
 
 def _read_sddl(path: str) -> str | None:
-    """The DACL of `path` as an SDDL string, read with the Windows API, or None if it
-    cannot be read. Only on Windows: `ctypes.WinDLL` exists nowhere else."""
+    """The owner and DACL of `path`, a file or folder, as an SDDL string read with the
+    Windows API, or None if they cannot be read. Only on Windows: `ctypes.WinDLL` exists
+    nowhere else."""
     import ctypes
     from ctypes import wintypes
 
     se_file_object = 1
-    dacl_security_information = 0x4
+    owner_and_dacl = 0x1 | 0x4  # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
     sddl_revision_1 = 1
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -337,14 +455,15 @@ def _read_sddl(path: str) -> str | None:
     local_free.restype = ctypes.c_void_p
 
     descriptor = ctypes.c_void_p()
+    owner = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     status = get_info(
         path,
         se_file_object,
-        dacl_security_information,
+        owner_and_dacl,
+        ctypes.byref(owner),  # these two point into the descriptor, so are not freed
         None,
-        None,
-        ctypes.byref(dacl),  # points into the descriptor, so it is not freed itself
+        ctypes.byref(dacl),
         None,
         ctypes.byref(descriptor),
     )
@@ -356,7 +475,7 @@ def _read_sddl(path: str) -> str | None:
         if not to_string(
             descriptor,
             sddl_revision_1,
-            dacl_security_information,
+            owner_and_dacl,
             ctypes.byref(text),
             ctypes.byref(length),
         ):
@@ -367,3 +486,70 @@ def _read_sddl(path: str) -> str | None:
             local_free(text)
         if descriptor.value:
             local_free(descriptor)
+
+
+def _current_user_sid() -> str | None:
+    """The SID of the user this process runs as, such as `S-1-5-21-...-1001`, read with
+    the Windows API, or None if it cannot be read. Only on Windows."""
+    import ctypes
+    from ctypes import wintypes
+
+    token_query = 0x8
+    token_user = 1  # TOKEN_INFORMATION_CLASS TokenUser
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    current_process = kernel32.GetCurrentProcess
+    current_process.argtypes = []
+    current_process.restype = wintypes.HANDLE
+    open_token = advapi32.OpenProcessToken
+    open_token.argtypes = [
+        wintypes.HANDLE,  # ProcessHandle
+        wintypes.DWORD,  # DesiredAccess
+        ctypes.POINTER(wintypes.HANDLE),  # TokenHandle
+    ]
+    open_token.restype = wintypes.BOOL
+    token_info = advapi32.GetTokenInformation
+    token_info.argtypes = [
+        wintypes.HANDLE,  # TokenHandle
+        ctypes.c_int,  # TokenInformationClass
+        ctypes.c_void_p,  # TokenInformation
+        wintypes.DWORD,  # TokenInformationLength
+        ctypes.POINTER(wintypes.DWORD),  # ReturnLength
+    ]
+    token_info.restype = wintypes.BOOL
+    sid_to_string = advapi32.ConvertSidToStringSidW
+    sid_to_string.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]  # PSID, LPWSTR *
+    sid_to_string.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    token = wintypes.HANDLE()
+    # The process's pseudo handle needs no closing.
+    if not open_token(current_process(), token_query, ctypes.byref(token)):
+        return None
+    text = ctypes.c_void_p()
+    try:
+        needed = wintypes.DWORD()
+        token_info(token, token_user, None, 0, ctypes.byref(needed))  # asks only the size
+        if not needed.value:
+            return None
+        # A buffer of pointers, so the TOKEN_USER in it is aligned; Python frees it.
+        size = (needed.value + ctypes.sizeof(ctypes.c_void_p) - 1) // ctypes.sizeof(ctypes.c_void_p)
+        buffer = (ctypes.c_void_p * size)()
+        if not token_info(token, token_user, buffer, ctypes.sizeof(buffer), ctypes.byref(needed)):
+            return None
+        # TOKEN_USER starts with SID_AND_ATTRIBUTES, which starts with the PSID.
+        sid = buffer[0]
+        if not sid or not sid_to_string(sid, ctypes.byref(text)):
+            return None
+        return ctypes.wstring_at(text.value) if text.value else None
+    finally:
+        if text.value:
+            local_free(text)
+        close_handle(token)
