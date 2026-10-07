@@ -34,7 +34,9 @@ send that breaks this raises `ValueError` and sends nothing. A `new` that carrie
 
 A Fundamentals pod's tickets are in `qte_sdk.tickets`, not here. The contract's
 `house_team` field on `new`, `cancel` and `amend` is for the exchange's own Director
-sessions only; a team session that sends it is refused, so no function here sets it.
+sessions only; a team session that sends it is refused, so no function here sets it. In
+the same way, a fill or cancellation whose `origin` is `HOUSE`, of one of the exchange's
+own house orders, goes only to those sessions: a team's connection never receives one.
 """
 
 import uuid

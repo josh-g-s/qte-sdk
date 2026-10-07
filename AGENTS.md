@@ -27,7 +27,7 @@ Never build these into code as constants. They are set by the exchange and can c
 - the order delay (every new, cancel, amend and mass cancel is held for it before it is applied; it is currently 150 ms);
 - the minimum time an order must rest before it may be cancelled or amended;
 - the price collar;
-- each instrument's tick and lot size, and which instruments your team may trade. Read them from the instruments table the exchange sends after the calendar (`session.wait_for_instrument_table()`, then `qte_sdk.instruments`), and never hard-code the list of instruments;
+- each instrument's tick and lot size, its sector for the Fundamentals sector limit, and which instruments your team may trade. Read them from the instruments table the exchange sends after the calendar (`session.wait_for_instrument_table()`, then `qte_sdk.instruments`), and never hard-code the list of instruments;
 - your team's message budgets;
 - the heartbeat interval, and how long the exchange waits before it drops a silent connection (the SDK's `liveness_timeout` is a client-side setting, not one of these);
 - trading days, holidays and hours. Read them from the calendar the exchange sends after you authenticate (`session.wait_for_calendar()`, then `qte_sdk.calendar.next_open` and `next_close`).

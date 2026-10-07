@@ -26,6 +26,7 @@ from qte_sdk.instruments import (
     instrument_info,
     instruments_by_id,
     on_tick,
+    sector_of,
     tradable_instruments,
 )
 from qte_sdk.market_data import as_market_data, market_data
@@ -48,6 +49,7 @@ TABLE = {
             "lot_size": "1",
             "status": "INSTRUMENT_TRADING",
             "tradable": True,
+            "sector_limit": "Information Technology",
         },
         {
             "instrument": "SPY",
@@ -56,6 +58,7 @@ TABLE = {
             "lot_size": "1",
             "status": "INSTRUMENT_TRADING",
             "tradable": True,
+            "sector_limit": "Unsectored",
         },
         {
             "instrument": CALL_ID,
@@ -139,6 +142,11 @@ async def test_the_table_is_decoded_kept_and_replaced_by_a_resend():
         ("instruments", 5),
     ]
     assert events[1].message == table()
+    # The sector arrives on the wire with each equity; the option contract has none.
+    sectors = {info.instrument: info.sector_limit for info in found.instruments}
+    assert sectors["AAPL"] == "Information Technology"
+    assert sectors["SPY"] == "Unsectored"
+    assert sectors[CALL_ID] == ""
 
 
 async def test_an_exchange_that_predates_instruments_is_recognised_at_once():
@@ -317,6 +325,18 @@ def test_instrument_info_and_instruments_by_id():
     assert by_id[CALL_ID].option.multiplier == 100
     assert not by_id["SPY"].HasField("option")
     assert not by_id["SPY"].HasField("display_name")
+
+
+def test_each_instruments_sector_for_the_sector_limit():
+    by_id = instruments_by_id(table())
+    assert by_id["AAPL"].sector_limit == "Information Technology"
+    assert sector_of(by_id["AAPL"]) == "Information Technology"
+    assert sector_of(by_id["SPY"]) == "Unsectored"
+    # An option contract, or a term with no sectors set, has none.
+    assert by_id[CALL_ID].sector_limit == ""
+    assert sector_of(by_id[CALL_ID]) is None
+    # A sector this SDK has never heard of is returned as it is, not refused.
+    assert sector_of(InstrumentInfo(instrument="A", sector_limit="Space")) == "Space"
 
 
 def test_can_trade_needs_a_known_kind_trading_status_and_entitlement():

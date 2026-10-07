@@ -129,7 +129,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.market_data`](qte_sdk/market_data.py) | `subscribe`, `unsubscribe`, `market_data`: the book, trades, marks and market state |
 | [`qte_sdk.books`](qte_sdk/books.py) | `LatestBooks`: the latest book of each instrument, since a book is sent only when it changes |
 | [`qte_sdk.calendar`](qte_sdk/calendar.py) | `next_open`, `next_close`: when the market next opens and closes, from the exchange's calendar |
-| [`qte_sdk.instruments`](qte_sdk/instruments.py) | `instrument_info`, `can_trade`, `tradable_instruments`, `on_tick`: the exchange's table of instruments, with each one's tick and lot size and whether your team may trade it |
+| [`qte_sdk.instruments`](qte_sdk/instruments.py) | `instrument_info`, `can_trade`, `tradable_instruments`, `on_tick`, `sector_of`: the exchange's table of instruments, with each one's tick and lot size, its sector, and whether your team may trade it |
 | [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
 | [`qte_sdk.replay`](qte_sdk/replay.py) | `replay`: a past session's market data in one stream, in time order, to run your loop on; market data only, with no orders or fills |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
