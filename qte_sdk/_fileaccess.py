@@ -8,10 +8,10 @@ Windows API (with `ctypes`, so no extra package is needed) and names the broad g
 lets read the file and those it lets change it. It also reads the list of the file's
 folder, since whoever may add or remove files there can replace the file with one of their
 own, and the file's owner, since an owner can always change the file's list. When the file
-is reached through a link (a symbolic link, a junction, or another link `os.path.realpath`
-follows), at the file itself or at a folder on its path, the file and the folder looked at
-are those it resolves to, and the folder that holds the link is looked at too, since
-whoever may replace the link may point it elsewhere.
+is reached through links (symbolic links or junctions), at the file itself, at a folder on
+its path, or in what a link points to, the file and the folder looked at are those it
+resolves to, and the folder that holds each link on the way is looked at too, since
+whoever may replace a link may point it elsewhere.
 `access_in_sddl`, `folder_access_in_sddl` and `owner_is_other` do the parsing, on the lists
 in their text form (SDDL), and run on any system, so they can be tested anywhere.
 
@@ -27,10 +27,13 @@ from pathlib import Path
 
 __all__ = [
     "BROAD_GROUPS",
+    "MAX_LINKS",
     "BroadAccess",
+    "LinkFolder",
     "access_in_sddl",
     "broad_access",
     "folder_access_in_sddl",
+    "links_on_the_way",
     "on_windows",
     "owner_is_other",
 ]
@@ -130,23 +133,37 @@ _SID = re.compile(r"S-1-\d+(-\d+)+")
 
 
 @dataclass(frozen=True)
+class LinkFolder:
+    """A folder that holds a link on the way to a file: its path, the links in it, as they
+    were met, and the broad groups that may add or remove files in it, or None if its list
+    could not be read."""
+
+    path: str
+    links: tuple[str, ...]
+    groups: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
 class BroadAccess:
     """The broad groups an access list lets read a file, and those it lets change it (or
     take control of it), each in the order of `BROAD_GROUPS`; the broad groups that may add
-    or remove files in its folder, and, when the file is reached through a link, in the
-    folder that holds the link; and whether another account owns it.
+    or remove files in its folder, and, when the file is reached through links, in the
+    folders that hold them; and whether another account owns it.
 
-    `folder` is None when the folder's list was not read, `link_folder` None when there is
-    no link or its folder's list was not read, and `other_owner` None when the owner was
-    not read or could not be compared with the current user. False when no broad group may
-    do any of these and no other account is known to own the file.
+    `folder` is None when the folder's list was not read, and `other_owner` None when the
+    owner was not read or could not be compared with the current user. `link_folder` is
+    None when no link leads to the file from another folder, and also when no group was
+    found in those folders but a folder's list, or the links themselves, could not be read
+    (see `link_folders`). False when no broad group may do any of these and no other
+    account is known to own the file.
 
-    `file`, `folder_path`, `link` and `link_folder_path` say where those lists were read:
-    the file the path resolves to, its folder, the link it is reached through (the path
-    itself, or a folder on it, such as a junction) and the folder that holds that link.
-    The last two are None when there is no link. They are not compared: two results are
-    equal when they find the same. When `file` or `folder_path` is None, the path the check
-    was asked about, or its folder, stands for it."""
+    `file`, `folder_path`, `links` and `link_folders` say where those lists were read: the
+    file the path resolves to, its folder, every link met on the way, in order, and each
+    folder that holds one of them, other than the file's own folder (see `LinkFolder`).
+    `link_folders` is None when the links could not be followed: a loop, more than
+    `MAX_LINKS` of them, or a link that could not be read. These are not compared: two
+    results are equal when they find the same. When `file` or `folder_path` is None, the
+    path the check was asked about, or its folder, stands for it."""
 
     read: tuple[str, ...] = ()
     write: tuple[str, ...] = ()
@@ -155,15 +172,15 @@ class BroadAccess:
     link_folder: tuple[str, ...] | None = None
     file: str | None = field(default=None, compare=False)
     folder_path: str | None = field(default=None, compare=False)
-    link: str | None = field(default=None, compare=False)
-    link_folder_path: str | None = field(default=None, compare=False)
+    links: tuple[str, ...] = field(default=(), compare=False)
+    link_folders: tuple[LinkFolder, ...] | None = field(default=(), compare=False)
 
     def __bool__(self) -> bool:
         return bool(self.read or self.write or self.changeable)
 
     @property
     def changeable(self) -> bool:
-        """Whether a broad group may change the file or replace it, or the link to it, with
+        """Whether a broad group may change the file or replace it, or a link to it, with
         one of their own, or another account owns it (and so may change it)."""
         return bool(self.write or self.folder or self.link_folder or self.other_owner)
 
@@ -183,14 +200,17 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     the file does not exist or the list cannot be read. If only a folder's list or the
     owner cannot be told, that part is None (see `BroadAccess`). Never raises.
 
-    When `path` is reached through a link, the file, its folder and its owner are those of
+    When `path` is reached through links, the file, its folder and its owner are those of
     the file it resolves to, and `link_folder` gives the groups that may add or remove
-    files in the folder that holds the link. Every list is read here, before the caller
-    opens the file, since `os.path.realpath` is itself a call to the Windows API."""
+    files in the folders that hold the links. Every link is followed and every list read
+    here, before the caller opens the file, since following a link is itself a call to the
+    Windows API."""
     if not on_windows():
         return None
     try:
-        file, folder_path, link, link_folder_path = _locations(path)
+        file = os.path.realpath(path)
+        folder_path = os.path.dirname(file)
+        walked = links_on_the_way(path)
         # Microsoft does not document whether GetNamedSecurityInfoW follows a symbolic link,
         # and documents that GetFileSecurity reads the link itself, so the list of the file
         # the path resolves to is asked for by that file's own path.
@@ -203,7 +223,11 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     if access is None:
         return None
     folder = _folder_access(folder_path)
-    link_folder = None if link_folder_path is None else _folder_access(link_folder_path)
+    links: tuple[str, ...] = ()
+    link_folders: tuple[LinkFolder, ...] | None = None
+    if walked is not None:
+        links = tuple(link for link, _ in walked)
+        link_folders = _link_folders(walked, folder_path)
     try:
         user = _current_user_sid()
     except Exception:
@@ -212,33 +236,103 @@ def broad_access(path: Path | str) -> BroadAccess | None:
         access,
         folder=folder,
         other_owner=owner_is_other(sddl, user),
-        link_folder=link_folder,
+        link_folder=_link_finding(walked, link_folders),
         file=file,
         folder_path=folder_path,
-        link=link,
-        link_folder_path=link_folder_path,
+        links=links,
+        link_folders=link_folders,
     )
 
 
-def _locations(path: Path | str) -> tuple[str, str, str | None, str | None]:
-    """The file `path` resolves to, through any symbolic link or junction; the folder that
-    holds that file; and the deepest link on the way to it (`path` itself, or a folder on
-    it) with the folder that holds that link, or None and None when there is no link or
-    the link is in the file's own folder. Another name for the same place, such as a mapped
-    drive's or a short 8.3 name, is not a link."""
-    file = os.path.realpath(path)
-    folder = os.path.dirname(file)
-    step = os.path.abspath(path)
-    while True:
-        parent = os.path.dirname(step)
-        if _same(parent, step):  # the root
-            return file, folder, None, None
-        if _is_link(step):
-            holder = os.path.realpath(parent)
-            if _same(holder, folder):
-                return file, folder, None, None
-            return file, folder, step, holder
-        step = parent
+# The most links followed on the way to a file, as an operating system bounds them; more
+# gives an unknown result rather than a long walk.
+MAX_LINKS = 40
+
+
+def links_on_the_way(path: Path | str) -> list[tuple[str, str]] | None:
+    """Each link met while `path` is resolved, in order, with the folder that holds it:
+    links at the file and at folders on its path, and links in what each link points to.
+    A link's folder is given resolved through every link before it. None if they cannot be
+    followed: a loop, more than `MAX_LINKS` links, or a link whose target cannot be read.
+
+    The path is resolved one name at a time, from its root. A link's target is joined to
+    the link's folder, so a relative one is taken from there, and `..` in it is applied to
+    that already resolved folder, as Windows does."""
+    root, pending = _split(os.path.abspath(path))
+    current = root
+    found: list[tuple[str, str]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    while pending:
+        name = pending.pop(0)
+        candidate = os.path.join(current, name)
+        if not _is_link(candidate):
+            current = candidate
+            continue
+        # The same link with the same names left to resolve is a loop; the same link met
+        # again with fewer names left, through a junction to a folder above it, is not.
+        state = (os.path.normcase(candidate), tuple(pending))
+        if state in seen or len(found) >= MAX_LINKS:
+            return None
+        seen.add(state)
+        try:
+            target = _without_prefix(os.readlink(candidate))
+        except (OSError, ValueError):
+            return None
+        found.append((candidate, current))
+        root, names = _split(os.path.normpath(os.path.join(current, target)))
+        current, pending = root, names + pending
+    return found
+
+
+def _split(path: str) -> tuple[str, list[str]]:
+    """The root of an absolute, normalized `path` (such as `C:\\`, a share's
+    `\\\\server\\share\\` or `/`), and the names after it."""
+    drive, rest = os.path.splitdrive(path)
+    return drive + os.sep, [name for name in rest.split(os.sep) if name]
+
+
+def _without_prefix(target: str) -> str:
+    """A link's target without the `\\\\?\\` or `\\??\\` that Windows puts before the
+    target of a junction, so it is an ordinary path."""
+    for prefix in ("\\\\?\\UNC\\", "\\??\\UNC\\"):
+        if target.startswith(prefix):
+            return "\\\\" + target[len(prefix) :]
+    for prefix in ("\\\\?\\", "\\??\\"):
+        if target.startswith(prefix):
+            return target[len(prefix) :]
+    return target
+
+
+def _link_folders(walked: list[tuple[str, str]], folder: str) -> tuple[LinkFolder, ...]:
+    """Each folder that holds a link in `walked`, by its resolved name, once, in the order
+    first met, with its links and the broad groups that may add or remove files in it;
+    leaving out `folder`, the file's own folder, which is checked anyway. Another name for
+    the same folder, such as a mapped drive's or a short 8.3 name, counts as the same."""
+    holders: dict[str, tuple[str, list[str]]] = {}
+    for link, holder in walked:
+        real = os.path.realpath(holder)
+        if _same(real, folder):
+            continue
+        holders.setdefault(os.path.normcase(os.path.normpath(real)), (real, []))[1].append(link)
+    return tuple(
+        LinkFolder(real, tuple(links), _folder_access(real)) for real, links in holders.values()
+    )
+
+
+def _link_finding(
+    walked: list[tuple[str, str]] | None, link_folders: tuple[LinkFolder, ...] | None
+) -> tuple[str, ...] | None:
+    """The broad groups that may add or remove files in any of `link_folders`, in the order
+    of `BROAD_GROUPS`; or None if there is none to look at, or none was found but a
+    folder's list, or the links themselves (`walked` is None), could not be read."""
+    if link_folders is None or not link_folders:
+        return None
+    found = {group for f in link_folders for group in (f.groups or ())}
+    if found:
+        return tuple(group for group in BROAD_GROUPS if group in found)
+    if walked is None or any(f.groups is None for f in link_folders):
+        return None
+    return ()
 
 
 def _is_link(path: str) -> bool:

@@ -32,11 +32,11 @@ Three safeguards apply:
   or another account owns, a `.env` that sets only `QTE_URL`, since whoever changes the
   address can capture a token kept elsewhere when you next connect. Both are kinds of
   `FileShared`. A folder under your user profile is private by default; a folder on
-  another drive, such as `D:\\`, usually is not. When the `.env` is reached through a
-  symbolic link or a junction, the file and the folder checked are those it leads to, and
-  the folder that holds the link is checked too. The file is still used, though a later
-  release will refuse it. The same check applies to the file named by `QTE_TOKEN_FILE`
-  (see `qte_sdk.session`).
+  another drive, such as `D:\\`, usually is not. When the `.env` is reached through
+  symbolic links or junctions, the file and the folder checked are those they lead to,
+  and each folder that holds a link on the way is checked too. The file is still used,
+  though a later release will refuse it. The same check applies to the file named by
+  `QTE_TOKEN_FILE` (see `qte_sdk.session`).
 - If the `.env`, or the file it links to, is inside a git working tree and git tracks
   it or does not ignore it, a `DotenvNotIgnored` warning is issued, once per process,
   since the token could be committed. It never stops the SDK: if a warnings filter makes
@@ -57,6 +57,7 @@ import subprocess
 import sys
 import unicodedata
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 
 from qte_sdk import _fileaccess
@@ -296,7 +297,7 @@ def shared_message(
     """What to tell the person when broad groups of users may read, change or replace
     `path`, or another account owns it. `path` holds the token if `holds_token`, and is a
     `.env` that can set the exchange address if `sets_address`. Names only the path, and
-    when it is reached through a link, the link and the file it leads to; their folders;
+    when it is reached through links, the links and the file they lead to; their folders;
     and the groups. Resolves no path: where the lists were read is taken from `access`."""
     changers = list(access.write)
     readers = [group for group in access.read if group not in changers] if holds_token else []
@@ -304,11 +305,13 @@ def shared_message(
     link_replacers = list(access.link_folder or ())
     file = access.file or os.path.abspath(path)
     folder = access.folder_path or os.path.dirname(os.path.abspath(path))
-    link_folder = access.link_folder_path
-    linked = link_folder is not None
-    # Reached through a folder that is a link, such as a junction, not a link at the file.
-    via = access.link if linked and access.link != os.path.abspath(path) else None
+    links = list(access.links)
+    linked = bool(links)
+    # Whether `path` is itself a link, and the links met after it (or all, if it is not).
+    is_link = linked and _fileaccess._same(links[0], os.path.abspath(path))
+    via = links[1:] if is_link else links
     verb = "leads to" if via else "links to"
+    link_folders = list(access.link_folders or ())
     granted = []
     if changers:
         granted.append(f"{_join(changers)} {'read or change' if holds_token else 'change'} it")
@@ -322,12 +325,14 @@ def shared_message(
         places.append(f"{_join(replacers)} may add or remove files in {folder}")
         if linked:
             places[-1] += f", which holds the file it {verb}"
-    if link_replacers:
-        holder = link_folder or os.path.dirname(os.path.abspath(path))
-        the_link = f"the link {via}" if via else "the link"
-        places.append(
-            f"{_join(link_replacers)} may add or remove files in {holder}, which holds {the_link}"
-        )
+    for holder in link_folders:
+        if holder.groups:
+            held = list(holder.links)
+            the_links = "the link" if is_link and held == links[:1] else _the_links(held)
+            places.append(
+                f"{_join(list(holder.groups))} may add or remove files in {holder.path}, "
+                f"which holds {the_links}"
+            )
     if places:
         findings.append(f"other users can replace it: {', and '.join(places)}")
     if access.other_owner:
@@ -350,7 +355,7 @@ def shared_message(
             "(%USERPROFILE%), which is private by default."
         )
     else:
-        it = f"the file it {verb}, and the link," if linked else "it"
+        it = f"the file it {verb}, and the link{'s' if len(links) > 1 else ''}," if linked else "it"
         their = "that group's" if len(groups) == 1 else "those groups'"
         fix = (
             f"Move {it} into a folder under your user profile (%USERPROFILE%), which is "
@@ -358,22 +363,30 @@ def shared_message(
         )
     what = "holds your token" if holds_token else f"sets {_URL_NAME}, the exchange address"
     name = f"{path}"
-    if via:
-        name = f"{path}, which leads to {file} through the link {via},"
-    elif linked:
+    if is_link and via:
+        name = f"{path}, a link that leads to {file} through {_the_links(via)},"
+    elif is_link:
         name = f"{path}, a link to {file},"
-    folders = "folders" if linked else "folder"
+    elif via:
+        name = f"{path}, which leads to {file} through {_the_links(via)},"
+    holders = [holder.path for holder in link_folders]
+    folders = "folders" if holders else "folder"
     return (
         f"{name} {what}, and {_join(findings, '; ')}, so other people who use this "
         f"computer could {' or '.join(risks)}. {fix} To see who can open the {folders} and "
-        f"the file, {_icacls(folder, file, link_folder)}. A later release will refuse such "
-        "a file."
+        f"the file, {_icacls(folder, file, holders)}. A later release will refuse such a "
+        "file."
     )
 
 
-def _icacls(folder: str, file: str, link_folder: str | None = None) -> str:
-    """How to run icacls on `folder` and on `file`, the file in it, and on `link_folder`,
-    the folder that holds a link to the file, if there is one. A path with characters
+def _the_links(links: list[str]) -> str:
+    """ "the link A", or "the links A and B"."""
+    return f"the link {links[0]}" if len(links) == 1 else f"the links {_join(links)}"
+
+
+def _icacls(folder: str, file: str, link_folders: Sequence[str] = ()) -> str:
+    """How to run icacls on `folder` and on `file`, the file in it, and on `link_folders`,
+    the folders that hold the links on the way to the file, if any. A path with characters
     cmd or PowerShell would expand or end a quote at inside double quotes is not put in a
     command, so the command never names another folder; nor is one that ends in a
     backslash, where the closing quote would be taken as part of the path, except a drive's
@@ -386,12 +399,13 @@ def _icacls(folder: str, file: str, link_folder: str | None = None) -> str:
             return None
         return f'`icacls "{target}"`'
 
-    targets = [folder, file] if link_folder is None else [link_folder, folder, file]
-    commands = [command(target) for target in targets]
-    if link_folder is not None and None in commands:
+    holders = list(link_folders)
+    commands = [command(target) for target in [*holders, folder, file]]
+    if holders and None in commands:
+        which = "folder that holds the link" if len(holders) == 1 else "folders that hold the links"
         return (
-            f"run icacls on the folder that holds the link, {link_folder}, on the folder "
-            f"that holds the file, {folder}, and on the file, {file}"
+            f"run icacls on the {which}, {_join(holders)}, on the folder that holds the file, "
+            f"{folder}, and on the file, {file}"
         )
     if None in commands:
         return f"run icacls on the folder that holds it, {folder}, and on the file itself"

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from qte_sdk import _fileaccess, dotenv
-from qte_sdk._fileaccess import BroadAccess
+from qte_sdk._fileaccess import BroadAccess, LinkFolder
 from qte_sdk.dotenv import (
     AddressFileShared,
     FileShared,
@@ -404,7 +404,7 @@ def test_the_folder_of_a_relative_path_is_checked(windows, tmp_path, monkeypatch
     found = _fileaccess.broad_access("token")
     # The file is asked for by the path it resolves to, which is absolute.
     assert windows.asked == [str(tmp_path / "token"), str(tmp_path)]
-    assert found is not None and found.link_folder_path is None
+    assert found is not None and found.links == () and found.link_folders == ()
 
 
 @pytest.mark.parametrize("folder", [None, "D:(A;;FA;;;WD", OSError("access denied")])
@@ -991,7 +991,8 @@ def test_a_link_is_checked_by_the_file_and_folder_it_links_to_and_its_own_folder
     assert found == BroadAccess(folder=(AUTHENTICATED,), other_owner=False, link_folder=())
     assert found.changeable
     assert (found.file, found.folder_path) == (str(target), str(target.parent))
-    assert found.link_folder_path == str(link.parent)
+    assert found.links == (str(link),)
+    assert found.link_folders == (LinkFolder(str(link.parent), (str(link),), ()),)
 
 
 def test_the_folder_of_a_link_is_checked_as_well_as_the_folder_it_links_into(windows, tmp_path):
@@ -1032,7 +1033,10 @@ def test_a_file_reached_through_a_linked_folder_checks_where_the_link_is(windows
         str(tmp_path / "open"),
     ]
     assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
-    assert (found.link, found.link_folder_path) == (str(alias), str(tmp_path / "open"))
+    assert found.links == (str(alias),)
+    assert found.link_folders == (
+        LinkFolder(str(tmp_path / "open"), (str(alias),), (AUTHENTICATED,)),
+    )
 
 
 def test_a_link_within_the_files_own_folder_adds_no_folder(windows, tmp_path):
@@ -1041,7 +1045,8 @@ def test_a_link_within_the_files_own_folder_adds_no_folder(windows, tmp_path):
     windows.sddl = PRIVATE_FILE
     found = _fileaccess.broad_access(tmp_path / ".env")
     assert windows.asked == [str(tmp_path / "real.env"), str(tmp_path)]
-    assert found is not None and found.link is None and found.link_folder_path is None
+    assert found is not None and found.links == (str(tmp_path / ".env"),)
+    assert found.link_folders == ()  # the link is in the file's own folder
 
 
 def test_a_folder_reached_by_another_name_is_not_a_link(windows, tmp_path, monkeypatch):
@@ -1057,7 +1062,7 @@ def test_a_folder_reached_by_another_name_is_not_a_link(windows, tmp_path, monke
     windows.sddl = PRIVATE_FILE
     found = _fileaccess.broad_access(path)
     assert windows.asked == [elsewhere(path), elsewhere(path.parent)]
-    assert found is not None and found.link_folder_path is None
+    assert found is not None and found.links == () and found.link_folders == ()
 
 
 class Status:
@@ -1183,7 +1188,11 @@ def test_a_link_is_resolved_and_read_before_the_token(windows, tmp_path, monkeyp
         events.append(f"list {path}")
         return fake_sddl(path)
 
-    real_lstat = os.lstat
+    real_lstat, real_readlink = os.lstat, os.readlink
+
+    def recording_readlink(path, *args, **kwargs):
+        events.append("readlink")
+        return real_readlink(path, *args, **kwargs)
 
     def recording_lstat(path, *args, **kwargs):
         if str(path).startswith(str(tmp_path)):
@@ -1192,12 +1201,13 @@ def test_a_link_is_resolved_and_read_before_the_token(windows, tmp_path, monkeyp
 
     monkeypatch.setattr(os, "open", recording_open)
     monkeypatch.setattr(os, "lstat", recording_lstat)
+    monkeypatch.setattr(os, "readlink", recording_readlink)
     monkeypatch.setattr(os.path, "realpath", recording_realpath)
     monkeypatch.setattr(_fileaccess, "_read_sddl", recording_sddl)
     with pytest.warns(TokenFileShared):
         assert resolve_token() == token
     # realpath is a Windows API call on Windows: it too comes before the token is read.
-    assert "realpath" in events and "lstat" in events
+    assert "realpath" in events and "lstat" in events and "readlink" in events
     last_call = max(i for i, e in enumerate(events) if not e.startswith("open"))
     assert events[last_call + 1 :] == [f"open {link}"]
     assert [e for e in events if e.startswith("list")] == [
@@ -1208,10 +1218,10 @@ def test_a_link_is_resolved_and_read_before_the_token(windows, tmp_path, monkeyp
 
 
 def test_the_icacls_commands_name_both_folders_of_a_link():
-    assert _icacls("D:\\data", "D:\\data\\.env", "C:\\Users\\me\\proj") == (
+    assert _icacls("D:\\data", "D:\\data\\.env", ["C:\\Users\\me\\proj"]) == (
         'run `icacls "C:\\Users\\me\\proj"`, `icacls "D:\\data"` and `icacls "D:\\data\\.env"`'
     )
-    assert _icacls("D:\\50%", "D:\\50%\\.env", "C:\\proj") == (
+    assert _icacls("D:\\50%", "D:\\50%\\.env", ["C:\\proj"]) == (
         "run icacls on the folder that holds the link, C:\\proj, on the folder that holds "
         "the file, D:\\50%, and on the file, D:\\50%\\.env"
     )
@@ -1373,7 +1383,12 @@ def test_a_token_file_reached_through_a_linked_folder_names_the_link(
 def test_a_clean_check_through_a_link_names_the_links_folder():
     from qte_sdk.token import _none_of_the_checked_groups
 
-    clean = BroadAccess(folder=(), other_owner=False, link_folder=(), link_folder_path="C:\\p")
+    clean = BroadAccess(
+        folder=(),
+        other_owner=False,
+        link_folder=(),
+        link_folders=(LinkFolder("C:\\p", ("C:\\p\\.env",), ()),),
+    )
     assert (
         "or add or remove files in its folder or the folder that holds the link it is "
         "reached through, and it is owned by you"
@@ -1408,3 +1423,196 @@ def test_an_interruption_before_the_warning_starts_carries_no_token(
     assert Interrupting.asked == 2
     assert caught.value.__context__ is None
     assert_token_absent(token, shown(caught.value))
+
+
+# Chains of links, on simulated Windows: every folder that holds a link on the way is
+# checked, since whoever may replace any one of the links may point the chain elsewhere.
+
+
+def chain(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """`private/.env` linking to `shared/redirect.env`, which links to `safe/config.env`:
+    the first link, the middle one and the file."""
+    for name in ("private", "shared", "safe"):
+        (tmp_path / name).mkdir()
+    target = tmp_path / "safe" / "config.env"
+    target.write_text("")
+    target.chmod(0o600)
+    middle = tmp_path / "shared" / "redirect.env"
+    middle.symlink_to(target)
+    first = tmp_path / "private" / ".env"
+    first.symlink_to(middle)
+    return first, middle, target
+
+
+def test_every_folder_in_a_chain_of_links_is_checked(windows, tmp_path):
+    first, middle, target = chain(tmp_path)
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(middle.parent): REAL_DRIVE_FOLDER}
+    found = _fileaccess.broad_access(first)
+    assert windows.asked == [str(target), str(target.parent), str(first.parent), str(middle.parent)]
+    assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
+    assert found.links == (str(first), str(middle))
+    assert found.link_folders == (
+        LinkFolder(str(first.parent), (str(first),), ()),
+        LinkFolder(str(middle.parent), (str(middle),), (AUTHENTICATED,)),
+    )
+
+
+def test_a_dotenv_at_the_start_of_a_chain_names_the_open_middle_folder(
+    windows, tmp_path, monkeypatch
+):
+    first, middle, target = chain(tmp_path)
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(middle.parent): REAL_DRIVE_FOLDER}
+    token = synthetic_token()
+    target.write_text(f"QTE_TOKEN={token}\n")
+    monkeypatch.chdir(first.parent)
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{first}, a link that leads to {target} through the link {middle}, holds your "
+        f"token, and other users can replace it: {AUTHENTICATED} may add or remove files in "
+        f"{middle.parent}, which holds the link {middle}, so other people who use this "
+        "computer could change QTE_URL in it"
+    )
+    assert "Move the file it leads to, and the links, into a folder" in message
+    assert (
+        f'run `icacls "{first.parent}"`, `icacls "{middle.parent}"`, '
+        f'`icacls "{target.parent}"` and `icacls "{target}"`.'
+    ) in message
+    assert_token_absent(token, message)
+
+
+def test_a_junction_above_a_file_link_checks_both_holding_folders(windows, tmp_path):
+    # open/project is a link to a folder (a junction, on Windows) and the .env in it is a
+    # link to a file elsewhere: both open and project's real folder hold a link.
+    for name in ("open", "project", "elsewhere"):
+        (tmp_path / name).mkdir()
+    target = tmp_path / "elsewhere" / "real.env"
+    target.write_text("")
+    (tmp_path / "project" / ".env").symlink_to(target)
+    junction = tmp_path / "open" / "project"
+    junction.symlink_to(tmp_path / "project", target_is_directory=True)
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(tmp_path / "open"): REAL_DRIVE_FOLDER}
+    found = _fileaccess.broad_access(junction / ".env")
+    assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
+    assert found.links == (str(junction), str(tmp_path / "project" / ".env"))
+    assert found.link_folders == (
+        LinkFolder(str(tmp_path / "open"), (str(junction),), (AUTHENTICATED,)),
+        LinkFolder(str(tmp_path / "project"), (str(tmp_path / "project" / ".env"),), ()),
+    )
+
+
+def test_a_relative_link_is_followed_from_the_links_folder(windows, tmp_path):
+    first, middle, target = chain(tmp_path)
+    first.unlink()
+    first.symlink_to(os.path.join("..", "shared", "redirect.env"))
+    windows.sddl = PRIVATE_FILE
+    found = _fileaccess.broad_access(first)
+    assert found is not None and found.file == str(target)
+    assert found.links == (str(first), str(middle))
+
+
+def test_links_in_one_folder_are_named_together(windows, tmp_path):
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "safe").mkdir()
+    target = tmp_path / "safe" / "real.env"
+    target.write_text("")
+    second = tmp_path / "shared" / "b.env"
+    second.symlink_to(target)
+    first = tmp_path / "shared" / "a.env"
+    first.symlink_to(second)
+    (tmp_path / "proj" / ".env").symlink_to(first)
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(tmp_path / "shared"): REAL_DRIVE_FOLDER}
+    found = _fileaccess.broad_access(tmp_path / "proj" / ".env")
+    assert found is not None
+    assert found.link_folders == (
+        LinkFolder(str(tmp_path / "proj"), (str(tmp_path / "proj" / ".env"),), ()),
+        LinkFolder(str(tmp_path / "shared"), (str(first), str(second)), (AUTHENTICATED,)),
+    )
+    message = shared_message(tmp_path / "proj" / ".env", found, sets_address=False)
+    assert f"which holds the links {first} and {second}, so" in message
+
+
+def test_a_loop_of_links_gives_unknown_folders_and_no_hang(windows, tmp_path):
+    (tmp_path / "a.env").symlink_to(tmp_path / "b.env")
+    (tmp_path / "b.env").symlink_to(tmp_path / "a.env")
+    assert _fileaccess.links_on_the_way(tmp_path / "a.env") is None
+    windows.sddl = PRIVATE_FILE
+    found = _fileaccess.broad_access(tmp_path / "a.env")
+    assert found is not None
+    assert found.link_folders is None and found.link_folder is None and found.links == ()
+
+
+def test_a_folder_reached_twice_through_a_junction_above_it_is_not_a_loop(tmp_path):
+    # proj/up links to proj itself, so proj/up/up/.env is proj/.env: the same link is met
+    # twice, with fewer names left each time.
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / ".env").write_text("")
+    up = tmp_path / "proj" / "up"
+    up.symlink_to(tmp_path / "proj", target_is_directory=True)
+    walked = _fileaccess.links_on_the_way(up / "up" / ".env")
+    assert walked == [(str(up), str(tmp_path / "proj"))] * 2
+
+
+def make_chain(tmp_path: Path, count: int) -> Path:
+    """A chain of `count` links, each to the next, ending at a file; the first link."""
+    target = tmp_path / "file.env"
+    target.write_text("")
+    following = target
+    for number in range(count, 0, -1):
+        link = tmp_path / f"link{number}.env"
+        link.symlink_to(following)
+        following = link
+    return following
+
+
+def test_a_chain_of_the_most_links_is_followed(tmp_path):
+    walked = _fileaccess.links_on_the_way(make_chain(tmp_path, _fileaccess.MAX_LINKS))
+    assert walked is not None and len(walked) == _fileaccess.MAX_LINKS
+
+
+def test_a_chain_of_too_many_links_gives_unknown_folders(windows, tmp_path):
+    first = make_chain(tmp_path, _fileaccess.MAX_LINKS + 1)
+    assert _fileaccess.links_on_the_way(first) is None
+    windows.sddl = PRIVATE_FILE
+    found = _fileaccess.broad_access(first)
+    assert found is not None and found.link_folders is None and found.link_folder is None
+
+
+def test_a_link_that_cannot_be_read_gives_unknown_folders(tmp_path, monkeypatch):
+    first, _, _ = chain(tmp_path)
+
+    def unreadable(path, *args, **kwargs):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(os, "readlink", unreadable)
+    assert _fileaccess.links_on_the_way(first) is None
+
+
+def test_unknown_link_folders_are_said_to_be_unchecked():
+    from qte_sdk.token import _none_of_the_checked_groups
+
+    unknown = BroadAccess(folder=(), other_owner=False, link_folders=None)
+    assert (
+        "(the folders that hold the links it is reached through could not be checked, and "
+        "other groups and users are not checked)"
+    ) in _none_of_the_checked_groups(unknown)
+
+
+@pytest.mark.parametrize(
+    ("target", "plain"),
+    [
+        ("\\\\?\\C:\\proj", "C:\\proj"),
+        ("\\??\\C:\\proj", "C:\\proj"),
+        ("\\\\?\\UNC\\server\\share\\proj", "\\\\server\\share\\proj"),
+        ("C:\\proj", "C:\\proj"),
+        ("..\\shared\\redirect.env", "..\\shared\\redirect.env"),
+    ],
+)
+def test_the_prefix_windows_gives_a_junctions_target_is_removed(target, plain):
+    assert _fileaccess._without_prefix(target) == plain

@@ -468,7 +468,8 @@ def test_a_dotenv_link_to_a_file_in_a_folder_open_to_users_warns_about_that_fold
     assert (access.file, access.folder_path) == (real(target), real(elsewhere))
     assert access.read == access.write == access.folder == ("BUILTIN\\Users",)
     assert access.link_folder == ()  # the folder that holds the link is private
-    assert access.link_folder_path == real(private_folder)
+    assert access.links == (str(link),)
+    assert [f.path for f in access.link_folders] == [real(private_folder)]
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
@@ -500,7 +501,8 @@ def test_a_dotenv_link_in_a_folder_open_to_users_warns_about_the_links_folder(
     assert access is not None
     assert (access.read, access.write, access.folder) == ((), (), ())
     assert access.link_folder == ("BUILTIN\\Users",)
-    assert (access.file, access.link_folder_path) == (real(target), real(here))
+    assert access.file == real(target)
+    assert [f.path for f in access.link_folders] == [real(here)]
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
@@ -533,7 +535,8 @@ def test_a_dotenv_reached_through_a_junction_warns_about_the_folder_holding_it(
         assert (access.read, access.write, access.folder) == ((), (), ())
         assert access.link_folder == ("BUILTIN\\Users",)
         assert (access.file, access.folder_path) == (real(path), real(private_folder))
-        assert (access.link, access.link_folder_path) == (str(junction), real(holder))
+        assert access.links == (str(junction),)
+        assert [f.path for f in access.link_folders] == [real(holder)]
 
         caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
         assert [w.category for w in caught] == [TokenFileShared]
@@ -601,3 +604,42 @@ def test_a_ctrl_c_while_warning_about_a_token_dotenv_carries_no_token(private_fo
     # The warning cut short is given next time.
     caught_again = shared_warnings(resolve_token)
     assert [w.category for w in caught_again] == [TokenFileShared]
+
+
+def test_a_chain_of_links_warns_about_an_open_folder_in_the_middle(
+    private_folder, tmp_path, user_sid
+):
+    # private\.env -> shared\redirect.env -> safe\config.env: whoever may replace the
+    # middle link may point the chain elsewhere, though both ends are private.
+    shared = tmp_path / "shared"
+    safe = tmp_path / "safe"
+    for folder in (shared, safe):
+        folder.mkdir()
+        make_folder_private(folder, user_sid)
+    target = write_dotenv(safe)
+    target = target.rename(safe / "config.env")
+    make_file_private(target, user_sid)
+    middle = shared / "redirect.env"
+    os.symlink(target, middle)
+    os.symlink(middle, private_folder / ".env")
+    open_folder_to_users(shared)
+    access = _fileaccess.broad_access(private_folder / ".env")
+    assert access is not None
+    assert (access.read, access.write, access.folder) == ((), (), ())
+    assert access.link_folder == ("BUILTIN\\Users",)
+    assert access.links == (str(private_folder / ".env"), str(middle))
+    assert [(f.path, f.groups) for f in access.link_folders] == [
+        (real(private_folder), ()),
+        (real(shared), ("BUILTIN\\Users",)),
+    ]
+
+    caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+    assert [w.category for w in caught] == [TokenFileShared]
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{Path.cwd() / '.env'}, a link that leads to {real(target)} through the link "
+        f"{middle}, holds your token, and other users can replace it: BUILTIN\\Users may "
+        f"add or remove files in {real(shared)}, which holds the link {middle}, so"
+    ), message
+    assert "Windows lets" not in message
+    assert_no_token(message)
