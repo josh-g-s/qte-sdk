@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import traceback
 import warnings
 from pathlib import Path
 
@@ -429,3 +430,174 @@ def test_token_set_refuses_at_once_without_a_console(tmp_path, command, stdin):
     assert "needs a terminal" in result.stderr
     assert_no_token(result.stdout, result.stderr)
     assert not (tmp_path / ".env").exists()
+
+
+# Links: a symbolic link to the file, and a junction on the way to it. The runner is an
+# elevated administrator, so it may make symbolic links; a junction needs no such right.
+
+
+def real(path: Path) -> str:
+    """`path` as the SDK names a place it reached by resolving links: with every link,
+    and any short 8.3 name, resolved."""
+    return os.path.realpath(path)
+
+
+def make_junction(link: Path, target: Path) -> None:
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_dotenv_link_to_a_file_in_a_folder_open_to_users_warns_about_that_folder(
+    private_folder, tmp_path, user_sid
+):
+    elsewhere = tmp_path / "open"
+    elsewhere.mkdir()
+    make_folder_private(elsewhere, user_sid)
+    open_folder_to_users(elsewhere)
+    target = write_dotenv(elsewhere)  # made after the folder was opened: inherits Users:M
+    link = private_folder / ".env"
+    os.symlink(target, link)
+    assert grants_users(target)
+    access = _fileaccess.broad_access(link)
+    assert access is not None
+    assert (access.file, access.folder_path) == (real(target), real(elsewhere))
+    assert access.read == access.write == access.folder == ("BUILTIN\\Users",)
+    assert access.link_folder == ()  # the folder that holds the link is private
+    assert access.link_folder_path == real(private_folder)
+
+    caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+    assert [w.category for w in caught] == [TokenFileShared]
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{Path.cwd() / '.env'}, a link to {real(target)}, holds your token, and Windows "
+        "lets BUILTIN\\Users read or change it; and other users can replace it: "
+        f"BUILTIN\\Users may add or remove files in {real(elsewhere)}, which holds the file "
+        "it links to, so"
+    ), message
+    assert "which holds the link" not in message
+    assert "Move the file it links to, and the link, into a folder" in message
+    assert_no_token(message)
+
+
+def test_a_dotenv_link_in_a_folder_open_to_users_warns_about_the_links_folder(
+    private_folder, tmp_path, user_sid, monkeypatch
+):
+    target = write_dotenv(private_folder)
+    make_file_private(target, user_sid)
+    here = tmp_path / "open"
+    here.mkdir()
+    make_folder_private(here, user_sid)
+    open_folder_to_users(here)
+    os.symlink(target, here / ".env")
+    monkeypatch.chdir(here)
+    assert not grants_users(target)
+    access = _fileaccess.broad_access(here / ".env")
+    assert access is not None
+    assert (access.read, access.write, access.folder) == ((), (), ())
+    assert access.link_folder == ("BUILTIN\\Users",)
+    assert (access.file, access.link_folder_path) == (real(target), real(here))
+
+    caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+    assert [w.category for w in caught] == [TokenFileShared]
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{Path.cwd() / '.env'}, a link to {real(target)}, holds your token, and other users "
+        f"can replace it: BUILTIN\\Users may add or remove files in {real(here)}, which "
+        "holds the link, so"
+    ), message
+    assert "Windows lets" not in message
+    assert "which holds the file it links to" not in message
+    assert_no_token(message)
+
+
+def test_a_dotenv_reached_through_a_junction_warns_about_the_folder_holding_it(
+    private_folder, tmp_path, user_sid, monkeypatch
+):
+    path = write_dotenv(private_folder)
+    make_file_private(path, user_sid)
+    holder = tmp_path / "open"
+    holder.mkdir()
+    make_folder_private(holder, user_sid)
+    open_folder_to_users(holder)
+    junction = holder / "project"
+    make_junction(junction, private_folder)
+    try:
+        monkeypatch.chdir(junction)
+        access = _fileaccess.broad_access(junction / ".env")
+        assert access is not None
+        assert (access.read, access.write, access.folder) == ((), (), ())
+        assert access.link_folder == ("BUILTIN\\Users",)
+        assert (access.file, access.folder_path) == (real(path), real(private_folder))
+        assert (access.link, access.link_folder_path) == (str(junction), real(holder))
+
+        caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+        assert [w.category for w in caught] == [TokenFileShared]
+        message = str(caught[0].message)
+        assert message.startswith(
+            f"{Path.cwd() / '.env'}, which leads to {real(path)} through the link "
+            f"{junction}, holds your token, and other users can replace it: BUILTIN\\Users "
+            f"may add or remove files in {real(holder)}, which holds the link {junction}, so"
+        ), message
+        assert "Windows lets" not in message
+        assert_no_token(message)
+    finally:
+        # The junction goes first, on its own, so no recursive delete goes through it.
+        os.chdir(tmp_path)
+        os.rmdir(junction)
+    assert path.exists()
+
+
+def shown_with_locals(error: BaseException) -> str:
+    """What a traceback that shows local variables could print for `error` and its chain,
+    and every text or bytes local of its frames, leaving out this module's own frames."""
+    parts = [str(error), repr(error), repr(error.args)]
+    pending = [traceback.TracebackException.from_exception(error, capture_locals=True)]
+    while pending:
+        link = pending.pop()
+        parts.extend(link.format())
+        for summary in link.stack:
+            if summary.filename != __file__:
+                parts.append(f"{summary.filename}:{summary.lineno} {summary.locals}")
+        pending.extend(n for n in (link.__cause__, link.__context__) if n is not None)
+    tb = error.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename != __file__:
+            for value in tb.tb_frame.f_locals.values():
+                if isinstance(value, bytes):
+                    parts.append(value.decode("utf-8", "replace"))
+                elif isinstance(value, str):
+                    parts.append(value)
+        tb = tb.tb_next
+    return "\n".join(parts)
+
+
+def test_a_ctrl_c_while_warning_about_a_token_dotenv_carries_no_token(private_folder):
+    open_folder_to_users(private_folder)
+    write_dotenv(private_folder)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.showwarning = interrupted
+        with pytest.raises(KeyboardInterrupt) as caught:
+            resolve_token()
+    error = caught.value
+    assert type(error) is KeyboardInterrupt
+    assert error.__cause__ is None and error.__context__ is None
+    frames = []
+    tb = error.__traceback__
+    while tb is not None:
+        frames.append(tb.tb_frame.f_code.co_name)
+        tb = tb.tb_next
+    assert "read_value" in frames  # it came through the frame that read the file
+    assert_no_token(shown_with_locals(error))
+    # The warning cut short is given next time.
+    caught_again = shared_warnings(resolve_token)
+    assert [w.category for w in caught_again] == [TokenFileShared]
