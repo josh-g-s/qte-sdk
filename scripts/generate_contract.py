@@ -60,7 +60,9 @@ def main() -> int:
             f"-I{well_known}",
             f"--python_out={tmp}",
             f"--pyi_out={tmp}",
-            *[str(p.relative_to(PROTO_ROOT)) for p in protos],
+            # protoc looks these names up under -I, and takes only forward slashes there,
+            # also on Windows.
+            *[p.relative_to(PROTO_ROOT).as_posix() for p in protos],
         ]
         if protoc.main(args) != 0:
             print("protoc failed", file=sys.stderr)
