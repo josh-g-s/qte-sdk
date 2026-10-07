@@ -27,6 +27,7 @@ from qte_sdk.options import (
     chain_contracts,
     expiry_date,
     greek_to_decimal,
+    is_feed_only,
     is_option_symbol,
     limit_scope,
     option_symbol,
@@ -379,9 +380,11 @@ def test_a_feed_only_residual_print_is_told_apart_from_an_ordinary_one():
             {"price": "1060000", "size": "3", "timestamp": "3", "kind": "STUDENT_TO_WALL"},
         ],
     }
-    feed_only, residual, ordinary = unpack(payload, Trades).prints
+    trades = unpack(payload, Trades)
+    feed_only, residual, ordinary = trades.prints
     assert feed_only.kind == RESIDUAL and residual.kind == RESIDUAL
     assert ordinary.kind == STUDENT_TO_WALL
     assert feed_only.HasField("feed_only") and feed_only.feed_only
     assert not residual.HasField("feed_only")
     assert not ordinary.HasField("feed_only")
+    assert [is_feed_only(p) for p in trades.prints] == [True, False, False]

@@ -122,7 +122,14 @@ present, and true, only on an option contract's `RESIDUAL` print that went throu
 live print's own premium because the contract had no wall on the side the aggressor
 took. It is never sent as false, and it is absent on every other print: an equity's, an
 option contract's other kinds, and a residual that printed at the wall's price. Test it
-with `HasField("feed_only")`; absent means an ordinary print.
+with `HasField("feed_only")` or `is_feed_only`; absent means an ordinary print.
+
+    >>> from qte_sdk.contract.v1.common_pb2 import RESIDUAL
+    >>> from qte_sdk.contract.v1.market_data_pb2 import TapePrint
+    >>> is_feed_only(TapePrint(kind=RESIDUAL, feed_only=True))
+    True
+    >>> is_feed_only(TapePrint(kind=RESIDUAL))
+    False
 
 Not published yet:
 
@@ -157,6 +164,7 @@ from qte_sdk.contract.v1.market_data_pb2 import (
     OptionGreeks,
     OptionGreeksStatus,
     OptionTradingState,
+    TapePrint,
 )
 from qte_sdk.contract.v1.session_pb2 import Instruments, OptionUnderlying
 
@@ -186,6 +194,7 @@ __all__ = [
     "chain_contracts",
     "expiry_date",
     "greek_to_decimal",
+    "is_feed_only",
     "is_option_symbol",
     "limit_scope",
     "listed_contracts",
@@ -361,6 +370,13 @@ def trading_state(book: Book) -> OptionTradingState.ValueType | None:
     if book.trading_state in (OPTION_TRADING, OPTION_REDUCING_ONLY, OPTION_SUSPENDED):
         return book.trading_state
     return OPTION_SUSPENDED
+
+
+def is_feed_only(tape_print: TapePrint) -> bool:
+    """Whether a tape print is an option contract's feed-only residual print: one whose
+    `feed_only` flag is present and true. An absent flag, as on every equity print, is an
+    ordinary print."""
+    return tape_print.HasField("feed_only") and tape_print.feed_only
 
 
 def greek_to_decimal(value: int) -> Decimal:

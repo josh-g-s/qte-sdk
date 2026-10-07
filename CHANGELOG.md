@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.8
+**Version:** 0.9
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -18,6 +18,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - `InstrumentInfo.sector_limit` is the sector the Fundamentals sector limit counts an instrument against, and `qte_sdk.instruments.sector_of` reads it, as None when the exchange gives none.
 - A `TapePrint` in live `trades` carries `feed_only`, present and true only on an option contract's residual print taken at the live print's premium because the contract had no wall on that side. Test it with `HasField("feed_only")`.
 - `Origin` names `HOUSE`, the origin of the exchange's own house orders. A team's connection is never sent a report with it.
+- `qte_sdk.options.is_feed_only` says whether a live tape print is an option contract's feed-only residual print; a print without the flag is an ordinary one.
 - The smoke test counts the ticket states a pod or desk is sent, instead of naming `ticket_state` as a type the SDK does not know.
 
 ## 1.0.2
