@@ -38,6 +38,31 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest
 
+  windows:
+    # The Windows token-file and console checks (tests marked `windows`) read real access
+    # lists, owners and consoles, so they run only here. See "Checks" in docs/development.md.
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - name: Run the tests marked windows
+        run: pytest -m windows --junitxml=windows-tests.xml
+      - name: Fail if none of them ran or any was skipped
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          suite = ET.parse("windows-tests.xml").getroot().find("testsuite")
+          tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
+          print(f"{tests} tests marked windows, {skipped} skipped")
+          assert tests > 0 and skipped == 0
+      - name: Run the rest of the suite
+        if: success() || failure()
+        run: pytest -m "not windows"
+
   test-websockets-floor:
     runs-on: ubuntu-latest
     steps:
