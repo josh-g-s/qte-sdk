@@ -26,6 +26,7 @@ Update with `python -m qte_sdk.update` and follow what it prints.
 - `Origin` names `HOUSE`, the origin of the exchange's own house orders. A team's connection is never sent a report with it.
 - `qte_sdk.options.is_feed_only` says whether a live tape print is an option contract's feed-only residual print; a print without the flag is an ordinary one.
 - The smoke test counts the ticket states a pod or desk is sent, instead of naming `ticket_state` as a type the SDK does not know.
+- The conformance session (`tests/test_conformance.py`, run only against an exchange you name) follows the published steps at v1.7: step 1a checks the `instruments` message that comes right after the calendar, step 15 checks heartbeats, the 45-second silence close, resume replay and snapshots, and a resume across an exchange restart, and step 3 accepts up to ten ladder levels a side.
 
 ## 1.0.2
 
