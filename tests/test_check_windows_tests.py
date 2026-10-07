@@ -79,6 +79,14 @@ FILTERING_CONFTEST = """
         config.pluginmanager.register(Selector(), "selector")
 """
 
+# A conftest that hides a Windows test from collection altogether, rather than deselecting
+# it, as a filter could.
+HIDING_CONFTEST = """
+    def pytest_pycollect_makeitem(collector, name, obj):
+        if name == "test_dropped":
+            return []
+"""
+
 
 def project(tmp_path: Path, conftest: str = "") -> Path:
     tests = tmp_path / "tests"
@@ -216,3 +224,24 @@ def test_the_list_of_this_repository_has_the_real_windows_tests(monkeypatch):
     monkeypatch.setenv("PYTEST_ADDOPTS", "-k nothing_matches_this -m windows")
     listed = check.inventory()
     assert "tests/test_windows_real.py::test_nul_is_not_a_console" in listed
+
+
+def test_a_conftest_that_hides_a_test_from_collection_does_not_shrink_the_list(tmp_path):
+    root = project(tmp_path, HIDING_CONFTEST)
+    expected = check.inventory(root)
+    assert len(expected) == EXPECTED
+    assert check.problems(run(root), expected) == [
+        "did not run (deselected, or not collected): tests/test_windows_real.py::test_dropped"
+    ]
+
+
+def test_plugins_named_in_the_environment_do_not_shrink_the_list(tmp_path, monkeypatch):
+    root = project(tmp_path)
+    (tmp_path / "hiding_plugin.py").write_text(textwrap.dedent(HIDING_CONFTEST))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("PYTEST_PLUGINS", "hiding_plugin")
+    expected = check.inventory(root)
+    assert len(expected) == EXPECTED
+    assert check.problems(run(root), expected) == [
+        "did not run (deselected, or not collected): tests/test_windows_real.py::test_dropped"
+    ]

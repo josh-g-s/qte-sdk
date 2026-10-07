@@ -4,9 +4,10 @@
 
 The tests that must run are every test in tests/test_windows_real.py, marked `windows` or
 not, and every test marked `windows` anywhere. They are listed by a separate pytest
-process, with no `addopts` and no `PYTEST_ADDOPTS`, as each test is collected, before `-k`,
-`-m`, `--deselect` or any hook that selects tests can leave one out, so nothing that
-filters the real run can shrink the list too. Each must be in the JUnit report the real
+process, with no `addopts`, no `PYTEST_ADDOPTS` or `PYTEST_PLUGINS`, no conftest and no
+plugin loaded by entry point, as each test is collected, before `-k`, `-m`, `--deselect`
+or any hook that selects tests can leave one out, so nothing that filters or hides tests
+in the real run can shrink the list too. Each must be in the JUnit report the real
 run wrote, by the name pytest gives it there, as many times as it is listed, and not
 skipped. The report has no entry for a test the run deselected, so a deselected test is
 reported as one that did not run. It prints what is wrong and exits 1, or exits 0.
@@ -30,7 +31,9 @@ PREFIX = "windows tests: "
 def inventory(root: Path = ROOT) -> list[str]:
     """The node IDs of the tests that must run in the project at `root`, listed by a pytest
     process of their own that no option meant for the real run reaches."""
-    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
+    # No options, plugins or conftest that could leave a test out of the list.
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")}
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), INVENTORY],
         cwd=root,
@@ -67,7 +70,16 @@ def _list_tests() -> int:
             self.finished = True
 
     found = Inventory()
-    args = ["--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "tests"]
+    args = [
+        "--collect-only",
+        "-q",
+        "--noconftest",
+        "-o",
+        "addopts=",
+        "-p",
+        "no:cacheprovider",
+        "tests",
+    ]
     code = pytest.main(args, plugins=[found])
     if code != 0 or not found.finished:
         return 1
