@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.37
+**Version:** 0.38
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -362,9 +362,9 @@ The `qte_sdk.options` docstring covers when each message arrives. There is no re
 
 A `new` or `amend` in an option contract has three reject reasons of its own: `CONTRACT_NOT_LISTED` (the contract is not listed in this session), `CONTRACT_SUSPENDED` (the contract was suspended when the message was applied; a cancel still applies) and `CONTRACT_REDUCING_ONLY` (the contract is reducing-only and the order would grow your position in it or take it across zero). A resting order in a reducing-only contract that would do either is cancelled, with the reason `CONTRACT_REDUCING_RECHECK_FAILED`. The `qte_sdk.options` docstring has the details.
 
-Not settled yet:
-- options in the history service;
-- the flag that will mark an option trade's residual print in `trades`.
+An option contract's print in `trades` may carry `feed_only`, which is present, and true, only on a `RESIDUAL` print that went through at the feed print's own premium because the contract had no wall on the side the aggressor took. It is never sent as false, and every other print, an equity's included, leaves it out. Read it with `print_.HasField("feed_only")` or `qte_sdk.options.is_feed_only(print_)`: absent means an ordinary print.
+
+Not settled yet: options in the history service.
 
 ## 6. Place and cancel an order
 

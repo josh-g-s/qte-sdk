@@ -8,7 +8,8 @@ from qte_sdk import options
 from qte_sdk.books import LatestBooks
 from qte_sdk.connection import DecodeFailed, Disconnected, SeqGap
 from qte_sdk.contract.codec import unpack
-from qte_sdk.contract.v1.market_data_pb2 import Book, Mark
+from qte_sdk.contract.v1.common_pb2 import RESIDUAL, STUDENT_TO_WALL
+from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, Trades
 from qte_sdk.options import (
     CALL,
     OPTION_GREEKS_VALID,
@@ -26,6 +27,7 @@ from qte_sdk.options import (
     chain_contracts,
     expiry_date,
     greek_to_decimal,
+    is_feed_only,
     is_option_symbol,
     limit_scope,
     option_symbol,
@@ -359,3 +361,30 @@ def test_a_trading_state_name_from_a_newer_contract_is_read_as_suspended():
     # The name cannot be decoded, so the field is left unset.
     assert not book.HasField("trading_state")
     assert trading_state(book) == OPTION_SUSPENDED
+
+
+def test_a_feed_only_residual_print_is_told_apart_from_an_ordinary_one():
+    # As the exchange sends `trades`: the flag only on the feed-only residual, never false.
+    payload = {
+        "instrument": "SPY261120C00665000",
+        "grid_time": "1791207000000",
+        "prints": [
+            {
+                "price": "1050000",
+                "size": "2",
+                "timestamp": "1",
+                "kind": "RESIDUAL",
+                "feed_only": True,
+            },
+            {"price": "1050000", "size": "1", "timestamp": "2", "kind": "RESIDUAL"},
+            {"price": "1060000", "size": "3", "timestamp": "3", "kind": "STUDENT_TO_WALL"},
+        ],
+    }
+    trades = unpack(payload, Trades)
+    feed_only, residual, ordinary = trades.prints
+    assert feed_only.kind == RESIDUAL and residual.kind == RESIDUAL
+    assert ordinary.kind == STUDENT_TO_WALL
+    assert feed_only.HasField("feed_only") and feed_only.feed_only
+    assert not residual.HasField("feed_only")
+    assert not ordinary.HasField("feed_only")
+    assert [is_feed_only(p) for p in trades.prints] == [True, False, False]

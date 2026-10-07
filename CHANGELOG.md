@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.7
+**Version:** 0.8
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -17,6 +17,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - The docs say that a `reject` can carry `CURE_WINDOW`, for a new still in its order delay when a cure window opens.
 - `InstrumentInfo.sector_limit` is the sector the Fundamentals sector limit counts an instrument against, and `qte_sdk.instruments.sector_of` reads it, as None when the exchange gives none.
 - `Origin` names `HOUSE`, the origin of the exchange's own house orders. A team's connection is never sent a report with it.
+- A `TapePrint` carries `feed_only`, present and true only on an option contract's residual print taken at the feed print's premium because the contract had no wall on that side. `qte_sdk.options.is_feed_only` reads it; absent means an ordinary print.
 - The smoke test counts the ticket states a pod or desk is sent, instead of naming `ticket_state` as a type the SDK does not know.
 
 ## 1.0.2
