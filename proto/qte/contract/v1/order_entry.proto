@@ -1,9 +1,10 @@
 // Inbound order entry.
 //
-// **Version:** 1.7
+// **Version:** 1.8
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
-// `mass_cancel`. Every new, cancel, amend and mass-cancel message is released
+// `mass_cancel`, and, from a Fundamentals pod only, `ticket`, `ticket_cancel`
+// and `ticket_urgency` (see the end of this file). Every new, cancel, amend and mass-cancel message is released
 // to the engine delta_oe after gateway receipt (SPEC 8.1, SPEC 8.2); nothing
 // about that timing is a field here.
 //
@@ -11,8 +12,8 @@
 // carries an order identifier. A team holds at most one resting order per
 // instrument, side and price, across all of its strategies (SPEC 8.2).
 //
-// Identifier limits: request_ref, strat_id and instrument are each at most 32
-// bytes of UTF-8. The limit counts bytes, not characters, so a character
+// Identifier limits: request_ref, strat_id, instrument and house_team are each
+// at most 32 bytes of UTF-8. The limit counts bytes, not characters, so a character
 // outside ASCII counts two to four towards it. Any text is allowed except the
 // NUL character. A message with a longer identifier, or one containing NUL,
 // is rejected MALFORMED_MESSAGE at receipt, and the reject still echoes
@@ -71,6 +72,11 @@ message NewOrder {
   // MALFORMED_MESSAGE at receipt, unless an earlier receipt check fails
   // first. SPEC 24.1
   optional string parent_ticket_id = 8; // id
+  // Present iff the sender is a Director session: the team the house order
+  // is placed under, at most 32 bytes. Its presence makes the message a house
+  // order. A Director session's new without it, or a team session's new with
+  // it, is rejected at receipt and not logged. SPEC 14
+  optional string house_team = 9; // id
 }
 
 // Cancels the team's resting order in the stated instrument at the stated
@@ -83,6 +89,10 @@ message CancelOrder {
   string instrument = 2;  // id, at most 32 bytes. SPEC 8.2
   Side side = 3;          // SPEC 8.2
   int64 price = 4;        // int64-micro. The price level to clear. SPEC 8.2
+  // Present iff the sender is a Director session, as on a NewOrder: the team
+  // named on the house order, which acts on the house's own order at the
+  // level, whichever team that order is placed under. SPEC 14
+  optional string house_team = 5; // id
 }
 
 // Changes the price and size of the team's resting order at the stated
@@ -111,6 +121,8 @@ message AmendOrder {
   int64 price = 4;        // int64-micro. The amend price: the price the order rests at now. SPEC 8.2
   int64 new_price = 5;    // int64-micro. Equal to price for a size-only amend. SPEC 8.2
   int64 new_size = 6;     // int64-qty, a whole number of shares, or of contracts for an option. The new remaining size. SPEC 0.1, SPEC 8.2, SPEC 18.1
+  // Present iff the sender is a Director session, as on a CancelOrder. SPEC 14
+  optional string house_team = 7; // id
 }
 
 // Cancels every order the team has on the exchange (SPEC 8.2). Falls into no
@@ -118,4 +130,73 @@ message AmendOrder {
 // minimum rest (SPEC 8.1, SPEC 8.2).
 message MassCancel {
   string request_ref = 1; // id, 1 to 32 bytes. Client correlation id. Its other rules are not yet specified
+}
+
+// The three ticket messages below: `ticket`, `ticket_cancel` and
+// `ticket_urgency`.
+//
+// Sent by a Fundamentals pod, never by another team: a Fundamentals pod sends
+// no orders itself and instead sends its assigned Execution desk a ticket
+// (SPEC 2.2, SPEC 23). The ticket is the instruction the desk works.
+// Identifier limits are those above: request_ref, instrument and ticket ids
+// are at most 32 bytes, with no NUL character, and a ticket id is written in
+// decimal digits only, as parent_ticket_id is.
+
+// Submits a ticket to the pod's assigned desk (SPEC 23.2, Table 21). One
+// working ticket per instrument; a ticket either increases the position or
+// reduces it and never crosses zero (SPEC 23.2). The side is the order's
+// side, so a sell that reduces a long is a reducing ticket and a sell that
+// opens a short is an increasing one; the exchange works out which from the
+// pod's position. An amendment is a replacement: cancel the old ticket with
+// a ticket_cancel, then send a new ticket naming it in replaces_ticket_id
+// (SPEC 23.2).
+//
+// An ordinary ticket carries a hard execution limit price. A cure ticket
+// (SPEC 23.3) carries none and is flagged cure; its `limit_price` is absent.
+message SubmitTicket {
+  string request_ref = 1;   // id, 1 to 32 bytes. Client correlation id, echoed on the response
+  // Present on an opening or increasing ticket: the filed thesis covering
+  // the instrument and side. A reducing ticket inherits the position's
+  // thesis and may leave it absent (SPEC 23.1).
+  optional string thesis_id = 2; // id, at most 32 bytes
+  // Present iff thesis_id is: the version of the thesis the ticket uses,
+  // recorded at acceptance (SPEC 23.1, SPEC 23.2).
+  optional int32 thesis_version = 3;
+  string instrument = 4;    // id, at most 32 bytes. SPEC 3.1
+  Side side = 5;            // BUY or SELL. SPEC 23.2
+  int64 shares = 6;         // int64-qty, a whole number of shares, positive. SPEC 23.2
+  // Required unless cure is set, and absent on a cure ticket: the hard
+  // execution limit, a tick multiple. SPEC 23.2, SPEC 23.3
+  optional int64 limit_price = 7; // int64-micro
+  TicketUrgency urgency = 8;  // SPEC 23.2
+  // Optional free text for the desk, at most 280 characters, with no NUL
+  // character. Visible to the desk and logged; unscored. SPEC 23.2
+  optional string notes = 9;
+  // Present when this ticket replaces one the pod cancelled: the ticket_id of
+  // that cancelled ticket of the same pod in the same instrument. Absent on a
+  // cure ticket, whose acceptance replaces any ordinary reducing ticket in the
+  // instrument by itself. SPEC 23.2, SPEC 23.3
+  optional string replaces_ticket_id = 10; // id, decimal digits only
+  // Present and true on a cure ticket; absent means an ordinary ticket.
+  // SPEC 23.3
+  optional bool cure = 11;
+}
+
+// Cancels one of the pod's own ordinary tickets that is still working. The
+// pod may cancel an ordinary ticket at any time; a cure ticket cannot be
+// cancelled by the pod (SPEC 23.2, SPEC 23.3). The remainder is cancelled,
+// the desk's children are cancelled with it and committed fills stand
+// (SPEC 24.1). The desk may never cancel or amend a ticket (SPEC 23.2).
+message CancelTicket {
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id, echoed on the response
+  string ticket_id = 2;   // id, decimal digits only. The ticket to cancel
+}
+
+// Raises the urgency of the pod's working cure ticket. A cure ticket's
+// urgency may only increase, and the change applies to the remaining
+// schedule from then on, not to what is already due (SPEC 23.3).
+message RaiseTicketUrgency {
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id, echoed on the response
+  string ticket_id = 2;   // id, decimal digits only. The cure ticket
+  TicketUrgency urgency = 3; // Higher than the ticket's current urgency. SPEC 23.3
 }

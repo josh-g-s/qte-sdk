@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.9
+// **Version:** 1.14
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -41,16 +41,15 @@ enum RequestType {
   ACCOUNT_QUERY = 8;
 }
 
-// The origin of a fill or a cancellation (SPEC 11.1, SPEC 11.2).
+// The origin of a fill or a cancellation (SPEC 11.1, SPEC 11.2, SPEC 14).
 enum Origin {
   ORIGIN_UNSPECIFIED = 0;
   TEAM = 1;
   CURE_TRADE = 2;
   AUTO_FLATTEN = 3;
-  // 4 is reserved for HOUSE: the exchange's own event log records house
-  // orders (SPEC 14) as origin 4, numbered the same as this enum. Whether
-  // HOUSE is ever sent on the wire is not yet specified, so no value is
-  // added here until it is.
+  // A house order (SPEC 14). A report whose origin is HOUSE is delivered to
+  // Director sessions only, never to a team's connection.
+  HOUSE = 4;
 }
 
 // MAKER or TAKER (SPEC 12.1, SPEC 16.4). `execution.liquidity`.
@@ -187,6 +186,128 @@ enum RiskNoticeKind {
   // 7-15 reserved for growth.
 }
 
+// A Fundamentals ticket's urgency, chosen by the pod (SPEC 23.2). It sets the
+// share of the instrument's average daily volume the ticket's schedule plans
+// to trade in each session: 1/3 High, 1/5 Medium, 1/10 Low (SPEC 23.2). The
+// values carry the `URGENCY_` prefix because proto enum values share the
+// package's scope.
+//
+// This enum is closed: adding a value later is a breaking change.
+enum TicketUrgency {
+  TICKET_URGENCY_UNSPECIFIED = 0;
+  URGENCY_HIGH = 1;
+  URGENCY_MEDIUM = 2;
+  URGENCY_LOW = 3;
+}
+
+// A Fundamentals ticket's status (SPEC 23.2, Table 21): Working, then one of
+// the stopped statuses. A stopped ticket never works again.
+//
+// This enum is open to extension: adding a value later is an additive change,
+// not a breaking one.
+enum TicketStatus {
+  TICKET_STATUS_UNSPECIFIED = 0;
+  // Accepted and not yet stopped.
+  TICKET_WORKING = 1;
+  // The whole quantity is filled (SPEC 23.2).
+  TICKET_COMPLETE = 2;
+  // Shares unfilled at the close of the term's final session (SPEC 23.2).
+  TICKET_EXPIRED = 3;
+  // The engine cancelled the remainder because the official one-second mark
+  // moved beyond the limit (SPEC 23.2).
+  TICKET_LIMIT_CANCELLED = 4;
+  // The pod cancelled it (SPEC 23.2).
+  TICKET_CANCELLED_BY_POD = 5;
+  // The engine cancelled it for another reason: a position breach cancelling
+  // an increasing ticket, or a cure ticket replacing a reducing one
+  // (SPEC 23.3).
+  TICKET_CANCELLED_BY_ENGINE = 6;
+  // 7-15 reserved for growth.
+}
+
+// Which inbound ticket message a `ticket_accepted` or `ticket_reject`
+// answers.
+//
+// This enum is closed: adding a value later is a breaking change.
+enum TicketRequestKind {
+  TICKET_REQUEST_KIND_UNSPECIFIED = 0;
+  // A `ticket`.
+  TICKET_REQUEST_SUBMIT = 1;
+  // A `ticket_cancel`.
+  TICKET_REQUEST_CANCEL = 2;
+  // A `ticket_urgency`.
+  TICKET_REQUEST_URGENCY = 3;
+}
+
+// The reason codes a `ticket_reject` carries. A separate enum from
+// `ReasonCodes.ReasonCode`, so that the order-entry reasons stay exactly the
+// set the exchange's event log defines. Every value that also exists in
+// `ReasonCodes.ReasonCode` has the same name and the same number there; the
+// values from 1700 are specific to tickets. Like `ReasonCodes.ReasonCode`,
+// this enum is open to extension: adding a value later is an additive change.
+//
+// Nesting inside a message gives the enum its own scope, as `ReasonCodes` does.
+message TicketReasonCodes {
+  enum TicketReasonCode {
+    TICKET_REASON_CODE_UNSPECIFIED = 0;
+
+    // Shared with ReasonCodes.ReasonCode, same numbers.
+    NOT_AUTHENTICATED = 1000;
+    VERSION_MISMATCH = 1001;
+    TEAM_DISABLED = 1003;
+    MARKET_CLOSED = 1004;
+    INSTRUMENT_DISABLED = 1104;
+    MALFORMED_MESSAGE = 1200;
+    UNKNOWN_INSTRUMENT = 1201;
+    TICK_VIOLATION = 1202;
+    INVALID_SIZE = 1203;
+    NON_POSITIVE_PRICE = 1204;
+    SIZE_OUT_OF_RANGE = 1206;
+    REFERENCE_UNAVAILABLE = 1301;
+    RISK_LIMIT_BREACH = 1600;
+
+    // 1700: Ticket intake.
+    // An opening or increasing ticket that names no filed thesis covering
+    // its instrument and side, or a thesis version that does not exist
+    // (SPEC 23.1).
+    TICKET_THESIS_NOT_FILED = 1700;
+    // The pod already has a working ticket in the instrument; there is one
+    // working ticket per instrument (SPEC 23.2).
+    TICKET_INSTRUMENT_WORKING = 1701;
+    // A reducing ticket larger than the position, or a ticket that would
+    // cross zero (SPEC 23.2).
+    TICKET_CROSSES_ZERO = 1702;
+    // The limit is not at or beyond the unshifted wall price the ticket
+    // would trade against, so it would cancel on arrival (SPEC 23.2).
+    TICKET_LIMIT_INSIDE_WALL = 1703;
+    // The planned completion falls after the close of the term's final
+    // session, for a ticket that increases a position (SPEC 23.2).
+    TICKET_COMPLETES_AFTER_TERM = 1704;
+    // The instrument's mark is frozen, and no ticket is accepted in it
+    // (SPEC 23.2, SPEC 7.2).
+    TICKET_MARK_FROZEN = 1705;
+    // replaces_ticket_id names no cancelled ticket of this pod in this
+    // instrument (SPEC 23.2).
+    TICKET_REPLACES_INVALID = 1706;
+    // No ticket with that id belongs to this pod.
+    TICKET_NOT_FOUND = 1707;
+    // The ticket is already stopped.
+    TICKET_NOT_WORKING = 1708;
+    // A cure ticket cannot be cancelled by the pod (SPEC 23.3).
+    TICKET_CURE_NOT_CANCELLABLE = 1709;
+    // An urgency change on a ticket that is not a cure ticket (SPEC 23.2,
+    // SPEC 23.3).
+    TICKET_NOT_CURE = 1710;
+    // A cure ticket's urgency may only increase (SPEC 23.3).
+    TICKET_URGENCY_NOT_INCREASED = 1711;
+    // A cure ticket in an instrument with no position breach, one that does
+    // not reduce the position, or one smaller than the whole shares needed
+    // to reach the entry cap (SPEC 23.3).
+    TICKET_CURE_INVALID = 1712;
+    // 1713-1799 reserved for band 1700 growth.
+  }
+}
+
 // Namespacing wrapper. `ReasonCode`'s values would otherwise collide with
 // `RequestType.MASS_CANCEL` and other tokens in this package: proto enum
 // values share their enclosing package's scope, not just their own enum's.
@@ -214,7 +335,12 @@ message ReasonCodes {
     // switch (SPEC 4.3, SPEC 9.4.3). A `cancel` or `mass_cancel` still
     // applies.
     EXCHANGE_OUTAGE = 1006;
-    // 1007-1099 reserved for band 1000 growth.
+    // A Market Making, Market Taking, Options MM or Options Taking order
+    // message received at or after the term-end trading cutoff, five minutes
+    // before the actual close of the term's final session (SPEC 13.5,
+    // SPEC 9.4.3).
+    TRADING_CUTOFF = 1007;
+    // 1008-1099 reserved for band 1000 growth.
 
     // 1100: Registration and entitlement
     STRATEGY_NOT_REGISTERED = 1100;
@@ -225,7 +351,10 @@ message ReasonCodes {
     // frozen statistics are degenerate (SPEC 3.3, SPEC 9.4.3). A `cancel`
     // there is never rejected on this ground.
     INSTRUMENT_DISABLED = 1104;
-    // 1105-1199 reserved for band 1100 growth.
+    // A `new` or `amend` in an option contract that is not listed this
+    // session: in neither the active window nor retained (SPEC 18.1).
+    CONTRACT_NOT_LISTED = 1105;
+    // 1106-1199 reserved for band 1100 growth.
 
     // 1200: Message validity. MALFORMED_MESSAGE, UNKNOWN_INSTRUMENT,
     // TICK_VIOLATION, INVALID_SIZE and NO_ORDER_AT_LEVEL are validation
@@ -245,7 +374,10 @@ message ReasonCodes {
     REFERENCE_UNAVAILABLE = 1301;
     NO_WALL_ON_SIDE = 1302;
     AMEND_PRICE_AT_OR_BEYOND_WALL = 1303;
-    // 1304-1399 reserved for band 1300 growth.
+    // A `new` or `amend` released while its option contract is suspended
+    // (SPEC 18.2); a `cancel` still applies.
+    CONTRACT_SUSPENDED = 1304;
+    // 1305-1399 reserved for band 1300 growth.
 
     // 1400: Order handling
     MIN_REST_VIOLATION = 1400;
@@ -270,10 +402,16 @@ message ReasonCodes {
     PARENT_NOT_WORKING = 1606;
     PARENT_MISMATCH = 1607;
     PARENT_QUANTITY_EXCEEDED = 1608;
-    // 1609-1799 reserved for bands 1600 and 1700 growth; band 1700 is unused
-    // by the registry today.
+    // A `new` or `amend` in a reducing-only option contract that would
+    // increase the desk's absolute position in it or cross zero (SPEC 18.1,
+    // SPEC 18.3, SPEC 18.6).
+    CONTRACT_REDUCING_ONLY = 1609;
+    // 1610-1699 reserved for band 1600 growth. Band 1700 is the ticket
+    // reasons of `TicketReasonCodes.TicketReasonCode` and is not used here.
+    // 1700-1799 stay unused in this enum.
 
-    // 1800: Cancellation. Carried on `order_cancelled`, never on `reject`.
+    // 1800: Cancellation. Carried on `order_cancelled`, never on `reject`,
+    // except CURE_WINDOW below.
     CANCEL_REQUEST = 1800;
     MASS_CANCEL = 1801;
     SELF_TRADE = 1802;
@@ -281,6 +419,11 @@ message ReasonCodes {
     SESSION_CLOSE = 1804;
     MARKET_REMAINDER = 1805;
     REMAINDER_OUTSIDE_BAND = 1806;
+    // On `order_cancelled`: an outstanding order in a breached limit's scope,
+    // cancelled when a cure window opens. Also carried on a `reject`: a new
+    // in that scope still pending when the window opened or the scope was
+    // added, rejected at its release so that it never becomes active
+    // (SPEC 11.2).
     CURE_WINDOW = 1807;
     STRATEGY_NOT_LIVE = 1808;
     KILL_SWITCH = 1809;
@@ -298,6 +441,21 @@ message ReasonCodes {
     // because it would increase the position or cross zero (SPEC 16.5,
     // SPEC 17.4).
     POSITION_REDUCING_RECHECK_FAILED = 1814;
-    // 1815-1899 reserved for band 1800 growth.
+    // A Market Making, Market Taking, Options MM or Options Taking order
+    // cancelled at the term-end trading cutoff, five minutes before the
+    // actual close of the term's final session (SPEC 13.5).
+    TERM_CUTOFF = 1815;
+    // A resting order in a reducing-only option contract cancelled because it
+    // would increase the desk's absolute position or cross zero: whole when
+    // the contract turns reducing-only, or the quantity that would, before a
+    // fill (SPEC 18.1, SPEC 18.3, SPEC 18.6).
+    CONTRACT_REDUCING_RECHECK_FAILED = 1816;
+    // An Execution desk's child cancelled because its parent ticket stopped:
+    // the pod cancelled it, the official mark moved beyond its limit, or the
+    // term's final close expired it (SPEC 24.1, SPEC 23.2). Number
+    // provisional: 1817 is main's 1816 plus one, and steward 1 sets the final
+    // number at merge.
+    PARENT_STOPPED = 1817;
+    // 1818-1899 reserved for band 1800 growth.
   }
 }

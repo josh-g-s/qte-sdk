@@ -1,10 +1,12 @@
 // Outbound order events.
 //
-// **Version:** 1.16
+// **Version:** 1.18
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
-// `obligation_state`, `account_state`, `risk_notice`. These are private to the team whose
+// `obligation_state`, `account_state`, `risk_notice`, and the
+// ticket answers `ticket_accepted`, `ticket_reject` and `ticket_state` (see
+// the end of this file). These are private to the team whose
 // orders they concern. Each but `account_summary` and `obligation_state` is sent as
 // soon as the engine records it, not held to the market-data publication grid
 // (SPEC 4.3); `account_summary` is never sent unprompted and is sent only in
@@ -44,7 +46,7 @@ message Reject {
   // (including ACCOUNT_QUERY for a rejected `account_query`); absent when it
   // is not, independently of request_ref. Not yet specified.
   optional RequestType request_type = 2;
-  ReasonCodes.ReasonCode reason_code = 3; // Bands 1000-1600. SPEC 8.1, SPEC 8.3, SPEC 11
+  ReasonCodes.ReasonCode reason_code = 3; // Bands 1000-1600, and CURE_WINDOW. SPEC 8.1, SPEC 8.3, SPEC 11
   optional string reason_detail = 4;      // Free text, for example the risk limit that failed
   int64 receipt_time = 5;                 // timestamp. Gateway receipt. SPEC 8.1
   // Present iff reason_code = UNKNOWN_INSTRUMENT on a subscription. Not yet specified.
@@ -56,8 +58,10 @@ message Reject {
 // orders generate posts immediately to the originating Fundamentals pod's or
 // house's own cash balance and position; a desk holds no separate ticket cash
 // position of its own (SPEC 12.2, SPEC 24). A child order names its parent
-// ticket in NewOrder.parent_ticket_id (SPEC 24.1); how a fill in this report
-// links to that ticket is not yet specified.
+// ticket in NewOrder.parent_ticket_id (SPEC 24.1), and a fill of a child
+// carries that ticket's id in parent_ticket_id below. The report goes to the
+// desk whose order was filled; the originating pod follows its ticket's
+// fills in TicketState.
 message Execution {
   string exec_id = 1;  // id. Fill report identity. SPEC 8.2. Its format is not yet specified
   Origin origin = 2;   // SPEC 11.1, SPEC 11.2
@@ -76,6 +80,9 @@ message Execution {
   // 0 when neither applies. SPEC 12.1
   int64 fee = 12; // int64-micro
   int64 timestamp = 13; // timestamp. The execution event's sequencer timestamp. SPEC 9.2
+  // Present iff the filled order is a child of a parent ticket: the
+  // ticket_id of that ticket, in decimal digits. SPEC 24.1
+  optional string parent_ticket_id = 14; // id
 }
 
 // One order of the team was cancelled with its remaining size unfilled:
@@ -350,4 +357,98 @@ message AccountState {
   // team has had no private report in this term, so a client applies every
   // one. The reply itself carries no report_seq.
   optional int64 as_of_report_seq = 8;
+}
+
+// The three ticket answers below, `ticket_accepted`, `ticket_reject` and
+// `ticket_state`.
+//
+// None of them carries a report_seq or is replayed by a resume. A pod or a
+// desk learns the state of every ticket from the `ticket_state` messages it
+// is sent on connecting, so a change missed while disconnected is recovered
+// from them.
+
+// The exchange accepted a ticket message and logged it. For a `ticket` it
+// carries the ticket's identity and the figures the exchange stamped at
+// acceptance; the ticket's state then follows in TicketState. For a
+// `ticket_cancel` or `ticket_urgency` only the first four fields are set, and
+// the changed state follows in TicketState.
+message TicketAccepted {
+  string request_ref = 1; // id. Echoes the inbound message
+  TicketRequestKind request_kind = 2; // SPEC 23.2
+  string ticket_id = 3;   // id, decimal digits. The ticket the message submitted, cancelled or changed
+  int64 receipt_time = 4; // timestamp. Gateway receipt
+  // Present iff request_kind is TICKET_REQUEST_SUBMIT: the decision price P0,
+  // the official one-second mark at or immediately preceding acceptance
+  // (SPEC 7.1, SPEC 23.2).
+  optional int64 decision_price = 5; // int64-micro
+  // Present iff request_kind is TICKET_REQUEST_SUBMIT: the acceptance time.
+  optional int64 accepted_time = 6; // timestamp. SPEC 23.2
+  // Present iff request_kind is TICKET_REQUEST_SUBMIT: the first time the
+  // schedule's due shares reach the ticket's quantity, which is not a
+  // promise and not a deadline (SPEC 23.2).
+  optional int64 planned_completion_time = 7; // timestamp
+}
+
+// A ticket message was refused and nothing was logged. Its reason code is
+// one of `TicketReasonCodes.TicketReasonCode`.
+message TicketReject {
+  // Required, except absent when the message could not be parsed far enough
+  // to read one, or when the client sent an empty string.
+  optional string request_ref = 1; // id
+  TicketRequestKind request_kind = 2; // The kind of the message refused
+  TicketReasonCodes.TicketReasonCode reason_code = 3; // SPEC 23.2
+  optional string reason_detail = 4; // Free text, for example the projected limit that failed
+  int64 receipt_time = 5; // timestamp. Gateway receipt
+}
+
+// The state of one ticket, sent to the originating pod and to the assigned
+// desk whenever the ticket changes (acceptance, a fill, a change of urgency,
+// a stop) and, for every ticket of the current term, when either connects
+// (SPEC 23.2, Table 21; SPEC 24.1, SPEC 24.4). A pod is sent its own tickets
+// only (SPEC 24.4). Reading a ticket is logged (SPEC 23.2).
+message TicketState {
+  string ticket_id = 1;   // id, decimal digits. Immutable; the exchange assigns it at acceptance
+  // Present iff a pod originated the ticket: the pod's team. SPEC 23.2
+  optional string pod = 2; // id
+  string desk = 3;        // id. The assigned Execution desk. SPEC 23.2
+  string instrument = 4;  // id. SPEC 23.2
+  Side side = 5;          // SPEC 23.2
+  int64 shares = 6;       // int64-qty. The ticket quantity Q. SPEC 23.2
+  // Absent on a cure ticket: the hard execution limit. SPEC 23.2, SPEC 23.3
+  optional int64 limit_price = 7; // int64-micro
+  TicketUrgency urgency = 8; // Current urgency. SPEC 23.2
+  int64 decision_price = 9;  // int64-micro. P0. SPEC 23.2
+  int64 accepted_time = 10;  // timestamp. SPEC 23.2
+  int64 planned_completion_time = 11; // timestamp. At acceptance. SPEC 23.2
+  // The shares due by update_time under the schedule, S(t), at most `shares`
+  // (SPEC 23.2). A stopped ticket's value is as at its stop.
+  int64 due_shares = 12;       // int64-qty
+  int64 filled_shares = 13;    // int64-qty. Filled by the desk's children so far
+  int64 remaining_shares = 14; // int64-qty. `shares` less `filled_shares`
+  // Present iff filled_shares is above zero: the volume-weighted average
+  // price of the fills. SPEC 24.4
+  optional int64 average_fill_price = 15; // int64-micro
+  // Fees net of rebates, signed as the fee of an execution is: negative for
+  // net fees paid, positive for a net rebate. SPEC 12.1, SPEC 24.4
+  int64 net_fee = 16; // int64-micro
+  TicketStatus status = 17; // SPEC 23.2
+  // Present iff status is not TICKET_WORKING: when the ticket stopped, and
+  // the official mark at that time. SPEC 23.2
+  optional int64 stopped_time = 18; // timestamp
+  optional int64 stopped_mark = 19; // int64-micro
+  // The thesis and its version the ticket was accepted under, when it named
+  // one. SPEC 23.1
+  optional string thesis_id = 20; // id
+  optional int32 thesis_version = 21;
+  // The ticket this one replaces, if any: the cancelled ticket a pod named,
+  // or, for a cure ticket, the ordinary reducing ticket its acceptance
+  // cancelled. SPEC 23.2, SPEC 23.3
+  optional string replaces_ticket_id = 22; // id
+  bool cure = 23; // True on a cure ticket. SPEC 23.3
+  // The pod's notes to the desk, as submitted; sent to the desk and the pod
+  // only. SPEC 23.2
+  optional string notes = 24;
+  // timestamp. The time of the change this message reports, or of the
+  // connection for the state sent on connecting.
+  int64 update_time = 25;
 }

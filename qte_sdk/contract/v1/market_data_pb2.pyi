@@ -104,18 +104,20 @@ class Book(_message.Message):
     def __init__(self, instrument: _Optional[str] = ..., grid_time: _Optional[int] = ..., bid_levels: _Optional[_Iterable[_Union[WallLevel, _Mapping]]] = ..., ask_levels: _Optional[_Iterable[_Union[WallLevel, _Mapping]]] = ..., student_bid_levels: _Optional[_Iterable[_Union[StudentLevel, _Mapping]]] = ..., student_ask_levels: _Optional[_Iterable[_Union[StudentLevel, _Mapping]]] = ..., condition: _Optional[_Union[InstrumentCondition, str]] = ..., trading_state: _Optional[_Union[OptionTradingState, str]] = ...) -> None: ...
 
 class TapePrint(_message.Message):
-    __slots__ = ("price", "size", "aggressor_side", "timestamp", "kind")
+    __slots__ = ("price", "size", "aggressor_side", "timestamp", "kind", "feed_only")
     PRICE_FIELD_NUMBER: _ClassVar[int]
     SIZE_FIELD_NUMBER: _ClassVar[int]
     AGGRESSOR_SIDE_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
+    FEED_ONLY_FIELD_NUMBER: _ClassVar[int]
     price: int
     size: int
     aggressor_side: _common_pb2.Side
     timestamp: int
     kind: _common_pb2.MatchKind
-    def __init__(self, price: _Optional[int] = ..., size: _Optional[int] = ..., aggressor_side: _Optional[_Union[_common_pb2.Side, str]] = ..., timestamp: _Optional[int] = ..., kind: _Optional[_Union[_common_pb2.MatchKind, str]] = ...) -> None: ...
+    feed_only: bool
+    def __init__(self, price: _Optional[int] = ..., size: _Optional[int] = ..., aggressor_side: _Optional[_Union[_common_pb2.Side, str]] = ..., timestamp: _Optional[int] = ..., kind: _Optional[_Union[_common_pb2.MatchKind, str]] = ..., feed_only: bool = ...) -> None: ...
 
 class Trades(_message.Message):
     __slots__ = ("instrument", "grid_time", "prints")

@@ -1,6 +1,6 @@
 // Session and subscription messages.
 //
-// **Version:** 1.8
+// **Version:** 1.10
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `instruments`, `session_reject`, `heartbeat`, `resume`,
@@ -33,8 +33,13 @@ message Auth {
 
 // Outbound.
 message SessionAck {
-  string session_id = 1;      // id. Not yet specified
-  string team = 2;             // id. The team the authenticated account trades for. SPEC 2.1, SPEC 2.5
+  // id. A label for the client's own logs, not a key. Unique only within one
+  // run of the exchange process: the gateway counts sessions in memory, so the
+  // id repeats after a restart and names a different session then. Treat it as
+  // an opaque string. Key on the client's own connection, and on the team's
+  // report_seq for reports: resume carries no session id.
+  string session_id = 1;
+  string team = 2;            // id. The team the authenticated account trades for. SPEC 2.1, SPEC 2.5
   int64 server_time = 3;       // timestamp. Milliseconds since the Unix epoch, UTC. Its other rules are not yet specified
   string contract_version = 4; // string. Not yet specified
   // bool. True when this is an unscored recorded session: no metric, score or
@@ -168,6 +173,19 @@ message InstrumentInfo {
   bool tradable = 7;
   // Present if and only if `kind` is OPTION.
   optional OptionTerms option = 8;
+  // string. The instrument's sector-limit classification, the one the
+  // Fundamentals sector limit counts it against: one of the eleven GICS sector
+  // names (Communication Services, Consumer Discretionary, Consumer Staples,
+  // Energy, Financials, Health Care, Industrials, Information Technology,
+  // Materials, Real Estate, Utilities) or Unsectored, which excludes the
+  // instrument from the sector limit only. It is the term configuration's
+  // per-instrument `sector_limit`, the same for every team. Always present: the
+  // empty string means the exchange has no classification to give, which is
+  // every option contract and every equity of a term whose configuration
+  // carries no classification. It is not the "group" of the universe file. A
+  // client treats a value it does not know as an unknown sector, never as an
+  // error. SPEC 3.1, SPEC 11.1, SPEC 23.3
+  string sector_limit = 9;
 }
 
 // One underlying of the option chain, an entry of
