@@ -683,7 +683,8 @@ async def test_a_fresh_session_delivers_the_ticket_states_read_ahead_by_its_resu
             "before_resume": connect_group(
                 ticket_frame("17", 10), ticket_frame("18", 10, "TICKET_COMPLETE")
             ),
-            "answer": [resume_ack(True, 2), order_state(1), order_state(2)],
+            # A replay of the reports after the cursor this session resumes from.
+            "answer": [resume_ack(True, 3), order_state(2), order_state(3)],
             "after": [book(7)],
         }
     )
@@ -694,7 +695,7 @@ async def test_a_fresh_session_delivers_the_ticket_states_read_ahead_by_its_resu
                 assert await session.wait_for_instrument_table(timeout=5) is not None
             # The exchange sends the ticket states before it reads the resume, so the
             # session reads them ahead while it waits for the resume_ack.
-            await session.resume(0)
+            await session.resume(1)
             events = []
             async with asyncio.timeout(5):
                 async for event in session:
@@ -702,15 +703,15 @@ async def test_a_fresh_session_delivers_the_ticket_states_read_ahead_by_its_resu
                     latest.update(event)
                     if isinstance(event, Received) and event.type == "book":
                         break
-            assert session.last_report_seq == 2
+            assert session.last_report_seq == 3
     assert kinds(events) == [
         "calendar:None",
         "instruments:None",
         "ticket_state:None",
         "ticket_state:None",
         "resume_ack:None",
-        "order_state:1",
         "order_state:2",
+        "order_state:3",
         "ResumeComplete",
         "book:None",
     ]
