@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.14
+// **Version:** 1.15
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -338,7 +338,10 @@ message ReasonCodes {
     // A Market Making, Market Taking, Options MM or Options Taking order
     // message received at or after the term-end trading cutoff, five minutes
     // before the actual close of the term's final session (SPEC 13.5,
-    // SPEC 9.4.3).
+    // SPEC 9.4.3). A new or amend of the team's still waiting out its delay at
+    // the cutoff is dropped with no answer, not rejected with this code: the
+    // Technology Arm's reading of SPEC 13.5, which does not say "without a
+    // response" (see TERM_CUTOFF).
     TRADING_CUTOFF = 1007;
     // 1008-1099 reserved for band 1000 growth.
 
@@ -443,18 +446,29 @@ message ReasonCodes {
     POSITION_REDUCING_RECHECK_FAILED = 1814;
     // A Market Making, Market Taking, Options MM or Options Taking order
     // cancelled at the term-end trading cutoff, five minutes before the
-    // actual close of the term's final session (SPEC 13.5).
+    // actual close of the term's final session (SPEC 13.5). A new or amend
+    // of the team's still waiting out its delay at the cutoff is not
+    // cancelled with this code but dropped with no answer, the way the close
+    // drops one. That "no answer" is the Technology Arm's reading of SPEC
+    // 13.5, which cancels pending submissions and amendments but does not say
+    // "without a response".
     TERM_CUTOFF = 1815;
     // A resting order in a reducing-only option contract cancelled because it
     // would increase the desk's absolute position or cross zero: whole when
     // the contract turns reducing-only, or the quantity that would, before a
     // fill (SPEC 18.1, SPEC 18.3, SPEC 18.6).
     CONTRACT_REDUCING_RECHECK_FAILED = 1816;
-    // An Execution desk's child cancelled because its parent ticket stopped:
-    // the pod cancelled it, the official mark moved beyond its limit, or the
-    // term's final close expired it (SPEC 24.1, SPEC 23.2). Number
-    // provisional: 1817 is main's 1816 plus one, and steward 1 sets the final
-    // number at merge.
+    // An Execution desk's child cancelled because its parent ticket stopped
+    // by any path other than filling: the pod cancelled it, or the official
+    // mark moved beyond its limit (SPEC 24.1, SPEC 23.2). A term's final close
+    // expiring the ticket cancels none further, since the close has cancelled
+    // the day's children SESSION_CLOSE. The engine's own cancellation of a
+    // ticket (a breach cancelling an increasing ticket, a cure ticket
+    // replacing a reducing one) cancels no child by any code in the engine as
+    // built, since none rests then; the Directors' fallback handover (SPEC
+    // 23.2), which cancels all outstanding children, uses this code too,
+    // though the parent does not stop: the engine goes on executing its
+    // remaining shares.
     PARENT_STOPPED = 1817;
     // 1818-1899 reserved for band 1800 growth.
   }

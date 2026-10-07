@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.18
+// **Version:** 1.19
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -405,7 +405,9 @@ message TicketReject {
 // desk whenever the ticket changes (acceptance, a fill, a change of urgency,
 // a stop) and, for every ticket of the current term, when either connects
 // (SPEC 23.2, Table 21; SPEC 24.1, SPEC 24.4). A pod is sent its own tickets
-// only (SPEC 24.4). Reading a ticket is logged (SPEC 23.2).
+// only (SPEC 24.4). Reading a ticket is logged (SPEC 23.2). The connect-time
+// set comes in ascending ticket_id order, once, right after the instruments
+// message, and is not sent again after a resume.
 message TicketState {
   string ticket_id = 1;   // id, decimal digits. Immutable; the exchange assigns it at acceptance
   // Present iff a pod originated the ticket: the pod's team. SPEC 23.2
@@ -435,6 +437,7 @@ message TicketState {
   // Present iff status is not TICKET_WORKING: when the ticket stopped, and
   // the official mark at that time. SPEC 23.2
   optional int64 stopped_time = 18; // timestamp
+  // 0 where the instrument had no valid mark this session.
   optional int64 stopped_mark = 19; // int64-micro
   // The thesis and its version the ticket was accepted under, when it named
   // one. SPEC 23.1
