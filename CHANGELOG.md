@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.13
+**Version:** 0.14
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -11,6 +11,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - On Windows, the check of a `.env` or the file named by `QTE_TOKEN_FILE` now also reads the access list of the file's folder and the file's owner. It warns, with the same `TokenFileShared` or `AddressFileShared`, when Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users may add or remove files in the folder, since they could replace a private file with one of their own, naming the folder; and when the file is owned by an account other than you, Administrators or SYSTEM. The warning suggests running `icacls` on both the folder and the file. `python -m qte_sdk.token set` and `check` report the same, and say when the folder or the owner could not be checked. It still warns rather than refuses.
 - On Windows, when the `.env` or the file named by `QTE_TOKEN_FILE` is reached through symbolic links or junctions, at the file itself, at a folder on its path, or in what a link points to, the check now reads the access list and owner of the file they lead to and the list of that file's folder, and also the list of each folder that holds a link on the way, since whoever may replace any one link may point it elsewhere. The warning names each folder that broad groups may add or remove files in, and the links in it. If a link on the way cannot be followed (a loop, more than 40 links, a link that cannot be read or that points to a volume's own name, or a name on the way that cannot be looked at or is not there), the folders of the links met before it are still checked, and the same warning says the file could not be fully checked, and why, since such a link could be made to hide where it leads. A `KeyboardInterrupt`, or another interruption, raised while the SDK warns about a file that holds the token still stops the program, but no longer carries the frames or chained exceptions that held the file's text.
 - CI runs the Windows token-file and console checks against the real Windows API, on a `windows-latest` runner. No change to the SDK itself.
+- A `.gitattributes` keeps the vendored `proto/` and `conformance/` files byte for byte on every clone, so their hash checks and `scripts/generate_contract.py` work on a Windows clone with git's default `core.autocrlf`. No change to the SDK itself.
 
 ## 1.1.0
 
