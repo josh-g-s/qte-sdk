@@ -1574,38 +1574,41 @@ async def test_cancelling_an_https_fetch_ends_the_worker_at_once(certificate, he
     assert_token_absent(token, shown(caught.value))
 
 
-def test_shutting_down_a_tls_connection_never_lets_a_write_out_in_the_clear(
-    certificate, monkeypatch
-):
-    # `ssl.SSLSocket.shutdown` drops the TLS layer before it shuts the connection down. A
-    # worker that sent the request in between would send it, token and all, in the clear.
-    # Here the request is sent at exactly that moment, from inside the shutdown.
+@pytest.mark.parametrize("tls", [False, True])
+def test_a_woken_connection_sends_nothing_more(certificate, tls):
+    # Once the fetch has given up, the worker must not send the request, token and all,
+    # whatever it was about to do, and nothing may go out in the clear.
     token = synthetic_token()
     plain_client, plain_server = socket.socketpair()
-    server = server_context(certificate).wrap_socket(
-        plain_server, server_side=True, do_handshake_on_connect=False
-    )
-    client = trusting(certificate).wrap_socket(
-        plain_client, server_hostname="127.0.0.1", do_handshake_on_connect=False
-    )
-    with server, client:
-        shaking = threading.Thread(target=server.do_handshake)
-        shaking.start()
-        client.do_handshake()
-        shaking.join()
+    client: socket.socket = plain_client
+    server: socket.socket = plain_server
+    if tls:
+        server = server_context(certificate).wrap_socket(
+            plain_server, server_side=True, do_handshake_on_connect=False
+        )
+        client = trusting(certificate).wrap_socket(
+            plain_client, server_hostname="127.0.0.1", do_handshake_on_connect=False
+        )
+    with server:
+        stream = history._WakeableSocket(client, timeout=60)
+        if tls:
+            shaking = threading.Thread(target=server.do_handshake)  # type: ignore[attr-defined]
+            shaking.start()
+            stream.do_handshake()
+            shaking.join()
+        stream.wake()
         request = b"GET / HTTP/1.1\r\nAuthorization: Bearer " + token.encode() + b"\r\n\r\n"
-        shutdown = socket.socket.shutdown
-
-        def sending_meanwhile(sock: socket.socket, how: int) -> None:
-            client.sendall(request)
-            shutdown(sock, how)
-
-        monkeypatch.setattr(socket.socket, "shutdown", sending_meanwhile)
-        history._shut_down(client)
-        monkeypatch.undo()
-        # What reached the other end, read below its TLS layer.
-        wire = socket.socket.recv(server, 65536)
-    assert wire and token.encode() not in wire
+        with pytest.raises(ConnectionAbortedError):
+            stream.sendall(request)
+        with pytest.raises(ConnectionAbortedError):
+            stream.recv_into(bytearray(10))
+        # What reached the other end, read below any TLS layer, before the client closes.
+        socket.socket.settimeout(server, 0.5)
+        with pytest.raises(TimeoutError):
+            socket.socket.recv(server, 65536)
+        stream.close()
+        stream.wake()  # harmless once closed
+    assert client.fileno() == -1 and plain_client.fileno() == -1
 
 
 class HeldHandshake:
