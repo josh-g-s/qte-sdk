@@ -117,12 +117,12 @@ the position or cross zero: the whole order when the contract turns reducing-onl
 just the part that would, before a fill. Read these as any other reason, with
 `qte_sdk.orders.reason_code_name` or against `ReasonCodes`.
 
-Feed-only residual prints. A `TapePrint` in `trades` may carry `feed_only`. It is set,
-and true, only on an option contract's `RESIDUAL` print that went through at the feed
-print's own premium because the contract had no wall on the side the aggressor took. It
-is never sent as false, and it is absent on every other print: an equity's, an option
-contract's other kinds, and a residual that printed at the wall's price. Read it with
-`HasField`, or with `is_feed_only`; absent means an ordinary print.
+Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
+present, and true, only on an option contract's `RESIDUAL` print that went through at the
+live print's own premium because the contract had no wall on the side the aggressor
+took. It is never sent as false, and it is absent on every other print: an equity's, an
+option contract's other kinds, and a residual that printed at the wall's price. Test it
+with `HasField("feed_only")` or `is_feed_only`; absent means an ordinary print.
 
     >>> from qte_sdk.contract.v1.common_pb2 import RESIDUAL
     >>> from qte_sdk.contract.v1.market_data_pb2 import TapePrint

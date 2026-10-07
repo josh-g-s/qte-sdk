@@ -44,17 +44,27 @@ and `stopped_mark_of`. A stop with no valid mark to record sends a mark of 0, wh
 `stopped_mark_of` returns as None, the same as a mark that is absent.
 
 None of the three answers carries a `report_seq`, and a resume replays none of them.
-Instead, each time the pod or desk connects, after the `session_ack` and any resume, the
-exchange sends one whole `ticket_state` for every ticket of the current term, working or
-stopped, in ascending order of `ticket_id`. That set replaces whatever you held before:
-a ticket missing from it is no longer one to follow. `LatestTickets` forgets every ticket
-on a `Disconnected` so that the set rebuilds it.
+Instead, once on each connection of the pod or desk, straight after the `session_ack`,
+the calendar and the instruments table, the exchange sends one whole `ticket_state` for
+every ticket of the current term, working or stopped, in ascending order of `ticket_id`.
+It does not send the set again after a resume. If your program resumes (as a
+`ReconnectingSession` does), the session keeps the states it reads while it waits for
+the `resume_ack` and delivers them to your loop in order, so pass every event to
+`LatestTickets` from the first. The set replaces whatever you held before: a ticket
+missing from it is no longer one to follow. `LatestTickets` forgets every ticket on a
+`Disconnected` so that the next connection's set rebuilds it.
 
 A desk's fill of a child order carries the ticket's id in `Execution.parent_ticket_id`
-(`parent_ticket_of`); the pod follows its ticket's fills in `ticket_state`. When a ticket
-stops because the pod cancelled it, the mark moved beyond its limit or the term's final
-close expired it, the desk's child orders still resting for it are cancelled, each with an
-`order_cancelled` whose reason is `PARENT_STOPPED`.
+(`parent_ticket_of`); the pod follows its ticket's fills in `ticket_state`. What becomes
+of the desk's child orders still resting when a ticket stops depends on why it stopped:
+
+- the pod cancelled it, or the mark moved beyond its limit: each child is cancelled with
+  an `order_cancelled` whose reason is `PARENT_STOPPED`;
+- the term's final close expired it: the close itself cancels the day's resting orders,
+  so each child is cancelled `SESSION_CLOSE`;
+- the exchange cancelled it (`TICKET_CANCELLED_BY_ENGINE`): each child is cancelled with
+  one of the cancellation reasons (the 1800 band), but the contract does not yet say
+  which, so do not expect `PARENT_STOPPED` there.
 
 Every send checks what it can before sending, and raises `ValueError` or `TypeError`
 and sends nothing if a check fails: `request_ref` is 1 to 32 bytes of UTF-8, `instrument`

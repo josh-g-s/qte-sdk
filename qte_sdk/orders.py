@@ -166,8 +166,9 @@ async def send_new(
     The exchange checks the rest: a value it cannot accept is rejected `MALFORMED_MESSAGE`,
     and a well-formed one is rejected `PARENT_NOT_WORKING` on a `new` from any team other
     than an Execution desk, as is a desk's `new` that names no working parent ticket
-    assigned to the desk. When the parent ticket stops, a child still resting is cancelled
-    with an `order_cancelled` whose reason is `PARENT_STOPPED`.
+    assigned to the desk. When the parent ticket stops, a child still resting is
+    cancelled, with `PARENT_STOPPED` for some stops but not all: `qte_sdk.tickets` says
+    which reason each stop gives.
     """
     ref = _ref(request_ref)
     _id("strat_id", strat_id)
