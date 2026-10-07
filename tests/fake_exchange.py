@@ -71,7 +71,11 @@ async def drop_connection(ws: ServerConnection) -> None:
     Windows a reset discards frames still being sent and frames the client has received but not
     yet read, so the client would see the drop a frame or more early. Half-closing sends the
     frames, then the end of the stream, and never a reset, on every system. Returns once the
-    client has closed its side, so the server sends no close frame of its own afterwards."""
+    client has closed its side, which it does once it has read those frames, so the server
+    sends no close frame of its own afterwards. Its keepalive is stopped first: a ping
+    written after the half-close would fail, and websockets would then abort after all."""
+    if ws.keepalive_task is not None:
+        ws.keepalive_task.cancel()
     ws.transport.write_eof()
     await ws.wait_closed()
 
