@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.10
+**Version:** 0.11
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,7 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-Nothing yet.
+- On Windows, the check of a `.env` or the file named by `QTE_TOKEN_FILE` now also reads the access list of the file's folder and the file's owner. It warns, with the same `TokenFileShared` or `AddressFileShared`, when Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users may add or remove files in the folder, since they could replace a private file with one of their own, naming the folder; and when the file is owned by an account other than you, Administrators or SYSTEM. The warning suggests running `icacls` on both the folder and the file. `python -m qte_sdk.token set` and `check` report the same, and say when the folder or the owner could not be checked. It still warns rather than refuses.
 
 ## 1.1.0
 

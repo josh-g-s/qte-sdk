@@ -726,8 +726,8 @@ def resolve_token(token: str | None = None) -> str:
     cannot be read, is not UTF-8 text, or holds nothing but whitespace (the `.env` is then
     not tried); or if the `.env` cannot be read or parsed, or, on POSIX, holds the token
     and other users can read it. On Windows, a file that holds the token and that a broad
-    group of users may read or change gives a `qte_sdk.dotenv.TokenFileShared` warning
-    instead.
+    group of users may read, change or replace, or that another account owns, gives a
+    `qte_sdk.dotenv.TokenFileShared` warning instead.
     """
     token, _, problem = _find_token(token)
     if problem is not None:
@@ -816,7 +816,7 @@ def _token_from_file() -> tuple[str | None, str | None]:
     with the file. (None, None) if the variable is unset or empty.
 
     On Windows, a `qte_sdk.dotenv.TokenFileShared` warning is issued if a broad group of
-    users may read or change the file.
+    users may read, change or replace the file, or another account owns it.
 
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected and an
     `OSError` keeps the path (which a mistaken setting could make the token itself), so

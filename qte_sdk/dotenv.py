@@ -24,13 +24,17 @@ Three safeguards apply:
 - On Windows, where files have access lists rather than modes, a `TokenFileShared`
   warning is issued, once per process for each file, if the access list of a `.env` that
   holds `QTE_TOKEN` lets a broad group read or change it: Everyone, Authenticated Users,
-  Users, INTERACTIVE or Domain Users. An `AddressFileShared` warning is issued instead if
-  such a group may change a `.env` that sets only `QTE_URL`, since whoever changes the
+  Users, INTERACTIVE or Domain Users. It is issued too if the access list of the file's
+  folder lets such a group add or remove files there, since they could then replace the
+  file with one of their own, or if the file's owner is another account than you,
+  Administrators or SYSTEM, since an owner can change who may open it. An
+  `AddressFileShared` warning is issued instead if such a group may change or replace,
+  or another account owns, a `.env` that sets only `QTE_URL`, since whoever changes the
   address can capture a token kept elsewhere when you next connect. Both are kinds of
-  `FileShared`. A folder under your user profile is private by
-  default; a folder on another drive, such as `D:\\`, usually is not. The file is still
-  used, though a later release will refuse it. The same check applies to the file named
-  by `QTE_TOKEN_FILE` (see `qte_sdk.session`).
+  `FileShared`. A folder under your user profile is private by default; a folder on
+  another drive, such as `D:\\`, usually is not. The file is still used, though a later
+  release will refuse it. The same check applies to the file named by `QTE_TOKEN_FILE`
+  (see `qte_sdk.session`).
 - If the `.env`, or the file it links to, is inside a git working tree and git tracks
   it or does not ignore it, a `DotenvNotIgnored` warning is issued, once per process,
   since the token could be committed. It never stops the SDK: if a warnings filter makes
@@ -73,6 +77,8 @@ _URL_NAME = "QTE_URL"
 # What cmd (%NAME%, and !NAME! with delayed expansion) or PowerShell ($, the backtick, and
 # its curly double quotes) treats specially inside double quotes.
 _UNSAFE_IN_DOUBLE_QUOTES = "%!$`\u201c\u201d\u201e"
+# A drive's root, such as D:\, which is given to icacls without quotes.
+_DRIVE_ROOT = re.compile(r"[A-Za-z]:\\")
 # What git needs to run and find your git configuration: nothing else is passed to it.
 _GIT_ENV = frozenset(
     {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "XDG_CONFIG_HOME", "LANG", "LC_ALL", "TMPDIR"}
@@ -88,18 +94,20 @@ class DotenvNotIgnored(UserWarning):
 
 
 class FileShared(UserWarning):
-    """On Windows, a broad group of users, such as Everyone or Users, may read or change a
-    file the SDK reads its setup from. Catch this to handle both kinds below."""
+    """On Windows, a broad group of users, such as Everyone or Users, may read, change or
+    replace a file the SDK reads its setup from, or another account owns it. Catch this to
+    handle both kinds below."""
 
 
 class TokenFileShared(FileShared):
-    """On Windows, a broad group of users may read or change the `.env`, or the file named
-    by `QTE_TOKEN_FILE`, that holds the token."""
+    """On Windows, a broad group of users may read, change or replace the `.env`, or the
+    file named by `QTE_TOKEN_FILE`, that holds the token, or another account owns it."""
 
 
 class AddressFileShared(FileShared):
-    """On Windows, a broad group of users may change a `.env` that sets `QTE_URL` but holds
-    no token. Whoever changes the address could capture a token kept elsewhere."""
+    """On Windows, a broad group of users may change or replace a `.env` that sets
+    `QTE_URL` but holds no token, or another account owns it. Whoever changes the address
+    could capture a token kept elsewhere."""
 
 
 def dotenv_path() -> Path:
@@ -164,8 +172,9 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     (None, None) if there is no `./.env` or it does not assign `name`, or assigns it an
     empty value. On POSIX, a file that assigns `QTE_TOKEN` and that other users can read is
     refused whichever name is asked for, and no value is returned. On Windows, such a file
-    that a broad group may read or change, or a file setting `QTE_URL` that a broad group
-    may change, gives a `TokenFileShared` or `AddressFileShared` warning and is still used.
+    that a broad group may read, change or replace, or a file setting `QTE_URL` that a
+    broad group may change or replace, gives a `TokenFileShared` or `AddressFileShared`
+    warning and is still used, as does either kind owned by another account.
 
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected, so
     neither it nor an `OSError` may reach the caller's exception as its cause or context.
@@ -212,7 +221,7 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             "so only you can"
         )
     if access is not None and (
-        (holds_token and access) or (access.write and _assigns(text, _URL_NAME))
+        (holds_token and access) or (access.changeable and _assigns(text, _URL_NAME))
     ):
         warn_shared(path, access, holds_token=holds_token, sets_address=True)
     value, problem = _parse(text, name)
@@ -260,9 +269,11 @@ def _warn_if_not_ignored(path: Path) -> None:
 
 
 def shared_access(path: Path) -> "_fileaccess.BroadAccess | None":
-    """The broad groups Windows lets read or change `path`, if this is Windows, the SDK has
-    not already warned about `path` in this process, and the access list can be read; None
-    otherwise. Takes only the path, so call it before the file is read."""
+    """The broad groups Windows lets read or change `path`, or add or remove files in its
+    folder, and whether another account owns it (see `_fileaccess.broad_access`), if this
+    is Windows, the SDK has not already warned about `path` in this process, and the access
+    list can be read; None otherwise. Takes only the path, so call it before the file is
+    read."""
     if not _fileaccess.on_windows() or os.path.abspath(path) in _shared_warned:
         return None
     return _fileaccess.broad_access(path)
@@ -275,41 +286,77 @@ def shared_message(
     holds_token: bool = True,
     sets_address: bool = True,
 ) -> str:
-    """What to tell the person when broad groups of users may read or change `path`, which
-    holds the token if `holds_token`, and is a `.env` that can set the exchange address if
-    `sets_address`. Names only the path and the groups."""
+    """What to tell the person when broad groups of users may read, change or replace
+    `path`, or another account owns it. `path` holds the token if `holds_token`, and is a
+    `.env` that can set the exchange address if `sets_address`. Names only the path, its
+    folder and the groups."""
     changers = list(access.write)
     readers = [group for group in access.read if group not in changers] if holds_token else []
+    replacers = list(access.folder or ())
+    folder = os.path.dirname(os.path.abspath(path))
     granted = []
     if changers:
         granted.append(f"{_join(changers)} {'read or change' if holds_token else 'change'} it")
     if readers:
         granted.append(f"{_join(readers)} read it")
+    findings = []
+    if granted:
+        findings.append(f"Windows lets {', and '.join(granted)}")
+    if replacers:
+        findings.append(
+            f"other users can replace it: {_join(replacers)} may add or remove files in {folder}"
+        )
+    if access.other_owner:
+        findings.append("it is owned by another account, which can change who may open it")
     risks = []
-    if holds_token and access.read:
+    if holds_token and (access.read or access.other_owner):
         risks.append("read your token")
-    if changers and sets_address:
+    if access.changeable and sets_address:
         risks.append(
             f"change {_URL_NAME} in it to a server of their own, which would capture your "
             "token when you next connect"
         )
-    elif changers:
+    elif access.changeable:
         risks.append("replace your token")
-    their = "that group's" if len(changers) + len(readers) == 1 else "those groups'"
-    folder = os.path.dirname(os.path.abspath(path))
-    # A path with characters cmd or PowerShell would expand or end a quote at inside double
-    # quotes is not put in a command, so the command never names another folder.
-    if any(c in folder for c in _UNSAFE_IN_DOUBLE_QUOTES):
-        icacls = f"run icacls on the folder that holds it, {folder}"
+    groups = set(changers + readers + replacers)
+    if access.other_owner:
+        fix = (
+            "Delete it and make it again yourself, in a folder under your user profile "
+            "(%USERPROFILE%), which is private by default."
+        )
     else:
-        icacls = f'run `icacls "{folder}"`'
+        their = "that group's" if len(groups) == 1 else "those groups'"
+        fix = (
+            "Move it into a folder under your user profile (%USERPROFILE%), which is private "
+            f"by default, or remove {their} access."
+        )
     what = "holds your token" if holds_token else f"sets {_URL_NAME}, the exchange address"
     return (
-        f"{path} {what}, and Windows lets {', and '.join(granted)}, so other people who use "
-        f"this computer could {' or '.join(risks)}. Move it into a folder under your user "
-        f"profile (%USERPROFILE%), which is private by default, or remove {their} access. "
-        f"To see who can open the folder, {icacls}. A later release will refuse such a file."
+        f"{path} {what}, and {_join(findings, '; ')}, so other people who use this "
+        f"computer could {' or '.join(risks)}. {fix} To see who can open the folder and the "
+        f"file, {_icacls(folder, os.path.abspath(path))}. A later release will refuse such a "
+        "file."
     )
+
+
+def _icacls(folder: str, file: str) -> str:
+    """How to run icacls on `folder` and on `file`, the file in it. A path with characters
+    cmd or PowerShell would expand or end a quote at inside double quotes is not put in a
+    command, so the command never names another folder; nor is one that ends in a
+    backslash, where the closing quote would be taken as part of the path, except a drive's
+    root, such as `D:\\`, which needs no quotes."""
+
+    def command(target: str) -> str | None:
+        if _DRIVE_ROOT.fullmatch(target):
+            return f"`icacls {target}`"
+        if any(c in target for c in _UNSAFE_IN_DOUBLE_QUOTES) or target.endswith(("\\", "/")):
+            return None
+        return f'`icacls "{target}"`'
+
+    on_folder, on_file = command(folder), command(file)
+    if on_folder is None or on_file is None:
+        return f"run icacls on the folder that holds it, {folder}, and on the file itself"
+    return f"run {on_folder} and {on_file}"
 
 
 def warn_shared(
@@ -339,11 +386,13 @@ def warn_shared(
         pass
 
 
-def _join(names: list[str]) -> str:
-    """`names` as a list in a sentence: "A", "A and B" or "A, B and C"."""
+def _join(names: list[str], separator: str = ", ") -> str:
+    """`names` as a list in a sentence: "A", "A and B" or "A, B and C". Clauses that have
+    commas of their own are separated by `separator` "; " instead: "A; B; and C"."""
     if len(names) <= 1:
         return "".join(names)
-    return ", ".join(names[:-1]) + " and " + names[-1]
+    last = " and " if separator == ", " else f"{separator}and "
+    return separator.join(names[:-1]) + last + names[-1]
 
 
 def _caller_level() -> int:
