@@ -1,12 +1,19 @@
 // Inbound order entry.
 //
-// **Version:** 1.8
+// **Version:** 1.9
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`, and, from a Fundamentals pod only, `ticket`, `ticket_cancel`
 // and `ticket_urgency` (see the end of this file). Every new, cancel, amend and mass-cancel message is released
 // to the engine delta_oe after gateway receipt (SPEC 8.1, SPEC 8.2); nothing
 // about that timing is a field here.
+//
+// A new or amend of a Market Making, Market Taking, Options MM or Options
+// Taking team still waiting out its delay at the term-end trading cutoff is
+// dropped with no answer, the way the close drops one: no accept, reject or
+// cancel follows (TRADING_CUTOFF and TERM_CUTOFF in common.proto). That "no
+// answer" is the Technology Arm's reading of SPEC 13.5, which cancels pending
+// submissions and amendments but does not say "without a response".
 //
 // The book is addressed by instrument, side and price; no inbound message
 // carries an order identifier. A team holds at most one resting order per

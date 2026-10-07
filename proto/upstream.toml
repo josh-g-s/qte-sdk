@@ -4,13 +4,13 @@
 # bytes against it.
 
 repo = "qte-platform"
-commit = "a3f42824d0612de1213810137394c95467313c61"
+commit = "df3809bf7f10b0bfd2ae899400d08d4d7a717d82"
 path = "schemas/proto/qte/contract/v1"
 
 [blobs]
-"common.proto" = "7f112f4fce55e31f131a8c6c6917cfd39403cebe"
+"common.proto" = "9a0005bb362b6840d9dd15384a21d35422b5deff"
 "envelope.proto" = "47c847d9b066383f4a08791186df86b521572b79"
 "session.proto" = "cca1b8b3daf88e853836d8cc09f221a8c9e66278"
-"order_entry.proto" = "341386efea51ca8afaab85ee13b02284222bde4b"
-"order_events.proto" = "688c210b01ea92ddba67cfc2c8ae232a38d6fdfa"
+"order_entry.proto" = "65ff1a6209da593a64b61fa441bee3a5dabff9c0"
+"order_events.proto" = "1d9dae669179aa86ba113df39c6d5a6c89b98c2b"
 "market_data.proto" = "9530f3a14ef982a97b84c87899e2cc1844631856"

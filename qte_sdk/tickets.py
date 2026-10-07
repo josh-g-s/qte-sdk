@@ -62,9 +62,14 @@ of the desk's child orders still resting when a ticket stops depends on why it s
   an `order_cancelled` whose reason is `PARENT_STOPPED`;
 - the term's final close expired it: the close itself cancels the day's resting orders,
   so each child is cancelled `SESSION_CLOSE`;
-- the exchange cancelled it (`TICKET_CANCELLED_BY_ENGINE`): each child is cancelled with
-  one of the cancellation reasons (the 1800 band), but the contract does not yet say
-  which, so do not expect `PARENT_STOPPED` there.
+- the exchange cancelled it (`TICKET_CANCELLED_BY_ENGINE`): a child still resting would be
+  cancelled with a reason from the 1800 band, but as the exchange works today none is
+  resting when it cancels a ticket.
+
+`PARENT_STOPPED` can also come while the ticket keeps working: when the Directors hand a
+ticket's remaining shares over to the exchange to execute, every outstanding child is
+cancelled `PARENT_STOPPED`, and the ticket stays `TICKET_WORKING`. So never read
+`PARENT_STOPPED` as the ticket having stopped: read the ticket's own `ticket_state`.
 
 Every send checks what it can before sending, and raises `ValueError` or `TypeError`
 and sends nothing if a check fails: `request_ref` is 1 to 32 bytes of UTF-8, `instrument`

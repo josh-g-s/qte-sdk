@@ -167,8 +167,9 @@ async def send_new(
     and a well-formed one is rejected `PARENT_NOT_WORKING` on a `new` from any team other
     than an Execution desk, as is a desk's `new` that names no working parent ticket
     assigned to the desk. When the parent ticket stops, a child still resting is
-    cancelled, with `PARENT_STOPPED` for some stops but not all: `qte_sdk.tickets` says
-    which reason each stop gives.
+    cancelled, with `PARENT_STOPPED` for some stops but not all, and `PARENT_STOPPED` can
+    also come while the ticket keeps working: `qte_sdk.tickets` says which reason each
+    case gives.
     """
     ref = _ref(request_ref)
     _id("strat_id", strat_id)
