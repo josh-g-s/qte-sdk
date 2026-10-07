@@ -8,7 +8,7 @@ through `ctypes`, as it does on a student's computer: nothing in `qte_sdk._filea
 The tokens here are fakes. The SIDs are worked out when the tests run, from `whoami`.
 
 CI's hosted runner runs the tests as an elevated administrator, which a student usually
-is not. Two things differ because of that:
+is not. Three things differ because of that:
 
 - A file an elevated administrator creates may be owned by BUILTIN\\Administrators rather
   than by the user, as Windows Server's default policy has it; a student's own files are
@@ -17,6 +17,10 @@ is not. Two things differ because of that:
 - An elevated administrator may give a file to another owner (`icacls /setowner`), which a
   student cannot do to their own files. The test of a file another account owns relies on
   it.
+- The runner's account is the computer's built-in Administrator (its SID ends in -500),
+  which SDDL writes as the alias LA rather than as its SID. The SDK cannot tell which
+  account LA stands for, so a file this account owns has an owner it reports as unknown,
+  not as yours. A student's own account is usually another one, written as its SID.
 """
 
 import csv
@@ -25,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 
@@ -242,17 +247,13 @@ def test_token_set_in_a_private_folder_says_no_broad_group_can_open_it(private_f
     assert not grants_users(private_folder / ".env")
 
 
-def test_a_folder_under_the_user_profile_is_private_by_default(tmp_path):
-    # What the SDK's advice rests on: a folder under %USERPROFILE% that nobody changed.
-    profile = Path(os.environ["USERPROFILE"]).resolve()
-    if not tmp_path.resolve().is_relative_to(profile):
-        pytest.skip(f"the temporary folder {tmp_path} is not under the user profile")
-    folder = tmp_path / "project"
-    folder.mkdir()
-    path = write_dotenv(folder)
-    access = _fileaccess.broad_access(path)
-    assert access is not None
-    assert not access, sddl(path) + " in a folder with " + sddl(folder)
+def test_a_folder_under_the_user_profile_is_private_by_default():
+    # What the SDK's advice rests on: a new folder under %USERPROFILE% that nobody changed.
+    with tempfile.TemporaryDirectory(prefix="qte-sdk-test-", dir=os.environ["USERPROFILE"]) as d:
+        path = write_dotenv(Path(d))
+        access = _fileaccess.broad_access(path)
+        assert access is not None
+        assert not access, f"{sddl(path)} in a folder with {sddl(Path(d))}"
 
 
 # A folder opened to BUILTIN\Users

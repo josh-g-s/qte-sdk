@@ -4,7 +4,7 @@
 
 ## Requirements
 
-Python 3.11 or later. CI tests 3.11, 3.12, 3.13 and 3.14.
+Python 3.11 or later. CI tests 3.11, 3.12, 3.13 and 3.14 on Linux, and 3.11 on Windows.
 
 The connection code depends on behaviour that differs between websockets releases, so the supported websockets range is tested at both ends. `pyproject.toml` allows `websockets>=15,<18`. The `test` job installs the newest websockets release inside the range on every Python version, and the `test-websockets-floor` job installs exactly websockets 15.0, the oldest release the range allows, and runs the whole test suite on Python 3.11. Raising the lower bound in `pyproject.toml` means updating the pin in that job and this paragraph together. To run the floor check locally:
 
@@ -52,9 +52,17 @@ It clears earlier builds first, so it can be run again and each path matches one
 
 ### Windows
 
-The `windows` job runs on GitHub's hosted `windows-latest` runner, with Python 3.11, and is the only real Windows test. Tests that need the real Windows API are marked `windows` (`@pytest.mark.windows`, or `pytestmark = pytest.mark.windows` for a module); `tests/conftest.py` skips them unless `sys.platform == "win32"`, so the other jobs and a plain `pytest` on macOS or Linux skip them. `tests/test_windows_real.py` holds them: with access lists and owners made by `icacls`, it checks that a `.env` holding a fake token in a private folder gives no warning, that the same file in a folder opened to BUILTIN\Users warns about the folder, that a file opened to Users warns about the file too, and the owners and messages of `python -m qte_sdk.token set` and `check`; and that `python -m qte_sdk.token set` with its input from `NUL` or a pipe refuses at once. Nothing in `qte_sdk._fileaccess` or the console check is replaced there, and only fake tokens are used. The rest of the suite tests the same code on every system with canned access lists.
+The `windows` job runs on GitHub's hosted `windows-latest` runner, with Python 3.11, and is the only real Windows test. Tests that need the real Windows API are marked `windows` (`@pytest.mark.windows`, or `pytestmark = pytest.mark.windows` for a module); `tests/conftest.py` skips them unless `sys.platform == "win32"`, so the other jobs and a plain `pytest` on macOS or Linux skip them. `tests/test_windows_real.py` holds them: with access lists and owners made by `icacls`, it checks that a `.env` holding a fake token in a private folder gives no warning, that the same file in a folder opened to BUILTIN\Users warns about the folder, that a file opened to Users warns about the file too, which owners are reported, and what `python -m qte_sdk.token set` and `check` print; and that `python -m qte_sdk.token set` with its input from `NUL` or a pipe refuses at once. Nothing in `qte_sdk._fileaccess` or the console check is replaced there, and only fake tokens are used. The rest of the suite tests the same code on every system with canned access lists.
 
-The job runs the tests marked `windows` first, fails if none ran or any was skipped, and then runs the rest of the suite. The runner works as an elevated administrator, which a student usually is not; `tests/test_windows_real.py` says what that changes. To run the Windows tests on a Windows machine:
+The job runs the tests marked `windows` first, and fails if none ran or any was skipped. It then runs the rest of the suite, except eight files that do not work on Windows yet:
+
+- `test_reconnect.py`, `test_resume.py`, `test_calendar.py`, `test_instruments.py`, `test_new_message_types.py` and `test_tickets.py`: their fake exchange drops a connection with `transport.abort()`, and on Windows the reset discards the frames sent just before it, so the client sees the drop a message early, and one test hangs.
+- `test_history.py`: its tests of cancelling a fetch and of shutting down a TLS connection time out on Windows.
+- `test_examples.py`: it sends `SIGINT` to child processes and uses `preexec_fn`, which Windows does not have.
+
+A few other tests check what is printed on macOS and Linux, or need POSIX modes, FIFOs or symbolic links, and skip themselves on Windows. The job sets git's `core.autocrlf` to false before checking out, so the vendored contract keeps the exact bytes its tests hash. The runner works as an elevated administrator, and as the computer's built-in Administrator account, which a student usually is not; `tests/test_windows_real.py` says what that changes.
+
+To run the Windows tests on a Windows machine:
 
 ```sh
 pytest -m windows

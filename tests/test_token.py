@@ -22,6 +22,8 @@ POSIX = os.name == "posix"
 URL = "ws://127.0.0.1:8080/ws"
 needs_posix = pytest.mark.skipif(not POSIX, reason="POSIX permissions")
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
+# Windows prints PowerShell and cmd commands, and its own note on privacy, instead.
+posix_wording = pytest.mark.skipif(not POSIX, reason="checks what is printed on macOS and Linux")
 
 
 def synthetic_token() -> str:
@@ -378,6 +380,7 @@ def test_a_failed_write_reports_the_reason_without_the_token(tmp_path, monkeypat
     assert list(folder.iterdir()) == []
 
 
+@posix_wording
 def test_a_token_already_in_the_environment_is_pointed_out(monkeypatch, capsys):
     monkeypatch.setenv(TOKEN_ENV_VAR, synthetic_token())
     assert run(["set"], ask=answers(URL), ask_secret=answers(synthetic_token())) == 0
@@ -482,6 +485,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@posix_wording
 def test_set_file_writes_only_the_token_to_a_private_default_file(home, capsys, monkeypatch):
     token = synthetic_token()
     assert run(["set", "--file"], ask_secret=answers(token)) == 0
@@ -514,6 +518,7 @@ def test_set_file_replaces_an_old_token(home):
     assert sorted(p.name for p in (home / ".qte").iterdir()) == ["token"]
 
 
+@posix_wording
 def test_set_file_takes_a_path(tmp_path, capsys):
     path = tmp_path / "secret dir" / "qte-token"
     token = synthetic_token()
@@ -755,6 +760,7 @@ def windows(monkeypatch) -> Callable[..., None]:
     return set_sddl
 
 
+@posix_wording
 def test_the_saved_message_promises_privacy_only_off_windows():
     assert "readable only by you" in helper._privacy(dotenv())
 
