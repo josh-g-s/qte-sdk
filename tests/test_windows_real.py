@@ -802,7 +802,12 @@ def hide_list(path: Path, user_sid: str) -> None:
 
 
 def show_list(path: Path, user_sid: str) -> None:
-    set_owner(path, ADMINISTRATORS)
+    """Undo `hide_list`. icacls cannot give `path` back, since it reads the list first, so
+    takeown gives it to Administrators, who then may read and change its list."""
+    result = subprocess.run(
+        ["takeown", "/f", str(path), "/a"], capture_output=True, text=True, timeout=TIMEOUT
+    )
+    assert result.returncode == 0, f"takeown: {result.stdout}{result.stderr}"
     icacls(path, "/remove:d", f"*{user_sid}")
 
 
