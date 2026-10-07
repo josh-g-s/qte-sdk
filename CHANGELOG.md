@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.11
+**Version:** 0.12
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -9,6 +9,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 ## Unreleased
 
 - On Windows, the check of a `.env` or the file named by `QTE_TOKEN_FILE` now also reads the access list of the file's folder and the file's owner. It warns, with the same `TokenFileShared` or `AddressFileShared`, when Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users may add or remove files in the folder, since they could replace a private file with one of their own, naming the folder; and when the file is owned by an account other than you, Administrators or SYSTEM. The warning suggests running `icacls` on both the folder and the file. `python -m qte_sdk.token set` and `check` report the same, and say when the folder or the owner could not be checked. It still warns rather than refuses.
+- On Windows, when the `.env` or the file named by `QTE_TOKEN_FILE` is reached through a symbolic link or a junction, at the file itself or at a folder on its path, the check now reads the access list and owner of the file the link leads to and the list of that file's folder, and also the list of the folder that holds the link, since whoever may replace the link may point it elsewhere. The warning names each folder that broad groups may add or remove files in. A `KeyboardInterrupt`, or another interruption, raised while the SDK warns about a file that holds the token still stops the program, but no longer carries the frames or chained exceptions that held the file's text.
 
 ## 1.1.0
 

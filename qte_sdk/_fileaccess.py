@@ -7,7 +7,11 @@ and Authenticated Users change it too. `broad_access` reads a file's list throug
 Windows API (with `ctypes`, so no extra package is needed) and names the broad groups it
 lets read the file and those it lets change it. It also reads the list of the file's
 folder, since whoever may add or remove files there can replace the file with one of their
-own, and the file's owner, since an owner can always change the file's list.
+own, and the file's owner, since an owner can always change the file's list. When the file
+is reached through a link (a symbolic link, a junction, or another link `os.path.realpath`
+follows), at the file itself or at a folder on its path, the file and the folder looked at
+are those it resolves to, and the folder that holds the link is looked at too, since
+whoever may replace the link may point it elsewhere.
 `access_in_sddl`, `folder_access_in_sddl` and `owner_is_other` do the parsing, on the lists
 in their text form (SDDL), and run on any system, so they can be tested anywhere.
 
@@ -16,8 +20,9 @@ Only paths and access lists are handled here, never a file's contents.
 
 import os
 import re
+import stat
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 __all__ = [
@@ -128,25 +133,39 @@ _SID = re.compile(r"S-1-\d+(-\d+)+")
 class BroadAccess:
     """The broad groups an access list lets read a file, and those it lets change it (or
     take control of it), each in the order of `BROAD_GROUPS`; the broad groups that may add
-    or remove files in its folder; and whether another account owns it.
+    or remove files in its folder, and, when the file is reached through a link, in the
+    folder that holds the link; and whether another account owns it.
 
-    `folder` is None when the folder's list was not read, and `other_owner` None when the
-    owner was not read or could not be compared with the current user. False when no broad
-    group may do any of these and no other account is known to own the file."""
+    `folder` is None when the folder's list was not read, `link_folder` None when there is
+    no link or its folder's list was not read, and `other_owner` None when the owner was
+    not read or could not be compared with the current user. False when no broad group may
+    do any of these and no other account is known to own the file.
+
+    `file`, `folder_path`, `link` and `link_folder_path` say where those lists were read:
+    the file the path resolves to, its folder, the link it is reached through (the path
+    itself, or a folder on it, such as a junction) and the folder that holds that link.
+    The last two are None when there is no link. They are not compared: two results are
+    equal when they find the same. When `file` or `folder_path` is None, the path the check
+    was asked about, or its folder, stands for it."""
 
     read: tuple[str, ...] = ()
     write: tuple[str, ...] = ()
     folder: tuple[str, ...] | None = None
     other_owner: bool | None = None
+    link_folder: tuple[str, ...] | None = None
+    file: str | None = field(default=None, compare=False)
+    folder_path: str | None = field(default=None, compare=False)
+    link: str | None = field(default=None, compare=False)
+    link_folder_path: str | None = field(default=None, compare=False)
 
     def __bool__(self) -> bool:
-        return bool(self.read or self.write or self.folder or self.other_owner)
+        return bool(self.read or self.write or self.changeable)
 
     @property
     def changeable(self) -> bool:
-        """Whether a broad group may change the file or replace it with one of their own,
-        or another account owns it (and so may change it)."""
-        return bool(self.write or self.folder or self.other_owner)
+        """Whether a broad group may change the file or replace it, or the link to it, with
+        one of their own, or another account owns it (and so may change it)."""
+        return bool(self.write or self.folder or self.link_folder or self.other_owner)
 
 
 _ALL_RIGHTS = 0xFFFFFFFF
@@ -161,12 +180,21 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     """The broad groups (see `BROAD_GROUPS`) that Windows lets read or change `path`, and
     add or remove files in the folder that holds it, and whether another account owns it;
     or None if the file's access list cannot be told, for example when this is not Windows,
-    the file does not exist or the list cannot be read. If only the folder's list or the
-    owner cannot be told, that part is None (see `BroadAccess`). Never raises."""
+    the file does not exist or the list cannot be read. If only a folder's list or the
+    owner cannot be told, that part is None (see `BroadAccess`). Never raises.
+
+    When `path` is reached through a link, the file, its folder and its owner are those of
+    the file it resolves to, and `link_folder` gives the groups that may add or remove
+    files in the folder that holds the link. Every list is read here, before the caller
+    opens the file, since `os.path.realpath` is itself a call to the Windows API."""
     if not on_windows():
         return None
     try:
-        sddl = _read_sddl(str(path))
+        file, folder_path, link, link_folder_path = _locations(path)
+        # Microsoft does not document whether GetNamedSecurityInfoW follows a symbolic link,
+        # and documents that GetFileSecurity reads the link itself, so the list of the file
+        # the path resolves to is asked for by that file's own path.
+        sddl = _read_sddl(file)
     except Exception:
         return None
     if sddl is None:
@@ -174,18 +202,74 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     access = access_in_sddl(sddl)
     if access is None:
         return None
-    folder = None
-    try:
-        folder_sddl = _read_sddl(os.path.dirname(os.path.abspath(path)))
-        if folder_sddl is not None:
-            folder = folder_access_in_sddl(folder_sddl)
-    except Exception:
-        folder = None
+    folder = _folder_access(folder_path)
+    link_folder = None if link_folder_path is None else _folder_access(link_folder_path)
     try:
         user = _current_user_sid()
     except Exception:
         user = None
-    return replace(access, folder=folder, other_owner=owner_is_other(sddl, user))
+    return replace(
+        access,
+        folder=folder,
+        other_owner=owner_is_other(sddl, user),
+        link_folder=link_folder,
+        file=file,
+        folder_path=folder_path,
+        link=link,
+        link_folder_path=link_folder_path,
+    )
+
+
+def _locations(path: Path | str) -> tuple[str, str, str | None, str | None]:
+    """The file `path` resolves to, through any symbolic link or junction; the folder that
+    holds that file; and the deepest link on the way to it (`path` itself, or a folder on
+    it) with the folder that holds that link, or None and None when there is no link or
+    the link is in the file's own folder. Another name for the same place, such as a mapped
+    drive's or a short 8.3 name, is not a link."""
+    file = os.path.realpath(path)
+    folder = os.path.dirname(file)
+    step = os.path.abspath(path)
+    while True:
+        parent = os.path.dirname(step)
+        if _same(parent, step):  # the root
+            return file, folder, None, None
+        if _is_link(step):
+            holder = os.path.realpath(parent)
+            if _same(holder, folder):
+                return file, folder, None, None
+            return file, folder, step, holder
+        step = parent
+
+
+def _is_link(path: str) -> bool:
+    """Whether `path` is a symbolic link or a junction (a mount point, to Windows). Other
+    reparse points, such as the placeholders of files kept in the cloud, are not links."""
+    try:
+        status = os.lstat(path)
+    except (OSError, ValueError):
+        return False
+    tag = getattr(status, "st_reparse_tag", 0)  # only on Windows
+    return stat.S_ISLNK(status.st_mode) or tag in _LINK_TAGS
+
+
+# IO_REPARSE_TAG_SYMLINK and IO_REPARSE_TAG_MOUNT_POINT (which a junction is), from
+# Microsoft's list of reparse tags. The stat module names them only on Windows.
+_LINK_TAGS = (0xA000000C, 0xA0000003)
+
+
+def _same(one: str, other: str) -> bool:
+    """Whether two paths name the same place, as Windows compares names."""
+    return os.path.normcase(os.path.normpath(one)) == os.path.normcase(os.path.normpath(other))
+
+
+def _folder_access(folder: str) -> tuple[str, ...] | None:
+    """The broad groups that may add or remove files in `folder` (see
+    `folder_access_in_sddl`), or None if its list cannot be read or parsed."""
+    try:
+        folder_sddl = _read_sddl(folder)
+    except Exception:
+        return None
+    return None if folder_sddl is None else folder_access_in_sddl(folder_sddl)
 
 
 def access_in_sddl(sddl: str) -> BroadAccess | None:

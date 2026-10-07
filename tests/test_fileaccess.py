@@ -6,12 +6,14 @@ address, or another account owns the file."""
 import logging
 import os
 import secrets
+import traceback
 import warnings
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from qte_sdk import _fileaccess
+from qte_sdk import _fileaccess, dotenv
 from qte_sdk._fileaccess import BroadAccess
 from qte_sdk.dotenv import (
     AddressFileShared,
@@ -332,11 +334,13 @@ def test_the_current_users_sid_is_unknown_off_windows():
 class Windows:
     """Makes the SDK act as on Windows, with each file's access list, each folder's, and the
     current user's SID given by the test (an exception is raised instead of returned).
+    `lists` gives the list of a particular path, ahead of `sddl` and `folder_sddl`.
     `os.name` itself cannot be changed: `pathlib` would then fail to make a path."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.sddl: str | Exception | None = SECOND_DRIVE
         self.folder_sddl: str | Exception | None = PROFILE_FOLDER
+        self.lists: dict[str, str | Exception | None] = {}
         self.user: str | Exception | None = USER_SID
         self.asked: list[str] = []
         monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
@@ -345,6 +349,8 @@ class Windows:
 
     def _read_sddl(self, path: str) -> str | None:
         self.asked.append(path)
+        if path in self.lists:
+            return self._give(self.lists[path])
         return self._give(self.folder_sddl if os.path.isdir(path) else self.sddl)
 
     def _current_user_sid(self) -> str | None:
@@ -395,8 +401,10 @@ def test_the_folder_of_a_relative_path_is_checked(windows, tmp_path, monkeypatch
     windows.sddl = PRIVATE_FILE
     monkeypatch.chdir(tmp_path)
     (tmp_path / "token").write_text("")
-    _fileaccess.broad_access("token")
-    assert windows.asked == ["token", str(tmp_path)]
+    found = _fileaccess.broad_access("token")
+    # The file is asked for by the path it resolves to, which is absolute.
+    assert windows.asked == [str(tmp_path / "token"), str(tmp_path)]
+    assert found is not None and found.link_folder_path is None
 
 
 @pytest.mark.parametrize("folder", [None, "D:(A;;FA;;;WD", OSError("access denied")])
@@ -948,3 +956,449 @@ def test_the_message_for_each_combination(monkeypatch, found, kwargs, start, fix
         f'`icacls "{AT}"`. A later release will refuse such a file.'
     )
     assert "  " not in message and message.count("; and") <= 1
+
+
+# Links, on simulated Windows. A real symbolic link is used where the system allows one
+# (the tests run on macOS and Linux too), and `os.path.realpath` is replaced where a link
+# Windows has and POSIX lacks, such as a junction, is meant.
+
+
+def linked(tmp_path: Path, link_in: str, target_in: str, name: str = ".env") -> tuple[Path, Path]:
+    """A file `name` in the folder `target_in` and a symbolic link to it, of the same name,
+    in the folder `link_in`, both under `tmp_path`: the link and the file."""
+    target = tmp_path / target_in / name
+    link = tmp_path / link_in / name
+    target.parent.mkdir(exist_ok=True)
+    link.parent.mkdir(exist_ok=True)
+    target.write_text("")
+    target.chmod(0o600)
+    try:
+        link.symlink_to(target)
+    except OSError:  # on Windows, without the right to make one
+        pytest.skip("symbolic links cannot be made here")
+    return link, target
+
+
+def test_a_link_is_checked_by_the_file_and_folder_it_links_to_and_its_own_folder(windows, tmp_path):
+    link, target = linked(tmp_path, "profile", "open")
+    windows.lists = {
+        str(target): PRIVATE_FILE,
+        str(target.parent): REAL_DRIVE_FOLDER,
+        str(link.parent): PROFILE_FOLDER,
+    }
+    found = _fileaccess.broad_access(link)
+    assert windows.asked == [str(target), str(target.parent), str(link.parent)]
+    assert found == BroadAccess(folder=(AUTHENTICATED,), other_owner=False, link_folder=())
+    assert found.changeable
+    assert (found.file, found.folder_path) == (str(target), str(target.parent))
+    assert found.link_folder_path == str(link.parent)
+
+
+def test_the_folder_of_a_link_is_checked_as_well_as_the_folder_it_links_into(windows, tmp_path):
+    link, target = linked(tmp_path, "open", "profile")
+    windows.lists = {
+        str(target): PRIVATE_FILE,
+        str(target.parent): PROFILE_FOLDER,
+        str(link.parent): REAL_DRIVE_FOLDER,
+    }
+    found = _fileaccess.broad_access(link)
+    assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
+    assert found and found.changeable
+
+
+@pytest.mark.parametrize("folder", [None, "garbage", OSError("access denied")])
+def test_a_link_folder_that_cannot_be_read_is_unknown(windows, tmp_path, folder):
+    link, target = linked(tmp_path, "profile", "other")
+    windows.lists = {str(target): PRIVATE_FILE, str(link.parent): folder}
+    found = _fileaccess.broad_access(link)
+    assert found == BroadAccess(folder=(), other_owner=False, link_folder=None)
+    assert not found
+
+
+def test_a_file_reached_through_a_linked_folder_checks_where_the_link_is(windows, tmp_path):
+    # Like a project folder that is a junction to another drive: whoever may replace the
+    # junction in the folder that holds it may point it elsewhere.
+    (tmp_path / "private").mkdir()
+    (tmp_path / "open").mkdir()
+    alias = tmp_path / "open" / "project"
+    alias.symlink_to(tmp_path / "private", target_is_directory=True)
+    (tmp_path / "private" / ".env").write_text("")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(tmp_path / "open"): REAL_DRIVE_FOLDER}
+    found = _fileaccess.broad_access(alias / ".env")
+    assert windows.asked == [
+        str(tmp_path / "private" / ".env"),
+        str(tmp_path / "private"),
+        str(tmp_path / "open"),
+    ]
+    assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
+    assert (found.link, found.link_folder_path) == (str(alias), str(tmp_path / "open"))
+
+
+def test_a_link_within_the_files_own_folder_adds_no_folder(windows, tmp_path):
+    (tmp_path / "real.env").write_text("")
+    (tmp_path / ".env").symlink_to(tmp_path / "real.env")
+    windows.sddl = PRIVATE_FILE
+    found = _fileaccess.broad_access(tmp_path / ".env")
+    assert windows.asked == [str(tmp_path / "real.env"), str(tmp_path)]
+    assert found is not None and found.link is None and found.link_folder_path is None
+
+
+def test_a_folder_reached_by_another_name_is_not_a_link(windows, tmp_path, monkeypatch):
+    # A mapped drive, or a short 8.3 name, resolves to another name for the same folder.
+    path = tmp_path / "proj" / ".env"
+    path.parent.mkdir()
+    path.write_text("")
+    monkeypatch.setattr(
+        os.path, "realpath", lambda p, **kw: str(p).replace(str(tmp_path), "/elsewhere")
+    )
+    windows.sddl = PRIVATE_FILE
+    found = _fileaccess.broad_access(path)
+    assert windows.asked == ["/elsewhere/proj/.env", "/elsewhere/proj"]
+    assert found is not None and found.link_folder_path is None
+
+
+class Status:
+    """What `os.lstat` gives on Windows: a mode, and the tag of a reparse point."""
+
+    def __init__(self, tag: int) -> None:
+        self.st_mode = 0o040755  # a folder
+        self.st_reparse_tag = tag
+
+
+@pytest.mark.parametrize(
+    ("tag", "link"),
+    [
+        (0xA0000003, True),  # IO_REPARSE_TAG_MOUNT_POINT: a junction
+        (0xA000000C, True),  # IO_REPARSE_TAG_SYMLINK
+        (0x9000601A, False),  # a file kept in the cloud, such as by OneDrive
+        (0x80000017, False),  # IO_REPARSE_TAG_WOF, a compressed file
+        (0, False),
+    ],
+)
+def test_junctions_and_symbolic_links_are_links_and_other_reparse_points_are_not(
+    monkeypatch, tag, link
+):
+    monkeypatch.setattr(os, "lstat", lambda path: Status(tag))
+    assert _fileaccess._is_link("C:\\proj") is link
+
+
+def test_a_path_that_cannot_be_looked_at_is_not_a_link(tmp_path):
+    assert _fileaccess._is_link(str(tmp_path / "missing")) is False
+
+
+def test_a_dotenv_linking_into_an_open_folder_warns_about_that_folder(windows, tmp_path):
+    link, target = linked(tmp_path, "profile", "open")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(target.parent): REAL_DRIVE_FOLDER}
+    token = synthetic_token()
+    target.write_text(f"QTE_TOKEN={token}\n")
+    os.chdir(link.parent)
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{link}, a link to {target}, holds your token, and other users can replace it: "
+        f"{AUTHENTICATED} may add or remove files in {target.parent}, which holds the file "
+        "it links to, so other people who use this computer could change QTE_URL in it"
+    )
+    assert "Move the file it links to, and the link, into a folder under your user" in message
+    assert (
+        f'To see who can open the folders and the file, run `icacls "{link.parent}"`, '
+        f'`icacls "{target.parent}"` and `icacls "{target}"`.'
+    ) in message
+    assert "which holds the link" not in message
+    assert_token_absent(token, message)
+
+
+def test_a_dotenv_link_in_an_open_folder_warns_about_the_links_folder(windows, tmp_path):
+    link, target = linked(tmp_path, "open", "profile")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(link.parent): REAL_DRIVE_FOLDER}
+    token = synthetic_token()
+    target.write_text(f"QTE_TOKEN={token}\n")
+    os.chdir(link.parent)
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{link}, a link to {target}, holds your token, and other users can replace it: "
+        f"{AUTHENTICATED} may add or remove files in {link.parent}, which holds the link, so"
+    )
+    assert "which holds the file it links to" not in message
+    assert_token_absent(token, message)
+
+
+def test_both_open_folders_of_a_linked_token_file_are_named(windows, tmp_path, monkeypatch):
+    link, target = linked(tmp_path, "one", "two", name="token")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {
+        str(target.parent): REAL_DRIVE_FOLDER,
+        str(link.parent): "D:(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)",
+    }
+    token = synthetic_token()
+    target.write_text(token)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(link))
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    message = str(caught[0].message)
+    assert (
+        f"other users can replace it: {AUTHENTICATED} may add or remove files in "
+        f"{target.parent}, which holds the file it links to, and {USERS} may add or remove "
+        f"files in {link.parent}, which holds the link, so other people who use this "
+        "computer could replace your token."
+    ) in message
+    assert "remove those groups' access." in message
+    assert_token_absent(token, message)
+
+
+def test_a_link_is_resolved_and_read_before_the_token(windows, tmp_path, monkeypatch):
+    link, target = linked(tmp_path, "profile", "open")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(target.parent): REAL_DRIVE_FOLDER}
+    token = synthetic_token()
+    target.write_text(f"QTE_TOKEN={token}\n")
+    os.chdir(link.parent)
+    events: list[str] = []
+    real_open, real_realpath, fake_sddl = os.open, os.path.realpath, _fileaccess._read_sddl
+
+    def recording_open(path, *args, **kwargs):
+        events.append(f"open {path}")
+        return real_open(path, *args, **kwargs)
+
+    def recording_realpath(path, **kwargs):
+        # Only the test's own paths: the SDK's own files are resolved later, by
+        # `dotenv._caller_level`, to point the warning at the caller.
+        if str(path).startswith(str(tmp_path)):
+            events.append("realpath")
+        return real_realpath(path, **kwargs)
+
+    def recording_sddl(path: str) -> str | None:
+        events.append(f"list {path}")
+        return fake_sddl(path)
+
+    real_lstat = os.lstat
+
+    def recording_lstat(path, *args, **kwargs):
+        if str(path).startswith(str(tmp_path)):
+            events.append("lstat")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    monkeypatch.setattr(os, "lstat", recording_lstat)
+    monkeypatch.setattr(os.path, "realpath", recording_realpath)
+    monkeypatch.setattr(_fileaccess, "_read_sddl", recording_sddl)
+    with pytest.warns(TokenFileShared):
+        assert resolve_token() == token
+    # realpath is a Windows API call on Windows: it too comes before the token is read.
+    assert "realpath" in events and "lstat" in events
+    last_call = max(i for i, e in enumerate(events) if not e.startswith("open"))
+    assert events[last_call + 1 :] == [f"open {link}"]
+    assert [e for e in events if e.startswith("list")] == [
+        f"list {target}",
+        f"list {target.parent}",
+        f"list {link.parent}",
+    ]
+
+
+def test_the_icacls_commands_name_both_folders_of_a_link():
+    assert _icacls("D:\\data", "D:\\data\\.env", "C:\\Users\\me\\proj") == (
+        'run `icacls "C:\\Users\\me\\proj"`, `icacls "D:\\data"` and `icacls "D:\\data\\.env"`'
+    )
+    assert _icacls("D:\\50%", "D:\\50%\\.env", "C:\\proj") == (
+        "run icacls on the folder that holds the link, C:\\proj, on the folder that holds "
+        "the file, D:\\50%, and on the file, D:\\50%\\.env"
+    )
+
+
+# Interruptions while warning, on simulated Windows
+
+
+class Halt(BaseException):
+    """An interruption of the SDK's own making, which no `except Exception` catches."""
+
+
+def shown(error: BaseException) -> str:
+    """What a traceback showing local variables could print for `error` and its chain, and
+    every text or bytes local of its frames, leaving out this test module's own frames,
+    which hold the token by design."""
+    parts = [str(error), repr(error), repr(error.args), repr(vars(error))]
+    pending = [traceback.TracebackException.from_exception(error, capture_locals=True)]
+    while pending:
+        link = pending.pop()
+        parts.extend(link.format_exception_only())
+        for summary in link.stack:
+            if summary.filename != __file__:
+                parts.append(f"{summary.filename}:{summary.lineno} {summary.locals}")
+        pending.extend(n for n in (link.__cause__, link.__context__) if n is not None)
+    tb = error.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename != __file__:
+            for value in tb.tb_frame.f_locals.values():
+                if isinstance(value, bytes):
+                    parts.append(value.decode("utf-8", "replace"))
+                elif isinstance(value, str):
+                    parts.append(value)
+        tb = tb.tb_next
+    return "\n".join(parts)
+
+
+def interrupt_with(kind: type[BaseException]):
+    def interrupted(*args, **kwargs):
+        raise kind()
+
+    return interrupted
+
+
+def token_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str) -> str:
+    token = synthetic_token()
+    if source == ".env":
+        write_dotenv(f"QTE_URL=ws://127.0.0.1:8080/ws\nQTE_TOKEN={token}\n")
+    else:
+        path = tmp_path / "token"
+        path.write_text(token + "\n")
+        monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    return token
+
+
+@pytest.mark.parametrize("source", [".env", TOKEN_FILE_ENV_VAR])
+@pytest.mark.parametrize("kind", [KeyboardInterrupt, SystemExit, GeneratorExit, Halt])
+def test_an_interruption_while_warning_carries_no_token(
+    windows, monkeypatch, tmp_path, source, kind
+):
+    token = token_source(monkeypatch, tmp_path, source)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.showwarning = interrupt_with(kind)
+        with pytest.raises(kind) as caught:
+            resolve_token()
+    error = caught.value
+    assert type(error) is kind
+    assert error.__cause__ is None and error.__context__ is None
+    assert_token_absent(token, shown(error))
+    # The warning that was cut short is given next time.
+    with pytest.warns(TokenFileShared):
+        assert resolve_token() == token
+
+
+@pytest.mark.parametrize("source", [".env", TOKEN_FILE_ENV_VAR])
+def test_an_interruption_while_logging_a_warning_made_an_error_carries_no_token(
+    windows, monkeypatch, tmp_path, source
+):
+    token = token_source(monkeypatch, tmp_path, source)
+
+    class Interrupting(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise KeyboardInterrupt
+
+    handler = Interrupting()
+    log = logging.getLogger("qte_sdk.dotenv")
+    log.addHandler(handler)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", TokenFileShared)
+            with pytest.raises(KeyboardInterrupt) as caught:
+                resolve_token()
+    finally:
+        log.removeHandler(handler)
+    # Raised while the warning made an error was handled, so it had that as its context.
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+    assert_token_absent(token, shown(caught.value))
+
+
+def test_an_interruption_while_the_message_is_made_carries_no_token(windows, monkeypatch):
+    token = synthetic_token()
+    write_dotenv(f"QTE_TOKEN={token}\n")
+    monkeypatch.setattr(dotenv, "shared_message", interrupt_with(KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt) as caught:
+        resolve_url()  # reading the address reads the file that holds the token
+    assert caught.value.__context__ is None
+    assert_token_absent(token, shown(caught.value))
+
+
+def test_the_interrupted_frames_no_longer_hold_the_text(windows, monkeypatch):
+    # The frames the interruption is raised from are still in its traceback: the text and
+    # the value read are let go of first, so a debugger or a crash report sees neither.
+    token = synthetic_token()
+    write_dotenv(f"QTE_TOKEN={token}\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.showwarning = interrupt_with(KeyboardInterrupt)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            resolve_token()
+    frames = []
+    tb = caught.value.__traceback__
+    while tb is not None:
+        frames.append(tb.tb_frame.f_code.co_name)
+        if tb.tb_frame.f_code.co_name == "read_value":
+            assert not {"text", "value", "data"} & set(tb.tb_frame.f_locals)
+        tb = tb.tb_next
+    assert "read_value" in frames and "warn_shared" not in frames
+
+
+def test_a_token_file_reached_through_a_linked_folder_names_the_link(
+    windows, tmp_path, monkeypatch
+):
+    # A token file, since the working directory is resolved on POSIX, so a `.env` cannot
+    # be reached through a link there.
+    (tmp_path / "private").mkdir()
+    (tmp_path / "open").mkdir()
+    alias = tmp_path / "open" / "project"
+    alias.symlink_to(tmp_path / "private", target_is_directory=True)
+    target = tmp_path / "private" / "token"
+    token = synthetic_token()
+    target.write_text(token)
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(tmp_path / "open"): REAL_DRIVE_FOLDER}
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(alias / "token"))
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{alias / 'token'}, which leads to {target} through the link {alias}, holds your "
+        f"token, and other users can replace it: {AUTHENTICATED} may add or remove files in "
+        f"{tmp_path / 'open'}, which holds the link {alias}, so other people who use this "
+        "computer could replace your token. Move the file it leads to, and the link, into a "
+        "folder under your user profile"
+    )
+    assert_token_absent(token, message)
+
+
+def test_a_clean_check_through_a_link_names_the_links_folder():
+    from qte_sdk.token import _none_of_the_checked_groups
+
+    clean = BroadAccess(folder=(), other_owner=False, link_folder=(), link_folder_path="C:\\p")
+    assert (
+        "or add or remove files in its folder or the folder that holds the link it is "
+        "reached through, and it is owned by you"
+    ) in _none_of_the_checked_groups(clean)
+    unknown = replace(clean, link_folder=None, other_owner=None)
+    assert (
+        "(the folder that holds the link it is reached through and its owner could not be "
+        "checked, and other groups and users are not checked)"
+    ) in _none_of_the_checked_groups(unknown)
+
+
+@pytest.mark.parametrize("source", [".env", TOKEN_FILE_ENV_VAR])
+def test_an_interruption_before_the_warning_starts_carries_no_token(
+    windows, monkeypatch, tmp_path, source
+):
+    token = token_source(monkeypatch, tmp_path, source)
+
+    class Interrupting(set):
+        """Asked first by the check before the file is read, then by `warn_shared`."""
+
+        asked = 0
+
+        def __contains__(self, item: object) -> bool:
+            Interrupting.asked += 1
+            if Interrupting.asked == 2:
+                raise KeyboardInterrupt
+            return super().__contains__(item)
+
+    monkeypatch.setattr(dotenv, "_shared_warned", Interrupting())
+    with pytest.raises(KeyboardInterrupt) as caught:
+        resolve_token()
+    assert Interrupting.asked == 2
+    assert caught.value.__context__ is None
+    assert_token_absent(token, shown(caught.value))
