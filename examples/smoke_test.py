@@ -38,7 +38,8 @@ reason, then a summary:
                      type the exchange does not know, is a SKIP: it does not serve the
                      query yet. Any other refusal is a FAIL. No figures are printed.
     test-order       only with --place-test-order (see below).
-    feed             whether any message was missed or could not be decoded.
+    feed             whether any message was missed or could not be decoded, and how many
+                     ticket states arrived, for a Fundamentals pod or Execution desk.
     heartbeat        whether the exchange's heartbeats arrived, and about how far apart;
                      a SKIP if none came, since the interval may be longer than the run.
     history:<name>   the start of the last closed session's books from the history service, when
@@ -198,6 +199,7 @@ try:
         token_source,
         url_source,
     )
+    from qte_sdk.tickets import is_ticket_event
     from qte_sdk.units import to_datetime, to_decimal, to_micros, to_timedelta
 except ImportError as error:
     if __name__ != "__main__" or not (error.name or "").startswith("qte_sdk."):
@@ -879,6 +881,8 @@ class Watcher:
         self.report_gaps = 0  # gaps in the team's private order reports
         self.undecodable = 0
         self.unknown_types: set[str] = set()
+        # Ticket states, which a Fundamentals pod or an Execution desk is sent on connecting.
+        self.ticket_states = 0
         self.account_ref: str | None = None
         self.account_reply: AccountState | Reject | None = None
         # Whether the reply refuses the query as a message type the exchange does not know.
@@ -967,6 +971,8 @@ class Watcher:
             self.undecodable += 1
         elif isinstance(event, Unknown):
             self.unknown_types.add(event.type)
+        elif is_ticket_event(event) and event.type == "ticket_state":
+            self.ticket_states += 1
         if self.order is not None and self.order.sent and missed_reports(event):
             self.order.reports_missed = True
         item = as_market_data(event)
@@ -1104,9 +1110,11 @@ def check_feed(report: Report, watcher: Watcher) -> None:
         report.add(FAIL, "feed", "; ".join(problems))
         return
     note = ""
+    if watcher.ticket_states:
+        note = f"; {watcher.ticket_states} ticket state(s)"
     if watcher.unknown_types:
         names = ", ".join(sorted(watcher.unknown_types))
-        note = f"; message types this SDK does not know: {names} (a newer SDK may read them)"
+        note += f"; message types this SDK does not know: {names} (a newer SDK may read them)"
     report.add(PASS, "feed", f"{watcher.messages} messages, none missed or unreadable{note}")
 
 

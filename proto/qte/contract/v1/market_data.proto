@@ -1,6 +1,6 @@
 // Outbound market data.
 //
-// **Version:** 1.12
+// **Version:** 1.13
 //
 // Message types on the envelope `type` field: `book`, `trades`, `mark`,
 // `session_state`, `official_close`, `option_chain`, `option_greeks`. One
@@ -192,6 +192,13 @@ message TapePrint {
   // SPEC 9.4.2 rank 8, SPEC 9.4.5 Example C
   int64 timestamp = 4;
   MatchKind kind = 5;     // Includes RESIDUAL, unlike execution.fill_kind. SPEC 10
+  // Present, and true, only on an option contract's residual print that
+  // prints at the live print's own premium because the contract has no wall
+  // on the side the aggressor took (a feed-only residual). Its `kind` is
+  // RESIDUAL. Absent on every other print: an equity's, and an option
+  // contract's other kinds, including a residual that prints at the wall
+  // price. Never sent as false. SPEC 18.4
+  optional bool feed_only = 6;
 }
 
 // The tape prints of one instrument published at one grid boundary

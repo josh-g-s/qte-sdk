@@ -12,6 +12,7 @@ from qte_sdk.connection import Connection, Received
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     CANCEL,
+    HOUSE,
     LIMIT,
     LOSS_WARNING,
     MAKER,
@@ -24,6 +25,7 @@ from qte_sdk.contract.v1.common_pb2 import (
     SUBSCRIBE,
     TAKER,
     TEAM,
+    Origin,
     ReasonCodes,
 )
 from qte_sdk.contract.v1.order_events_pb2 import (
@@ -642,6 +644,56 @@ async def test_a_parent_or_loss_halt_reason_decodes_by_name(type_, payload, name
     assert is_order_event(event)
     assert event.message.reason_code == ReasonCodes.ReasonCode.Value(name)
     assert reason_code_name(event.message.reason_code) == name
+
+
+def rejected(reason: str) -> dict[str, Any]:
+    return {"request_ref": "r-1", "request_type": "NEW", "reason_code": reason, "receipt_time": "1"}
+
+
+def cancelled(reason: str) -> dict[str, Any]:
+    return {
+        "origin": "TEAM",
+        "strat_id": "mm-1",
+        "instrument": "SPY261120C00665000",
+        "side": "BUY",
+        "price": str(PRICE),
+        "cancelled_size": "1",
+        "reason_code": reason,
+        "timestamp": "1",
+    }
+
+
+@pytest.mark.parametrize(
+    "type_, payload, name",
+    [
+        ("reject", rejected("TRADING_CUTOFF"), "TRADING_CUTOFF"),
+        ("reject", rejected("CONTRACT_NOT_LISTED"), "CONTRACT_NOT_LISTED"),
+        ("reject", rejected("CONTRACT_SUSPENDED"), "CONTRACT_SUSPENDED"),
+        ("reject", rejected("CONTRACT_REDUCING_ONLY"), "CONTRACT_REDUCING_ONLY"),
+        # A new still in its order delay when a cure window opens over it.
+        ("reject", rejected("CURE_WINDOW"), "CURE_WINDOW"),
+        ("order_cancelled", cancelled("TERM_CUTOFF"), "TERM_CUTOFF"),
+        (
+            "order_cancelled",
+            cancelled("CONTRACT_REDUCING_RECHECK_FAILED"),
+            "CONTRACT_REDUCING_RECHECK_FAILED",
+        ),
+        ("order_cancelled", cancelled("PARENT_STOPPED"), "PARENT_STOPPED"),
+    ],
+)
+async def test_the_cutoff_option_and_parent_reasons_are_named(type_, payload, name):
+    [event] = await received(frame(type_, payload, 1))
+    assert is_order_event(event)
+    assert event.message.reason_code == getattr(ReasonCodes, name)
+    assert reason_code_name(event.message.reason_code) == name
+    # Known to this SDK, so nothing is left over as a name it could not map.
+    assert event.unknown_enum_names() == {}
+
+
+def test_the_house_origin_is_named():
+    # A team's connection is never sent a HOUSE report, but the name is known.
+    assert Origin.Name(HOUSE) == "HOUSE"
+    assert Origin.Value("HOUSE") == HOUSE
 
 
 async def test_a_reject_that_could_not_read_a_request_ref_carries_none():

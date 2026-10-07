@@ -168,12 +168,16 @@ class FakeExchange:
         heartbeat_every: float | None = None,
         instruments: dict[str, Any] | None = None,
         newer: dict[str, Any] | None = None,
+        tickets: list[dict[str, Any]] | None = None,
     ) -> None:
         # With `instruments`, an `instruments` message follows the calendar, as the exchange
         # sends it on every authentication.
         self.instruments = instruments
         # With `newer`, a message of a type newer than this SDK follows them.
         self.newer = newer
+        # With `tickets`, one `ticket_state` each follows them, as a Fundamentals pod or an
+        # Execution desk is sent on connecting.
+        self.tickets = tickets
         # With `heartbeat_every`, a heartbeat is sent that often, in seconds, from the ack
         # on, each carrying a send time that many seconds after the ack's server_time.
         self.heartbeat_every = heartbeat_every
@@ -311,6 +315,8 @@ class FakeExchange:
             await self.send(ws, "instruments", self.instruments)
         if self.newer is not None:
             await self.send(ws, "newer_kind", self.newer)
+        for ticket in self.tickets or []:
+            await self.send(ws, "ticket_state", ticket)
         ticker: asyncio.Task | None = None
         beats = None if self.heartbeat_every is None else asyncio.create_task(self.beat(ws))
         try:
@@ -2233,6 +2239,31 @@ async def test_the_smoke_test_passes_a_message_type_it_does_not_know_and_names_i
         "; message types this SDK does not know: newer_kind (a newer SDK may read them)"
     )
     assert not any(status == "FAIL" for status, _ in found.values())
+
+
+async def test_the_smoke_test_reads_ticket_states_and_counts_them():
+    ticket = {
+        "ticket_id": "7",
+        "desk": "desk-1",
+        "instrument": INSTRUMENT,
+        "side": "BUY",
+        "shares": "100",
+        "urgency": "URGENCY_LOW",
+        "status": "TICKET_WORKING",
+        "update_time": "1",
+    }
+    exchange = FakeExchange(
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+        tickets=[ticket, {**ticket, "ticket_id": "8", "status": "TICKET_COMPLETE"}],
+    )
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    status, reason = found["feed"]
+    assert status == "PASS"
+    # A type this SDK knows: counted, and never named as one it does not know.
+    assert reason.endswith("; 2 ticket state(s)")
+    assert "does not know" not in reason
 
 
 def listed(instrument: str, status: str = "INSTRUMENT_TRADING", tradable: bool = True) -> dict:

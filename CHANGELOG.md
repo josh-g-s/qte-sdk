@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.6
+**Version:** 0.8
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,7 +8,17 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-Nothing yet.
+- The SDK reads the exchange's contract 11.
+- `qte_sdk.tickets`, for Fundamentals tickets: a pod sends its Execution desk a ticket with `send_ticket`, cancels it with `send_ticket_cancel` and raises a cure ticket's urgency with `send_ticket_urgency`. Pods and desks pick out the exchange's answers (`ticket_accepted`, `ticket_reject`, `ticket_state`) with `is_ticket_event`, and `LatestTickets` keeps each ticket's newest state, forgetting them all on a `Disconnected` so that the states resent on the next connection rebuild it. `stopped_time_of` and `stopped_mark_of` read when a ticket stopped and the mark then, and `parent_ticket_of` names the ticket a desk's fill works.
+- A desk's child order cancelled because the pod cancelled its ticket, or the mark moved beyond the ticket's limit, carries the reason `PARENT_STOPPED`. At the term's final close the children are cancelled `SESSION_CLOSE`, a child still resting when the exchange cancels a ticket itself would be cancelled with a reason from the 1800 band (today none rests then), and a Directors' handover of a working ticket cancels its outstanding children `PARENT_STOPPED` while the ticket keeps working.
+- The order helpers never set the contract's new `house_team` field, which only the exchange's own sessions may send.
+- The reasons `TRADING_CUTOFF` (an order message received at or after the term-end trading cutoff) and `TERM_CUTOFF` (a resting order cancelled at the cutoff) are named, instead of decoding as `REASON_CODE_UNSPECIFIED`.
+- The reasons for option contracts are named: a `new` or `amend` is rejected `CONTRACT_NOT_LISTED`, `CONTRACT_SUSPENDED` or `CONTRACT_REDUCING_ONLY`, and a resting order in a reducing-only contract that would grow the position or cross zero is cancelled `CONTRACT_REDUCING_RECHECK_FAILED`. The `qte_sdk.options` docstring and the quickstart say when each applies.
+- The docs say that a `reject` can carry `CURE_WINDOW`, for a new still in its order delay when a cure window opens.
+- `InstrumentInfo.sector_limit` is the sector the Fundamentals sector limit counts an instrument against, and `qte_sdk.instruments.sector_of` reads it, as None when the exchange gives none.
+- A `TapePrint` in live `trades` carries `feed_only`, present and true only on an option contract's residual print taken at the live print's premium because the contract had no wall on that side. Test it with `HasField("feed_only")`.
+- `Origin` names `HOUSE`, the origin of the exchange's own house orders. A team's connection is never sent a report with it.
+- The smoke test counts the ticket states a pod or desk is sent, instead of naming `ticket_state` as a type the SDK does not know.
 
 ## 1.0.2
 

@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.36
+**Version:** 0.38
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -229,7 +229,7 @@ else:
 
 ### Reading the instruments
 
-Straight after the calendar, the exchange sends an `instruments` message: every instrument it runs, with its kind (equity or option), tick size, lot size and status, and whether your team may trade it, plus each option underlying with its strike increment and listed contracts. Build your list of instruments, and your tick sizes, from it rather than writing them into your code. It is the whole table, not a change: the exchange sends it again whenever an instrument is listed, delisted or changes status, and each one replaces the last. `session.instrument_table` keeps the latest, and `qte_sdk.instruments` reads it:
+Straight after the calendar, the exchange sends an `instruments` message: every instrument it runs, with its kind (equity or option), tick size, lot size and status, whether your team may trade it, and its sector for the sector limit, plus each option underlying with its strike increment and listed contracts. Build your list of instruments, and your tick sizes, from it rather than writing them into your code. It is the whole table, not a change: the exchange sends it again whenever an instrument is listed, delisted or changes status, and each one replaces the last. `session.instrument_table` keeps the latest, and `qte_sdk.instruments` reads it:
 
 ```python
 from qte_sdk.instruments import can_trade, instrument_info, tradable_instruments
@@ -248,6 +248,7 @@ else:
 - Like `wait_for_calendar`, `wait_for_instrument_table` keeps every event it reads. It returns `None` as soon as the message after the calendar is something else, or at its timeout, since an older exchange never sends the table, so your program must still work without it.
 - `can_trade` is true only when the instrument's status is `INSTRUMENT_TRADING` and `tradable` is true for your team. A reducing-only option contract (`INSTRUMENT_REDUCING_ONLY`) still accepts orders that reduce a position. A kind or status from a newer contract than your SDK knows decodes as unspecified: treat it as one you cannot trade.
 - `tradable` says only what your team's arm and assignment allow: it is an entitlement, not a status. An instrument can be `tradable` and still `INSTRUMENT_DISABLED`, so never decide to send an order on `tradable` alone; use `can_trade`, or `tradable_instruments` for the list. Limits, the price collar and the session's state still apply to every order.
+- `sector_limit` is the sector the Fundamentals sector limit counts the instrument against, the same for every team: a GICS sector name, or `Unsectored` for one the limit leaves out. It is empty when the exchange has none to give, as for every option contract; `qte_sdk.instruments.sector_of(info)` returns `None` then. Treat a sector name you do not know as unknown, never as an error.
 - `display_name` is a name to show, and may be absent: the exchange can leave it unset for every instrument. Show `instrument` when it is (`info.display_name if info.HasField("display_name") else info.instrument`), and never parse it.
 - A `ReconnectingSession` keeps the latest table of its current session in `instrument_table`, `None` again after each reconnect until the new session's table arrives.
 
@@ -357,10 +358,13 @@ book = books.get("SPY261120C00665000")
 may_open = book is not None and trading_state(book) == OPTION_TRADING
 ```
 
-The `qte_sdk.options` docstring covers when each message arrives. There is no request for the chain, so your first option subscribe must name a listed contract; a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. Take it from the instruments table (step 3): `qte_sdk.options.listed_contracts(table, "SPY")` gives the underlying's listed contracts, and `strike_increment(table, "SPY")` its strike increment. An underlying with no contract listed yet has none. With an exchange that sends no table, work out a listed contract from the symbol rules. Not settled yet:
-- reject reasons for options, which this SDK does not map, so read a reject by its `reason_code` as usual;
-- options in the history service;
-- the flag that will mark an option trade's residual print in `trades`.
+The `qte_sdk.options` docstring covers when each message arrives. There is no request for the chain, so your first option subscribe must name a listed contract; a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. Take it from the instruments table (step 3): `qte_sdk.options.listed_contracts(table, "SPY")` gives the underlying's listed contracts, and `strike_increment(table, "SPY")` its strike increment. An underlying with no contract listed yet has none. With an exchange that sends no table, work out a listed contract from the symbol rules.
+
+A `new` or `amend` in an option contract has three reject reasons of its own: `CONTRACT_NOT_LISTED` (the contract is not listed in this session), `CONTRACT_SUSPENDED` (the contract was suspended when the message was applied; a cancel still applies) and `CONTRACT_REDUCING_ONLY` (the contract is reducing-only and the order would grow your position in it or take it across zero). A resting order in a reducing-only contract that would do either is cancelled, with the reason `CONTRACT_REDUCING_RECHECK_FAILED`. The `qte_sdk.options` docstring has the details.
+
+An option contract's print in live `trades` may carry `feed_only`. It is present, and true, only on a `RESIDUAL` print that went through at the live print's own premium because the contract had no wall on the side the aggressor took. It is never sent as false, and every other print, an equity's included, leaves it out, so test it with `print_.HasField("feed_only")`: absent means an ordinary print.
+
+Not settled yet: options in the history service.
 
 ## 6. Place and cancel an order
 
@@ -446,7 +450,9 @@ Because a cancel or amend names a level, not an order, it acts on whichever of y
 
 A send checks its identifiers before anything leaves your machine: `strat_id` and `request_ref` must be 1 to 32 bytes of UTF-8 and `instrument` at most 32 bytes. A send that breaks this raises `ValueError`.
 
-`send_new` also takes `parent_ticket_id`, which is for Execution desks only: it names the working parent ticket a child order works. Leave it out on any other team: the exchange rejects a `new` from any other team that carries it, with `PARENT_NOT_WORKING` (or `MALFORMED_MESSAGE` if the value itself is malformed).
+`send_new` also takes `parent_ticket_id`, which is for Execution desks only: it names the working parent ticket a child order works. Leave it out on any other team: the exchange rejects a `new` from any other team that carries it, with `PARENT_NOT_WORKING` (or `MALFORMED_MESSAGE` if the value itself is malformed). A fill of such a child order names its ticket too: `qte_sdk.tickets.parent_ticket_of(execution)`. When a ticket stops, the desk's child orders still resting for it are cancelled. If the pod cancelled the ticket or the mark moved beyond its limit, each child's `order_cancelled` has the reason `PARENT_STOPPED`. If the term's final close expired it, the close cancels the children itself, with `SESSION_CLOSE`. If the exchange cancelled the ticket (`TICKET_CANCELLED_BY_ENGINE`), a child still resting would be cancelled with a reason from the 1800 band, but as the exchange works today none is resting when it cancels a ticket. `PARENT_STOPPED` can also come while the ticket keeps working: when the Directors hand a ticket's remaining shares to the exchange to execute, every outstanding child is cancelled `PARENT_STOPPED` and the ticket stays `TICKET_WORKING`. So never read `PARENT_STOPPED` as the ticket having stopped: read the ticket's own `ticket_state`.
+
+A Fundamentals pod sends no orders. It sends its Execution desk tickets with `qte_sdk.tickets` (`send_ticket`, `send_ticket_cancel`, `send_ticket_urgency`), and the exchange answers with `ticket_accepted` or `ticket_reject`, then reports each ticket's state to the pod and the desk in `ticket_state`. Pick them out in your one loop with `is_ticket_event`, and keep the newest state of each ticket with `LatestTickets`. A `ticket_reject` never stops a ticket: a ticket stops only when a `ticket_state` arrives whose `status` is not `TICKET_WORKING`. Ticket answers carry no `report_seq` and a resume does not replay them. Instead, once on each connection, straight after the `session_ack`, the calendar and the instruments table, the exchange sends a whole `ticket_state` for each ticket of the current term, and those replace what you held. It does not send them again after a resume, so pass every event to `LatestTickets` from the first: a session that resumes keeps the states it reads while waiting for the `resume_ack` and delivers them in order. `LatestTickets` forgets every ticket on a `Disconnected` so that they rebuild it. The `qte_sdk.tickets` docstring has the rules.
 
 ## 7. Read your order events
 
@@ -551,9 +557,9 @@ Some rejects you are likely to meet while learning (the exchange's rules decide 
 | `DUPLICATE_ORDER_AT_LEVEL` | Your team already has an order at that instrument, side and price. |
 | `MESSAGE_BUDGET_EXCEEDED`, `BURST_CAP_EXCEEDED`, `NEW_ORDER_CAP_EXCEEDED` | You sent too many messages. Slow down. |
 
-A reason from a newer contract than your SDK knows decodes as `REASON_CODE_UNSPECIFIED`; `event.unknown_enum_names()` returns the name the exchange sent.
+A `reject` can also carry `CURE_WINDOW`, a reason you otherwise see on `order_cancelled`: a new still waiting out its order delay when a cure window opens on a limit it falls under is rejected when it is released, so that it never rests. A reason from a newer contract than your SDK knows decodes as `REASON_CODE_UNSPECIFIED`; `event.unknown_enum_names()` returns the name the exchange sent.
 
-**The term-end trading cutoff.** On the final session of a term, Market Making, Market Taking, Options MM and Options Taking teams stop trading five minutes before the close. Other teams trade on to the close. At the cutoff the exchange cancels each of your resting orders with an `order_cancelled` whose reason is `TERM_CUTOFF`. A new or amend still waiting out its order delay at that moment is dropped with no answer, while a cancel or mass cancel you sent before the cutoff, still waiting out its delay, still applies. Any order message of yours that the exchange receives at or after the cutoff is rejected `TRADING_CUTOFF`, even one you sent just before it. No `SessionState` phase marks the cutoff, so these two reasons are how your program learns of it. This SDK does not name them yet, so until it does they decode as `REASON_CODE_UNSPECIFIED`, and `event.unknown_enum_names()` returns `{"reason_code": "TRADING_CUTOFF"}` or `{"reason_code": "TERM_CUTOFF"}`. Their numbers are 1007 and 1815.
+**The term-end trading cutoff.** On the final session of a term, Market Making, Market Taking, Options MM and Options Taking teams stop trading five minutes before the close. Other teams trade on to the close. At the cutoff the exchange cancels each of your resting orders with an `order_cancelled` whose reason is `TERM_CUTOFF`. A new or amend still waiting out its order delay at that moment is dropped with no answer, while a cancel or mass cancel you sent before the cutoff, still waiting out its delay, still applies. Any order message of yours that the exchange receives at or after the cutoff is rejected `TRADING_CUTOFF`, even one you sent just before it. No `SessionState` phase marks the cutoff, so these two reasons are how your program learns of it: compare a reason with `ReasonCodes.TRADING_CUTOFF` or `ReasonCodes.TERM_CUTOFF` (from `qte_sdk.contract.v1.common_pb2`), or name it with `reason_code_name`. An SDK of 1.0.2 or older does not know them and decodes them as `REASON_CODE_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
 
 ## 9. If the connection drops
 

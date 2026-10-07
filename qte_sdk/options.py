@@ -102,14 +102,32 @@ this SDK does not know as `OPTION_SUSPENDED`, the most restrictive, rather than 
 field itself. An option contract's wall is
 one level per side, or none at all while it is suspended or its quote is not two-sided.
 
-Not settled or not published yet:
+Reasons for options. A `new` or `amend` in an option contract can be rejected for three
+reasons of its own:
 
-- Reject reasons for options, such as a contract that is not listed, suspended or
-  reducing-only. This SDK maps none; read any reject by its `reason_code` as usual.
+- `CONTRACT_NOT_LISTED`: the contract is not listed in this session.
+- `CONTRACT_SUSPENDED`: the contract was suspended when the order message was applied,
+  after its order delay. A `cancel` there still applies.
+- `CONTRACT_REDUCING_ONLY`: the contract is reducing-only and the order would grow your
+  team's absolute position in it, or take it across zero.
+
+A resting order in a reducing-only contract can also be cancelled, with an
+`order_cancelled` whose reason is `CONTRACT_REDUCING_RECHECK_FAILED`, when it would grow
+the position or cross zero: the whole order when the contract turns reducing-only, or
+just the part that would, before a fill. Read these as any other reason, with
+`qte_sdk.orders.reason_code_name` or against `ReasonCodes`.
+
+Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
+present, and true, only on an option contract's `RESIDUAL` print that went through at the
+live print's own premium because the contract had no wall on the side the aggressor
+took. It is never sent as false, and it is absent on every other print: an equity's, an
+option contract's other kinds, and a residual that printed at the wall's price. Test it
+with `HasField("feed_only")`; absent means an ordinary print.
+
+Not published yet:
+
 - Options in the history service: it serves no `option_chain` or `option_greeks`, so
   `qte_sdk.replay` replays no Greeks.
-- The residual print of an option trade. It is to be marked by a new optional flag on
-  `TapePrint`; until that is published, nothing marks it.
 """
 
 import re

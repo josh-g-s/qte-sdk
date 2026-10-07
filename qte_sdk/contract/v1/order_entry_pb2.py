@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from qte_sdk.contract.v1 import common_pb2 as qte_dot_contract_dot_v1_dot_common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!qte/contract/v1/order_entry.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"\xfa\x01\n\x08NewOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x10\n\x08strat_id\x18\x02 \x01(\t\x12\x12\n\ninstrument\x18\x03 \x01(\t\x12#\n\x04side\x18\x04 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12.\n\norder_type\x18\x05 \x01(\x0e\x32\x1a.qte.contract.v1.OrderType\x12\x12\n\x05price\x18\x06 \x01(\x03H\x00\x88\x01\x01\x12\x0c\n\x04size\x18\x07 \x01(\x03\x12\x1d\n\x10parent_ticket_id\x18\x08 \x01(\tH\x01\x88\x01\x01\x42\x08\n\x06_priceB\x13\n\x11_parent_ticket_id\"j\n\x0b\x43\x61ncelOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\"\x8e\x01\n\nAmendOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x11\n\tnew_price\x18\x05 \x01(\x03\x12\x10\n\x08new_size\x18\x06 \x01(\x03\"!\n\nMassCancel\x12\x13\n\x0brequest_ref\x18\x01 \x01(\tB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!qte/contract/v1/order_entry.proto\x12\x0fqte.contract.v1\x1a\x1cqte/contract/v1/common.proto\"\xa2\x02\n\x08NewOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x10\n\x08strat_id\x18\x02 \x01(\t\x12\x12\n\ninstrument\x18\x03 \x01(\t\x12#\n\x04side\x18\x04 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12.\n\norder_type\x18\x05 \x01(\x0e\x32\x1a.qte.contract.v1.OrderType\x12\x12\n\x05price\x18\x06 \x01(\x03H\x00\x88\x01\x01\x12\x0c\n\x04size\x18\x07 \x01(\x03\x12\x1d\n\x10parent_ticket_id\x18\x08 \x01(\tH\x01\x88\x01\x01\x12\x17\n\nhouse_team\x18\t \x01(\tH\x02\x88\x01\x01\x42\x08\n\x06_priceB\x13\n\x11_parent_ticket_idB\r\n\x0b_house_team\"\x92\x01\n\x0b\x43\x61ncelOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x17\n\nhouse_team\x18\x05 \x01(\tH\x00\x88\x01\x01\x42\r\n\x0b_house_team\"\xb6\x01\n\nAmendOrder\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x12\n\ninstrument\x18\x02 \x01(\t\x12#\n\x04side\x18\x03 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\r\n\x05price\x18\x04 \x01(\x03\x12\x11\n\tnew_price\x18\x05 \x01(\x03\x12\x10\n\x08new_size\x18\x06 \x01(\x03\x12\x17\n\nhouse_team\x18\x07 \x01(\tH\x00\x88\x01\x01\x42\r\n\x0b_house_team\"!\n\nMassCancel\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\"\x8f\x03\n\x0cSubmitTicket\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x16\n\tthesis_id\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x1b\n\x0ethesis_version\x18\x03 \x01(\x05H\x01\x88\x01\x01\x12\x12\n\ninstrument\x18\x04 \x01(\t\x12#\n\x04side\x18\x05 \x01(\x0e\x32\x15.qte.contract.v1.Side\x12\x0e\n\x06shares\x18\x06 \x01(\x03\x12\x18\n\x0blimit_price\x18\x07 \x01(\x03H\x02\x88\x01\x01\x12/\n\x07urgency\x18\x08 \x01(\x0e\x32\x1e.qte.contract.v1.TicketUrgency\x12\x12\n\x05notes\x18\t \x01(\tH\x03\x88\x01\x01\x12\x1f\n\x12replaces_ticket_id\x18\n \x01(\tH\x04\x88\x01\x01\x12\x11\n\x04\x63ure\x18\x0b \x01(\x08H\x05\x88\x01\x01\x42\x0c\n\n_thesis_idB\x11\n\x0f_thesis_versionB\x0e\n\x0c_limit_priceB\x08\n\x06_notesB\x15\n\x13_replaces_ticket_idB\x07\n\x05_cure\"6\n\x0c\x43\x61ncelTicket\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x11\n\tticket_id\x18\x02 \x01(\t\"m\n\x12RaiseTicketUrgency\x12\x13\n\x0brequest_ref\x18\x01 \x01(\t\x12\x11\n\tticket_id\x18\x02 \x01(\t\x12/\n\x07urgency\x18\x03 \x01(\x0e\x32\x1e.qte.contract.v1.TicketUrgencyB8Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,11 +34,17 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z6qte-platform/schemas/gen/go/qte/contract/v1;contractv1'
   _globals['_NEWORDER']._serialized_start=85
-  _globals['_NEWORDER']._serialized_end=335
-  _globals['_CANCELORDER']._serialized_start=337
-  _globals['_CANCELORDER']._serialized_end=443
-  _globals['_AMENDORDER']._serialized_start=446
-  _globals['_AMENDORDER']._serialized_end=588
-  _globals['_MASSCANCEL']._serialized_start=590
-  _globals['_MASSCANCEL']._serialized_end=623
+  _globals['_NEWORDER']._serialized_end=375
+  _globals['_CANCELORDER']._serialized_start=378
+  _globals['_CANCELORDER']._serialized_end=524
+  _globals['_AMENDORDER']._serialized_start=527
+  _globals['_AMENDORDER']._serialized_end=709
+  _globals['_MASSCANCEL']._serialized_start=711
+  _globals['_MASSCANCEL']._serialized_end=744
+  _globals['_SUBMITTICKET']._serialized_start=747
+  _globals['_SUBMITTICKET']._serialized_end=1146
+  _globals['_CANCELTICKET']._serialized_start=1148
+  _globals['_CANCELTICKET']._serialized_end=1202
+  _globals['_RAISETICKETURGENCY']._serialized_start=1204
+  _globals['_RAISETICKETURGENCY']._serialized_end=1313
 # @@protoc_insertion_point(module_scope)

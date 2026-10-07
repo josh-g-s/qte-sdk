@@ -35,6 +35,7 @@ class Origin(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     TEAM: _ClassVar[Origin]
     CURE_TRADE: _ClassVar[Origin]
     AUTO_FLATTEN: _ClassVar[Origin]
+    HOUSE: _ClassVar[Origin]
 
 class Liquidity(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -107,6 +108,30 @@ class RiskNoticeKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     CURE_TRADE_PLACED: _ClassVar[RiskNoticeKind]
     AUTO_FLATTEN_STARTED: _ClassVar[RiskNoticeKind]
     KILL_SWITCH_ENGAGED: _ClassVar[RiskNoticeKind]
+
+class TicketUrgency(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    TICKET_URGENCY_UNSPECIFIED: _ClassVar[TicketUrgency]
+    URGENCY_HIGH: _ClassVar[TicketUrgency]
+    URGENCY_MEDIUM: _ClassVar[TicketUrgency]
+    URGENCY_LOW: _ClassVar[TicketUrgency]
+
+class TicketStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    TICKET_STATUS_UNSPECIFIED: _ClassVar[TicketStatus]
+    TICKET_WORKING: _ClassVar[TicketStatus]
+    TICKET_COMPLETE: _ClassVar[TicketStatus]
+    TICKET_EXPIRED: _ClassVar[TicketStatus]
+    TICKET_LIMIT_CANCELLED: _ClassVar[TicketStatus]
+    TICKET_CANCELLED_BY_POD: _ClassVar[TicketStatus]
+    TICKET_CANCELLED_BY_ENGINE: _ClassVar[TicketStatus]
+
+class TicketRequestKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    TICKET_REQUEST_KIND_UNSPECIFIED: _ClassVar[TicketRequestKind]
+    TICKET_REQUEST_SUBMIT: _ClassVar[TicketRequestKind]
+    TICKET_REQUEST_CANCEL: _ClassVar[TicketRequestKind]
+    TICKET_REQUEST_URGENCY: _ClassVar[TicketRequestKind]
 SIDE_UNSPECIFIED: Side
 BUY: Side
 SELL: Side
@@ -126,6 +151,7 @@ ORIGIN_UNSPECIFIED: Origin
 TEAM: Origin
 CURE_TRADE: Origin
 AUTO_FLATTEN: Origin
+HOUSE: Origin
 LIQUIDITY_UNSPECIFIED: Liquidity
 MAKER: Liquidity
 TAKER: Liquidity
@@ -174,6 +200,81 @@ CURE_WINDOW_OPENED: RiskNoticeKind
 CURE_TRADE_PLACED: RiskNoticeKind
 AUTO_FLATTEN_STARTED: RiskNoticeKind
 KILL_SWITCH_ENGAGED: RiskNoticeKind
+TICKET_URGENCY_UNSPECIFIED: TicketUrgency
+URGENCY_HIGH: TicketUrgency
+URGENCY_MEDIUM: TicketUrgency
+URGENCY_LOW: TicketUrgency
+TICKET_STATUS_UNSPECIFIED: TicketStatus
+TICKET_WORKING: TicketStatus
+TICKET_COMPLETE: TicketStatus
+TICKET_EXPIRED: TicketStatus
+TICKET_LIMIT_CANCELLED: TicketStatus
+TICKET_CANCELLED_BY_POD: TicketStatus
+TICKET_CANCELLED_BY_ENGINE: TicketStatus
+TICKET_REQUEST_KIND_UNSPECIFIED: TicketRequestKind
+TICKET_REQUEST_SUBMIT: TicketRequestKind
+TICKET_REQUEST_CANCEL: TicketRequestKind
+TICKET_REQUEST_URGENCY: TicketRequestKind
+
+class TicketReasonCodes(_message.Message):
+    __slots__ = ()
+    class TicketReasonCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+        __slots__ = ()
+        TICKET_REASON_CODE_UNSPECIFIED: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        NOT_AUTHENTICATED: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        VERSION_MISMATCH: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TEAM_DISABLED: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        MARKET_CLOSED: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        INSTRUMENT_DISABLED: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        MALFORMED_MESSAGE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        UNKNOWN_INSTRUMENT: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICK_VIOLATION: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        INVALID_SIZE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        NON_POSITIVE_PRICE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        SIZE_OUT_OF_RANGE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        REFERENCE_UNAVAILABLE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        RISK_LIMIT_BREACH: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_THESIS_NOT_FILED: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_INSTRUMENT_WORKING: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_CROSSES_ZERO: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_LIMIT_INSIDE_WALL: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_COMPLETES_AFTER_TERM: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_MARK_FROZEN: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_REPLACES_INVALID: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_NOT_FOUND: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_NOT_WORKING: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_CURE_NOT_CANCELLABLE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_NOT_CURE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_URGENCY_NOT_INCREASED: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_CURE_INVALID: _ClassVar[TicketReasonCodes.TicketReasonCode]
+    TICKET_REASON_CODE_UNSPECIFIED: TicketReasonCodes.TicketReasonCode
+    NOT_AUTHENTICATED: TicketReasonCodes.TicketReasonCode
+    VERSION_MISMATCH: TicketReasonCodes.TicketReasonCode
+    TEAM_DISABLED: TicketReasonCodes.TicketReasonCode
+    MARKET_CLOSED: TicketReasonCodes.TicketReasonCode
+    INSTRUMENT_DISABLED: TicketReasonCodes.TicketReasonCode
+    MALFORMED_MESSAGE: TicketReasonCodes.TicketReasonCode
+    UNKNOWN_INSTRUMENT: TicketReasonCodes.TicketReasonCode
+    TICK_VIOLATION: TicketReasonCodes.TicketReasonCode
+    INVALID_SIZE: TicketReasonCodes.TicketReasonCode
+    NON_POSITIVE_PRICE: TicketReasonCodes.TicketReasonCode
+    SIZE_OUT_OF_RANGE: TicketReasonCodes.TicketReasonCode
+    REFERENCE_UNAVAILABLE: TicketReasonCodes.TicketReasonCode
+    RISK_LIMIT_BREACH: TicketReasonCodes.TicketReasonCode
+    TICKET_THESIS_NOT_FILED: TicketReasonCodes.TicketReasonCode
+    TICKET_INSTRUMENT_WORKING: TicketReasonCodes.TicketReasonCode
+    TICKET_CROSSES_ZERO: TicketReasonCodes.TicketReasonCode
+    TICKET_LIMIT_INSIDE_WALL: TicketReasonCodes.TicketReasonCode
+    TICKET_COMPLETES_AFTER_TERM: TicketReasonCodes.TicketReasonCode
+    TICKET_MARK_FROZEN: TicketReasonCodes.TicketReasonCode
+    TICKET_REPLACES_INVALID: TicketReasonCodes.TicketReasonCode
+    TICKET_NOT_FOUND: TicketReasonCodes.TicketReasonCode
+    TICKET_NOT_WORKING: TicketReasonCodes.TicketReasonCode
+    TICKET_CURE_NOT_CANCELLABLE: TicketReasonCodes.TicketReasonCode
+    TICKET_NOT_CURE: TicketReasonCodes.TicketReasonCode
+    TICKET_URGENCY_NOT_INCREASED: TicketReasonCodes.TicketReasonCode
+    TICKET_CURE_INVALID: TicketReasonCodes.TicketReasonCode
+    def __init__(self) -> None: ...
 
 class ReasonCodes(_message.Message):
     __slots__ = ()
@@ -187,11 +288,13 @@ class ReasonCodes(_message.Message):
         MARKET_CLOSED: _ClassVar[ReasonCodes.ReasonCode]
         RELEASE_AFTER_CLOSE: _ClassVar[ReasonCodes.ReasonCode]
         EXCHANGE_OUTAGE: _ClassVar[ReasonCodes.ReasonCode]
+        TRADING_CUTOFF: _ClassVar[ReasonCodes.ReasonCode]
         STRATEGY_NOT_REGISTERED: _ClassVar[ReasonCodes.ReasonCode]
         OUTSIDE_DECLARED_SCOPE: _ClassVar[ReasonCodes.ReasonCode]
         INSTRUMENT_NOT_PERMITTED: _ClassVar[ReasonCodes.ReasonCode]
         INSTRUMENT_SUSPENDED: _ClassVar[ReasonCodes.ReasonCode]
         INSTRUMENT_DISABLED: _ClassVar[ReasonCodes.ReasonCode]
+        CONTRACT_NOT_LISTED: _ClassVar[ReasonCodes.ReasonCode]
         MALFORMED_MESSAGE: _ClassVar[ReasonCodes.ReasonCode]
         UNKNOWN_INSTRUMENT: _ClassVar[ReasonCodes.ReasonCode]
         TICK_VIOLATION: _ClassVar[ReasonCodes.ReasonCode]
@@ -203,6 +306,7 @@ class ReasonCodes(_message.Message):
         REFERENCE_UNAVAILABLE: _ClassVar[ReasonCodes.ReasonCode]
         NO_WALL_ON_SIDE: _ClassVar[ReasonCodes.ReasonCode]
         AMEND_PRICE_AT_OR_BEYOND_WALL: _ClassVar[ReasonCodes.ReasonCode]
+        CONTRACT_SUSPENDED: _ClassVar[ReasonCodes.ReasonCode]
         MIN_REST_VIOLATION: _ClassVar[ReasonCodes.ReasonCode]
         DUPLICATE_ORDER_AT_LEVEL: _ClassVar[ReasonCodes.ReasonCode]
         AMEND_WOULD_MAKE_STALE_MARKETABLE: _ClassVar[ReasonCodes.ReasonCode]
@@ -218,6 +322,7 @@ class ReasonCodes(_message.Message):
         PARENT_NOT_WORKING: _ClassVar[ReasonCodes.ReasonCode]
         PARENT_MISMATCH: _ClassVar[ReasonCodes.ReasonCode]
         PARENT_QUANTITY_EXCEEDED: _ClassVar[ReasonCodes.ReasonCode]
+        CONTRACT_REDUCING_ONLY: _ClassVar[ReasonCodes.ReasonCode]
         CANCEL_REQUEST: _ClassVar[ReasonCodes.ReasonCode]
         MASS_CANCEL: _ClassVar[ReasonCodes.ReasonCode]
         SELF_TRADE: _ClassVar[ReasonCodes.ReasonCode]
@@ -233,6 +338,9 @@ class ReasonCodes(_message.Message):
         PARTICIPATION_LIMIT: _ClassVar[ReasonCodes.ReasonCode]
         LOSS_HALT: _ClassVar[ReasonCodes.ReasonCode]
         POSITION_REDUCING_RECHECK_FAILED: _ClassVar[ReasonCodes.ReasonCode]
+        TERM_CUTOFF: _ClassVar[ReasonCodes.ReasonCode]
+        CONTRACT_REDUCING_RECHECK_FAILED: _ClassVar[ReasonCodes.ReasonCode]
+        PARENT_STOPPED: _ClassVar[ReasonCodes.ReasonCode]
     REASON_CODE_UNSPECIFIED: ReasonCodes.ReasonCode
     NOT_AUTHENTICATED: ReasonCodes.ReasonCode
     VERSION_MISMATCH: ReasonCodes.ReasonCode
@@ -241,11 +349,13 @@ class ReasonCodes(_message.Message):
     MARKET_CLOSED: ReasonCodes.ReasonCode
     RELEASE_AFTER_CLOSE: ReasonCodes.ReasonCode
     EXCHANGE_OUTAGE: ReasonCodes.ReasonCode
+    TRADING_CUTOFF: ReasonCodes.ReasonCode
     STRATEGY_NOT_REGISTERED: ReasonCodes.ReasonCode
     OUTSIDE_DECLARED_SCOPE: ReasonCodes.ReasonCode
     INSTRUMENT_NOT_PERMITTED: ReasonCodes.ReasonCode
     INSTRUMENT_SUSPENDED: ReasonCodes.ReasonCode
     INSTRUMENT_DISABLED: ReasonCodes.ReasonCode
+    CONTRACT_NOT_LISTED: ReasonCodes.ReasonCode
     MALFORMED_MESSAGE: ReasonCodes.ReasonCode
     UNKNOWN_INSTRUMENT: ReasonCodes.ReasonCode
     TICK_VIOLATION: ReasonCodes.ReasonCode
@@ -257,6 +367,7 @@ class ReasonCodes(_message.Message):
     REFERENCE_UNAVAILABLE: ReasonCodes.ReasonCode
     NO_WALL_ON_SIDE: ReasonCodes.ReasonCode
     AMEND_PRICE_AT_OR_BEYOND_WALL: ReasonCodes.ReasonCode
+    CONTRACT_SUSPENDED: ReasonCodes.ReasonCode
     MIN_REST_VIOLATION: ReasonCodes.ReasonCode
     DUPLICATE_ORDER_AT_LEVEL: ReasonCodes.ReasonCode
     AMEND_WOULD_MAKE_STALE_MARKETABLE: ReasonCodes.ReasonCode
@@ -272,6 +383,7 @@ class ReasonCodes(_message.Message):
     PARENT_NOT_WORKING: ReasonCodes.ReasonCode
     PARENT_MISMATCH: ReasonCodes.ReasonCode
     PARENT_QUANTITY_EXCEEDED: ReasonCodes.ReasonCode
+    CONTRACT_REDUCING_ONLY: ReasonCodes.ReasonCode
     CANCEL_REQUEST: ReasonCodes.ReasonCode
     MASS_CANCEL: ReasonCodes.ReasonCode
     SELF_TRADE: ReasonCodes.ReasonCode
@@ -287,4 +399,7 @@ class ReasonCodes(_message.Message):
     PARTICIPATION_LIMIT: ReasonCodes.ReasonCode
     LOSS_HALT: ReasonCodes.ReasonCode
     POSITION_REDUCING_RECHECK_FAILED: ReasonCodes.ReasonCode
+    TERM_CUTOFF: ReasonCodes.ReasonCode
+    CONTRACT_REDUCING_RECHECK_FAILED: ReasonCodes.ReasonCode
+    PARENT_STOPPED: ReasonCodes.ReasonCode
     def __init__(self) -> None: ...

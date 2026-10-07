@@ -77,11 +77,14 @@ What happens on a disconnect, in this order:
    every instrument this session is subscribed to.
 4. A `Connected` event is delivered, with `reconnected=True` and the `resume_ack` as
    `resume`.
-5. The `resume_ack` follows as an event, then the replayed reports or the `order_snapshot`
-   events, then `ResumeComplete`, then the reports that arrived meanwhile, in order, mixed
-   with market data as it arrives. After a full replay the resting view is complete
-   again, unless something other than the disconnect made it uncertain; after a snapshot
-   it holds exactly the snapshot's orders and is complete.
+5. What the exchange sent before the `resume_ack` follows first, in order: the calendar,
+   the instruments table and, for a Fundamentals pod or Execution desk, its ticket
+   states (see `qte_sdk.tickets`). Then come the `resume_ack` as an event, the replayed
+   reports or the `order_snapshot` events, then `ResumeComplete`, then the reports that
+   arrived meanwhile, in order, mixed with market data as it arrives. After a full
+   replay the resting view is complete again, unless something other than the
+   disconnect made it uncertain; after a snapshot it holds exactly the snapshot's orders
+   and is complete.
 
 A report the exchange sends twice, as a replay of one already delivered, is dropped. If a
 report number is skipped, a `ReportGap` is delivered (see `Session`).

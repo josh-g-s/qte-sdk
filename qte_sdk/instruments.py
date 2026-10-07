@@ -38,7 +38,13 @@ An `InstrumentInfo` carries:
   whether to send an order, use `can_trade` or `tradable_instruments`, never `tradable`
   alone;
 - `option`, the contract's terms (underlying, expiry, right, strike in micro-dollars and
-  multiplier), present only for an option.
+  multiplier), present only for an option;
+- `sector_limit`, the sector the Fundamentals sector limit counts the instrument against,
+  the same for every team: a GICS sector name such as `Information Technology`, or
+  `Unsectored` for an instrument the sector limit leaves out. It is the empty string when
+  the exchange has no sector to give, as for every option contract (`sector_of` returns
+  None then). The list of sectors may grow: treat a name you do not know as a sector you
+  know nothing about, never as an error.
 
 An exchange that predates the message never sends one, so code that uses these helpers
 must also work without a table.
@@ -78,6 +84,7 @@ __all__ = [
     "instrument_info",
     "instruments_by_id",
     "on_tick",
+    "sector_of",
     "tradable_instruments",
 ]
 
@@ -121,6 +128,14 @@ def tradable_instruments(
         for info in table.instruments
         if can_trade(info) and (kind is None or info.kind == kind)
     ]
+
+
+def sector_of(info: InstrumentInfo) -> str | None:
+    """The sector the Fundamentals sector limit counts this instrument against, such as
+    `Information Technology` or `Unsectored`, or None when the exchange gives none (an
+    option contract, or a term with no sectors set). A name this SDK has never seen is
+    returned as it is: the list of sectors may grow."""
+    return info.sector_limit or None
 
 
 def on_tick(info: InstrumentInfo, price: int) -> bool:

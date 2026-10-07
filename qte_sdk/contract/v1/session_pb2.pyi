@@ -110,7 +110,7 @@ class OptionTerms(_message.Message):
     def __init__(self, underlying: _Optional[str] = ..., expiry: _Optional[str] = ..., right: _Optional[_Union[OptionRight, str]] = ..., strike: _Optional[int] = ..., multiplier: _Optional[int] = ...) -> None: ...
 
 class InstrumentInfo(_message.Message):
-    __slots__ = ("instrument", "display_name", "kind", "tick_size", "lot_size", "status", "tradable", "option")
+    __slots__ = ("instrument", "display_name", "kind", "tick_size", "lot_size", "status", "tradable", "option", "sector_limit")
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
     DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
@@ -119,6 +119,7 @@ class InstrumentInfo(_message.Message):
     STATUS_FIELD_NUMBER: _ClassVar[int]
     TRADABLE_FIELD_NUMBER: _ClassVar[int]
     OPTION_FIELD_NUMBER: _ClassVar[int]
+    SECTOR_LIMIT_FIELD_NUMBER: _ClassVar[int]
     instrument: str
     display_name: str
     kind: InstrumentKind
@@ -127,7 +128,8 @@ class InstrumentInfo(_message.Message):
     status: InstrumentStatus
     tradable: bool
     option: OptionTerms
-    def __init__(self, instrument: _Optional[str] = ..., display_name: _Optional[str] = ..., kind: _Optional[_Union[InstrumentKind, str]] = ..., tick_size: _Optional[int] = ..., lot_size: _Optional[int] = ..., status: _Optional[_Union[InstrumentStatus, str]] = ..., tradable: bool = ..., option: _Optional[_Union[OptionTerms, _Mapping]] = ...) -> None: ...
+    sector_limit: str
+    def __init__(self, instrument: _Optional[str] = ..., display_name: _Optional[str] = ..., kind: _Optional[_Union[InstrumentKind, str]] = ..., tick_size: _Optional[int] = ..., lot_size: _Optional[int] = ..., status: _Optional[_Union[InstrumentStatus, str]] = ..., tradable: bool = ..., option: _Optional[_Union[OptionTerms, _Mapping]] = ..., sector_limit: _Optional[str] = ...) -> None: ...
 
 class OptionUnderlying(_message.Message):
     __slots__ = ("underlying", "strike_increment", "contracts")

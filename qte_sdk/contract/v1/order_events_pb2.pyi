@@ -36,7 +36,7 @@ class Reject(_message.Message):
     def __init__(self, request_ref: _Optional[str] = ..., request_type: _Optional[_Union[_common_pb2.RequestType, str]] = ..., reason_code: _Optional[_Union[_common_pb2.ReasonCodes.ReasonCode, str]] = ..., reason_detail: _Optional[str] = ..., receipt_time: _Optional[int] = ..., instrument: _Optional[str] = ...) -> None: ...
 
 class Execution(_message.Message):
-    __slots__ = ("exec_id", "origin", "strat_id", "instrument", "side", "order_price", "fill_price", "fill_size", "remaining_size", "fill_kind", "liquidity", "fee", "timestamp")
+    __slots__ = ("exec_id", "origin", "strat_id", "instrument", "side", "order_price", "fill_price", "fill_size", "remaining_size", "fill_kind", "liquidity", "fee", "timestamp", "parent_ticket_id")
     EXEC_ID_FIELD_NUMBER: _ClassVar[int]
     ORIGIN_FIELD_NUMBER: _ClassVar[int]
     STRAT_ID_FIELD_NUMBER: _ClassVar[int]
@@ -50,6 +50,7 @@ class Execution(_message.Message):
     LIQUIDITY_FIELD_NUMBER: _ClassVar[int]
     FEE_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    PARENT_TICKET_ID_FIELD_NUMBER: _ClassVar[int]
     exec_id: str
     origin: _common_pb2.Origin
     strat_id: str
@@ -63,7 +64,8 @@ class Execution(_message.Message):
     liquidity: _common_pb2.Liquidity
     fee: int
     timestamp: int
-    def __init__(self, exec_id: _Optional[str] = ..., origin: _Optional[_Union[_common_pb2.Origin, str]] = ..., strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., order_price: _Optional[int] = ..., fill_price: _Optional[int] = ..., fill_size: _Optional[int] = ..., remaining_size: _Optional[int] = ..., fill_kind: _Optional[_Union[_common_pb2.MatchKind, str]] = ..., liquidity: _Optional[_Union[_common_pb2.Liquidity, str]] = ..., fee: _Optional[int] = ..., timestamp: _Optional[int] = ...) -> None: ...
+    parent_ticket_id: str
+    def __init__(self, exec_id: _Optional[str] = ..., origin: _Optional[_Union[_common_pb2.Origin, str]] = ..., strat_id: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., order_price: _Optional[int] = ..., fill_price: _Optional[int] = ..., fill_size: _Optional[int] = ..., remaining_size: _Optional[int] = ..., fill_kind: _Optional[_Union[_common_pb2.MatchKind, str]] = ..., liquidity: _Optional[_Union[_common_pb2.Liquidity, str]] = ..., fee: _Optional[int] = ..., timestamp: _Optional[int] = ..., parent_ticket_id: _Optional[str] = ...) -> None: ...
 
 class OrderCancelled(_message.Message):
     __slots__ = ("origin", "strat_id", "instrument", "side", "price", "cancelled_size", "reason_code", "request_ref", "timestamp")
@@ -222,3 +224,89 @@ class AccountState(_message.Message):
     cash: int
     as_of_report_seq: int
     def __init__(self, request_ref: _Optional[str] = ..., summary: _Optional[_Union[AccountSummary, _Mapping]] = ..., positions: _Optional[_Iterable[_Union[PositionValue, _Mapping]]] = ..., valuation_basis: _Optional[_Union[_common_pb2.ValuationBasis, str]] = ..., session_date: _Optional[str] = ..., as_of: _Optional[int] = ..., cash: _Optional[int] = ..., as_of_report_seq: _Optional[int] = ...) -> None: ...
+
+class TicketAccepted(_message.Message):
+    __slots__ = ("request_ref", "request_kind", "ticket_id", "receipt_time", "decision_price", "accepted_time", "planned_completion_time")
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_KIND_FIELD_NUMBER: _ClassVar[int]
+    TICKET_ID_FIELD_NUMBER: _ClassVar[int]
+    RECEIPT_TIME_FIELD_NUMBER: _ClassVar[int]
+    DECISION_PRICE_FIELD_NUMBER: _ClassVar[int]
+    ACCEPTED_TIME_FIELD_NUMBER: _ClassVar[int]
+    PLANNED_COMPLETION_TIME_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    request_kind: _common_pb2.TicketRequestKind
+    ticket_id: str
+    receipt_time: int
+    decision_price: int
+    accepted_time: int
+    planned_completion_time: int
+    def __init__(self, request_ref: _Optional[str] = ..., request_kind: _Optional[_Union[_common_pb2.TicketRequestKind, str]] = ..., ticket_id: _Optional[str] = ..., receipt_time: _Optional[int] = ..., decision_price: _Optional[int] = ..., accepted_time: _Optional[int] = ..., planned_completion_time: _Optional[int] = ...) -> None: ...
+
+class TicketReject(_message.Message):
+    __slots__ = ("request_ref", "request_kind", "reason_code", "reason_detail", "receipt_time")
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_KIND_FIELD_NUMBER: _ClassVar[int]
+    REASON_CODE_FIELD_NUMBER: _ClassVar[int]
+    REASON_DETAIL_FIELD_NUMBER: _ClassVar[int]
+    RECEIPT_TIME_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    request_kind: _common_pb2.TicketRequestKind
+    reason_code: _common_pb2.TicketReasonCodes.TicketReasonCode
+    reason_detail: str
+    receipt_time: int
+    def __init__(self, request_ref: _Optional[str] = ..., request_kind: _Optional[_Union[_common_pb2.TicketRequestKind, str]] = ..., reason_code: _Optional[_Union[_common_pb2.TicketReasonCodes.TicketReasonCode, str]] = ..., reason_detail: _Optional[str] = ..., receipt_time: _Optional[int] = ...) -> None: ...
+
+class TicketState(_message.Message):
+    __slots__ = ("ticket_id", "pod", "desk", "instrument", "side", "shares", "limit_price", "urgency", "decision_price", "accepted_time", "planned_completion_time", "due_shares", "filled_shares", "remaining_shares", "average_fill_price", "net_fee", "status", "stopped_time", "stopped_mark", "thesis_id", "thesis_version", "replaces_ticket_id", "cure", "notes", "update_time")
+    TICKET_ID_FIELD_NUMBER: _ClassVar[int]
+    POD_FIELD_NUMBER: _ClassVar[int]
+    DESK_FIELD_NUMBER: _ClassVar[int]
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    SIDE_FIELD_NUMBER: _ClassVar[int]
+    SHARES_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_PRICE_FIELD_NUMBER: _ClassVar[int]
+    URGENCY_FIELD_NUMBER: _ClassVar[int]
+    DECISION_PRICE_FIELD_NUMBER: _ClassVar[int]
+    ACCEPTED_TIME_FIELD_NUMBER: _ClassVar[int]
+    PLANNED_COMPLETION_TIME_FIELD_NUMBER: _ClassVar[int]
+    DUE_SHARES_FIELD_NUMBER: _ClassVar[int]
+    FILLED_SHARES_FIELD_NUMBER: _ClassVar[int]
+    REMAINING_SHARES_FIELD_NUMBER: _ClassVar[int]
+    AVERAGE_FILL_PRICE_FIELD_NUMBER: _ClassVar[int]
+    NET_FEE_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    STOPPED_TIME_FIELD_NUMBER: _ClassVar[int]
+    STOPPED_MARK_FIELD_NUMBER: _ClassVar[int]
+    THESIS_ID_FIELD_NUMBER: _ClassVar[int]
+    THESIS_VERSION_FIELD_NUMBER: _ClassVar[int]
+    REPLACES_TICKET_ID_FIELD_NUMBER: _ClassVar[int]
+    CURE_FIELD_NUMBER: _ClassVar[int]
+    NOTES_FIELD_NUMBER: _ClassVar[int]
+    UPDATE_TIME_FIELD_NUMBER: _ClassVar[int]
+    ticket_id: str
+    pod: str
+    desk: str
+    instrument: str
+    side: _common_pb2.Side
+    shares: int
+    limit_price: int
+    urgency: _common_pb2.TicketUrgency
+    decision_price: int
+    accepted_time: int
+    planned_completion_time: int
+    due_shares: int
+    filled_shares: int
+    remaining_shares: int
+    average_fill_price: int
+    net_fee: int
+    status: _common_pb2.TicketStatus
+    stopped_time: int
+    stopped_mark: int
+    thesis_id: str
+    thesis_version: int
+    replaces_ticket_id: str
+    cure: bool
+    notes: str
+    update_time: int
+    def __init__(self, ticket_id: _Optional[str] = ..., pod: _Optional[str] = ..., desk: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., limit_price: _Optional[int] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ..., decision_price: _Optional[int] = ..., accepted_time: _Optional[int] = ..., planned_completion_time: _Optional[int] = ..., due_shares: _Optional[int] = ..., filled_shares: _Optional[int] = ..., remaining_shares: _Optional[int] = ..., average_fill_price: _Optional[int] = ..., net_fee: _Optional[int] = ..., status: _Optional[_Union[_common_pb2.TicketStatus, str]] = ..., stopped_time: _Optional[int] = ..., stopped_mark: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., replaces_ticket_id: _Optional[str] = ..., cure: bool = ..., notes: _Optional[str] = ..., update_time: _Optional[int] = ...) -> None: ...
