@@ -1,14 +1,14 @@
 # Conformance steps
 
-**Version:** 1.4
+**Version:** 1.7
 
 The scripted checks a client and an exchange are run against, end to end. Each step names
 the messages it exercises and the rule it proves, citing `SPEC.md` sections and naming
 the `.proto` messages and fields of the published contract. A client that cannot produce
 or consume every named message with every Required field has not met the contract.
 
-There are two scripts: a WebSocket session (steps 1 to 16, with steps 9a to 9c lettered
-between 9 and 10) and the read-only history
+There are two scripts: a WebSocket session (steps 1 to 16, with step 1a lettered
+after 1 and steps 9a to 9c lettered between 9 and 10) and the read-only history
 service (steps H1 to H19). The history service is a separate, stateless HTTP interface:
 it has no `auth`, no `subscribe` and no step in the numbered session script.
 
@@ -22,8 +22,10 @@ how an exchange provides one.
 
 Message names are the lower-case `type` tokens of the envelope, and each is the
 `.proto` message of the same name in CamelCase: `auth` is `Auth`, `session_ack` is
-`SessionAck`, `calendar` is `Calendar`, `subscribe` is `Subscribe`, `heartbeat` is
-`Heartbeat`, `resume` is `Resume`, `new` is `NewOrder`, `cancel` is `CancelOrder`,
+`SessionAck`, `calendar` is `Calendar`, `instruments` is `Instruments`, `subscribe` is
+`Subscribe`, `heartbeat` is
+`Heartbeat`, `resume` is `Resume`, `resume_ack` is `ResumeAck`, `order_snapshot` is
+`OrderSnapshot`, `new` is `NewOrder`, `cancel` is `CancelOrder`,
 `amend` is `AmendOrder`, `mass_cancel` is `MassCancel`, `accepted` is `Accepted`,
 `reject` is `Reject`, `execution` is `Execution`, `order_cancelled` is `OrderCancelled`,
 `order_state` is `OrderState`, `book` is `Book`, `trades` is `Trades`, `session_state`
@@ -60,10 +62,20 @@ price and side; step 8 checks that the exchange refuses to.
 
 1. **Connect and authenticate.** `auth`, then `session_ack` naming the team, then
    `calendar` listing the term's own sessions and holidays (the `Calendar` message).
+1a. **Instruments.** Directly after step 1's `calendar`, with the next `seq` and no
+   message between them, one `instruments` (the `Instruments` message) listing every
+   instrument sorted by the byte order of `instrument`, each with `kind`, `tick_size`,
+   `lot_size`, `status` and a `tradable` that is present, `false` included, and
+   `option_underlyings` naming SPY and GOOGL with their `strike_increment` and
+   `contracts`. An `OPTION` entry carries `option` terms and an id in Alpaca's unpadded
+   OCC form; an `EQUITY` entry carries none. Precondition: the exchange under test lists
+   the instrument of this script. A client that subscribes in step 2 names an
+   `instrument` from this table. When the exchange resends `instruments` because a
+   listing changed, the client replaces its table with the whole new message.
 2. **Subscribe.** `subscribe` for the instrument.
 3. **First book.** The subscribe snapshot, a `book` carrying its original `grid_time`
    (or, if the instrument has no book yet this session, its first published book), with
-   ten `bid_levels` and ten `ask_levels`, level 1 of each being the wall edge (SPEC 4.3,
+   up to ten `bid_levels` and up to ten `ask_levels`, level 1 of each being the wall edge (SPEC 4.3,
    SPEC 5.3; the `Book` message).
 4. **New limit order.** `new` for `strat-a`, a buy strictly inside the band. Step 5's
    cancel is sent immediately after this `new` is sent, without waiting for a response;
@@ -150,8 +162,63 @@ price and side; step 8 checks that the exchange refuses to.
     open that has not (SPEC 8.1, SPEC 9.4.3 receipt step 4). A script that expects
     `MARKET_CLOSED` here fails this step: that reason is for a receipt before the open or
     on a day with no session, see step 16.
-15. **Heartbeat and resume.** Not yet specified. The `heartbeat` and `resume` behaviour
-    of the session layer is undecided, so this step has no checks until it is specified.
+15. **Heartbeat and resume.** Precondition: the exchange under test can be restarted
+    between two of the sub-steps, and the close of step 14 has happened before the
+    empty-marker sub-step. A "report" below is one of the six private messages that carry a `report_seq`
+    on the envelope: `accepted`, `reject` (when it is a reply to an order the exchange
+    released), `execution`, `order_cancelled`, `order_state` and `risk_notice`. The
+    sub-steps, in order, each on a connection the script opens itself:
+
+    - **Heartbeat, nothing sent by the client.** From the opening of a connection, with
+      `auth` sent or not, at any hour (inside a session and outside one), the server
+      sends a WebSocket ping and a `heartbeat` 15 s after the connection opens and every
+      15 s after that. A `heartbeat` is an envelope with `seq` and `sent_at`, a `seq`
+      that increases from one message of the connection to the next, no payload fields
+      and no `report_seq`. The client sends nothing, not even a pong, and stays
+      connected for as long as the server's own timer allows.
+    - **45 s of silence closes with 4000.** A connection on which the server sees no
+      inbound frame for 45 s is closed with close code 4000 and reason
+      `heartbeat timeout`. The 45 s counts from the later of the connection's opening and
+      its last inbound frame: an authenticated client that sends one frame 44 s after
+      opening and another 44 s later is still connected 88 s in, and is closed 45 s after
+      its last frame. A connection that never authenticates is closed 45 s after it
+      opens with the same code and reason, even if it answers every ping with a pong.
+    - **Resume inside the window replays.** After `auth` (and the `session_ack` and
+      `calendar` that answer it), `resume` with `last_report_seq` L, where
+      1 <= L <= H, H is the team's newest `report_seq` and the exchange still holds every
+      report above L. Then `resume_ack` with `replayed = true`, `as_of_report_seq` equal to H
+      and `snapshot_count = 0`; then every report with `report_seq` above L up to H, in
+      `report_seq` order, each with the `report_seq` and the payload bytes it was first
+      sent with (its envelope `seq` and `sent_at` are the new connection's); then live
+      reports from H + 1, with no gap and no duplicate. Nothing but those reports
+      follows the `resume_ack`: no `book`, `trades`, `mark`, `session_state` or
+      `order_snapshot`.
+    - **Resume with no cursor, orders resting, gets a snapshot.** `resume` with
+      `last_report_seq = 0` while the team has k resting orders. `resume_ack` with
+      `replayed = false`, `as_of_report_seq` equal to N, the team's newest `report_seq`, and
+      `snapshot_count = k`; then k `order_snapshot` messages in level-key order
+      (instrument ascending, then `BUY` before `SELL`, then price ascending), each with
+      `strat_id`, `instrument`, `side`, `price`, `remaining_size` and `timestamp` and
+      with no `report_seq`, `remaining_size` being what is left after partial fills; then
+      reports from `report_seq` N + 1. Replay is never partial: an L older than the
+      window, above H, or sent to an exchange that has restarted since the report was
+      first sent gets this answer too.
+    - **Resume across a restart.** After the exchange restarts, a `resume` whose
+      `last_report_seq` was inside the window before the restart gets
+      `resume_ack(replayed = false)` with `as_of_report_seq` equal to the number of
+      reports the team has had in the term, k `order_snapshot` for what rests, and then
+      reports from N + 1, numbered as an uninterrupted run would have numbered them.
+    - **Resume outside a session, past the window, gets the empty marker.** After the
+      close has cancelled every order (step 14), `resume` with a `last_report_seq` the
+      exchange cannot replay, for example 0. `resume_ack` with `replayed = false`,
+      `as_of_report_seq` equal to the team's newest `report_seq` and
+      `snapshot_count = 0`, and no `order_snapshot`. `snapshot_count = 0` is the whole
+      answer: the team has no resting order. (A `last_report_seq` the exchange can still
+      replay gets the replay of the third sub-step, including the close's
+      `SESSION_CLOSE` cancellations.)
+    - **Market data is not replayed.** Neither a replay nor a snapshot carries `book`,
+      `trades`, `mark` or `session_state`. A client closes a gap in public data by
+      sending `subscribe` again, which is answered with the latest `book` of step 3.
 16. **Subscribe outside a session.** Precondition: the exchange under test closed the
     instrument's session in step 14 and has not restarted since. After step 14's close, a
     `subscribe` naming the instrument, sent on a new connection authenticated after the

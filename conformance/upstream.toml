@@ -4,8 +4,8 @@
 # bytes against it.
 
 repo = "qte-platform"
-commit = "21a8bb00b5014b2f38d9dea974dd3c532193343f"
+commit = "1ef7d25feedc6533847b82f2a587aa9cb195289f"
 path = "schemas/public"
 
 [blobs]
-"CONFORMANCE.md" = "38c37b03cc722fc887af341211400ec083b9ffaf"
+"CONFORMANCE.md" = "927b6e83a941bc3f473fc117790feacff10a992c"
