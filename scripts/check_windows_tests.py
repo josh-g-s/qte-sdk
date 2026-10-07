@@ -6,11 +6,13 @@ The tests that must run are every test in tests/test_windows_real.py, marked `wi
 not, and every test marked `windows` anywhere. They are listed by a separate pytest
 process, with no `addopts`, no `PYTEST_ADDOPTS` or `PYTEST_PLUGINS`, no conftest and no
 plugin loaded by entry point, as each test is collected, before `-k`, `-m`, `--deselect`
-or any hook that selects tests can leave one out, so nothing that filters or hides tests
-in the real run can shrink the list too. Each must be in the JUnit report the real
-run wrote, by the name pytest gives it there, as many times as it is listed, and not
-skipped. The report has no entry for a test the run deselected, so a deselected test is
-reported as one that did not run. It prints what is wrong and exits 1, or exits 0.
+or any hook that selects tests can leave one out. So options, conftest files and plugins
+named in the environment that filter or hide tests in the real run cannot shrink the list
+too; a plugin a test module names in its `pytest_plugins` still loads in both. Each must
+be in the JUnit report the real run wrote, by the name pytest gives it there, as many
+times as it is listed, and not skipped. The report has no entry for a test the run
+deselected, so a deselected test is reported as one that did not run. It prints what is
+wrong and exits 1, or exits 0.
 """
 
 import json

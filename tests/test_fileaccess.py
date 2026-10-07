@@ -1091,10 +1091,6 @@ def test_junctions_and_symbolic_links_are_links_and_other_reparse_points_are_not
     assert _fileaccess._is_link("C:\\proj") is link
 
 
-def test_a_path_that_cannot_be_looked_at_is_not_a_link(tmp_path):
-    assert _fileaccess._is_link(str(tmp_path / "missing")) is False
-
-
 def test_a_dotenv_linking_into_an_open_folder_warns_about_that_folder(
     windows, tmp_path, monkeypatch
 ):
@@ -1584,8 +1580,26 @@ def test_a_loop_of_links_stops_and_says_so(tmp_path):
     assert unfollowed == f"the link {a} leads round in a loop"
 
 
-def test_a_name_that_does_not_exist_is_not_a_link(tmp_path):
-    assert _fileaccess._is_link(str(tmp_path / "missing" / ".env")) is False
+def test_a_name_that_is_not_there_cannot_be_looked_at(tmp_path):
+    assert _fileaccess._is_link(str(tmp_path / "missing" / ".env")) is None
+
+
+def test_a_link_removed_while_the_check_runs_stops_the_walk(windows, tmp_path, monkeypatch):
+    # Whoever may write in the folder of the middle link could remove it after the file
+    # was found and put it back before the file is read.
+    first, middle, target = chain(tmp_path)
+    real_lstat = os.lstat
+
+    def gone(p, *args, **kwargs):
+        if str(p) == str(middle) and sys._getframe(1).f_code.co_name == "_is_link":
+            raise FileNotFoundError(str(p))
+        return real_lstat(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", gone)
+    windows.sddl = PRIVATE_FILE
+    found = _fileaccess.broad_access(first)
+    assert found is not None and found
+    assert found.unfollowed == f"{middle} could not be looked at, or was not there"
 
 
 # Links that cannot be followed. Whoever may write in a folder on the way could make their
@@ -1644,8 +1658,8 @@ def unfollowable(monkeypatch: pytest.MonkeyPatch, cause: str, hop: Path) -> str:
     if cause == "volume":
         readlink_giving("\\??\\Volume{12345678-1234-1234-1234-123456789abc}\\safe\\real.env")
         return (
-            f"the link {hop} points to a place that is not on a drive or a share, such as a "
-            "volume's own name"
+            f"the link {hop} uses a form of path this check cannot follow, such as a volume's "
+            "own name"
         )
     assert cause == "not looked at"
 
@@ -1655,7 +1669,7 @@ def unfollowable(monkeypatch: pytest.MonkeyPatch, cause: str, hop: Path) -> str:
         return real_lstat(p, *args, **kwargs)
 
     monkeypatch.setattr(os, "lstat", denied)
-    return f"{hop} could not be looked at"
+    return f"{hop} could not be looked at, or was not there"
 
 
 CAUSES = ["loop", "too many", "unreadable", "volume", "not looked at"]
@@ -1694,17 +1708,24 @@ def test_a_link_that_cannot_be_followed_warns_when_the_token_is_read(
 
 
 @pytest.mark.parametrize("cause", CAUSES)
-def test_a_link_that_cannot_be_followed_warns_on_its_own(windows, tmp_path, monkeypatch, cause):
+@pytest.mark.parametrize("source", [".env", TOKEN_FILE_ENV_VAR])
+def test_a_link_that_cannot_be_followed_warns_on_its_own(
+    windows, tmp_path, monkeypatch, cause, source
+):
     token = synthetic_token()
-    first, middle, hop, target = three_links(tmp_path, ".env", f"QTE_TOKEN={token}\n")
-    monkeypatch.chdir(first.parent)
+    if source == ".env":
+        first, middle, hop, target = three_links(tmp_path, ".env", f"QTE_TOKEN={token}\n")
+        monkeypatch.chdir(first.parent)
+    else:
+        first, middle, hop, target = three_links(tmp_path, "token", token)
+        monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(first))
     windows.sddl = PRIVATE_FILE  # every folder private: the walk is the only finding
     reason = unfollowable(monkeypatch, cause, hop)
     found = _fileaccess.broad_access(first)
     assert found is not None and found.unfollowed == reason
     assert found and not found.changeable
     with pytest.warns(TokenFileShared) as caught:
-        assert read_value("QTE_TOKEN") == (token, None)
+        assert resolve_token() == token
     message = str(caught[0].message)
     assert message.startswith(
         f"{first}, a link that leads on through the link"

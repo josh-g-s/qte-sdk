@@ -266,8 +266,9 @@ def links_on_the_way(path: Path | str) -> tuple[list[tuple[str, str]], str | Non
     A link's folder is given resolved through every link before it.
 
     Also None if every link was followed, or, in plain words, why the walk stopped: a
-    loop, more than `MAX_LINKS` links, a name that cannot be looked at, or a link whose
-    target cannot be read or is not on a drive or a share (such as a volume's GUID name).
+    loop, more than `MAX_LINKS` links, a name that cannot be looked at or is not there, or
+    a link whose target cannot be read or uses a form of path the walk cannot follow (such
+    as a volume's GUID name).
     The links met up to it, the one that could not be followed included, are still given.
 
     The path is resolved one name at a time, from its root. A link's target is joined to
@@ -282,7 +283,7 @@ def links_on_the_way(path: Path | str) -> tuple[list[tuple[str, str]], str | Non
         candidate = os.path.join(current, name)
         link = _is_link(candidate)
         if link is None:
-            return found, f"{candidate} could not be looked at"
+            return found, f"{candidate} could not be looked at, or was not there"
         if not link:
             current = candidate
             continue
@@ -303,8 +304,8 @@ def links_on_the_way(path: Path | str) -> tuple[list[tuple[str, str]], str | Non
             return found, f"the link {candidate} could not be read"
         if target is None:
             return found, (
-                f"the link {candidate} points to a place that is not on a drive or a share, "
-                "such as a volume's own name"
+                f"the link {candidate} uses a form of path this check cannot follow, such as "
+                "a volume's own name"
             )
         root, names = _split(os.path.normpath(os.path.join(current, target)))
         current, pending = root, names + pending
@@ -372,12 +373,11 @@ def _link_finding(link_folders: tuple[LinkFolder, ...]) -> tuple[str, ...] | Non
 
 def _is_link(path: str) -> bool | None:
     """Whether `path` is a symbolic link or a junction (a mount point, to Windows), or None
-    if it cannot be looked at. A name that does not exist is not a link. Other reparse
+    if it cannot be looked at, or is not there: the file the path resolves to was found, so
+    a name missing on the way means a link changed while it was checked. Other reparse
     points, such as the placeholders of files kept in the cloud, are not links."""
     try:
         status = os.lstat(path)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
     except (OSError, ValueError):
         return None
     tag = getattr(status, "st_reparse_tag", 0)  # only on Windows
