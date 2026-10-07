@@ -70,7 +70,8 @@ declared by setting a variable:
     QTE_CONFORMANCE_RESTART_CMD=<command>
         step 15: a shell command that restarts the exchange under test on its own state,
         run once, between two sub-steps, before step 14's close. It returns once the
-        restart has begun; the sub-step then waits up to QTE_CONFORMANCE_RESTART_WITHIN
+        exchange it restarts has stopped, and may return before the new one accepts
+        connections; the sub-step then waits up to QTE_CONFORMANCE_RESTART_WITHIN
         seconds (default 120) for the command to finish and again for the exchange to
         accept a connection. The instrument's session must still be open after it.
     QTE_CONFORMANCE_RECORDED_SESSION=1
@@ -103,6 +104,7 @@ the newest report, not one older than the window, whose size the steps do not na
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 import re
 from collections.abc import Callable
@@ -162,7 +164,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     OrderState,
     Reject,
 )
-from qte_sdk.contract.v1.session_pb2 import Auth, Resume, ResumeAck, Subscribe
+from qte_sdk.contract.v1.session_pb2 import Auth, OrderSnapshot, Resume, ResumeAck, Subscribe
 from qte_sdk.instruments import EQUITY, OPTION, instrument_info
 from qte_sdk.market_data import as_market_data, subscribe
 from qte_sdk.options import is_option_symbol, option_underlyings, strike_increment
@@ -1330,11 +1332,17 @@ class NotAccepted(Exception):
     a restart."""
 
 
+# The protocol's own logger, kept off: its debug lines show every frame, `auth` and its
+# token included, and `Wire` has none of the SDK's guards against that.
+_WIRE_LOGGER = logging.getLogger("test_conformance.wire")
+_WIRE_LOGGER.disabled = True
+
+
 class _Protocol(ClientProtocol):
     """The `websockets` client protocol, answering a ping with a pong only if `pong`."""
 
     def __init__(self, uri: WebSocketURI, *, pong: bool) -> None:
-        super().__init__(uri, max_size=None)
+        super().__init__(uri, max_size=None, logger=_WIRE_LOGGER)
         self.pong = pong
 
     def recv_frame(self, frame: Frame) -> None:
@@ -1408,6 +1416,7 @@ class Wire:
         self.messages: list[WireMessage] = []
         self.pings: list[float] = []
         self.unreadable: list[str] = []
+        self._fragments: list[bytes] | None = None
         self.closed_at: float | None = None
         self.last_sent = 0.0
         self.ended = False
@@ -1468,8 +1477,19 @@ class Wire:
                 self.pings.append(at)
             elif event.opcode is Opcode.CLOSE:
                 self.closed_at = at
-            elif event.opcode is Opcode.TEXT:
-                self._take_text(at, event.data.decode())
+            elif event.opcode is Opcode.TEXT or (
+                event.opcode is Opcode.CONT and self._fragments is not None
+            ):
+                # A message may come in fragments: it is read once its last has arrived.
+                self._fragments = [*(self._fragments or []), bytes(event.data)]
+                if event.fin:
+                    data, self._fragments = b"".join(self._fragments), None
+                    try:
+                        text = data.decode()
+                    except UnicodeDecodeError:
+                        self.unreadable.append("a text message that is not UTF-8")
+                        continue
+                    self._take_text(at, text)
             elif event.opcode is not Opcode.PONG:
                 self.unreadable.append(f"a {event.opcode.name} frame")
         self._changed.set()
@@ -1648,6 +1668,14 @@ def assert_nothing_but(messages: list[WireMessage], what: str, *also: str) -> No
         if m.type == "heartbeat" or m.type in also:
             continue
         assert m.type in REPORT_TYPES and m.report_seq is not None, f"a {m.type} {what}"
+
+
+def assert_snapshot_first(answer: list[WireMessage], count: int) -> None:
+    """`answer`, what followed a `resume_ack` other than heartbeats, opens with exactly
+    `count` `order_snapshot` and has none after them."""
+    kinds = [m.type for m in answer]
+    assert kinds[:count] == ["order_snapshot"] * count, "fewer order_snapshot than snapshot_count"
+    assert "order_snapshot" not in kinds[count:], "more order_snapshot than snapshot_count"
 
 
 async def answer_to_resume(r: Wire, since: int, timeout: float) -> WireMessage:
@@ -1945,10 +1973,8 @@ async def test_step_15d_resume_with_no_cursor_gets_a_snapshot(market: Client):
         for r, answered in resumed:
             answer = [m for m in r.messages[answered:] if m.type != "heartbeat"]
             assert_nothing_but(answer, "after resume_ack", "order_snapshot")
+            assert_snapshot_first(answer, len(orders))
             snapshots = answer[: len(orders)]
-            assert all(m.type == "order_snapshot" for m in snapshots), (
-                "a report before the snapshot was complete"
-            )
             check_snapshots(snapshots, orders, c)
             assert_same_reports(reports_of(r, answered), live)
             assert_seq_increasing(r)
@@ -1959,7 +1985,22 @@ async def test_step_15d_resume_with_no_cursor_gets_a_snapshot(market: Client):
         live[-1].report_seq,
         len(orders) - 1,
     )
-    assert [e.message for e in delivered] == [m.message for m in snapshots[: len(orders) - 1]]
+    # Compared order by order, not by timestamp: each answer may stamp its own.
+    assert all(isinstance(e.message, OrderSnapshot) for e in delivered)
+    as_received = [
+        WireMessage(
+            at=0.0,
+            type=e.type,
+            seq=e.seq,
+            sent_at=None,
+            report_seq=e.report_seq,
+            payload=e.payload,
+            payload_text=None,
+            message=e.message,
+        )
+        for e in delivered
+    ]
+    check_snapshots(as_received, [o for o in orders if o[1] == BUY], c)
 
 
 async def restart_exchange() -> None:
@@ -2044,6 +2085,7 @@ async def test_step_15e_resume_across_a_restart(market: Client):
         await asyncio.sleep(1.0)  # so anything sent after them is read too
         answer = [m for m in r.messages[answered:] if m.type != "heartbeat"]
         assert_nothing_but(answer, "after resume_ack", "order_snapshot")
+        assert_snapshot_first(answer, len(orders))
         check_snapshots(answer[: len(orders)], orders, c)
         reports = reports_of(r, answered)
         assert_numbered(reports, newest + 1)
@@ -2072,7 +2114,9 @@ async def test_step_15g_market_data_is_not_replayed(market: Client):
                 "session_state on the subscribed connection",
             )
             await asyncio.sleep(0.5)
-            assert_nothing_but(r.messages[answered:], "after resume_ack", "order_snapshot")
+            answer = [m for m in r.messages[answered:] if m.type != "heartbeat"]
+            assert_nothing_but(answer, "after resume_ack", "order_snapshot")
+            assert_snapshot_first(answer, ack.message.snapshot_count)
             # A client closes the gap by subscribing again, which is answered with the latest
             # book.
             latest = c.books.get(config.instrument)
