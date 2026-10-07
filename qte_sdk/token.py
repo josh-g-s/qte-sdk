@@ -21,17 +21,19 @@ offers to add it to `.gitignore`.
 
 On macOS and Linux the modes make the files readable only by you. Windows does not apply
 them, and this command does not change Windows access lists. Instead, once the file is
-written, it reads the access lists of the file and its folder, and the file's owner, and
-says whether a broad group of users, such as Everyone, Authenticated Users or Users, can
-read or change the file or add or remove files in its folder, or another account owns it,
-and if so how to fix that: keep the file in a folder under your user profile
-(%USERPROFILE%), which is private by default. If the file's access list cannot be read, it
-says to keep the file in such a folder.
+written, it reads the access lists and owners of the file and its folder, and says
+whether a broad group of users, such as Everyone, Authenticated Users or Users, can read
+or change the file or add or remove files in its folder, or another account owns the file
+or the folder, or Windows would not let it see a list, and if so how to fix that: keep
+the file in a folder under your user profile (%USERPROFILE%), which is private by default.
+If the file's access list cannot be read for another reason, it says to keep the file in
+such a folder.
 
 `check` reports where the SDK would take the token and the address from, as
 `qte_sdk.session.resolve_token` and `resolve_url` would, without showing the token. On
 Windows it also reports whether a broad group of users can read or change the file the
-token is in, or add or remove files in its folder, and whether another account owns it.
+token is in, or add or remove files in its folder, and whether another account owns the
+file or a folder it is in; it gives the same warning as when the token is read.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
@@ -546,9 +548,10 @@ def _unset_advice(names: list[str], purpose: str) -> str:
 
 def _privacy(path: Path, *, sets_address: bool = True) -> str:
     """The end of the message saying where the token was saved: what protects it. On
-    Windows, what the access lists of the file and its folder, and its owner, say: a
-    warning naming the broad groups that can read, change or replace it, or another owner,
-    or that none can; or, if the file's list cannot be read, where to keep the file.
+    Windows, what the access lists and owners of the file and its folder say: a warning
+    naming the broad groups that can read, change or replace it, or another owner, or the
+    lists it could not see, or that none can; or, if the file's list cannot be read for
+    another reason, where to keep the file.
     `sets_address` says whether the file is a `.env`, which can set the address."""
     if not _fileaccess.on_windows():
         return ", readable only by you."

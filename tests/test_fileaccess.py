@@ -72,12 +72,14 @@ def access(
     write: list[str],
     folder: list[str] | None = None,
     other_owner: bool | None = None,
+    folder_owner: bool | None = None,
 ) -> BroadAccess:
     return BroadAccess(
         read=tuple(read),
         write=tuple(write),
         folder=None if folder is None else tuple(folder),
         other_owner=other_owner,
+        folder_owner=folder_owner,
     )
 
 
@@ -374,7 +376,7 @@ def test_a_private_file_in_a_profile_folder_has_no_broad_access(windows, tmp_pat
     path = tmp_path / ".env"
     path.write_text("")
     found = _fileaccess.broad_access(path)
-    assert found == access([], [], [], False)
+    assert found == access([], [], [], False, folder_owner=False)
     assert not found and not found.changeable
     assert windows.asked == [str(path), str(tmp_path)]
 
@@ -394,7 +396,7 @@ def test_a_file_owned_by_another_account(windows, tmp_path):
     path = tmp_path / ".env"
     path.write_text("")
     found = _fileaccess.broad_access(path)
-    assert found == access([], [], [], True)
+    assert found == access([], [], [], True, folder_owner=False)
     assert found and found.changeable
 
 
@@ -408,7 +410,7 @@ def test_the_folder_of_a_relative_path_is_checked(windows, tmp_path, monkeypatch
     assert found is not None and found.links == () and found.link_folders == ()
 
 
-@pytest.mark.parametrize("folder", [None, "D:(A;;FA;;;WD", OSError("access denied")])
+@pytest.mark.parametrize("folder", [None, OSError("access denied")])
 def test_a_folder_that_cannot_be_read_is_unknown_and_does_not_hide_the_file(
     windows, tmp_path, folder
 ):
@@ -491,7 +493,7 @@ def test_a_shared_dotenv_warns_once_naming_the_groups_and_the_fix(windows):
     assert windows.asked and all(token not in path for path in windows.asked)
 
 
-@pytest.mark.parametrize("sddl", [PROFILE, None, "D:(A;;FA;;;WD"])
+@pytest.mark.parametrize("sddl", [PROFILE, None])
 def test_a_private_or_unknown_dotenv_does_not_warn(windows, sddl):
     windows.sddl = sddl
     token = synthetic_token()
@@ -787,7 +789,7 @@ def test_an_owner_that_cannot_be_compared_does_not_warn(windows, user):
         resolve_token()
 
 
-@pytest.mark.parametrize("folder", [None, "garbage", OSError("access denied")])
+@pytest.mark.parametrize("folder", [None, OSError("access denied")])
 def test_a_folder_that_cannot_be_read_does_not_warn(windows, folder):
     windows.sddl = PRIVATE_FILE
     windows.folder_sddl = folder
@@ -859,11 +861,12 @@ def test_the_folder_and_owner_are_read_before_the_token(windows, monkeypatch):
     with pytest.warns(TokenFileShared):
         assert resolve_token() == token
     # No Windows API call is made once the file, and so the token, has been read.
-    assert opened == [f"list {path}", f"list {path.parent}", "sid", f"open {path}"]
+    assert opened == [f"list {path}", "sid", f"list {path.parent}", f"open {path}"]
 
 
 AT = "C:\\Users\\me\\proj\\.env"
 FOLDER = "C:\\Users\\me\\proj"
+UNSEEN = "Windows would not let this check see who may open"
 
 
 @pytest.mark.parametrize(
@@ -943,6 +946,49 @@ FOLDER = "C:\\Users\\me\\proj"
             "replace your token.",
             "Delete it and make it again yourself",
         ),
+        (
+            replace(access([], [], [], False), folder_owner=True),
+            {},
+            f"{AT} holds your token, and {FOLDER} is owned by another account, which can "
+            "change who may add or remove files in it, so other people who use this computer "
+            "could change QTE_URL in it to a server of their own, which would capture your "
+            "token when you next connect. Move it into a folder under your user profile "
+            "(%USERPROFILE%), which is private by default. To see",
+            "private by default. To see",
+        ),
+        (
+            replace(access([], [], [USERS], False), folder_owner=True),
+            {"sets_address": False},
+            f"{AT} holds your token, and other users can replace it: {USERS} may add or remove "
+            f"files in {FOLDER}; and {FOLDER} is owned by another account, which can change "
+            "who may add or remove files in it, so other people who use this computer could "
+            "replace your token.",
+            "or remove that group's access.",
+        ),
+        (
+            replace(access([], [], [], None), unseen=(f"{UNSEEN} {AT}",)),
+            {},
+            f"{AT} holds your token, but it could not be fully checked: {UNSEEN} {AT}. Delete "
+            "it and make it again yourself",
+            "Delete it and make it again yourself",
+        ),
+        (
+            replace(
+                access([], [], [AUTHENTICATED], None),
+                unseen=(
+                    f"{UNSEEN} {AT}",
+                    f"the access list of {FOLDER} is in a form this check cannot read",
+                ),
+            ),
+            {"holds_token": False},
+            f"{AT} sets QTE_URL, the exchange address, and other users can replace it: "
+            f"{AUTHENTICATED} may add or remove files in {FOLDER}, so other people who use "
+            "this computer could change QTE_URL in it to a server of their own, which would "
+            "capture your token when you next connect. Also, it could not be fully checked: "
+            f"{UNSEEN} {AT}; and the access list of {FOLDER} is in a form this check cannot "
+            "read.",
+            "or remove that group's access.",
+        ),
     ],
 )
 def test_the_message_for_each_combination(monkeypatch, found, kwargs, start, fix):
@@ -989,11 +1035,13 @@ def test_a_link_is_checked_by_the_file_and_folder_it_links_to_and_its_own_folder
     }
     found = _fileaccess.broad_access(link)
     assert windows.asked == [str(target), str(target.parent), str(link.parent)]
-    assert found == BroadAccess(folder=(AUTHENTICATED,), other_owner=False, link_folder=())
+    assert found == BroadAccess(
+        folder=(AUTHENTICATED,), other_owner=False, link_folder=(), link_owner=False
+    )
     assert found.changeable
     assert (found.file, found.folder_path) == (str(target), str(target.parent))
     assert found.links == (str(link),)
-    assert found.link_folders == (LinkFolder(str(link.parent), (str(link),), ()),)
+    assert found.link_folders == (LinkFolder(str(link.parent), (str(link),), (), False),)
 
 
 def test_the_folder_of_a_link_is_checked_as_well_as_the_folder_it_links_into(windows, tmp_path):
@@ -1004,16 +1052,18 @@ def test_the_folder_of_a_link_is_checked_as_well_as_the_folder_it_links_into(win
         str(link.parent): REAL_DRIVE_FOLDER,
     }
     found = _fileaccess.broad_access(link)
-    assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
+    assert found == BroadAccess(
+        folder=(), other_owner=False, link_folder=(AUTHENTICATED,), folder_owner=False
+    )
     assert found and found.changeable
 
 
-@pytest.mark.parametrize("folder", [None, "garbage", OSError("access denied")])
+@pytest.mark.parametrize("folder", [None, OSError("access denied")])
 def test_a_link_folder_that_cannot_be_read_is_unknown(windows, tmp_path, folder):
     link, target = linked(tmp_path, "profile", "other")
     windows.lists = {str(target): PRIVATE_FILE, str(link.parent): folder}
     found = _fileaccess.broad_access(link)
-    assert found == BroadAccess(folder=(), other_owner=False, link_folder=None)
+    assert found == BroadAccess(folder=(), other_owner=False, link_folder=None, folder_owner=False)
     assert not found
 
 
@@ -1033,7 +1083,9 @@ def test_a_file_reached_through_a_linked_folder_checks_where_the_link_is(windows
         str(tmp_path / "private"),
         str(tmp_path / "open"),
     ]
-    assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
+    assert found == BroadAccess(
+        folder=(), other_owner=False, link_folder=(AUTHENTICATED,), folder_owner=False
+    )
     assert found.links == (str(alias),)
     assert found.link_folders == (
         LinkFolder(str(tmp_path / "open"), (str(alias),), (AUTHENTICATED,)),
@@ -1447,10 +1499,12 @@ def test_every_folder_in_a_chain_of_links_is_checked(windows, tmp_path):
     windows.lists = {str(middle.parent): REAL_DRIVE_FOLDER}
     found = _fileaccess.broad_access(first)
     assert windows.asked == [str(target), str(target.parent), str(first.parent), str(middle.parent)]
-    assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
+    assert found == BroadAccess(
+        folder=(), other_owner=False, link_folder=(AUTHENTICATED,), folder_owner=False
+    )
     assert found.links == (str(first), str(middle))
     assert found.link_folders == (
-        LinkFolder(str(first.parent), (str(first),), ()),
+        LinkFolder(str(first.parent), (str(first),), (), False),
         LinkFolder(str(middle.parent), (str(middle),), (AUTHENTICATED,)),
     )
 
@@ -1494,11 +1548,13 @@ def test_a_junction_above_a_file_link_checks_both_holding_folders(windows, tmp_p
     windows.sddl = PRIVATE_FILE
     windows.lists = {str(tmp_path / "open"): REAL_DRIVE_FOLDER}
     found = _fileaccess.broad_access(junction / ".env")
-    assert found == BroadAccess(folder=(), other_owner=False, link_folder=(AUTHENTICATED,))
+    assert found == BroadAccess(
+        folder=(), other_owner=False, link_folder=(AUTHENTICATED,), folder_owner=False
+    )
     assert found.links == (str(junction), str(tmp_path / "project" / ".env"))
     assert found.link_folders == (
         LinkFolder(str(tmp_path / "open"), (str(junction),), (AUTHENTICATED,)),
-        LinkFolder(str(tmp_path / "project"), (str(tmp_path / "project" / ".env"),), ()),
+        LinkFolder(str(tmp_path / "project"), (str(tmp_path / "project" / ".env"),), (), False),
     )
 
 
@@ -1528,7 +1584,7 @@ def test_links_in_one_folder_are_named_together(windows, tmp_path):
     found = _fileaccess.broad_access(tmp_path / "proj" / ".env")
     assert found is not None
     assert found.link_folders == (
-        LinkFolder(str(tmp_path / "proj"), (str(tmp_path / "proj" / ".env"),), ()),
+        LinkFolder(str(tmp_path / "proj"), (str(tmp_path / "proj" / ".env"),), (), False),
         LinkFolder(str(tmp_path / "shared"), (str(first), str(second)), (AUTHENTICATED,)),
     )
     message = shared_message(tmp_path / "proj" / ".env", found, sets_address=False)
@@ -1820,3 +1876,324 @@ def test_a_link_folder_that_cannot_be_resolved_is_checked_by_its_walked_name(
 )
 def test_the_prefix_windows_gives_a_junctions_target_is_removed(target, plain):
     assert _fileaccess._without_prefix(target) == plain
+
+
+# Lists the check is not shown, or cannot read, and the owners of folders. Whoever owns a
+# file or folder, or holds WRITE_DAC on it, can withhold READ_CONTROL from you, or write an
+# entry the parser does not know, to hide who may open the file or replace it; and whoever
+# owns a folder can change who may add or remove files in it. Each is a finding.
+
+DENIED = _fileaccess.DENIED
+# An access list the parser rejects, with an owner it can still read: a right it does not
+# know, as an entry Windows would accept but the parser does not understand.
+UNPARSABLE = "O:BAD:(A;;ZZ;;;WD)"
+# A folder like a profile folder, but owned by another account.
+OTHER_FOLDER = f"O:{OTHER_SID}D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{USER_SID})"
+
+
+def not_shown(path: Path | str, folder: bool = False) -> str:
+    what = "add or remove files in" if folder else "open"
+    return f"Windows would not let this check see who may {what} {path}"
+
+
+def not_parsed(path: Path | str) -> str:
+    return f"the access list of {path} is in a form this check cannot read"
+
+
+def test_a_file_whose_list_is_not_shown_still_has_its_folder_checked(windows, tmp_path):
+    windows.sddl = DENIED
+    windows.folder_sddl = REAL_DRIVE_FOLDER
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    assert windows.asked == [str(path), str(tmp_path)]
+    assert found == replace(access([], [], [AUTHENTICATED], None), unseen=(not_shown(path),))
+    assert found and found.incomplete and found.changeable
+
+
+def test_a_file_whose_list_is_not_shown_still_has_its_link_folders_checked(windows, tmp_path):
+    first, middle, target = chain(tmp_path)
+    windows.lists = {str(target): DENIED, str(middle.parent): REAL_DRIVE_FOLDER}
+    found = _fileaccess.broad_access(first)
+    assert windows.asked == [str(target), str(target.parent), str(first.parent), str(middle.parent)]
+    assert found is not None and found.unseen == (not_shown(target),)
+    assert found.link_folder == (AUTHENTICATED,)
+    message = shared_message(first, found)
+    assert message.startswith(
+        f"{first}, a link that leads to {target} through the link {middle}, holds your "
+        f"token, and other users can replace it: {AUTHENTICATED} may add or remove files in "
+        f"{middle.parent}, which holds the link {middle}, so other people"
+    )
+    assert f"Also, it could not be fully checked: {not_shown(target)}." in message
+
+
+@pytest.mark.parametrize(
+    ("folder", "unseen"),
+    [(DENIED, lambda f: not_shown(f, folder=True)), (UNPARSABLE, not_parsed)],
+)
+def test_a_folder_whose_list_is_not_shown_or_not_parsed_is_a_finding(
+    windows, tmp_path, folder, unseen
+):
+    windows.sddl = PRIVATE_FILE
+    windows.folder_sddl = folder
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    # The owner of a list the parser rejects is still compared.
+    owner = None if folder is DENIED else False
+    assert found == replace(
+        access([], [], None, False, folder_owner=owner), unseen=(unseen(tmp_path),)
+    )
+    assert found and not found.changeable
+
+
+def test_a_file_whose_list_is_not_parsed_is_a_finding(windows, tmp_path):
+    windows.sddl = UNPARSABLE
+    windows.folder_sddl = REAL_DRIVE_FOLDER
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    # The owner, which the parser could still read, is compared.
+    assert found == replace(access([], [], [AUTHENTICATED], False), unseen=(not_parsed(path),))
+
+
+@pytest.mark.parametrize("folder", [DENIED, UNPARSABLE])
+def test_a_link_folder_whose_list_is_not_shown_or_not_parsed_is_a_finding(
+    windows, tmp_path, folder
+):
+    link, target = linked(tmp_path, "profile", "other")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(link.parent): folder}
+    found = _fileaccess.broad_access(link)
+    said = not_shown(link.parent, folder=True) if folder is DENIED else not_parsed(link.parent)
+    assert found == BroadAccess(
+        folder=(),
+        other_owner=False,
+        link_folder=None,
+        folder_owner=False,
+        link_owner=None if folder is DENIED else False,
+        unseen=(said,),
+    )
+    assert found and not found.changeable
+
+
+def test_a_folder_owned_by_another_account_is_a_finding(windows, tmp_path):
+    windows.sddl = PRIVATE_FILE
+    windows.folder_sddl = OTHER_FOLDER
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    assert found == access([], [], [], False, folder_owner=True)
+    assert found and found.changeable
+
+
+@pytest.mark.parametrize(
+    ("owner", "other"),
+    [
+        (USER_SID, False),
+        ("BA", False),
+        ("SY", False),
+        (OTHER_SID, True),
+        ("BU", True),
+        ("LA", None),
+    ],
+)
+def test_a_folders_owner_is_compared_like_the_files(windows, tmp_path, owner, other):
+    windows.sddl = PRIVATE_FILE
+    windows.folder_sddl = f"O:{owner}D:(A;OICI;FA;;;{USER_SID})"
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    assert found is not None and found.folder_owner is other
+    assert bool(found) is bool(other)
+
+
+def test_a_link_folder_owned_by_another_account_is_a_finding(windows, tmp_path):
+    first, middle, target = chain(tmp_path)
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(middle.parent): OTHER_FOLDER}
+    found = _fileaccess.broad_access(first)
+    assert found == BroadAccess(
+        folder=(), other_owner=False, link_folder=(), folder_owner=False, link_owner=True
+    )
+    assert found.link_folders[1] == LinkFolder(str(middle.parent), (str(middle),), (), True)
+    message = shared_message(first, found)
+    assert (
+        f"holds your token, and {middle.parent}, which holds the link {middle}, is owned by "
+        "another account, which can change who may add or remove files in it, so other "
+        "people who use this computer could change QTE_URL in it"
+    ) in message
+    assert "Move the file it leads to, and the links, into a folder under your user profile" in (
+        message
+    )
+    assert "remove" not in message.split("Move", 1)[1].split("To see")[0]
+
+
+def test_the_folder_of_a_name_that_could_not_be_looked_at_is_checked(
+    windows, tmp_path, monkeypatch
+):
+    # Review of #163: an lstat that fails on a link in an open folder stopped the walk
+    # before that folder was recorded, so it was neither checked nor named.
+    first, middle, hop, target = three_links(tmp_path, ".env", "")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(hop.parent): REAL_DRIVE_FOLDER}
+    reason = unfollowable(monkeypatch, "not looked at", hop)
+    found = _fileaccess.broad_access(first)
+    assert found is not None and found.unfollowed == reason
+    assert found.links == (str(first), str(middle), str(hop))
+    assert found.link_folder == (AUTHENTICATED,)
+    assert (str(hop.parent), (str(hop),), (AUTHENTICATED,)) in [
+        (f.path, f.links, f.groups) for f in found.link_folders
+    ]
+    message = shared_message(first, found)
+    assert (
+        f"{AUTHENTICATED} may add or remove files in {hop.parent}, which holds the link {hop}"
+    ) in message
+
+
+@pytest.mark.parametrize("status", [None, OSError("the API failed")])
+def test_other_failures_to_read_a_list_still_say_nothing(windows, tmp_path, status):
+    windows.sddl = PRIVATE_FILE
+    windows.folder_sddl = status
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    assert found is not None and found.unseen == () and not found
+    windows.sddl = status
+    assert _fileaccess.broad_access(path) is None
+
+
+def test_nothing_is_reported_denied_off_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(_fileaccess, "on_windows", lambda: False)
+    monkeypatch.setattr(_fileaccess, "_read_sddl", lambda path: DENIED)
+    assert _fileaccess.broad_access(tmp_path / ".env") is None
+
+
+# Each, when the token is read, from a .env and from the file named by QTE_TOKEN_FILE.
+
+
+def token_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str, token: str) -> Path:
+    """The file holding `token` that `source` names, in `tmp_path`, the working directory."""
+    if source == ".env":
+        return write_dotenv(f"QTE_URL=ws://127.0.0.1:8080/ws\nQTE_TOKEN={token}\n")
+    path = tmp_path / "token"
+    path.write_text(token)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    return path
+
+
+# What each case sets, and what the warning then says, after the file's name.
+UNSEEN_CASES = {
+    "file not shown": (
+        {"sddl": DENIED, "folder_sddl": PROFILE_FOLDER},
+        lambda path: (
+            f"holds your token, but it could not be fully checked: {not_shown(path)}. "
+            "Delete it and make it again yourself, in a folder under your user profile"
+        ),
+    ),
+    "file not parsed": (
+        {"sddl": UNPARSABLE, "folder_sddl": PROFILE_FOLDER},
+        lambda path: f"holds your token, but it could not be fully checked: {not_parsed(path)}.",
+    ),
+    "folder not shown": (
+        {"sddl": PRIVATE_FILE, "folder_sddl": DENIED},
+        lambda path: (
+            "holds your token, but it could not be fully checked: "
+            f"{not_shown(path.parent, folder=True)}."
+        ),
+    ),
+    "folder not parsed": (
+        {"sddl": PRIVATE_FILE, "folder_sddl": UNPARSABLE},
+        lambda path: (
+            f"holds your token, but it could not be fully checked: {not_parsed(path.parent)}."
+        ),
+    ),
+    "folder owner": (
+        {"sddl": PRIVATE_FILE, "folder_sddl": OTHER_FOLDER},
+        lambda path: (
+            f"holds your token, and {path.parent} is owned by another account, which "
+            "can change who may add or remove files in it, so other people who use this computer "
+            "could"
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(UNSEEN_CASES))
+@pytest.mark.parametrize("source", [".env", TOKEN_FILE_ENV_VAR])
+def test_each_case_warns_when_the_token_is_read(windows, monkeypatch, tmp_path, case, source):
+    settings, said = UNSEEN_CASES[case]
+    for name, value in settings.items():
+        setattr(windows, name, value)
+    token = synthetic_token()
+    path = token_in(monkeypatch, tmp_path, source, token)
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    assert len(caught) == 1
+    message = str(caught[0].message)
+    assert message.startswith(f"{path} {said(path)}"), message
+    assert message.endswith(" A later release will refuse such a file.")
+    assert_token_absent(token, message)
+
+
+@pytest.mark.parametrize("case", list(UNSEEN_CASES))
+def test_each_case_warns_about_an_address_only_dotenv(windows, monkeypatch, case):
+    settings, _ = UNSEEN_CASES[case]
+    for name, value in settings.items():
+        setattr(windows, name, value)
+    token = synthetic_token()
+    monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    path = write_dotenv("QTE_URL=ws://127.0.0.1:8080/ws\n")
+    with pytest.warns(AddressFileShared) as caught:
+        assert resolve_url() == "ws://127.0.0.1:8080/ws"
+    assert str(caught[0].message).startswith(f"{path} sets QTE_URL, the exchange address, ")
+    assert_token_absent(token, str(caught[0].message))
+
+
+@pytest.mark.parametrize("source", [".env", TOKEN_FILE_ENV_VAR])
+def test_a_link_folder_not_shown_warns_when_the_token_is_read(
+    windows, monkeypatch, tmp_path, source
+):
+    token = synthetic_token()
+    if source == ".env":
+        first, middle, hop, target = three_links(tmp_path, ".env", f"QTE_TOKEN={token}\n")
+        monkeypatch.chdir(first.parent)
+    else:
+        first, middle, hop, target = three_links(tmp_path, "token", token)
+        monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(first))
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(middle.parent): DENIED, str(hop.parent): OTHER_FOLDER}
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    message = str(caught[0].message)
+    assert (
+        f"holds your token, and {hop.parent}, which holds the link {hop}, is owned by another "
+        "account, which can change who may add or remove files in it, so other people"
+    ) in message
+    assert (
+        f"Also, it could not be fully checked: {not_shown(middle.parent, folder=True)}."
+    ) in message
+    assert_token_absent(token, message)
+
+
+def test_a_list_not_shown_is_read_before_the_token(windows, monkeypatch):
+    windows.sddl = PRIVATE_FILE
+    windows.folder_sddl = DENIED
+    token = synthetic_token()
+    path = write_dotenv(f"QTE_TOKEN={token}\n")
+    calls: list[str] = []
+    real_open, fake_sddl = os.open, _fileaccess._read_sddl
+
+    def recording_sddl(p: str) -> object:
+        calls.append(f"list {p}")
+        return fake_sddl(p)
+
+    def recording_open(p, *args, **kwargs):
+        calls.append(f"open {p}")
+        return real_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    monkeypatch.setattr(_fileaccess, "_read_sddl", recording_sddl)
+    with pytest.warns(TokenFileShared):
+        assert resolve_token() == token
+    assert calls == [f"list {path}", f"list {path.parent}", f"open {path}"]

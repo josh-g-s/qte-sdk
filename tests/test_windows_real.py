@@ -21,6 +21,10 @@ is not. Three things differ because of that:
   which SDDL writes as the alias LA rather than as its SID. The SDK cannot tell which
   account LA stands for, so a file this account owns has an owner it reports as unknown,
   not as yours. A student's own account is usually another one, written as its SID.
+- An owner always may read and change an object's list, and the runner's token holds
+  Administrators, which own what it creates, so a list is hidden from it only once the
+  object is given to an owner outside its token: the tests that hide one give it to SYSTEM
+  (as only an elevated administrator may), which is no finding of its own.
 """
 
 import csv
@@ -39,7 +43,7 @@ import pytest
 from qte_sdk import _fileaccess, dotenv
 from qte_sdk import token as token_command
 from qte_sdk.dotenv import AddressFileShared, FileShared, TokenFileShared
-from qte_sdk.session import resolve_token
+from qte_sdk.session import MissingToken, resolve_token
 
 pytestmark = pytest.mark.windows
 
@@ -115,7 +119,7 @@ def set_owner(path: Path, sid: str) -> None:
 def sddl(path: Path) -> str:
     """The owner and access list of `path` as the SDK reads them."""
     text = _fileaccess._read_sddl(str(path))
-    assert text is not None, f"could not read the access list of {path}"
+    assert isinstance(text, str), f"could not read the access list of {path}: {text!r}"
     return text
 
 
@@ -780,3 +784,219 @@ def test_a_junction_to_a_volumes_guid_name_warns_with_the_open_folder_before_it(
         monkeypatch.chdir(tmp_path)
         os.rmdir(junction)
     assert path.exists()
+
+
+# Lists the check is not shown, and folders another account owns. A list is hidden by an
+# entry that denies the user READ_CONTROL; since an owner may always read the list, the
+# object is then given to SYSTEM. Each is put back afterwards, so the folder can be removed.
+
+NOT_SHOWN = "Windows would not let this check see who may"
+
+
+def hide_list(path: Path, user_sid: str) -> None:
+    """Deny the user READ_CONTROL on `path`, and give it to SYSTEM, so the user may still
+    open it (and what is in it, if it is a folder) but not see its owner or list."""
+    icacls(path, "/deny", f"*{user_sid}:(RC)")
+    set_owner(path, SYSTEM)
+    assert _fileaccess._read_sddl(str(path)) is _fileaccess.DENIED
+
+
+def show_list(path: Path, user_sid: str) -> None:
+    set_owner(path, ADMINISTRATORS)
+    icacls(path, "/remove:d", f"*{user_sid}")
+
+
+def test_a_folder_whose_list_is_not_shown_warns_when_the_token_is_read(
+    tmp_path, user_sid, monkeypatch
+):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    make_folder_private(locked, user_sid)
+    path = locked / "token"
+    path.write_text(FAKE_TOKEN + "\n", encoding="utf-8")
+    make_file_private(path, user_sid)
+    hide_list(locked, user_sid)
+    try:
+        access = _fileaccess.broad_access(path)
+        assert access is not None
+        folder = os.path.dirname(real(path))
+        assert access.unseen == (f"{NOT_SHOWN} add or remove files in {folder}",)
+        assert (access.read, access.write, access.folder) == ((), (), None)
+        assert access
+
+        monkeypatch.setenv("QTE_TOKEN_FILE", str(path))
+        values: list[str] = []
+        caught = shared_warnings(lambda: values.append(resolve_token()))
+        assert values == [FAKE_TOKEN]
+        assert [w.category for w in caught] == [TokenFileShared]
+        message = str(caught[0].message)
+        assert (
+            f"holds your token, but it could not be fully checked: {NOT_SHOWN} add or remove "
+            f"files in {folder}."
+        ) in message, message
+        assert_no_token(message)
+
+        write_dotenv(locked)
+        result = run_sdk("qte_sdk.token", "check", cwd=locked)
+        # The working directory the command is given may be written with short 8.3 names.
+        assert result.stdout.count("warning:") == 1, result.stdout + result.stderr
+        assert (
+            f".env holds your token, but it could not be fully checked: {NOT_SHOWN} add or "
+            f"remove files in {folder}."
+        ) in result.stdout, result.stdout + result.stderr
+        assert "none of Everyone" not in result.stdout
+        assert_no_token(result.stdout, result.stderr)
+    finally:
+        show_list(locked, user_sid)
+
+
+def test_a_file_whose_list_is_not_shown_cannot_be_read_and_its_folder_is_still_checked(
+    private_folder, user_sid, monkeypatch
+):
+    # Python opens a file for GENERIC_READ, which needs READ_CONTROL, so a token file whose
+    # list is hidden from you cannot be read at all, and so is never used; the check still
+    # reports the folder's list, which here is open to Users.
+    path = private_folder / "token"
+    path.write_text(FAKE_TOKEN + "\n", encoding="utf-8")
+    make_file_private(path, user_sid)
+    open_folder_to_users(private_folder)
+    hide_list(path, user_sid)
+    try:
+        access = _fileaccess.broad_access(path)
+        assert access is not None
+        assert access.unseen == (f"{NOT_SHOWN} open {real(path)}",)
+        assert access.folder == ("BUILTIN\\Users",)
+        assert (access.read, access.write, access.other_owner) == ((), (), None)
+        message = dotenv.shared_message(path, access, sets_address=False)
+        assert message.startswith(
+            f"{path} holds your token, and other users can replace it: BUILTIN\\Users may add "
+            f"or remove files in {os.path.dirname(real(path))}, so other people"
+        ), message
+        assert f"Also, it could not be fully checked: {NOT_SHOWN} open {real(path)}." in message
+
+        monkeypatch.setenv("QTE_TOKEN_FILE", str(path))
+        with pytest.raises(MissingToken, match="names a file that cannot be read"):
+            shared_warnings(resolve_token)
+    finally:
+        show_list(path, user_sid)
+
+
+def test_a_folder_owned_by_another_account_warns(private_folder, user_sid):
+    path = write_dotenv(private_folder)
+    make_file_private(path, user_sid)
+    set_owner(private_folder, USERS)
+    folder = os.path.dirname(real(path))
+    access = _fileaccess.broad_access(path)
+    assert access is not None
+    assert (access.read, access.write, access.folder, access.folder_owner) == ((), (), (), True)
+
+    caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+    assert [w.category for w in caught] == [TokenFileShared]
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{Path.cwd() / '.env'} holds your token, and {folder} is owned by another account, "
+        "which can change who may add or remove files in it, so other people"
+    ), message
+    assert_no_token(message)
+    result = run_sdk("qte_sdk.token", "check", cwd=private_folder)
+    assert f"{folder} is owned by another account" in result.stdout, result.stdout
+    assert_no_token(result.stdout, result.stderr)
+
+
+def test_a_folder_that_holds_a_link_and_is_owned_by_another_account_warns(
+    private_folder, tmp_path, user_sid, monkeypatch
+):
+    target = write_dotenv(private_folder)
+    make_file_private(target, user_sid)
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    make_folder_private(holder, user_sid)
+    os.symlink(target, holder / ".env")
+    set_owner(holder, USERS)
+    monkeypatch.chdir(holder)
+    access = _fileaccess.broad_access(holder / ".env")
+    assert access is not None
+    assert (access.link_folder, access.link_owner) == ((), True)
+    assert [(f.path, f.other_owner) for f in access.link_folders] == [(real(holder), True)]
+
+    caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+    assert [w.category for w in caught] == [TokenFileShared]
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{Path.cwd() / '.env'}, a link to {real(target)}, holds your token, and "
+        f"{real(holder)}, which holds the link, is owned by another account, which can "
+        "change who may add or remove files in it, so other people"
+    ), message
+    assert_no_token(message)
+
+
+def test_a_folder_that_holds_a_link_and_whose_list_is_not_shown_warns(
+    private_folder, tmp_path, user_sid, monkeypatch
+):
+    target = private_folder / "token"
+    target.write_text(FAKE_TOKEN + "\n", encoding="utf-8")
+    make_file_private(target, user_sid)
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    make_folder_private(holder, user_sid)
+    link = holder / "token"
+    os.symlink(target, link)
+    hide_list(holder, user_sid)
+    try:
+        access = _fileaccess.broad_access(link)
+        assert access is not None
+        assert access.unseen == (f"{NOT_SHOWN} add or remove files in {real(holder)}",)
+        assert access.link_folder is None
+
+        monkeypatch.setenv("QTE_TOKEN_FILE", str(link))
+        values: list[str] = []
+        caught = shared_warnings(lambda: values.append(resolve_token()))
+        assert values == [FAKE_TOKEN]
+        assert [w.category for w in caught] == [TokenFileShared]
+        message = str(caught[0].message)
+        assert message.startswith(
+            f"{link}, a link to {real(target)}, holds your token, but it could not be fully "
+            f"checked: {NOT_SHOWN} add or remove files in {real(holder)}. Keep the file "
+            "itself, not a link to it,"
+        ), message
+        assert_no_token(message)
+    finally:
+        show_list(holder, user_sid)
+
+
+def test_a_link_that_cannot_be_looked_at_has_its_folder_checked(tmp_path, user_sid):
+    # Review of #163: a link the check cannot lstat, in a folder open to Users. Denying you
+    # its attributes, and the folder's listing (which Python's lstat falls back to), makes
+    # lstat fail where Windows still follows the link.
+    target_folder = tmp_path / "safe"
+    target_folder.mkdir()
+    make_folder_private(target_folder, user_sid)
+    target = write_dotenv(target_folder)
+    make_file_private(target, user_sid)
+    holder = tmp_path / "open"
+    holder.mkdir()
+    make_folder_private(holder, user_sid)
+    open_folder_to_users(holder)
+    link = holder / ".env"
+    os.symlink(target, link)
+    icacls(link, "/L", "/deny", f"*{user_sid}:(RA)")
+    icacls(holder, "/deny", f"*{user_sid}:(RD)")
+    try:
+        with pytest.raises(OSError):
+            os.lstat(link)
+        access = _fileaccess.broad_access(link)
+        assert access is not None
+        assert access.unfollowed == f"{link} could not be looked at, or was not there"
+        assert access.links == (str(link),)
+        assert [(f.path, f.groups) for f in access.link_folders] == [
+            (real(holder), ("BUILTIN\\Users",))
+        ]
+        assert access.link_folder == ("BUILTIN\\Users",)
+        message = dotenv.shared_message(link, access)
+        assert (
+            f"BUILTIN\\Users may add or remove files in {real(holder)}, which holds the link, "
+            "so other people"
+        ) in message, message
+    finally:
+        icacls(holder, "/remove:d", f"*{user_sid}")
+        icacls(link, "/L", "/remove:d", f"*{user_sid}")

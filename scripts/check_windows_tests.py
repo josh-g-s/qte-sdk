@@ -5,10 +5,11 @@
 The tests that must run are every test in tests/test_windows_real.py, marked `windows` or
 not, and every test marked `windows` anywhere. They are listed by a separate pytest
 process, with no `addopts`, no `PYTEST_ADDOPTS` or `PYTEST_PLUGINS`, no conftest and no
-plugin loaded by entry point, as each test is collected, before `-k`, `-m`, `--deselect`
-or any hook that selects tests can leave one out. So options, conftest files and plugins
-named in the environment that filter or hide tests in the real run cannot shrink the list
-too; a plugin a test module names in its `pytest_plugins` still loads in both. Each must
+plugin loaded by entry point, and with pytest's default `python_files`, `python_classes`
+and `python_functions`, as each test is collected, before `-k`, `-m`, `--deselect` or any
+hook that selects tests can leave one out. So options, settings, conftest files and
+plugins named in the environment that filter or hide tests in the real run cannot shrink
+the list too; a plugin a test module names in its `pytest_plugins` still loads in both. Each must
 be in the JUnit report the real run wrote, by the name pytest gives it there, as many
 times as it is listed, and not skipped. The report has no entry for a test the run
 deselected, so a deselected test is reported as one that did not run. It prints what is
@@ -78,6 +79,14 @@ def _list_tests() -> int:
         "--noconftest",
         "-o",
         "addopts=",
+        # pytest's own defaults for which files, classes and functions hold tests, so the
+        # project's settings for them cannot shrink the list either.
+        "-o",
+        "python_files=test_*.py *_test.py",
+        "-o",
+        "python_classes=Test",
+        "-o",
+        "python_functions=test",
         "-p",
         "no:cacheprovider",
         "tests",

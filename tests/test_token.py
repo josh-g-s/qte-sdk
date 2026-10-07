@@ -992,6 +992,114 @@ def test_check_on_windows_says_nothing_extra_when_it_cannot_tell(windows, capsys
     assert "warning:" not in out and "no group" not in out
 
 
+# A list Windows will not show the check, or that it cannot parse, and a folder another
+# account owns: `set` and `check` say the same as the warning when the token is read.
+
+NOT_SHOWN = "Windows would not let this check see who may"
+# A folder like a profile folder, owned by another account.
+OTHER_FOLDER = f"O:S-1-5-21-1-2-3-1002D:(A;OICI;FA;;;SY)(A;OICI;FA;;;{USER_SID})"
+
+
+def test_set_on_windows_warns_when_the_folders_list_is_not_shown(windows, capsys):
+    windows(PRIVATE_FILE, folder=_fileaccess.DENIED)
+    token = synthetic_token()
+    assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    assert (
+        f".\nWarning: {dotenv()} holds your token, but it could not be fully checked: "
+        f"{NOT_SHOWN} add or remove files in {Path.cwd()}. Delete it and make it again "
+        "yourself, in a folder under your user profile (%USERPROFILE%)"
+    ) in out
+    assert "None of Everyone" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_set_file_on_windows_warns_when_the_files_list_is_not_parsed(windows, tmp_path, capsys):
+    windows("O:BAD:(A;;ZZ;;;WD)", folder=PROFILE)
+    path = tmp_path / "token"
+    token = synthetic_token()
+    assert run(["set", "--file", str(path)], ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    real = path.parent.resolve() / path.name
+    assert (
+        f"Warning: {real} holds your token, but it could not be fully checked: the access "
+        f"list of {real} is in a form this check cannot read."
+    ) in out
+    assert_token_absent(token, out + err)
+
+
+def test_set_on_windows_warns_about_a_folder_another_account_owns(windows, capsys):
+    windows(PRIVATE_FILE, folder=OTHER_FOLDER)
+    token = synthetic_token()
+    assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    assert (
+        f".\nWarning: {dotenv()} holds your token, and {Path.cwd()} is owned by another "
+        "account, which can change who may add or remove files in it, so other people who "
+        "use this computer could change QTE_URL in it"
+    ) in out
+    assert "Move it into a folder under your user profile (%USERPROFILE%), which is " in out
+    assert_token_absent(token, out + err)
+
+
+@pytest.mark.parametrize(
+    ("file", "folder", "said"),
+    [
+        (_fileaccess.DENIED, PROFILE, lambda path: f"{NOT_SHOWN} open {path}"),
+        (
+            PRIVATE_FILE,
+            _fileaccess.DENIED,
+            lambda path: f"{NOT_SHOWN} add or remove files in {path.parent}",
+        ),
+        (
+            PRIVATE_FILE,
+            "O:BAD:(A;;ZZ;;;WD)",
+            lambda path: f"the access list of {path.parent} is in a form this check cannot read",
+        ),
+    ],
+    ids=["file not shown", "folder not shown", "folder not parsed"],
+)
+@pytest.mark.parametrize("source", ["dotenv", "file"])
+def test_check_on_windows_warns_when_a_list_is_not_seen(
+    windows, monkeypatch, tmp_path, capsys, file, folder, said, source
+):
+    windows(file, folder=folder)
+    token = synthetic_token()
+    if source == "dotenv":
+        path = dotenv()
+        path.write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
+        path.chmod(0o600)
+    else:
+        path = tmp_path / "token"
+        path.write_text(token)
+        monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+        monkeypatch.setenv(URL_ENV_VAR, URL)
+    assert run(["check"]) == 0
+    out, err = capsys.readouterr()
+    assert out.count("warning:") == 1
+    assert (
+        f"warning: {path} holds your token, but it could not be fully checked: {said(path)}."
+    ) in out
+    assert "none of Everyone" not in out
+    assert_token_absent(token, out + err)
+
+
+def test_check_on_windows_warns_about_a_folder_another_account_owns(windows, capsys):
+    windows(PRIVATE_FILE, folder=OTHER_FOLDER)
+    token = synthetic_token()
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
+    dotenv().chmod(0o600)
+    assert run(["check"]) == 0
+    out, err = capsys.readouterr()
+    assert out.count("warning:") == 1
+    assert (
+        f"warning: {dotenv()} holds your token, and {Path.cwd()} is owned by another account, "
+        "which can change who may add or remove files in it"
+    ) in out
+    assert "none of Everyone" not in out
+    assert_token_absent(token, out + err)
+
+
 # check
 
 
