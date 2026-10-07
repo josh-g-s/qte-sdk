@@ -61,6 +61,12 @@ jobs:
       # mark, or that -k, --deselect or a conftest hook leaves out, fails the job.
       - name: Fail if a Windows test did not run or was skipped
         run: python scripts/check_windows_tests.py windows-tests.xml
+      - name: TEMP issue 168 diagnosis
+        if: success() || failure()
+        continue-on-error: true
+        run: |
+          pip install pytest-timeout
+          python scripts/diag_windows_168.py
       # Left out:
       # - test_reconnect, test_resume, test_calendar, test_instruments,
       #   test_new_message_types and test_tickets: their fake exchange drops a connection
