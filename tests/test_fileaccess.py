@@ -44,6 +44,9 @@ TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478
 # The user the tests run as, and another account on the same computer.
 USER_SID = "S-1-5-21-1111111111-2222222222-3333333333-1001"
 OTHER_SID = "S-1-5-21-1111111111-2222222222-3333333333-1002"
+# This computer's built-in Administrator and Guest, which SDDL writes as LA and LG.
+ADMIN_SID = "S-1-5-21-1111111111-2222222222-3333333333-500"
+GUEST_SID = "S-1-5-21-1111111111-2222222222-3333333333-501"
 # A file under a user profile: SYSTEM, Administrators and the owner only. The group, in
 # G:, ends in -513 like Domain Users, but it is not an entry of the access list.
 PROFILE = (
@@ -352,10 +355,13 @@ class Windows:
         self.folder_sddl: str | Exception | None = PROFILE_FOLDER
         self.lists: dict[str, str | Exception | None] = {}
         self.user: str | Exception | None = USER_SID
+        # The SIDs of this computer's built-in Administrator and Guest (LA and LG).
+        self.local: dict[str, str] | Exception = {"LA": ADMIN_SID, "LG": GUEST_SID}
         self.asked: list[str] = []
         monkeypatch.setattr(_fileaccess, "on_windows", lambda: True)
         monkeypatch.setattr(_fileaccess, "_read_sddl", self._read_sddl)
         monkeypatch.setattr(_fileaccess, "_current_user_sid", self._current_user_sid)
+        monkeypatch.setattr(_fileaccess, "_local_accounts", self._local_accounts)
 
     def _read_sddl(self, path: str) -> str | None:
         self.asked.append(path)
@@ -365,6 +371,11 @@ class Windows:
 
     def _current_user_sid(self) -> str | None:
         return self._give(self.user)
+
+    def _local_accounts(self) -> dict[str, str]:
+        if isinstance(self.local, Exception):
+            raise self.local
+        return self.local
 
     @staticmethod
     def _give(value: str | Exception | None) -> str | None:
@@ -2004,7 +2015,7 @@ def test_a_folder_owned_by_another_account_is_a_finding(windows, tmp_path):
         ("SY", False),
         (OTHER_SID, True),
         ("BU", True),
-        ("LA", None),
+        ("LA", True),  # the built-in Administrator, who is not you
     ],
 )
 def test_a_folders_owner_is_compared_like_the_files(windows, tmp_path, owner, other):
@@ -2248,3 +2259,137 @@ def test_a_link_folder_trusted_installer_owns_is_no_finding(windows, tmp_path, m
         warnings.simplefilter("always")
         assert resolve_token() == token
     assert [w for w in caught if issubclass(w.category, FileShared)] == []
+
+
+# LA and LG, the computer's built-in Administrator and Guest, and owners that cannot be
+# told. Windows writes these two accounts' SIDs as aliases, which the SDK resolves; an
+# owner it still cannot place is reported, as a list it cannot see is, since it could be
+# anyone's.
+
+LOCAL = {"LA": ADMIN_SID, "LG": GUEST_SID}
+
+
+@pytest.mark.parametrize(
+    ("sddl", "user", "local", "other"),
+    [
+        ("O:LA", ADMIN_SID, LOCAL, False),
+        ("O:la", ADMIN_SID.lower(), LOCAL, False),
+        ("O:LA", USER_SID, LOCAL, True),
+        ("O:LG", USER_SID, LOCAL, True),
+        ("O:LG", GUEST_SID, LOCAL, False),
+        ("O:LA", ADMIN_SID, None, None),
+        ("O:LA", ADMIN_SID, {"LG": GUEST_SID}, None),
+        ("O:LG", ADMIN_SID, {"LG": ""}, None),
+        ("O:LA", None, LOCAL, None),
+    ],
+)
+def test_la_and_lg_are_compared_by_the_sids_windows_gives(sddl, user, local, other):
+    assert _fileaccess.owner_is_other(sddl, user, local) is other
+
+
+def owned_by(owner: str) -> str:
+    """A folder like a profile folder, owned by `owner`."""
+    return f"O:{owner}D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{USER_SID})"
+
+
+@pytest.mark.parametrize(
+    ("owner", "user", "other"),
+    [
+        ("LA", ADMIN_SID, False),
+        ("LA", USER_SID, True),
+        ("LG", USER_SID, True),
+    ],
+)
+@pytest.mark.parametrize("where", ["folder", "link folder"])
+def test_a_folder_owned_by_la_or_lg_is_compared_with_you(
+    windows, tmp_path, monkeypatch, owner, user, other, where
+):
+    windows.user = user
+    windows.sddl = f"O:{user}D:PAI(A;;FA;;;{user})"  # the file, and its folder, are yours
+    windows.folder_sddl = owned_by(user)
+    token = synthetic_token()
+    if where == "folder":
+        path = tmp_path / "token"
+        path.write_text(token)
+        windows.folder_sddl = owned_by(owner)
+        holder = tmp_path
+    else:
+        link, target = linked(tmp_path, "holder", "profile", "token")
+        target.write_text(token)
+        windows.lists = {str(link.parent): owned_by(owner)}
+        path, holder = link, link.parent
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    found = _fileaccess.broad_access(path)
+    assert found is not None and found.unseen == ()
+    assert (found.folder_owner if where == "folder" else found.link_owner) is other
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert resolve_token() == token
+    shared = [str(w.message) for w in caught if issubclass(w.category, FileShared)]
+    if not other:
+        assert shared == []
+        return
+    assert len(shared) == 1
+    assert f"{holder}" in shared[0]
+    assert (
+        "is owned by another account, which can change who may add or remove files in it"
+        in (shared[0])
+    )
+    assert_token_absent(token, shared[0])
+
+
+@pytest.mark.parametrize(
+    ("owner", "local"),
+    [("LA", {}), ("LG", Exception("LSA failed")), ("ZZ", LOCAL)],
+    ids=["LA not resolved", "LG not resolved", "undocumented alias"],
+)
+@pytest.mark.parametrize("where", ["file", "folder", "link folder"])
+def test_an_owner_that_cannot_be_placed_warns(windows, tmp_path, monkeypatch, owner, local, where):
+    windows.local = local
+    windows.sddl = PRIVATE_FILE
+    token = synthetic_token()
+    if where == "link folder":
+        link, target = linked(tmp_path, "holder", "profile", "token")
+        target.write_text(token)
+        windows.lists = {str(link.parent): owned_by(owner)}
+        path, place = link, link.parent
+    else:
+        path = tmp_path / "token"
+        path.write_text(token)
+        if where == "file":
+            windows.sddl = f"O:{owner}D:PAI(A;;FA;;;{USER_SID})"
+        else:
+            windows.folder_sddl = owned_by(owner)
+        place = path if where == "file" else tmp_path
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    found = _fileaccess.broad_access(path)
+    assert found is not None and found.unseen == (f"who owns {place} could not be told",)
+    assert found and not found.changeable
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    message = str(caught[0].message)
+    assert (
+        f"holds your token, but it could not be fully checked: who owns {place} could not be told."
+    ) in message
+    assert_token_absent(token, message)
+
+
+def test_an_owner_is_not_reported_when_the_current_user_is_not_known(windows, tmp_path):
+    # Not reading your own SID is a failure of the API, which says nothing, as before.
+    windows.user = None
+    windows.local = {}
+    windows.sddl = "O:LAD:PAI(A;;FA;;;BA)"
+    windows.folder_sddl = owned_by("LG")
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    assert found is not None and found.unseen == () and not found
+
+
+def test_a_list_with_no_owner_says_nothing_of_one(windows, tmp_path):
+    windows.sddl = "D:PAI(A;;FA;;;BA)"
+    windows.folder_sddl = "D:PAI(A;;FA;;;BA)"
+    path = tmp_path / ".env"
+    path.write_text("")
+    found = _fileaccess.broad_access(path)
+    assert found is not None and found.unseen == () and not found

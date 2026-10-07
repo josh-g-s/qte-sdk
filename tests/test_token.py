@@ -734,8 +734,9 @@ PRIVATE_FILE = f"O:{USER_SID}D:PAI(A;;FA;;;{USER_SID})"
 OPEN_FOLDER = "D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;AU)(A;OICIID;0x1200a9;;;BU)"
 CLEAN = (
     "None of Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users can read or "
-    "change it, or add or remove files in its folder, and it is owned by you, Administrators "
-    "or SYSTEM (other groups and users are not checked)"
+    "change it, or add or remove files in its folder, and it is owned by you or a trusted "
+    "system account: Administrators, SYSTEM or TrustedInstaller (other groups and users are "
+    "not checked)"
 )
 
 SAME = object()
@@ -753,6 +754,7 @@ def windows(monkeypatch) -> Callable[..., None]:
         lambda path: lists["folder" if os.path.isdir(path) else "file"],
     )
     monkeypatch.setattr(_fileaccess, "_current_user_sid", lambda: lists["user"])
+    monkeypatch.setattr(_fileaccess, "_local_accounts", lambda: {"LA": "S-1-5-21-1-2-3-500"})
 
     def set_sddl(value: str | None, folder: object = SAME, user: str | None = USER_SID) -> None:
         lists.update(file=value, folder=value if folder is SAME else folder, user=user)

@@ -666,7 +666,8 @@ def _access_note(source: str) -> str:
 def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:
     """What a clean Windows access check shows: none of the broad groups it looks at may
     read or change the file, or add or remove files in its folder (or, when it is reached
-    through a link, in the link's folder), and its owner is you, Administrators or SYSTEM.
+    through a link, in the link's folder), and its owner is you or a trusted system account
+    (Administrators, SYSTEM or TrustedInstaller).
     It says which of the folders and the owner it could not check, and it looks at no other
     group or user, so it never says the file is private to you."""
     names = [group.rsplit("\\", 1)[-1] for group in _fileaccess.BROAD_GROUPS]
@@ -684,7 +685,10 @@ def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:
     if checked:
         text += f", or add or remove files in {' or '.join(checked)}"
     if access.other_owner is False:
-        text += ", and it is owned by you, Administrators or SYSTEM"
+        text += (
+            ", and it is owned by you or a trusted system account: Administrators, SYSTEM or "
+            "TrustedInstaller"
+        )
     unchecked = [
         part for part, known in (*folders, ("its owner", access.other_owner)) if known is None
     ]

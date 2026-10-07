@@ -23,7 +23,7 @@ Only paths and access lists are handled here, never a file's contents.
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -126,12 +126,14 @@ _DACL_FLAGS = ("NO_ACCESS_CONTROL", "AI", "AR", "P")
 _TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 _TRUSTED_OWNERS = frozenset({"BA", "S-1-5-32-544", "SY", "S-1-5-18", _TRUSTED_INSTALLER})
 # The aliases SDDL may give an owner that a process can run as, by SID: LOCAL SERVICE and
-# NETWORK SERVICE. The local Administrator and Guest accounts (LA and LG) stand for a SID
-# in this computer's domain, which is not known here, so they cannot be compared.
+# NETWORK SERVICE. The computer's built-in Administrator and Guest accounts (LA and LG)
+# stand for a SID in this computer's account domain, which `_local_accounts` reads from
+# Windows, so they are compared too.
 _SERVICE_OWNERS = {"LS": "S-1-5-19", "NS": "S-1-5-20"}
+_LOCAL_ACCOUNTS = {"LA": 500, "LG": 501}  # their relative IDs in that domain
 # The other SID aliases Microsoft documents for SDDL (its "SID Strings" list), each a group
-# or a well-known identity, never the current user. An owner given by LA, LG or an alias in
-# none of these lists cannot be told, so it is unknown.
+# or a well-known identity, never the current user. An owner given by an alias in none of
+# these lists, or by LA or LG when they could not be read, cannot be told.
 _GROUP_OWNERS = frozenset(
     "AA AC AN AO AP AS AU BG BO BU CA CD CG CN CO CY DA DC DD DG DU EA ED EK ER ES HA HI IS "
     "IU KA LU LW ME MP MS MU NO NU OW PA PO PS PU RA RC RD RE RM RO RS RU SA SI SO SS SU UD "
@@ -290,21 +292,30 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     except Exception:
         return None
     unseen: list[str] = []
-    if sddl is DENIED:
-        access = BroadAccess()
-        unseen.append(f"Windows would not let this check see who may open {file}")
-    elif isinstance(sddl, str):
-        parsed = access_in_sddl(sddl)
-        if parsed is None:
-            unseen.append(_unparsed(file))
-        access = parsed or BroadAccess()
-    else:
+    if sddl is not DENIED and not isinstance(sddl, str):
         return None
     try:
         user = _current_user_sid()
     except Exception:
         user = None
-    folder = _look_at_folder(folder_path, user)
+    try:
+        local = _local_accounts()
+    except Exception:
+        local = {}
+    other_owner = None
+    if sddl is DENIED:
+        access = BroadAccess()
+        unseen.append(f"Windows would not let this check see who may open {file}")
+    else:
+        assert isinstance(sddl, str)
+        parsed = access_in_sddl(sddl)
+        other_owner = owner_is_other(sddl, user, local)
+        if parsed is None:
+            unseen.append(_unparsed(file))
+        elif other_owner is None and user is not None and _has_owner(sddl):
+            unseen.append(_unplaced(file))
+        access = parsed or BroadAccess()
+    folder = _look_at_folder(folder_path, user, local)
     if folder.unseen is not None:
         unseen.append(folder.unseen)
     # A name the walk could not look at is not known to be a link: its folder is checked as
@@ -312,7 +323,7 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     unlooked = walked[-1][0] if walked and unfollowed == _not_looked_at(walked[-1][0]) else None
     links = tuple(link for link, _ in walked if link != unlooked)
     try:
-        link_folders, link_unseen = _link_folders(walked, folder_path, user)
+        link_folders, link_unseen = _link_folders(walked, folder_path, user, local)
     except Exception:
         link_folders, link_unseen = (), []
         unfollowed = unfollowed or "the folders that hold the links on the way could not be named"
@@ -320,7 +331,7 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     return replace(
         access,
         folder=folder.groups,
-        other_owner=owner_is_other(sddl, user) if isinstance(sddl, str) else None,
+        other_owner=other_owner,
         link_folder=_link_finding(link_folders),
         unfollowed=unfollowed,
         folder_owner=folder.other_owner,
@@ -337,6 +348,22 @@ def broad_access(path: Path | str) -> BroadAccess | None:
 def _unparsed(path: str) -> str:
     """What `unseen` says of `path` when its access list is one the parser rejects."""
     return f"the access list of {path} is in a form this check cannot read"
+
+
+def _unplaced(path: str) -> str:
+    """What `unseen` says of `path` when its list names an owner that cannot be told apart
+    from the current user (see `owner_is_other`), though the current user is known: an
+    alias Microsoft does not document, or LA or LG when Windows would not say whose they
+    are. Whoever owns it could be anyone, so it is not passed over. (A list with no owner
+    at all says nothing of one: Windows gives an owner for every file and folder on a
+    drive that keeps access lists.)"""
+    return f"who owns {path} could not be told"
+
+
+def _has_owner(sddl: str) -> bool:
+    """Whether `sddl` names an owner (has an `O:` part)."""
+    sections = _sections(sddl)
+    return sections is not None and "O" in sections
 
 
 # The most links followed on the way to a file, as an operating system bounds them; the
@@ -431,14 +458,15 @@ _DRIVE_PATH = re.compile(r"[A-Za-z]:\\?")
 
 
 def _link_folders(
-    walked: list[tuple[str, str]], folder: str, user: str | None
+    walked: list[tuple[str, str]], folder: str, user: str | None, local: dict[str, str]
 ) -> tuple[tuple[LinkFolder, ...], list[str]]:
     """Each folder that holds a link in `walked`, by its resolved name, once, in the order
     first met, with its links, the broad groups that may add or remove files in it and
     whether another account than `user` owns it; leaving out `folder`, the file's own
     folder, which is checked anyway. Another name for the same folder, such as a mapped
     drive's or a short 8.3 name, counts as the same. Also what `unseen` says of each whose
-    list was not shown or could not be parsed."""
+    list was not shown or could not be parsed, or whose owner could not be told. `local`
+    gives the SIDs of LA and LG (see `owner_is_other`)."""
     holders: dict[str, tuple[str, list[str]]] = {}
     for link, holder in walked:
         try:
@@ -451,7 +479,7 @@ def _link_folders(
     found: list[LinkFolder] = []
     unseen: list[str] = []
     for real, links in holders.values():
-        look = _look_at_folder(real, user)
+        look = _look_at_folder(real, user, local)
         found.append(LinkFolder(real, tuple(links), look.groups, look.other_owner))
         if look.unseen is not None:
             unseen.append(look.unseen)
@@ -510,19 +538,20 @@ def _same(one: str, other: str) -> bool:
 class _FolderLook:
     """What one read of a folder's owner and access list shows: the broad groups that may
     add or remove files in it, whether another account owns it (each None if not told),
-    and what `unseen` says of it, if Windows would not show its list or the list could not
-    be parsed."""
+    and what `unseen` says of it, if Windows would not show its list, the list could not
+    be parsed or its owner could not be told."""
 
     groups: tuple[str, ...] | None = None
     other_owner: bool | None = None
     unseen: str | None = None
 
 
-def _look_at_folder(folder: str, user: str | None) -> _FolderLook:
+def _look_at_folder(folder: str, user: str | None, local: dict[str, str]) -> _FolderLook:
     """The broad groups that may add or remove files in `folder` (see
     `folder_access_in_sddl`) and whether an account other than `user` owns it (see
-    `owner_is_other`), from one read of its list. A list Windows would not show, or one the
-    parser rejects, is said in `unseen`; any other failure leaves both unknown."""
+    `owner_is_other`, which `local` is for), from one read of its list. A list Windows
+    would not show, one the parser rejects, or an owner that cannot be told while `user`
+    is known, is said in `unseen`; any other failure leaves both unknown."""
     try:
         folder_sddl = _read_sddl(folder)
     except Exception:
@@ -534,11 +563,13 @@ def _look_at_folder(folder: str, user: str | None) -> _FolderLook:
     if not isinstance(folder_sddl, str):
         return _FolderLook()
     groups = folder_access_in_sddl(folder_sddl)
-    return _FolderLook(
-        groups=groups,
-        other_owner=owner_is_other(folder_sddl, user),
-        unseen=_unparsed(folder) if groups is None else None,
-    )
+    other = owner_is_other(folder_sddl, user, local)
+    unseen = None
+    if groups is None:
+        unseen = _unparsed(folder)
+    elif other is None and user is not None and _has_owner(folder_sddl):
+        unseen = _unplaced(folder)
+    return _FolderLook(groups=groups, other_owner=other, unseen=unseen)
 
 
 def access_in_sddl(sddl: str) -> BroadAccess | None:
@@ -576,7 +607,9 @@ def folder_access_in_sddl(sddl: str) -> tuple[str, ...] | None:
     return _holding(grants, _FOLDER_MASK)
 
 
-def owner_is_other(sddl: str, user: str | None) -> bool | None:
+def owner_is_other(
+    sddl: str, user: str | None, local: Mapping[str, str] | None = None
+) -> bool | None:
     """Whether the owner in `sddl` (its `O:` part) is an account other than `user` (the
     current user's SID), BUILTIN\\Administrators, SYSTEM or NT SERVICE\\TrustedInstaller
     (which Windows itself installs its files as); or None if that cannot be told, because
@@ -584,8 +617,10 @@ def owner_is_other(sddl: str, user: str | None) -> bool | None:
 
     SDDL gives a well-known owner by its alias, such as `BA`, and any other by its SID. An
     alias other than those of an account a process may run as names a group or a
-    well-known identity, so it is never the current user; an alias Microsoft does not
-    document gives None."""
+    well-known identity, so it is never the current user. LA and LG, the computer's
+    built-in Administrator and Guest, are compared by the SIDs `local` gives them (see
+    `_local_accounts`), and give None without one, as an alias Microsoft does not document
+    does."""
     sections = _sections(sddl)
     if sections is None or "O" not in sections:
         return None
@@ -595,9 +630,12 @@ def owner_is_other(sddl: str, user: str | None) -> bool | None:
     if _SID.fullmatch(owner) is None:
         if owner in _GROUP_OWNERS:
             return True
-        if owner not in _SERVICE_OWNERS:
-            return None  # LA, LG, or not an alias at all
-        owner = _SERVICE_OWNERS[owner]
+        if owner in _SERVICE_OWNERS:
+            owner = _SERVICE_OWNERS[owner]
+        elif local and local.get(owner):
+            owner = local[owner].strip().upper()
+        else:
+            return None  # LA or LG not read, or not an alias at all
     if user is None:
         return None
     return owner != user.strip().upper()
@@ -775,6 +813,16 @@ def _read_sddl(path: str) -> "str | _Denied | None":
     (ERROR_ACCESS_DENIED: it lacks READ_CONTROL); or None if they cannot be read for any
     other reason. Only on Windows: `ctypes.WinDLL` exists nowhere else, so elsewhere it
     raises, which callers take as unknown, like None."""
+    status, text = _read_security(path)
+    if status == _ERROR_ACCESS_DENIED:
+        return DENIED
+    return text if status == 0 else None
+
+
+def _read_security(path: str) -> tuple[int, str | None]:
+    """The status `GetNamedSecurityInfoW` gives for the owner and DACL of `path`, and, if
+    it is 0 (success), them as an SDDL string, or None if they could not be put as one.
+    Only on Windows."""
     import ctypes
     from ctypes import wintypes
 
@@ -826,7 +874,7 @@ def _read_sddl(path: str) -> "str | _Denied | None":
     if status != 0:
         if descriptor.value:
             local_free(descriptor)
-        return DENIED if status == _ERROR_ACCESS_DENIED else None
+        return status, None
     text = ctypes.c_void_p()
     try:
         length = wintypes.ULONG()
@@ -837,8 +885,8 @@ def _read_sddl(path: str) -> "str | _Denied | None":
             ctypes.byref(text),
             ctypes.byref(length),
         ):
-            return None
-        return ctypes.wstring_at(text.value) if text.value else None
+            return status, None
+        return status, ctypes.wstring_at(text.value) if text.value else None
     finally:
         if text.value:
             local_free(text)
@@ -911,3 +959,143 @@ def _current_user_sid() -> str | None:
         if text.value:
             local_free(text)
         close_handle(token)
+
+
+def _local_accounts() -> dict[str, str]:
+    """The SIDs that SDDL writes as LA and LG, the built-in Administrator and Guest accounts
+    of this computer, such as `{"LA": "S-1-5-21-...-500"}`; those that cannot be read are
+    left out. Each is asked of `ConvertStringSidToSidW`, which reads the aliases as
+    `ConvertSecurityDescriptorToStringSecurityDescriptorW` writes them; failing that, it is
+    made from this computer's account domain, as the Local Security Authority gives it, and
+    the account's relative ID. Only on Windows."""
+    found: dict[str, str] = {}
+    domain: str | None = None
+    for alias, rid in _LOCAL_ACCOUNTS.items():
+        sid = _alias_sid(alias)
+        if sid is None or not sid.endswith(f"-{rid}"):
+            if domain is None:
+                domain = _account_domain_sid() or ""
+            sid = f"{domain}-{rid}" if domain else None
+        if sid is not None and _SID.fullmatch(sid):
+            found[alias] = sid
+    return found
+
+
+def _alias_sid(alias: str) -> str | None:
+    """The SID string that the SDDL alias `alias` stands for on this computer, as
+    `ConvertStringSidToSidW` reads it, or None if it does not. Only on Windows."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    from_string = advapi32.ConvertStringSidToSidW
+    from_string.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    from_string.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+
+    sid = ctypes.c_void_p()
+    if not from_string(alias, ctypes.byref(sid)):
+        return None
+    try:
+        return _sid_string(sid.value)
+    finally:
+        if sid.value:
+            local_free(sid)
+
+
+def _account_domain_sid() -> str | None:
+    """The SID of this computer's account domain, such as `S-1-5-21-1-2-3`, which its local
+    accounts' SIDs start with, from `LsaQueryInformationPolicy`; or None if it cannot be
+    read. Only on Windows."""
+    import ctypes
+    from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):  # LSA_UNICODE_STRING
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):  # LSA_OBJECT_ATTRIBUTES
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.c_void_p),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", ctypes.c_void_p),
+            ("SecurityQualityOfService", ctypes.c_void_p),
+        ]
+
+    class AccountDomainInfo(ctypes.Structure):  # POLICY_ACCOUNT_DOMAIN_INFO
+        _fields_ = [("DomainName", UnicodeString), ("DomainSid", ctypes.c_void_p)]
+
+    policy_view_local_information = 0x1
+    policy_account_domain_information = 5  # POLICY_INFORMATION_CLASS
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    open_policy = advapi32.LsaOpenPolicy
+    open_policy.argtypes = [
+        ctypes.c_void_p,  # SystemName: this computer
+        ctypes.POINTER(ObjectAttributes),
+        wintypes.DWORD,  # DesiredAccess
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    open_policy.restype = wintypes.LONG  # NTSTATUS
+    query = advapi32.LsaQueryInformationPolicy
+    query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    query.restype = wintypes.LONG
+    free_memory = advapi32.LsaFreeMemory
+    free_memory.argtypes = [ctypes.c_void_p]
+    free_memory.restype = wintypes.LONG
+    close = advapi32.LsaClose
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.LONG
+
+    attributes = ObjectAttributes()
+    attributes.Length = ctypes.sizeof(ObjectAttributes)
+    policy = wintypes.HANDLE()
+    if open_policy(
+        None, ctypes.byref(attributes), policy_view_local_information, ctypes.byref(policy)
+    ):
+        return None
+    buffer = ctypes.c_void_p()
+    try:
+        if query(policy, policy_account_domain_information, ctypes.byref(buffer)):
+            return None
+        if not buffer.value:
+            return None
+        info = ctypes.cast(buffer, ctypes.POINTER(AccountDomainInfo)).contents
+        return _sid_string(info.DomainSid) if info.DomainSid else None
+    finally:
+        if buffer.value:
+            free_memory(buffer)
+        close(policy)
+
+
+def _sid_string(sid: int | None) -> str | None:
+    """The text form of the SID at `sid`, such as `S-1-5-21-...`, or None. Only on
+    Windows."""
+    import ctypes
+
+    if not sid:
+        return None
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    to_string = advapi32.ConvertSidToStringSidW
+    to_string.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    to_string.restype = ctypes.c_int
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [ctypes.c_void_p]
+    local_free.restype = ctypes.c_void_p
+    text = ctypes.c_void_p()
+    if not to_string(sid, ctypes.byref(text)):
+        return None
+    try:
+        return ctypes.wstring_at(text.value) if text.value else None
+    finally:
+        if text.value:
+            local_free(text)

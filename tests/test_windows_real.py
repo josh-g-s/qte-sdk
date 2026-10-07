@@ -18,9 +18,9 @@ is not. Three things differ because of that:
   student cannot do to their own files. The test of a file another account owns relies on
   it.
 - The runner's account is the computer's built-in Administrator (its SID ends in -500),
-  which SDDL writes as the alias LA rather than as its SID. The SDK cannot tell which
-  account LA stands for, so a file this account owns has an owner it reports as unknown,
-  not as yours. A student's own account is usually another one, written as its SID.
+  which SDDL writes as the alias LA rather than as its SID. The SDK asks Windows which SID
+  LA stands for, so a file this account owns is reported as yours. A student's own account
+  is usually another one, written as its SID.
 - An owner always may read and change an object's list, and the runner's token holds
   Administrators, which own what it creates, so a list is hidden from it only once the
   object is given to an owner outside its token: the tests that hide one give it to SYSTEM
@@ -55,11 +55,12 @@ USERS = "S-1-5-32-545"
 TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 QTE_VARIABLES = ("QTE_TOKEN", "QTE_TOKEN_FILE", "QTE_URL")
 # What `token set` and `token check` say when no broad group may read, change or replace
-# the file and its owner is you, Administrators or SYSTEM.
+# the file and its owner is you or a trusted system account.
 CLEAN = (
     "None of Everyone, Authenticated Users, Users, INTERACTIVE or Domain Users can read or "
-    "change it, or add or remove files in its folder, and it is owned by you, Administrators "
-    "or SYSTEM (other groups and users are not checked)"
+    "change it, or add or remove files in its folder, and it is owned by you or a trusted "
+    "system account: Administrators, SYSTEM or TrustedInstaller (other groups and users are "
+    "not checked)"
 )
 # How long a command may take before it counts as hanging.
 TIMEOUT = 20
@@ -350,25 +351,20 @@ def test_a_token_file_in_a_folder_open_to_users_warns(private_folder, monkeypatc
 def test_a_file_owned_by_the_user_has_no_owner_finding(private_folder, user_sid):
     path = write_dotenv(private_folder)
     set_owner(path, user_sid)
-    if user_sid.startswith("S-1-5-21-") and user_sid.endswith("-500"):
-        # CI's runner works as the computer's built-in Administrator account (RID 500),
-        # whose SID SDDL writes as the alias LA. The SDK cannot tell which account LA
-        # stands for, so it reports the owner as unknown rather than as another account:
-        # no warning, and `token check` says the owner could not be checked. A student's
-        # own account is usually another one, which SDDL writes as its SID.
-        assert owner(path) == "LA"
-        expected = None
-    else:
-        assert owner(path) == user_sid
-        expected = False
+    # CI's runner works as the computer's built-in Administrator account (RID 500), whose
+    # SID SDDL writes as the alias LA, which the SDK resolves to that SID (#169). A
+    # student's own account is usually another one, which SDDL writes as its SID.
+    builtin = user_sid.startswith("S-1-5-21-") and user_sid.endswith("-500")
+    assert owner(path) == ("LA" if builtin else user_sid)
     access = _fileaccess.broad_access(path)
     assert access is not None
-    assert access.other_owner is expected
-    assert not access
+    assert access.other_owner is False
+    assert not access, access
     assert shared_warnings(resolve_token) == []
     result = run_sdk("qte_sdk.token", "check", cwd=private_folder)
     assert "warning:" not in result.stdout, result.stdout + result.stderr
-    assert ("its owner could not be checked" in result.stdout) is (expected is None)
+    assert "could not be checked" not in result.stdout, result.stdout
+    assert "owned by you or a trusted system account" in result.stdout, result.stdout
     assert_no_token(result.stdout, result.stderr)
 
 
@@ -1050,3 +1046,99 @@ def test_a_dotenv_reached_through_documents_and_settings_has_no_owner_finding(
     monkeypatch.chdir(via)
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert caught == []
+
+
+# The computer's built-in Administrator and Guest accounts, which SDDL writes as LA and LG.
+# The runner works as the built-in Administrator, so LA is its own account.
+
+
+def test_la_and_lg_are_resolved_to_this_computers_accounts(user_sid, capsys):
+    by_alias = {alias: _fileaccess._alias_sid(alias) for alias in ("LA", "LG")}
+    domain = _fileaccess._account_domain_sid()
+    local = _fileaccess._local_accounts()
+    with capsys.disabled():  # shown in CI's log, to say how they were resolved there
+        print(
+            f"\nConvertStringSidToSidW: {by_alias}; account domain: {domain}; "
+            f"resolved: {local}; user: {user_sid}"
+        )
+    assert domain is not None and user_sid.startswith(domain + "-")
+    assert local == {"LA": f"{domain}-500", "LG": f"{domain}-501"}
+    assert local["LA"] == user_sid  # the runner is the built-in Administrator
+
+
+@pytest.mark.parametrize("where", ["folder", "link folder"])
+def test_a_folder_the_builtin_administrator_owns_gives_no_warning(
+    private_folder, tmp_path, user_sid, monkeypatch, where
+):
+    # The runner is the built-in Administrator, so a folder it owns is its own.
+    target = write_dotenv(private_folder)
+    make_file_private(target, user_sid)
+    if where == "folder":
+        owned, path = private_folder, target
+    else:
+        owned = tmp_path / "holder"
+        owned.mkdir()
+        make_folder_private(owned, user_sid)
+        path = owned / ".env"
+        os.symlink(target, path)
+        monkeypatch.chdir(owned)
+    set_owner(owned, user_sid)
+    assert owner(owned) == "LA"
+    access = _fileaccess.broad_access(path)
+    assert access is not None
+    assert (access.folder_owner if where == "folder" else access.link_owner) is False, access
+    assert not access, access
+    assert shared_warnings(lambda: dotenv.read_value("QTE_TOKEN")) == []
+
+
+# Drives that keep no access lists, such as a USB stick formatted FAT32 or exFAT: anyone
+# using the computer may open any file on one. A small virtual disk of each is made with
+# diskpart (the runner is elevated) and given a free drive letter.
+
+
+def diskpart(script: str) -> str:
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as file:
+        file.write(script)
+    try:
+        result = subprocess.run(
+            ["diskpart", "/s", file.name], capture_output=True, text=True, timeout=180
+        )
+    finally:
+        os.unlink(file.name)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+@pytest.fixture(params=["fat32", "exfat"])
+def drive_without_lists(request, tmp_path):
+    """The root of a new drive formatted `request.param`, such as `Q:\\`."""
+    vhd = tmp_path / f"{request.param}.vhd"
+    letter = next(c for c in "QRSTUVWXYZ" if not os.path.exists(f"{c}:\\"))
+    diskpart(
+        f'create vdisk file="{vhd}" maximum=64 type=expandable\n'
+        f'select vdisk file="{vhd}"\n'
+        "attach vdisk\n"
+        "create partition primary\n"
+        f"format fs={request.param} quick label=QTE\n"
+        f"assign letter={letter}\n"
+    )
+    try:
+        yield Path(f"{letter}:\\")
+    finally:
+        diskpart(f'select vdisk file="{vhd}"\ndetach vdisk\n')
+
+
+def test_a_token_on_a_drive_without_access_lists_warns(drive_without_lists, monkeypatch, capsys):
+    path = drive_without_lists / "token"
+    path.write_text(FAKE_TOKEN + "\n", encoding="utf-8")
+    raw = {str(p): _fileaccess._read_security(str(p)) for p in (path, drive_without_lists)}
+    access = _fileaccess.broad_access(path)
+    with capsys.disabled():  # shown in CI's log, to say what Windows gives there
+        print(f"\nGetNamedSecurityInfoW (status, SDDL): {raw}; the check: {access!r}")
+    assert access is not None and access, (raw, access)
+    monkeypatch.setenv("QTE_TOKEN_FILE", str(path))
+    values: list[str] = []
+    caught = shared_warnings(lambda: values.append(resolve_token()))
+    assert values == [FAKE_TOKEN]
+    assert [w.category for w in caught] == [TokenFileShared], (raw, access)
+    assert_no_token(str(caught[0].message))
