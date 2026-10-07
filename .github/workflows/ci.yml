@@ -56,52 +56,11 @@ jobs:
       - name: Run the tests marked windows
         run: pytest -m windows --junitxml=windows-tests.xml
       # Every test in tests/test_windows_real.py, marked or not, and every test marked
-      # windows anywhere, must be in the report by name, and none skipped, so a test that
-      # loses its mark fails the job. The tests are collected in this process, so the
-      # check does not depend on how pytest prints them.
+      # windows anywhere, must be in the report by name, and none skipped. The script lists
+      # them in a pytest process of its own, before any filter, so a test that loses its
+      # mark, or that -k, --deselect or a conftest hook leaves out, fails the job.
       - name: Fail if a Windows test did not run or was skipped
-        shell: python
-        run: |
-          import xml.etree.ElementTree as ET
-
-          import pytest
-
-          MODULE = "tests/test_windows_real.py"
-
-
-          class Expected:
-              """Collects the node IDs of the tests that must run: every test in MODULE, marked or
-              not, and every test marked windows anywhere."""
-
-              def __init__(self):
-                  self.ids = []
-
-              def pytest_collection_finish(self, session):
-                  self.ids = [
-                      item.nodeid
-                      for item in session.items
-                      if item.nodeid.startswith(MODULE + "::") or item.get_closest_marker("windows")
-                  ]
-
-
-          def junit_key(nodeid):
-              """The (classname, name) pytest's JUnit report gives the test with `nodeid`."""
-              path, *rest = nodeid.split("::")
-              module = path.removesuffix(".py").replace("/", ".")
-              return ".".join([module, *rest[:-1]]), rest[-1]
-
-
-          expected = Expected()
-          code = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "tests"], plugins=[expected])
-          report = "windows-tests.xml"
-          cases = {(c.get("classname"), c.get("name")): c for c in ET.parse(report).getroot().iter("testcase")}
-          skipped = sorted(f"{k[0]}::{k[1]}" for k, c in cases.items() if c.find("skipped") is not None)
-          missing = sorted(i for i in expected.ids if junit_key(i) not in cases)
-          print(f"{len(cases)} ran, {len(skipped)} skipped; {len(expected.ids)} expected")
-          assert code == 0, f"collecting the tests failed ({code})"
-          assert expected.ids, "no test was collected from " + MODULE
-          assert not skipped, f"skipped: {skipped}"
-          assert not missing, f"did not run: {missing}"
+        run: python scripts/check_windows_tests.py windows-tests.xml
       # Left out:
       # - test_reconnect, test_resume, test_calendar, test_instruments,
       #   test_new_message_types and test_tickets: their fake exchange drops a connection
