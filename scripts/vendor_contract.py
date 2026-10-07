@@ -100,7 +100,9 @@ def write_manifest(
         "[blobs]",
     ]
     lines += [f'"{name}" = "{sha}"' for name, sha in blobs.items()]
-    target.manifest.write_text("\n".join(lines) + "\n")
+    # LF on every OS: the manifest is vendored byte for byte (.gitattributes marks it -text),
+    # so a CRLF written on Windows would change the committed file.
+    target.manifest.write_text("\n".join(lines) + "\n", newline="\n")
 
 
 def run(target: Target, platform: Path, check: bool) -> int:

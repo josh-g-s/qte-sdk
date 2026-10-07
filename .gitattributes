@@ -3,3 +3,9 @@
 # them out byte for byte, with no line-ending conversion, whatever core.autocrlf says.
 proto/** -text
 conformance/** -text
+
+# The generated contract code is not hashed, but scripts/generate_contract.py writes it with
+# LF on every OS, and CI regenerates it and fails if it differs. Checking it out with LF
+# everywhere, whatever core.autocrlf says, means a regeneration on Windows leaves the files
+# exactly as they were checked out.
+qte_sdk/contract/v1/** text eol=lf

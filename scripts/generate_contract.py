@@ -69,12 +69,15 @@ def main() -> int:
         if OUT.exists():
             shutil.rmtree(OUT)
         OUT.mkdir(parents=True)
-        (OUT / "__init__.py").write_text(INIT)
+        # Written with LF on every OS, as .gitattributes checks it out, so a regeneration on
+        # Windows leaves the tree unchanged. Reading protoc's output with universal newlines
+        # first means its own line endings never reach the files.
+        (OUT / "__init__.py").write_text(INIT, newline="\n")
         generated = Path(tmp) / "qte" / "contract" / "v1"
         for src in sorted(generated.iterdir()):
             text = IMPORT.sub("from qte_sdk.contract.v1 import ", src.read_text())
             text = MODULE_NAME.sub(r"\1'qte_sdk.contract.v1.", text)
-            (OUT / src.name).write_text(text)
+            (OUT / src.name).write_text(text, newline="\n")
     print(f"generated {len(protos)} protos into {OUT.relative_to(ROOT)}")
     return 0
 
