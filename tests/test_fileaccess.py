@@ -1049,12 +1049,14 @@ def test_a_folder_reached_by_another_name_is_not_a_link(windows, tmp_path, monke
     path = tmp_path / "proj" / ".env"
     path.parent.mkdir()
     path.write_text("")
-    monkeypatch.setattr(
-        os.path, "realpath", lambda p, **kw: str(p).replace(str(tmp_path), "/elsewhere")
-    )
+
+    def elsewhere(p: object, **kwargs: object) -> str:
+        return str(p).replace(str(tmp_path), os.path.join(os.sep, "elsewhere"))
+
+    monkeypatch.setattr(os.path, "realpath", elsewhere)
     windows.sddl = PRIVATE_FILE
     found = _fileaccess.broad_access(path)
-    assert windows.asked == ["/elsewhere/proj/.env", "/elsewhere/proj"]
+    assert windows.asked == [elsewhere(path), elsewhere(path.parent)]
     assert found is not None and found.link_folder_path is None
 
 
@@ -1087,13 +1089,15 @@ def test_a_path_that_cannot_be_looked_at_is_not_a_link(tmp_path):
     assert _fileaccess._is_link(str(tmp_path / "missing")) is False
 
 
-def test_a_dotenv_linking_into_an_open_folder_warns_about_that_folder(windows, tmp_path):
+def test_a_dotenv_linking_into_an_open_folder_warns_about_that_folder(
+    windows, tmp_path, monkeypatch
+):
     link, target = linked(tmp_path, "profile", "open")
     windows.sddl = PRIVATE_FILE
     windows.lists = {str(target.parent): REAL_DRIVE_FOLDER}
     token = synthetic_token()
     target.write_text(f"QTE_TOKEN={token}\n")
-    os.chdir(link.parent)
+    monkeypatch.chdir(link.parent)
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
     message = str(caught[0].message)
@@ -1111,13 +1115,15 @@ def test_a_dotenv_linking_into_an_open_folder_warns_about_that_folder(windows, t
     assert_token_absent(token, message)
 
 
-def test_a_dotenv_link_in_an_open_folder_warns_about_the_links_folder(windows, tmp_path):
+def test_a_dotenv_link_in_an_open_folder_warns_about_the_links_folder(
+    windows, tmp_path, monkeypatch
+):
     link, target = linked(tmp_path, "open", "profile")
     windows.sddl = PRIVATE_FILE
     windows.lists = {str(link.parent): REAL_DRIVE_FOLDER}
     token = synthetic_token()
     target.write_text(f"QTE_TOKEN={token}\n")
-    os.chdir(link.parent)
+    monkeypatch.chdir(link.parent)
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
     message = str(caught[0].message)
@@ -1158,7 +1164,7 @@ def test_a_link_is_resolved_and_read_before_the_token(windows, tmp_path, monkeyp
     windows.lists = {str(target.parent): REAL_DRIVE_FOLDER}
     token = synthetic_token()
     target.write_text(f"QTE_TOKEN={token}\n")
-    os.chdir(link.parent)
+    monkeypatch.chdir(link.parent)
     events: list[str] = []
     real_open, real_realpath, fake_sddl = os.open, os.path.realpath, _fileaccess._read_sddl
 

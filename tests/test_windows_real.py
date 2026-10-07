@@ -547,7 +547,7 @@ def test_a_dotenv_reached_through_a_junction_warns_about_the_folder_holding_it(
         assert_no_token(message)
     finally:
         # The junction goes first, on its own, so no recursive delete goes through it.
-        os.chdir(tmp_path)
+        monkeypatch.chdir(tmp_path)
         os.rmdir(junction)
     assert path.exists()
 
