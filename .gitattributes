@@ -1,0 +1,5 @@
+# The vendored contract and conformance steps are checked against pinned git blob hashes
+# (tests/test_vendored_contract.py, scripts/generate_contract.py), so every clone must check
+# them out byte for byte, with no line-ending conversion, whatever core.autocrlf says.
+proto/** -text
+conformance/** -text

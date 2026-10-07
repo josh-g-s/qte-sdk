@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.13
+**Version:** 0.15
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -13,6 +13,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - CI runs the Windows token-file and console checks against the real Windows API, on a `windows-latest` runner. No change to the SDK itself.
 - On Windows, the check of a `.env` or the file named by `QTE_TOKEN_FILE` now warns, with the same `TokenFileShared` or `AddressFileShared`, when it could not see an access list it looks at: when Windows would not let it see who may open the file, or who may add or remove files in its folder or in a folder that holds a link on the way (it was denied READ_CONTROL), or when a list is in a form it cannot read. Whoever controls a list can hide it so, to hide who may open or replace the file. When the file's own list is hidden, its folders are still checked and named. Other failures to read a list still say nothing. It also compares the owner of the file's folder, and of each folder that holds a link on the way, as it does the file's, and warns when another account owns one (you, Administrators, SYSTEM and Windows' own TrustedInstaller, which owns `C:\`, are not another account), since an owner can change who may add or remove files in it. A name on the way that cannot be looked at now has its folder checked as one that may hold a link. `python -m qte_sdk.token set` and `check` report the same.
 - The CI guard that every Windows test ran (`scripts/check_windows_tests.py`) lists the tests with pytest's default `python_files`, `python_classes` and `python_functions`, so the project's own settings for them cannot shrink the list.
+- A `.gitattributes` keeps the vendored `proto/` and `conformance/` files byte for byte on every clone, so their hash checks and `scripts/generate_contract.py` work on a Windows clone with git's default `core.autocrlf`. No change to the SDK itself.
 
 ## 1.1.0
 

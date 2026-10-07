@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.13
+**Version:** 0.14
 
 ## Requirements
 
@@ -60,7 +60,7 @@ The job runs the tests marked `windows` first, and then `scripts/check_windows_t
 - `test_history.py`: its tests of cancelling a fetch and of shutting down a TLS connection time out on Windows.
 - `test_examples.py`: it sends `SIGINT` to child processes and uses `preexec_fn`, which Windows does not have.
 
-A few other tests check what is printed on macOS and Linux, or need POSIX modes, FIFOs or symbolic links, and skip themselves on Windows. The job sets git's `core.autocrlf` to false before checking out, so the vendored contract keeps the exact bytes its tests hash. The runner works as an elevated administrator, and as the computer's built-in Administrator account, which a student usually is not; `tests/test_windows_real.py` says what that changes.
+A few other tests check what is printed on macOS and Linux, or need POSIX modes, FIFOs or symbolic links, and skip themselves on Windows. `.gitattributes` marks `proto/**` and `conformance/**` as `-text`, so git checks the vendored contract and conformance steps out byte for byte on every clone, a Windows clone with git's default `core.autocrlf=true` included, and their hash checks pass there; the job checks out with the runner's default settings to prove it. The generated `qte_sdk/contract/v1` is left to git's usual line-ending handling: nothing hashes it, and `scripts/generate_contract.py` writes it with the system's line endings, which git normalizes when it compares under the default `core.autocrlf=true`, so a regeneration on Windows shows no changes there. The `contract-drift` job, which compares the regenerated code with what is committed, runs on Linux. The runner works as an elevated administrator, and as the computer's built-in Administrator account, which a student usually is not; `tests/test_windows_real.py` says what that changes.
 
 To run the Windows tests on a Windows machine:
 
