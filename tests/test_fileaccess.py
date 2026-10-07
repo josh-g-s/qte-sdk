@@ -6,6 +6,7 @@ address, or another account owns the file."""
 import logging
 import os
 import secrets
+import sys
 import traceback
 import warnings
 from dataclasses import replace
@@ -1538,16 +1539,6 @@ def test_links_in_one_folder_are_named_together(windows, tmp_path):
     assert f"which holds the links {first} and {second}, so" in message
 
 
-def test_a_loop_of_links_gives_unknown_folders_and_no_hang(windows, tmp_path):
-    (tmp_path / "a.env").symlink_to(tmp_path / "b.env")
-    (tmp_path / "b.env").symlink_to(tmp_path / "a.env")
-    assert _fileaccess.links_on_the_way(tmp_path / "a.env") is None
-    windows.sddl = PRIVATE_FILE
-    found = _fileaccess.broad_access(tmp_path / "a.env")
-    assert found is not None
-    assert found.link_folders is None and found.link_folder is None and found.links == ()
-
-
 def test_a_folder_reached_twice_through_a_junction_above_it_is_not_a_loop(tmp_path):
     # proj/up links to proj itself, so proj/up/up/.env is proj/.env: the same link is met
     # twice, with fewer names left each time.
@@ -1555,8 +1546,8 @@ def test_a_folder_reached_twice_through_a_junction_above_it_is_not_a_loop(tmp_pa
     (tmp_path / "proj" / ".env").write_text("")
     up = tmp_path / "proj" / "up"
     up.symlink_to(tmp_path / "proj", target_is_directory=True)
-    walked = _fileaccess.links_on_the_way(up / "up" / ".env")
-    assert walked == [(str(up), str(tmp_path / "proj"))] * 2
+    walked, unfollowed = _fileaccess.links_on_the_way(up / "up" / ".env")
+    assert walked == [(str(up), str(tmp_path / "proj"))] * 2 and unfollowed is None
 
 
 def make_chain(tmp_path: Path, count: int) -> Path:
@@ -1572,36 +1563,223 @@ def make_chain(tmp_path: Path, count: int) -> Path:
 
 
 def test_a_chain_of_the_most_links_is_followed(tmp_path):
-    walked = _fileaccess.links_on_the_way(make_chain(tmp_path, _fileaccess.MAX_LINKS))
-    assert walked is not None and len(walked) == _fileaccess.MAX_LINKS
+    walked, unfollowed = _fileaccess.links_on_the_way(make_chain(tmp_path, _fileaccess.MAX_LINKS))
+    assert len(walked) == _fileaccess.MAX_LINKS and unfollowed is None
 
 
-def test_a_chain_of_too_many_links_gives_unknown_folders(windows, tmp_path):
-    first = make_chain(tmp_path, _fileaccess.MAX_LINKS + 1)
-    assert _fileaccess.links_on_the_way(first) is None
+def test_a_chain_of_too_many_links_stops_and_says_so(tmp_path):
+    walked, unfollowed = _fileaccess.links_on_the_way(
+        make_chain(tmp_path, _fileaccess.MAX_LINKS + 1)
+    )
+    assert len(walked) == _fileaccess.MAX_LINKS + 1
+    assert unfollowed == f"there are more than {_fileaccess.MAX_LINKS} links on the way"
+
+
+def test_a_loop_of_links_stops_and_says_so(tmp_path):
+    a, b = tmp_path / "a.env", tmp_path / "b.env"
+    a.symlink_to(b)
+    b.symlink_to(a)
+    walked, unfollowed = _fileaccess.links_on_the_way(a)
+    assert [link for link, _ in walked] == [str(a), str(b)]
+    assert unfollowed == f"the link {a} leads round in a loop"
+
+
+def test_a_name_that_does_not_exist_is_not_a_link(tmp_path):
+    assert _fileaccess._is_link(str(tmp_path / "missing" / ".env")) is False
+
+
+# Links that cannot be followed. Whoever may write in a folder on the way could make their
+# link one that cannot be followed, to hide where it leads, so the SDK warns when the file
+# is read, as for an open folder, and still checks the folders of the links met before it.
+# The file itself stays readable here: the walk is made to fail where the system's own
+# resolution does not, as a link Windows follows but the SDK cannot would.
+
+
+def three_links(tmp_path: Path, first: str, text: str) -> tuple[Path, Path, Path, Path]:
+    """proj/<first> -> shared/redirect.env -> mnt/hop.env -> safe/real.env, with `text` in
+    real.env: the first link, the second, the third and the file."""
+    for name in ("proj", "shared", "mnt", "safe"):
+        (tmp_path / name).mkdir(exist_ok=True)
+    target = tmp_path / "safe" / "real.env"
+    target.write_text(text)
+    target.chmod(0o600)
+    hop = tmp_path / "mnt" / "hop.env"
+    hop.symlink_to(target)
+    middle = tmp_path / "shared" / "redirect.env"
+    middle.symlink_to(hop)
+    link = tmp_path / "proj" / first
+    link.symlink_to(middle)
+    return link, middle, hop, target
+
+
+def from_the_walk() -> bool:
+    """Whether the caller's caller is the SDK's own link walk, not the system's resolution
+    (`os.path.realpath`), which is left to succeed."""
+    return sys._getframe(2).f_code.co_name == "links_on_the_way"
+
+
+def unfollowable(monkeypatch: pytest.MonkeyPatch, cause: str, hop: Path) -> str:
+    """Make the walk fail at `hop` for `cause`; what the warning should say about it."""
+    real_readlink, real_lstat = os.readlink, os.lstat
+
+    def readlink_giving(value):
+        def readlink(p, *args, **kwargs):
+            if str(p) == str(hop) and from_the_walk():
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            return real_readlink(p, *args, **kwargs)
+
+        monkeypatch.setattr(os, "readlink", readlink)
+
+    if cause == "loop":
+        readlink_giving(str(hop))
+        return f"the link {hop} leads round in a loop"
+    if cause == "too many":
+        monkeypatch.setattr(_fileaccess, "MAX_LINKS", 2)
+        return "there are more than 2 links on the way"
+    if cause == "unreadable":
+        readlink_giving(PermissionError("access denied"))
+        return f"the link {hop} could not be read"
+    if cause == "volume":
+        readlink_giving("\\??\\Volume{12345678-1234-1234-1234-123456789abc}\\safe\\real.env")
+        return (
+            f"the link {hop} points to a place that is not on a drive or a share, such as a "
+            "volume's own name"
+        )
+    assert cause == "not looked at"
+
+    def denied(p, *args, **kwargs):
+        if str(p) == str(hop) and sys._getframe(1).f_code.co_name == "_is_link":
+            raise PermissionError("access denied")
+        return real_lstat(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", denied)
+    return f"{hop} could not be looked at"
+
+
+CAUSES = ["loop", "too many", "unreadable", "volume", "not looked at"]
+
+
+@pytest.mark.parametrize("cause", CAUSES)
+@pytest.mark.parametrize("source", [".env", TOKEN_FILE_ENV_VAR])
+def test_a_link_that_cannot_be_followed_warns_when_the_token_is_read(
+    windows, tmp_path, monkeypatch, cause, source
+):
+    # The reviewer's chain: the folder of the second link is open, and the third cannot be
+    # followed. Both are said.
+    token = synthetic_token()
+    if source == ".env":
+        first, middle, hop, target = three_links(tmp_path, ".env", f"QTE_TOKEN={token}\n")
+        monkeypatch.chdir(first.parent)
+    else:
+        first, middle, hop, target = three_links(tmp_path, "token", token)
+        monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(first))
     windows.sddl = PRIVATE_FILE
-    found = _fileaccess.broad_access(first)
-    assert found is not None and found.link_folders is None and found.link_folder is None
-
-
-def test_a_link_that_cannot_be_read_gives_unknown_folders(tmp_path, monkeypatch):
-    first, _, _ = chain(tmp_path)
-
-    def unreadable(path, *args, **kwargs):
-        raise OSError("access denied")
-
-    monkeypatch.setattr(os, "readlink", unreadable)
-    assert _fileaccess.links_on_the_way(first) is None
-
-
-def test_unknown_link_folders_are_said_to_be_unchecked():
-    from qte_sdk.token import _none_of_the_checked_groups
-
-    unknown = BroadAccess(folder=(), other_owner=False, link_folders=None)
+    windows.lists = {str(middle.parent): REAL_DRIVE_FOLDER}
+    reason = unfollowable(monkeypatch, cause, hop)
+    with pytest.warns(TokenFileShared) as caught:
+        assert resolve_token() == token
+    message = str(caught[0].message)
+    assert message.startswith(f"{first}, a link that leads on through the link")
     assert (
-        "(the folders that hold the links it is reached through could not be checked, and "
-        "other groups and users are not checked)"
-    ) in _none_of_the_checked_groups(unknown)
+        f"other users can replace it: {AUTHENTICATED} may add or remove files in "
+        f"{middle.parent}, which holds the link {middle}, so other people"
+    ) in message
+    assert (
+        f"Also, it could not be fully checked: {reason}; a link on the way could not be "
+        "followed, so check where it leads."
+    ) in message
+    assert_token_absent(token, message)
+
+
+@pytest.mark.parametrize("cause", CAUSES)
+def test_a_link_that_cannot_be_followed_warns_on_its_own(windows, tmp_path, monkeypatch, cause):
+    token = synthetic_token()
+    first, middle, hop, target = three_links(tmp_path, ".env", f"QTE_TOKEN={token}\n")
+    monkeypatch.chdir(first.parent)
+    windows.sddl = PRIVATE_FILE  # every folder private: the walk is the only finding
+    reason = unfollowable(monkeypatch, cause, hop)
+    found = _fileaccess.broad_access(first)
+    assert found is not None and found.unfollowed == reason
+    assert found and not found.changeable
+    with pytest.warns(TokenFileShared) as caught:
+        assert read_value("QTE_TOKEN") == (token, None)
+    message = str(caught[0].message)
+    assert message.startswith(
+        f"{first}, a link that leads on through the link"
+    ) and message.endswith(" A later release will refuse such a file.")
+    assert (
+        f"holds your token, but it could not be fully checked: {reason}; a link on the way "
+        "could not be followed, so check where it leads. Keep the file itself, not a link to "
+        "it, in a folder under your user profile (%USERPROFILE%), which is private by default."
+    ) in message
+    assert "other people" not in message
+    assert_token_absent(token, message)
+
+
+def test_an_address_file_reached_through_a_link_that_cannot_be_followed_warns(
+    windows, tmp_path, monkeypatch
+):
+    first, middle, hop, target = three_links(tmp_path, ".env", "QTE_URL=ws://127.0.0.1:8080/ws\n")
+    monkeypatch.chdir(first.parent)
+    windows.sddl = PRIVATE_FILE
+    reason = unfollowable(monkeypatch, "volume", hop)
+    with pytest.warns(AddressFileShared) as caught:
+        assert resolve_url() == "ws://127.0.0.1:8080/ws"
+    assert (
+        f"sets QTE_URL, the exchange address, but it could not be fully checked: {reason};"
+    ) in str(caught[0].message)
+
+
+def test_the_folders_of_the_links_met_before_one_that_cannot_be_followed_are_checked(
+    windows, tmp_path, monkeypatch
+):
+    first, middle, hop, target = three_links(tmp_path, ".env", "")
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(middle.parent): REAL_DRIVE_FOLDER}
+    unfollowable(monkeypatch, "unreadable", hop)
+    found = _fileaccess.broad_access(first)
+    assert found is not None
+    assert found.links == (str(first), str(middle), str(hop))
+    assert [(f.path, f.groups) for f in found.link_folders] == [
+        (str(first.parent), ()),
+        (str(middle.parent), (AUTHENTICATED,)),
+        (str(hop.parent), ()),
+    ]
+    assert found.link_folder == (AUTHENTICATED,)
+
+
+def test_a_check_that_fails_outright_still_gives_no_warning(windows, tmp_path, monkeypatch):
+    # Only a walk that stops on Windows warns: an access list that cannot be read at all
+    # gives an unknown result, as before.
+    token = synthetic_token()
+    first, middle, hop, target = three_links(tmp_path, ".env", f"QTE_TOKEN={token}\n")
+    monkeypatch.chdir(first.parent)
+    windows.sddl = None
+    unfollowable(monkeypatch, "volume", hop)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert resolve_token() == token
+
+
+def test_a_link_folder_that_cannot_be_resolved_is_checked_by_its_walked_name(
+    windows, tmp_path, monkeypatch
+):
+    first, middle, target = chain(tmp_path)
+    windows.sddl = PRIVATE_FILE
+    windows.lists = {str(middle.parent): REAL_DRIVE_FOLDER}
+    real = os.path.realpath
+
+    def failing(path, *args, **kwargs):
+        if str(path) == str(middle.parent):
+            raise OSError("cannot resolve")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, "realpath", failing)
+    found = _fileaccess.broad_access(first)
+    assert found is not None and found.unfollowed is None
+    assert found.link_folder == (AUTHENTICATED,)
 
 
 @pytest.mark.parametrize(
@@ -1613,7 +1791,7 @@ def test_unknown_link_folders_are_said_to_be_unchecked():
         ("C:\\proj", "C:\\proj"),
         ("..\\shared\\redirect.env", "..\\shared\\redirect.env"),
         ("\\\\?\\C:", "C:"),
-        # A volume's GUID name, or another namespace, is not followed: the walk is unknown.
+        # A volume's GUID name, or another namespace, is not followed: the walk stops.
         ("\\??\\Volume{12345678-1234-1234-1234-123456789abc}\\shared", None),
         ("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume2\\shared", None),
         ("\\\\?\\C:shared", None),
@@ -1621,44 +1799,3 @@ def test_unknown_link_folders_are_said_to_be_unchecked():
 )
 def test_the_prefix_windows_gives_a_junctions_target_is_removed(target, plain):
     assert _fileaccess._without_prefix(target) == plain
-
-
-def test_a_link_to_a_volumes_guid_name_gives_unknown_folders(tmp_path, monkeypatch):
-    first, _, _ = chain(tmp_path)
-    monkeypatch.setattr(os, "readlink", lambda path, *a, **k: "\\??\\Volume{1234}\\shared")
-    assert _fileaccess.links_on_the_way(first) is None
-
-
-def test_a_name_that_cannot_be_looked_at_gives_unknown_folders(tmp_path, monkeypatch):
-    first, middle, _ = chain(tmp_path)
-    real_lstat = os.lstat
-
-    def denied(path, *args, **kwargs):
-        if str(path) == str(middle):
-            raise PermissionError("access denied")
-        return real_lstat(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "lstat", denied)
-    assert _fileaccess.links_on_the_way(first) is None
-
-
-def test_a_name_that_does_not_exist_is_not_a_link(tmp_path):
-    assert _fileaccess._is_link(str(tmp_path / "missing" / ".env")) is False
-
-
-def test_a_link_folder_that_cannot_be_resolved_is_unknown_not_an_error(
-    windows, tmp_path, monkeypatch
-):
-    first, middle, target = chain(tmp_path)
-    windows.sddl = PRIVATE_FILE
-    real = os.path.realpath
-
-    def failing(path, *args, **kwargs):
-        if str(path) == str(middle.parent):
-            raise OSError("cannot resolve")
-        return real(path, *args, **kwargs)
-
-    monkeypatch.setattr(os.path, "realpath", failing)
-    found = _fileaccess.broad_access(first)
-    assert found is not None and found.file == str(target)
-    assert found.link_folders is None and found.link_folder is None and found.links == ()

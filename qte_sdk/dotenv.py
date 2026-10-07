@@ -34,7 +34,8 @@ Three safeguards apply:
   `FileShared`. A folder under your user profile is private by default; a folder on
   another drive, such as `D:\\`, usually is not. When the `.env` is reached through
   symbolic links or junctions, the file and the folder checked are those they lead to,
-  and each folder that holds a link on the way is checked too. The file is still used,
+  and each folder that holds a link on the way is checked too; if a link cannot be
+  followed, the warning says the file could not be fully checked. The file is still used,
   though a later release will refuse it. The same check applies to the file named by
   `QTE_TOKEN_FILE` (see `qte_sdk.session`).
 - If the `.env`, or the file it links to, is inside a git working tree and git tracks
@@ -98,7 +99,8 @@ class DotenvNotIgnored(UserWarning):
 
 class FileShared(UserWarning):
     """On Windows, a broad group of users, such as Everyone or Users, may read, change or
-    replace a file the SDK reads its setup from, or another account owns it. Catch this to
+    replace a file the SDK reads its setup from, or another account owns it, or a link on
+    the way to it could not be followed, so it could not be fully checked. Catch this to
     handle both kinds below."""
 
 
@@ -224,7 +226,8 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             "so only you can"
         )
     warn = access is not None and (
-        (holds_token and access) or (access.changeable and _assigns(text, _URL_NAME))
+        (holds_token and access)
+        or ((access.changeable or access.unfollowed) and _assigns(text, _URL_NAME))
     )
     value, problem = _parse(text, name)
     del text  # released before the warning, which runs code that is not the SDK's
@@ -298,7 +301,8 @@ def shared_message(
     `path`, or another account owns it. `path` holds the token if `holds_token`, and is a
     `.env` that can set the exchange address if `sets_address`. Names only the path, and
     when it is reached through links, the links and the file they lead to; their folders;
-    and the groups. Resolves no path: where the lists were read is taken from `access`."""
+    and the groups; and, if a link on the way could not be followed, why. Resolves no
+    path: where the lists were read is taken from `access`."""
     changers = list(access.write)
     readers = [group for group in access.read if group not in changers] if holds_token else []
     replacers = list(access.folder or ())
@@ -348,7 +352,12 @@ def shared_message(
     elif access.changeable:
         risks.append("replace your token")
     groups = set(changers + readers + replacers + link_replacers)
-    if access.other_owner:
+    if not findings:
+        fix = (
+            "Keep the file itself, not a link to it, in a folder under your user profile "
+            "(%USERPROFILE%), which is private by default."
+        )
+    elif access.other_owner:
         it = f"the file it {verb}" if linked else "it"
         fix = (
             f"Delete {it} and make it again yourself, in a folder under your user profile "
@@ -363,19 +372,38 @@ def shared_message(
         )
     what = "holds your token" if holds_token else f"sets {_URL_NAME}, the exchange address"
     name = f"{path}"
-    if is_link and via:
+    if access.unfollowed:
+        # Where the links lead is not known, so no file is named as their end.
+        if is_link and via:
+            name = f"{path}, a link that leads on through {_the_links(via)},"
+        elif is_link:
+            name = f"{path}, a link,"
+        elif via:
+            name = f"{path}, reached through {_the_links(via)},"
+    elif is_link and via:
         name = f"{path}, a link that leads to {file} through {_the_links(via)},"
     elif is_link:
         name = f"{path}, a link to {file},"
     elif via:
         name = f"{path}, which leads to {file} through {_the_links(via)},"
+    unchecked = (
+        f"it could not be fully checked: {access.unfollowed}; a link on the way could not be "
+        "followed, so check where it leads"
+    )
+    if findings:
+        said = (
+            f"{name} {what}, and {_join(findings, '; ')}, so other people who use this "
+            f"computer could {' or '.join(risks)}."
+        )
+        if access.unfollowed:
+            said += f" Also, {unchecked}."
+    else:
+        said = f"{name} {what}, but {unchecked}."
     holders = [holder.path for holder in link_folders]
     folders = "folders" if holders else "folder"
     return (
-        f"{name} {what}, and {_join(findings, '; ')}, so other people who use this "
-        f"computer could {' or '.join(risks)}. {fix} To see who can open the {folders} and "
-        f"the file, {_icacls(folder, file, holders)}. A later release will refuse such a "
-        "file."
+        f"{said} {fix} To see who can open the {folders} and the file, "
+        f"{_icacls(folder, file, holders)}. A later release will refuse such a file."
     )
 
 

@@ -670,10 +670,10 @@ def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:
     listed = ", ".join(names[:-1]) + f" or {names[-1]}"
     text = f"None of {listed} can read or change it"
     folders: list[tuple[str, object]] = [("its folder", access.folder)]
-    if access.link_folders is None or access.link_folders:
+    if access.link_folders:
         which = (
             "the folder that holds the link"
-            if access.link_folders and len(access.link_folders) == 1
+            if len(access.link_folders) == 1
             else "the folders that hold the links"
         )
         folders.append((f"{which} it is reached through", access.link_folder))

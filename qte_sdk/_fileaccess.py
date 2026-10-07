@@ -153,30 +153,38 @@ class BroadAccess:
     `folder` is None when the folder's list was not read, and `other_owner` None when the
     owner was not read or could not be compared with the current user. `link_folder` is
     None when no link leads to the file from another folder, and also when no group was
-    found in those folders but a folder's list, or the links themselves, could not be read
-    (see `link_folders`). False when no broad group may do any of these and no other
-    account is known to own the file.
+    found in those folders but a folder's list could not be read (see `link_folders`).
+
+    `unfollowed` says, in plain words, why the links on the way could not all be followed,
+    or is None if they could (see `links_on_the_way`): a loop, more than `MAX_LINKS` of
+    them, a link that could not be read or that points outside any drive or share, or a
+    name that could not be looked at. Whoever made such a link may have done so to hide
+    where it leads, so a result with one is true, like one with a finding. The folders of
+    the links met before it are still checked.
+
+    False when no broad group may do any of these, no other account is known to own the
+    file and every link on the way was followed.
 
     `file`, `folder_path`, `links` and `link_folders` say where those lists were read: the
     file the path resolves to, its folder, every link met on the way, in order, and each
     folder that holds one of them, other than the file's own folder (see `LinkFolder`).
-    `link_folders` is None when the links could not be followed: a loop, more than
-    `MAX_LINKS` of them, or a link that could not be read. These are not compared: two
-    results are equal when they find the same. When `file` or `folder_path` is None, the
-    path the check was asked about, or its folder, stands for it."""
+    These are not compared: two results are equal when they find the same. When `file` or
+    `folder_path` is None, the path the check was asked about, or its folder, stands for
+    it."""
 
     read: tuple[str, ...] = ()
     write: tuple[str, ...] = ()
     folder: tuple[str, ...] | None = None
     other_owner: bool | None = None
     link_folder: tuple[str, ...] | None = None
+    unfollowed: str | None = None
     file: str | None = field(default=None, compare=False)
     folder_path: str | None = field(default=None, compare=False)
     links: tuple[str, ...] = field(default=(), compare=False)
-    link_folders: tuple[LinkFolder, ...] | None = field(default=(), compare=False)
+    link_folders: tuple[LinkFolder, ...] = field(default=(), compare=False)
 
     def __bool__(self) -> bool:
-        return bool(self.read or self.write or self.changeable)
+        return bool(self.read or self.write or self.changeable or self.unfollowed)
 
     @property
     def changeable(self) -> bool:
@@ -202,15 +210,16 @@ def broad_access(path: Path | str) -> BroadAccess | None:
 
     When `path` is reached through links, the file, its folder and its owner are those of
     the file it resolves to, and `link_folder` gives the groups that may add or remove
-    files in the folders that hold the links. Every link is followed and every list read
-    here, before the caller opens the file, since following a link is itself a call to the
-    Windows API."""
+    files in the folders that hold the links. If a link cannot be followed, `unfollowed`
+    says why, and the folders of the links met before it are still checked. Every link is
+    followed and every list read here, before the caller opens the file, since following a
+    link is itself a call to the Windows API."""
     if not on_windows():
         return None
     try:
         file = os.path.realpath(path)
         folder_path = os.path.dirname(file)
-        walked = links_on_the_way(path)
+        walked, unfollowed = links_on_the_way(path)
         # Microsoft does not document whether GetNamedSecurityInfoW follows a symbolic link,
         # and documents that GetFileSecurity reads the link itself, so the list of the file
         # the path resolves to is asked for by that file's own path.
@@ -223,14 +232,12 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     if access is None:
         return None
     folder = _folder_access(folder_path)
-    links: tuple[str, ...] = ()
-    link_folders: tuple[LinkFolder, ...] | None = None
-    if walked is not None:
-        links = tuple(link for link, _ in walked)
-        try:
-            link_folders = _link_folders(walked, folder_path)
-        except Exception:
-            walked, links = None, ()  # the folders could not be named: unknown
+    links = tuple(link for link, _ in walked)
+    try:
+        link_folders = _link_folders(walked, folder_path)
+    except Exception:
+        link_folders = ()
+        unfollowed = unfollowed or "the folders that hold the links on the way could not be named"
     try:
         user = _current_user_sid()
     except Exception:
@@ -239,7 +246,8 @@ def broad_access(path: Path | str) -> BroadAccess | None:
         access,
         folder=folder,
         other_owner=owner_is_other(sddl, user),
-        link_folder=_link_finding(walked, link_folders),
+        link_folder=_link_finding(link_folders),
+        unfollowed=unfollowed,
         file=file,
         folder_path=folder_path,
         links=links,
@@ -247,18 +255,20 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     )
 
 
-# The most links followed on the way to a file, as an operating system bounds them; more
-# gives an unknown result rather than a long walk.
+# The most links followed on the way to a file, as an operating system bounds them; the
+# walk stops at one more, and says so, rather than go on.
 MAX_LINKS = 40
 
 
-def links_on_the_way(path: Path | str) -> list[tuple[str, str]] | None:
+def links_on_the_way(path: Path | str) -> tuple[list[tuple[str, str]], str | None]:
     """Each link met while `path` is resolved, in order, with the folder that holds it:
     links at the file and at folders on its path, and links in what each link points to.
-    A link's folder is given resolved through every link before it. None if they cannot be
-    followed: a loop, more than `MAX_LINKS` links, a name that cannot be looked at, or a
-    link whose target cannot be read or is not an ordinary path (such as a volume's GUID
-    name), so no link on the way is left out unsaid.
+    A link's folder is given resolved through every link before it.
+
+    Also None if every link was followed, or, in plain words, why the walk stopped: a
+    loop, more than `MAX_LINKS` links, a name that cannot be looked at, or a link whose
+    target cannot be read or is not on a drive or a share (such as a volume's GUID name).
+    The links met up to it, the one that could not be followed included, are still given.
 
     The path is resolved one name at a time, from its root. A link's target is joined to
     the link's folder, so a relative one is taken from there, and `..` in it is applied to
@@ -272,26 +282,33 @@ def links_on_the_way(path: Path | str) -> list[tuple[str, str]] | None:
         candidate = os.path.join(current, name)
         link = _is_link(candidate)
         if link is None:
-            return None
+            return found, f"{candidate} could not be looked at"
         if not link:
             current = candidate
             continue
         # The same link with the same names left to resolve is a loop; the same link met
         # again with fewer names left, through a junction to a folder above it, is not.
         state = (os.path.normcase(candidate), tuple(map(os.path.normcase, pending)))
-        if state in seen or len(found) >= MAX_LINKS:
-            return None
+        if state in seen:
+            return found, f"the link {candidate} leads round in a loop"
         seen.add(state)
+        # Kept even if it cannot be followed: whoever may replace it in its folder may
+        # point it anywhere.
+        found.append((candidate, current))
+        if len(found) > MAX_LINKS:
+            return found, f"there are more than {MAX_LINKS} links on the way"
         try:
             target = _without_prefix(os.readlink(candidate))
         except (OSError, ValueError):
-            return None
+            return found, f"the link {candidate} could not be read"
         if target is None:
-            return None
-        found.append((candidate, current))
+            return found, (
+                f"the link {candidate} points to a place that is not on a drive or a share, "
+                "such as a volume's own name"
+            )
         root, names = _split(os.path.normpath(os.path.join(current, target)))
         current, pending = root, names + pending
-    return found
+    return found, None
 
 
 def _split(path: str) -> tuple[str, list[str]]:
@@ -327,7 +344,10 @@ def _link_folders(walked: list[tuple[str, str]], folder: str) -> tuple[LinkFolde
     the same folder, such as a mapped drive's or a short 8.3 name, counts as the same."""
     holders: dict[str, tuple[str, list[str]]] = {}
     for link, holder in walked:
-        real = os.path.realpath(holder)
+        try:
+            real = os.path.realpath(holder)
+        except (OSError, ValueError):
+            real = os.path.normpath(holder)  # checked by the name the walk gave it
         if _same(real, folder):
             continue
         holders.setdefault(os.path.normcase(os.path.normpath(real)), (real, []))[1].append(link)
@@ -336,18 +356,16 @@ def _link_folders(walked: list[tuple[str, str]], folder: str) -> tuple[LinkFolde
     )
 
 
-def _link_finding(
-    walked: list[tuple[str, str]] | None, link_folders: tuple[LinkFolder, ...] | None
-) -> tuple[str, ...] | None:
+def _link_finding(link_folders: tuple[LinkFolder, ...]) -> tuple[str, ...] | None:
     """The broad groups that may add or remove files in any of `link_folders`, in the order
     of `BROAD_GROUPS`; or None if there is none to look at, or none was found but a
-    folder's list, or the links themselves (`walked` is None), could not be read."""
-    if link_folders is None or not link_folders:
+    folder's list could not be read."""
+    if not link_folders:
         return None
     found = {group for f in link_folders for group in (f.groups or ())}
     if found:
         return tuple(group for group in BROAD_GROUPS if group in found)
-    if walked is None or any(f.groups is None for f in link_folders):
+    if any(f.groups is None for f in link_folders):
         return None
     return ()
 

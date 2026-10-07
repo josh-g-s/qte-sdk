@@ -442,7 +442,7 @@ def real(path: Path) -> str:
     return os.path.realpath(path)
 
 
-def make_junction(link: Path, target: Path) -> None:
+def make_junction(link: Path, target: Path | str) -> None:
     result = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(link), str(target)],
         capture_output=True,
@@ -692,3 +692,91 @@ def test_a_junction_above_a_chain_of_links_warns_about_each_open_folder(
     finally:
         monkeypatch.chdir(tmp_path)
         os.rmdir(junction)
+
+
+# Links the SDK cannot follow, though Windows does: the file is still read, so the warning
+# must come when it is.
+
+
+def test_a_chain_longer_than_the_sdk_follows_warns_when_the_token_is_read(
+    private_folder, tmp_path, user_sid
+):
+    # Windows follows up to 63 links; the SDK follows MAX_LINKS (40) and says when it stops.
+    links = tmp_path / "links"
+    links.mkdir()
+    make_folder_private(links, user_sid)
+    target = write_dotenv(links)
+    make_file_private(target, user_sid)
+    following = target
+    for number in range(_fileaccess.MAX_LINKS + 1, 0, -1):
+        link = links / f"link{number}.env"
+        os.symlink(following, link)
+        following = link
+    os.symlink(following, private_folder / ".env")
+    access = _fileaccess.broad_access(private_folder / ".env")
+    assert access is not None
+    assert access.unfollowed == f"there are more than {_fileaccess.MAX_LINKS} links on the way"
+    assert access.file == real(target)  # Windows itself reached the file
+
+    caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+    assert [w.category for w in caught] == [TokenFileShared]
+    message = str(caught[0].message)
+    assert (
+        "holds your token, but it could not be fully checked: there are more than "
+        f"{_fileaccess.MAX_LINKS} links on the way; a link on the way could not be followed, "
+        "so check where it leads."
+    ) in message
+    assert_no_token(message)
+
+
+def volume_name(path: Path) -> str:
+    """`path` written with its volume's GUID name, such as `\\\\?\\Volume{...}\\Users\\...`,
+    from `mountvol`, not from the SDK."""
+    drive, rest = os.path.splitdrive(real(path))
+    result = subprocess.run(
+        ["mountvol", drive + "\\", "/L"], capture_output=True, text=True, timeout=TIMEOUT
+    )
+    volume = result.stdout.strip()
+    assert result.returncode == 0 and volume.startswith("\\\\?\\Volume{"), result.stdout
+    return volume.rstrip("\\") + rest
+
+
+def test_a_junction_to_a_volumes_guid_name_warns_with_the_open_folder_before_it(
+    tmp_path, user_sid, monkeypatch
+):
+    # The reviewer's case: a folder open to Users holds a junction whose target is written
+    # with a volume's GUID name, which Windows follows and the SDK does not.
+    holder = tmp_path / "open"
+    safe = tmp_path / "safe"
+    for folder in (holder, safe):
+        folder.mkdir()
+        make_folder_private(folder, user_sid)
+    path = write_dotenv(safe)
+    make_file_private(path, user_sid)
+    junction = holder / "project"
+    make_junction(junction, volume_name(safe))
+    open_folder_to_users(holder)
+    try:
+        monkeypatch.chdir(junction)
+        access = _fileaccess.broad_access(junction / ".env")
+        assert access is not None
+        assert access.links == (str(junction),)
+        assert access.link_folder == ("BUILTIN\\Users",)
+        assert access.unfollowed is not None and str(junction) in access.unfollowed
+
+        caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+        assert [w.category for w in caught] == [TokenFileShared]
+        message = str(caught[0].message)
+        assert (
+            f"BUILTIN\\Users may add or remove files in {real(holder)}, which holds the link "
+            f"{junction}, so other people"
+        ) in message, message
+        assert (
+            f"Also, it could not be fully checked: {access.unfollowed}; a link on the way "
+            "could not be followed, so check where it leads."
+        ) in message
+        assert_no_token(message)
+    finally:
+        monkeypatch.chdir(tmp_path)
+        os.rmdir(junction)
+    assert path.exists()
