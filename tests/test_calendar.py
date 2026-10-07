@@ -3,7 +3,7 @@
 import asyncio
 
 import pytest
-from fake_exchange import LoopClock, frame, serve_local
+from fake_exchange import LoopClock, drop_connection, frame, serve_local
 from test_reconnect import Clock, Exchange, book, drop, session
 from test_session import ack, synthetic_token
 from websockets.asyncio.server import ServerConnection
@@ -237,7 +237,7 @@ async def test_a_drop_while_waiting_is_raised_by_iteration_after_the_kept_events
         await ws.send(ack())
         await ws.send(book(2))
         await asyncio.sleep(0.1)
-        ws.transport.abort()
+        await drop_connection(ws)
 
     async with serve_local(handler) as url:
         async with await open_session(url, synthetic_token()) as sess:

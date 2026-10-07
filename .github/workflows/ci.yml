@@ -40,8 +40,8 @@ jobs:
 
   windows:
     # The Windows token-file and console checks (tests marked `windows`) read real access
-    # lists, owners and consoles, so they run only here. The rest of the suite runs too,
-    # except the files below, which do not work on Windows yet. See "Windows" in
+    # lists, owners and consoles, so they run only here. The rest of the suite runs too; the
+    # few tests that cannot run on Windows skip themselves and say why. See "Windows" in
     # docs/development.md.
     runs-on: windows-latest
     timeout-minutes: 30
@@ -64,27 +64,17 @@ jobs:
       - name: TEMP issue 168 diagnosis
         if: success() || failure()
         continue-on-error: true
+        shell: bash
         run: |
           pip install pytest-timeout
           python scripts/diag_windows_168.py
-      # Left out:
-      # - test_reconnect, test_resume, test_calendar, test_instruments,
-      #   test_new_message_types and test_tickets: their fake exchange drops a connection
-      #   with transport.abort(), and on Windows the reset discards the frames sent just
-      #   before it, so the client sees the drop a message early; one test hangs.
-      # - test_examples: it sends SIGINT to child processes and uses preexec_fn, which
-      #   Windows does not have.
+          for i in 1 2 3 4 5; do
+            echo "=== repeat $i"
+            pytest -q -p no:cacheprovider --timeout=90 tests/test_reconnect.py tests/test_resume.py tests/test_calendar.py tests/test_instruments.py tests/test_new_message_types.py tests/test_tickets.py 2>&1 | tail -8
+          done
       - name: Run the rest of the suite
         if: success() || failure()
-        run: >-
-          pytest -m "not windows"
-          --ignore=tests/test_reconnect.py
-          --ignore=tests/test_resume.py
-          --ignore=tests/test_calendar.py
-          --ignore=tests/test_instruments.py
-          --ignore=tests/test_new_message_types.py
-          --ignore=tests/test_tickets.py
-          --ignore=tests/test_examples.py
+        run: pytest -m "not windows"
 
   test-websockets-floor:
     runs-on: ubuntu-latest

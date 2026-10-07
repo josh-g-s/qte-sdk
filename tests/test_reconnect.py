@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 
 import pytest
-from fake_exchange import frame, serve_local
+from fake_exchange import drop_connection, frame, serve_local
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
@@ -89,7 +89,7 @@ def resting_order(seq: int) -> str:
 
 
 async def drop(ws: ServerConnection, exchange: Exchange) -> None:
-    ws.transport.abort()
+    await drop_connection(ws)
 
 
 async def close_normally(ws: ServerConnection, exchange: Exchange) -> None:

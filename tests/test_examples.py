@@ -82,6 +82,12 @@ TICK = 10_000
 # The longest any run may take, well beyond each example's own bound.
 RUN_LIMIT = 30.0
 
+# For a test that stops a child process with Ctrl+C. Windows has no SIGINT to send to a
+# single child: CTRL_C_EVENT goes to every process on the console, the tests' own included.
+SENDS_SIGINT = pytest.mark.skipif(
+    sys.platform == "win32", reason="sends SIGINT to a child process, which Windows cannot"
+)
+
 
 def test_the_examples_directory_has_the_three_worked_examples():
     names = {path.name for path in EXAMPLES}
@@ -1310,6 +1316,7 @@ async def read_until(process: asyncio.subprocess.Process, text: bytes, seen: byt
         seen += line
 
 
+@SENDS_SIGINT
 async def test_quote_both_sides_cancels_its_orders_on_ctrl_c():
     exchange = FakeExchange()
     async with serve_local(exchange) as url:
@@ -1339,6 +1346,7 @@ async def until(condition: Callable[[], bool]) -> None:
         await asyncio.sleep(0.01)
 
 
+@SENDS_SIGINT
 async def test_quote_both_sides_finishes_cancelling_on_ctrl_c_during_cleanup():
     # The cancels are confirmed only when the test says so, so the Ctrl+C lands while the
     # example waits for those confirmations.
@@ -1373,6 +1381,7 @@ async def test_quote_both_sides_finishes_cancelling_on_ctrl_c_during_cleanup():
     assert exchange.resting == {}
 
 
+@SENDS_SIGINT
 async def test_quote_both_sides_stops_at_once_on_a_second_ctrl_c_during_cleanup():
     # Cancels are never confirmed, so without a second Ctrl+C cleanup would run for the
     # whole of --drain-seconds.
@@ -3311,6 +3320,7 @@ async def test_the_smoke_test_cancels_its_orders_level_when_interrupted(
     assert exchange.resting == {}
 
 
+@SENDS_SIGINT
 async def test_the_smoke_tests_cleanup_after_an_interruption_is_bounded():
     # The cancels are never confirmed: the cleanup gives up after its bound and warns.
     exchange = FakeExchange(
