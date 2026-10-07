@@ -63,7 +63,9 @@ sends the same requests as the command, and nothing more. The day is counted fro
 file holding the time of the last check, written just before the check starts, so a failed
 check is not retried until the next day: `qte-sdk/update-check` in your cache folder
 (`%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` or
-`~/.cache` elsewhere). When the file cannot be written, the check does not run. A program
+`~/.cache` elsewhere). While a program reads and writes it, it holds
+`update-check.lock` beside it, so two programs started together do not both check. When
+the file cannot be written, the check does not run. A program
 that calls `check_for_update()` itself is not checked again automatically. Set
 `QTE_UPDATE_CHECK=0` in the environment to turn it off. Replays and past market data
 (`qte_sdk.replay`, `qte_sdk.history`) never start it, and the SDK's own tests turn it off.
@@ -521,8 +523,9 @@ def _read_at_most(response: Any, limit: int, deadline: float, timeout: float) ->
     while len(data) <= limit:
         if time.monotonic() > deadline:
             raise _CannotTell(f"{REPOSITORY} did not answer within {timeout:g} s")
-        # At most one read from the connection, so the deadline is checked often.
-        chunk = response.read1(_CHUNK)
+        # At most one read from the connection, so the deadline is checked often, and never
+        # more than one byte beyond the limit.
+        chunk = response.read1(min(_CHUNK, limit + 1 - len(data)))
         if not chunk:
             return bytes(data)
         data += chunk
@@ -862,6 +865,10 @@ def _unknown(version: str, install: _Install, reason: str) -> UpdateCheck:
 # The automatic check
 
 _STAMP = "update-check"
+# Held by a program while it decides whether to check, and removed when it is older than
+# `_STALE_LOCK` seconds.
+_LOCK = "update-check.lock"
+_STALE_LOCK = 60.0
 _automatic_lock = threading.Lock()
 # True once this program has started the automatic check, or called check_for_update.
 _automatic_done = False
@@ -917,11 +924,37 @@ def _claim_the_day() -> bool:
     """Whether the automatic check may run now: true when no check has started on this
     computer within `CHECK_INTERVAL`, recording now as the time of the last one before
     saying so. False when the time cannot be recorded, so a check that cannot be counted
-    never runs."""
+    never runs, and while another program is deciding the same, so two programs started
+    together do not both check."""
     folder = _cache_dir()
     if folder is None:
         return False
-    stamp = folder / _STAMP
+    lock = folder / _LOCK
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        held = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        # Another program is deciding. A lock left by one that stopped part way is removed
+        # once it is old, for the next program.
+        try:
+            if time.time() - lock.stat().st_mtime > _STALE_LOCK:
+                lock.unlink()
+        except OSError:
+            pass
+        return False
+    except OSError:
+        return False
+    try:
+        return _claim_with_the_lock(folder / _STAMP)
+    finally:
+        os.close(held)
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
+def _claim_with_the_lock(stamp: Path) -> bool:
     now = time.time()
     try:
         with open(stamp, "rb") as file:
@@ -931,7 +964,6 @@ def _claim_the_day() -> bool:
     if math.isfinite(last) and 0 <= now - last < CHECK_INTERVAL:
         return False
     try:
-        folder.mkdir(parents=True, exist_ok=True)
         # Rounded down, so the next check never finds it in the future.
         stamp.write_text(f"{math.floor(now)}\n", encoding="ascii")
     except OSError:

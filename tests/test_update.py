@@ -2039,3 +2039,46 @@ def test_no_home_folder_gives_no_cache_folder(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.windows
 def test_the_cache_folder_on_real_windows_is_under_localappdata():
     assert ORIGINAL_CACHE_DIR() == Path(os.environ["LOCALAPPDATA"]) / "qte-sdk"
+
+
+def test_two_programs_deciding_at_once_do_not_both_check(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    # Another program holds the lock while it decides.
+    automatic.parent.mkdir(parents=True)
+    lock = automatic.parent / "update-check.lock"
+    lock.write_text("")
+    repository = behind_a_release(monkeypatch)
+    run_in_background()
+    assert repository.requests == []
+    assert not automatic.exists()
+    assert lock.exists()
+
+
+def test_a_lock_left_by_a_program_that_stopped_is_cleared_for_the_next(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    automatic.parent.mkdir(parents=True)
+    lock = automatic.parent / "update-check.lock"
+    lock.write_text("")
+    old = time.time() - 10 * 60
+    os.utime(lock, (old, old))
+    repository = behind_a_release(monkeypatch)
+    run_in_background()
+    assert not lock.exists()
+    new_program(monkeypatch)
+    run_in_background()
+    assert len(repository.requests) == 1
+    # The lock is released after each decision.
+    assert not lock.exists()
+
+
+def test_releases_json_is_read_no_further_than_one_byte_past_its_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    body = b"[" + b" " * (4 * update._MAX_RELEASES_SIZE) + b"]"
+    response = FakeResponse(body, update.RELEASES_URL, "text/plain")
+    monkeypatch.setattr(update, "_open", lambda request, timeout: response)
+    with pytest.raises(update._CannotTell):
+        update._read_releases(5)
+    assert len(body) - len(response.body) == update._MAX_RELEASES_SIZE + 1

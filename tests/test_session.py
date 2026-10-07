@@ -847,6 +847,8 @@ async def test_opening_a_session_starts_the_update_check_without_waiting_for_it(
         raise TimeoutError
 
     monkeypatch.setattr(update, "_open", hanging)
+    # A git install of the repository, whatever installed the SDK under test.
+    monkeypatch.setattr(update, "_installed", lambda version: update._Install("1" * 40))
     started: list[threading.Thread | None] = []
     real_start = update.check_in_background
     monkeypatch.setattr(
