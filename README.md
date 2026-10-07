@@ -32,10 +32,10 @@ In cmd, activate with `.venv\Scripts\activate.bat` instead. If PowerShell says r
 The `git+https` install needs git. If you do not have it, either install git (on Windows, `winget install Git.Git`, then open a new terminal) or install a release from its zip, which needs no git:
 
 ```sh
-pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.2.zip
+pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.1.0.zip
 ```
 
-That is the latest release, v1.0.2, as this is written. The [changelog](CHANGELOG.md) lists each release, and the update check below says when a newer one is out.
+That is the latest release, v1.1.0, as this is written. The [changelog](CHANGELOG.md) lists each release, and the update check below says when a newer one is out.
 
 This installs the `qte_sdk` package only, not the [worked examples](examples/); you do not need them to use the SDK. To run or read them, clone this repository or, without git, download the source zip of the release you installed (the address above, or the repository's Releases or Tags page on GitHub) and unzip it, so the examples match your SDK. A zip of `main` may be newer than the release you installed. Then copy its `examples` folder into your project folder, the one that holds your `.env` (below), and run the examples from the project folder: the SDK reads `.env` only from the folder you run in.
 
