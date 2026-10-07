@@ -335,14 +335,37 @@ def test_a_token_file_in_a_folder_open_to_users_warns(private_folder, monkeypatc
 # Owners
 
 
-@pytest.mark.parametrize("who", ["user", "administrators"])
-def test_a_file_owned_by_the_user_or_administrators_has_no_owner_finding(
-    private_folder, user_sid, who
-):
+def test_a_file_owned_by_the_user_has_no_owner_finding(private_folder, user_sid):
     path = write_dotenv(private_folder)
-    sid = user_sid if who == "user" else ADMINISTRATORS
-    set_owner(path, sid)
-    assert owner(path) in ((user_sid,) if who == "user" else ("BA", ADMINISTRATORS))
+    set_owner(path, user_sid)
+    if user_sid.startswith("S-1-5-21-") and user_sid.endswith("-500"):
+        # CI's runner works as the computer's built-in Administrator account (RID 500),
+        # whose SID SDDL writes as the alias LA. The SDK cannot tell which account LA
+        # stands for, so it reports the owner as unknown rather than as another account:
+        # no warning, and `token check` says the owner could not be checked. A student's
+        # own account is usually another one, which SDDL writes as its SID.
+        assert owner(path) == "LA"
+        expected = None
+    else:
+        assert owner(path) == user_sid
+        expected = False
+    access = _fileaccess.broad_access(path)
+    assert access is not None
+    assert access.other_owner is expected
+    assert not access
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FileShared)
+        assert resolve_token() == FAKE_TOKEN
+    result = run_sdk("qte_sdk.token", "check", cwd=private_folder)
+    assert "warning:" not in result.stdout, result.stdout + result.stderr
+    assert ("its owner could not be checked" in result.stdout) is (expected is None)
+    assert_no_token(result.stdout, result.stderr)
+
+
+def test_a_file_owned_by_administrators_has_no_owner_finding(private_folder):
+    path = write_dotenv(private_folder)
+    set_owner(path, ADMINISTRATORS)
+    assert owner(path) in ("BA", ADMINISTRATORS)
     access = _fileaccess.broad_access(path)
     assert access is not None
     assert access.other_owner is False

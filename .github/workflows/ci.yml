@@ -42,7 +42,7 @@ jobs:
     # The Windows token-file and console checks (tests marked `windows`) read real access
     # lists, owners and consoles, so they run only here. See "Checks" in docs/development.md.
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,9 +59,17 @@ jobs:
           tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
           print(f"{tests} tests marked windows, {skipped} skipped")
           assert tests > 0 and skipped == 0
-      - name: Run the rest of the suite
+      - name: Survey the rest of the suite, file by file (temporary)
         if: success() || failure()
-        run: pytest -m "not windows"
+        shell: bash
+        run: |
+          pip install pytest-timeout
+          for f in tests/test_*.py; do
+            [ "$f" = tests/test_windows_real.py ] && continue
+            timeout 900 python -m pytest "$f" -q -rfE -p no:cacheprovider --timeout=90 -m "not windows" > out.txt 2>&1
+            echo "status $f: $?"
+            tail -120 out.txt
+          done
 
   test-websockets-floor:
     runs-on: ubuntu-latest

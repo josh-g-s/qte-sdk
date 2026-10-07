@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.10
+**Version:** 0.11
 
 ## Requirements
 
@@ -49,6 +49,16 @@ python3 -m venv /tmp/sdist-venv
 ```
 
 It clears earlier builds first, so it can be run again and each path matches one file.
+
+### Windows
+
+The `windows` job runs on GitHub's hosted `windows-latest` runner, with Python 3.11, and is the only real Windows test. Tests that need the real Windows API are marked `windows` (`@pytest.mark.windows`, or `pytestmark = pytest.mark.windows` for a module); `tests/conftest.py` skips them unless `sys.platform == "win32"`, so the other jobs and a plain `pytest` on macOS or Linux skip them. `tests/test_windows_real.py` holds them: with access lists and owners made by `icacls`, it checks that a `.env` holding a fake token in a private folder gives no warning, that the same file in a folder opened to BUILTIN\Users warns about the folder, that a file opened to Users warns about the file too, and the owners and messages of `python -m qte_sdk.token set` and `check`; and that `python -m qte_sdk.token set` with its input from `NUL` or a pipe refuses at once. Nothing in `qte_sdk._fileaccess` or the console check is replaced there, and only fake tokens are used. The rest of the suite tests the same code on every system with canned access lists.
+
+The job runs the tests marked `windows` first, fails if none ran or any was skipped, and then runs the rest of the suite. The runner works as an elevated administrator, which a student usually is not; `tests/test_windows_real.py` says what that changes. To run the Windows tests on a Windows machine:
+
+```sh
+pytest -m windows
+```
 
 ## Releases
 
