@@ -165,7 +165,8 @@ def run_sdk(
 
 
 def shared_warnings(read) -> list[warnings.WarningMessage]:
-    """The `FileShared` warnings issued while `read()` runs."""
+    """The `FileShared` warnings issued while `read()` runs. Recorded rather than made
+    errors, since the SDK logs a warning that a filter makes an error instead of raising."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         read()
@@ -215,11 +216,15 @@ def test_a_dotenv_in_a_private_folder_gives_no_warning(private_folder):
     assert access is not None
     assert (access.read, access.write, access.folder, access.other_owner) == ((), (), (), False)
     assert not access
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", FileShared)
-        assert dotenv.read_value("QTE_TOKEN") == (FAKE_TOKEN, None)
-        assert dotenv.read_value("QTE_URL") == (URL, None)
-        assert resolve_token() == FAKE_TOKEN
+    values: list[object] = []
+
+    def read() -> None:
+        values.extend(
+            [dotenv.read_value("QTE_TOKEN"), dotenv.read_value("QTE_URL"), resolve_token()]
+        )
+
+    assert shared_warnings(read) == []
+    assert values == [(FAKE_TOKEN, None), (URL, None), FAKE_TOKEN]
 
 
 def test_token_check_in_a_private_folder_says_no_broad_group_can_open_it(private_folder):
@@ -354,9 +359,7 @@ def test_a_file_owned_by_the_user_has_no_owner_finding(private_folder, user_sid)
     assert access is not None
     assert access.other_owner is expected
     assert not access
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", FileShared)
-        assert resolve_token() == FAKE_TOKEN
+    assert shared_warnings(resolve_token) == []
     result = run_sdk("qte_sdk.token", "check", cwd=private_folder)
     assert "warning:" not in result.stdout, result.stdout + result.stderr
     assert ("its owner could not be checked" in result.stdout) is (expected is None)
@@ -371,9 +374,7 @@ def test_a_file_owned_by_administrators_has_no_owner_finding(private_folder):
     assert access is not None
     assert access.other_owner is False
     assert not access
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", FileShared)
-        assert resolve_token() == FAKE_TOKEN
+    assert shared_warnings(resolve_token) == []
 
 
 def test_a_file_owned_by_another_account_warns(private_folder):
@@ -397,6 +398,24 @@ def test_a_file_owned_by_another_account_warns(private_folder):
 def test_nul_is_not_a_console():
     with open(os.devnull, "rb") as nul:
         assert not token_command._is_console(nul.fileno())
+
+
+def test_a_new_console_is_a_terminal_to_token_set():
+    # The other side of the check below: in a console of its own, with its input not
+    # redirected, `set` finds a terminal. The child says so by its exit status, since
+    # capturing its output would redirect its handles away from the console.
+    code = "import sys; from qte_sdk import token; sys.exit(0 if token._has_terminal() else 3)"
+    startup = subprocess.STARTUPINFO(dwFlags=subprocess.STARTF_USESHOWWINDOW, wShowWindow=0)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            startupinfo=startup,
+            timeout=TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"the console check was still running after {TIMEOUT} s")
+    assert result.returncode == 0
 
 
 @pytest.mark.parametrize("command", [["set"], ["set", "--file"]])
