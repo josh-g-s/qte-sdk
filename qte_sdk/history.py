@@ -737,7 +737,7 @@ class _WakeableSocket:
     each operation waits for it together with one end of a socket pair. `wake` marks this
     socket woken and writes to the other end: a thread waiting here raises
     `ConnectionAbortedError` at once, and every later operation raises it before it
-    touches the connection, so nothing more is sent once the fetch has given up. Another
+    touches the connection, so nothing more is sent once `wake` has returned. Another
     thread may wake it at any time, but reads, writes and closes it only when no worker
     is using it: a response is closed through its reader, whose lock a read holds, after
     a wake has ended that read.
@@ -784,6 +784,9 @@ class _WakeableSocket:
             sent = 0
             deadline = self._deadline()
             while sent < len(rest):
+                # A bound on the whole, as `socket.sendall` has, even if each send succeeds.
+                if sent and deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("timed out")
                 sent += self._io("send", rest[sent:], write=True, deadline=deadline)
 
     def do_handshake(self) -> None:
@@ -836,21 +839,24 @@ class _WakeableSocket:
         if deadline is None:
             deadline = self._deadline()
         while True:
-            if self._woken:
-                raise ConnectionAbortedError("the fetch was cancelled")
-            sock, wake = self._sock, self._wake_r
-            if sock is None or wake is None:
-                raise OSError("the connection is closed")
-            try:
-                return getattr(sock, operation)(*args)
-            # TLS says which way it waits, whichever way the operation goes: a read may
-            # need to write, and a write to read.
-            except ssl.SSLWantWriteError:
-                wants_write = True
-            except ssl.SSLWantReadError:
-                wants_write = False
-            except BlockingIOError:
-                wants_write = write
+            # Checked and tried under the lock `wake` takes, so once a wake has returned,
+            # nothing more is attempted. Each try is non-blocking, so it holds it briefly.
+            with self._lock:
+                if self._woken:
+                    raise ConnectionAbortedError("the fetch was cancelled")
+                sock, wake = self._sock, self._wake_r
+                if sock is None or wake is None:
+                    raise OSError("the connection is closed")
+                try:
+                    return getattr(sock, operation)(*args)
+                # TLS says which way it waits, whichever way the operation goes: a read
+                # may need to write, and a write to read.
+                except ssl.SSLWantWriteError:
+                    wants_write = True
+                except ssl.SSLWantReadError:
+                    wants_write = False
+                except BlockingIOError:
+                    wants_write = write
             self._wait(sock, wake, wants_write, deadline)
 
     def _wait(
