@@ -32,9 +32,12 @@ Three safeguards apply:
   or another account owns, a `.env` that sets only `QTE_URL`, since whoever changes the
   address can capture a token kept elsewhere when you next connect. Both are kinds of
   `FileShared`. A folder under your user profile is private by default; a folder on
-  another drive, such as `D:\\`, usually is not. The file is still used, though a later
-  release will refuse it. The same check applies to the file named by `QTE_TOKEN_FILE`
-  (see `qte_sdk.session`).
+  another drive, such as `D:\\`, usually is not. When the `.env` is reached through
+  symbolic links or junctions, the file and the folder checked are those they lead to,
+  and each folder that holds a link on the way is checked too; if a link cannot be
+  followed, the warning says the file could not be fully checked. The file is still used,
+  though a later release will refuse it. The same check applies to the file named by
+  `QTE_TOKEN_FILE` (see `qte_sdk.session`).
 - If the `.env`, or the file it links to, is inside a git working tree and git tracks
   it or does not ignore it, a `DotenvNotIgnored` warning is issued, once per process,
   since the token could be committed. It never stops the SDK: if a warnings filter makes
@@ -55,6 +58,7 @@ import subprocess
 import sys
 import unicodedata
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 
 from qte_sdk import _fileaccess
@@ -95,7 +99,8 @@ class DotenvNotIgnored(UserWarning):
 
 class FileShared(UserWarning):
     """On Windows, a broad group of users, such as Everyone or Users, may read, change or
-    replace a file the SDK reads its setup from, or another account owns it. Catch this to
+    replace a file the SDK reads its setup from, or another account owns it, or a link on
+    the way to it could not be followed, so it could not be fully checked. Catch this to
     handle both kinds below."""
 
 
@@ -220,12 +225,18 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             f"holds {_TOKEN_NAME} but other users can read it; run `chmod 600 {DOTENV_NAME}` "
             "so only you can"
         )
-    if access is not None and (
-        (holds_token and access) or (access.changeable and _assigns(text, _URL_NAME))
-    ):
-        warn_shared(path, access, holds_token=holds_token, sets_address=True)
+    warn = access is not None and (
+        (holds_token and access)
+        or ((access.changeable or access.unfollowed) and _assigns(text, _URL_NAME))
+    )
     value, problem = _parse(text, name)
-    del text
+    del text  # released before the warning, which runs code that is not the SDK's
+    if warn:
+        assert access is not None
+        failure = warn_shared(path, access, holds_token=holds_token, sets_address=True)
+        if failure is not None:
+            del value
+            raise failure  # from a frame that no longer holds the token
     if problem is not None:
         return None, problem
     return value or None, None
@@ -288,12 +299,23 @@ def shared_message(
 ) -> str:
     """What to tell the person when broad groups of users may read, change or replace
     `path`, or another account owns it. `path` holds the token if `holds_token`, and is a
-    `.env` that can set the exchange address if `sets_address`. Names only the path, its
-    folder and the groups."""
+    `.env` that can set the exchange address if `sets_address`. Names only the path, and
+    when it is reached through links, the links and the file they lead to; their folders;
+    and the groups; and, if a link on the way could not be followed, why. Resolves no
+    path: where the lists were read is taken from `access`."""
     changers = list(access.write)
     readers = [group for group in access.read if group not in changers] if holds_token else []
     replacers = list(access.folder or ())
-    folder = os.path.dirname(os.path.abspath(path))
+    link_replacers = list(access.link_folder or ())
+    file = access.file or os.path.abspath(path)
+    folder = access.folder_path or os.path.dirname(os.path.abspath(path))
+    links = list(access.links)
+    linked = bool(links)
+    # Whether `path` is itself a link, and the links met after it (or all, if it is not).
+    is_link = linked and _fileaccess._same(links[0], os.path.abspath(path))
+    via = links[1:] if is_link else links
+    verb = "leads to" if via else "links to"
+    link_folders = list(access.link_folders or ())
     granted = []
     if changers:
         granted.append(f"{_join(changers)} {'read or change' if holds_token else 'change'} it")
@@ -302,10 +324,21 @@ def shared_message(
     findings = []
     if granted:
         findings.append(f"Windows lets {', and '.join(granted)}")
+    places = []
     if replacers:
-        findings.append(
-            f"other users can replace it: {_join(replacers)} may add or remove files in {folder}"
-        )
+        places.append(f"{_join(replacers)} may add or remove files in {folder}")
+        if linked:
+            places[-1] += f", which holds the file it {verb}"
+    for holder in link_folders:
+        if holder.groups:
+            held = list(holder.links)
+            the_links = "the link" if is_link and held == links[:1] else _the_links(held)
+            places.append(
+                f"{_join(list(holder.groups))} may add or remove files in {holder.path}, "
+                f"which holds {the_links}"
+            )
+    if places:
+        findings.append(f"other users can replace it: {', and '.join(places)}")
     if access.other_owner:
         findings.append("it is owned by another account, which can change who may open it")
     risks = []
@@ -318,29 +351,70 @@ def shared_message(
         )
     elif access.changeable:
         risks.append("replace your token")
-    groups = set(changers + readers + replacers)
-    if access.other_owner:
+    groups = set(changers + readers + replacers + link_replacers)
+    if not findings:
         fix = (
-            "Delete it and make it again yourself, in a folder under your user profile "
+            "Keep the file itself, not a link to it, in a folder under your user profile "
+            "(%USERPROFILE%), which is private by default."
+        )
+    elif access.other_owner:
+        it = f"the file it {verb}" if linked else "it"
+        fix = (
+            f"Delete {it} and make it again yourself, in a folder under your user profile "
             "(%USERPROFILE%), which is private by default."
         )
     else:
+        it = f"the file it {verb}, and the link{'s' if len(links) > 1 else ''}," if linked else "it"
         their = "that group's" if len(groups) == 1 else "those groups'"
         fix = (
-            "Move it into a folder under your user profile (%USERPROFILE%), which is private "
-            f"by default, or remove {their} access."
+            f"Move {it} into a folder under your user profile (%USERPROFILE%), which is "
+            f"private by default, or remove {their} access."
         )
     what = "holds your token" if holds_token else f"sets {_URL_NAME}, the exchange address"
+    name = f"{path}"
+    if access.unfollowed:
+        # Where the links lead is not known, so no file is named as their end.
+        if is_link and via:
+            name = f"{path}, a link that leads on through {_the_links(via)},"
+        elif is_link:
+            name = f"{path}, a link,"
+        elif via:
+            name = f"{path}, reached through {_the_links(via)},"
+    elif is_link and via:
+        name = f"{path}, a link that leads to {file} through {_the_links(via)},"
+    elif is_link:
+        name = f"{path}, a link to {file},"
+    elif via:
+        name = f"{path}, which leads to {file} through {_the_links(via)},"
+    unchecked = (
+        f"it could not be fully checked: {access.unfollowed}; a link on the way could not be "
+        "followed, so check where it leads"
+    )
+    if findings:
+        said = (
+            f"{name} {what}, and {_join(findings, '; ')}, so other people who use this "
+            f"computer could {' or '.join(risks)}."
+        )
+        if access.unfollowed:
+            said += f" Also, {unchecked}."
+    else:
+        said = f"{name} {what}, but {unchecked}."
+    holders = [holder.path for holder in link_folders]
+    folders = "folders" if holders else "folder"
     return (
-        f"{path} {what}, and {_join(findings, '; ')}, so other people who use this "
-        f"computer could {' or '.join(risks)}. {fix} To see who can open the folder and the "
-        f"file, {_icacls(folder, os.path.abspath(path))}. A later release will refuse such a "
-        "file."
+        f"{said} {fix} To see who can open the {folders} and the file, "
+        f"{_icacls(folder, file, holders)}. A later release will refuse such a file."
     )
 
 
-def _icacls(folder: str, file: str) -> str:
-    """How to run icacls on `folder` and on `file`, the file in it. A path with characters
+def _the_links(links: list[str]) -> str:
+    """ "the link A", or "the links A and B"."""
+    return f"the link {links[0]}" if len(links) == 1 else f"the links {_join(links)}"
+
+
+def _icacls(folder: str, file: str, link_folders: Sequence[str] = ()) -> str:
+    """How to run icacls on `folder` and on `file`, the file in it, and on `link_folders`,
+    the folders that hold the links on the way to the file, if any. A path with characters
     cmd or PowerShell would expand or end a quote at inside double quotes is not put in a
     command, so the command never names another folder; nor is one that ends in a
     backslash, where the closing quote would be taken as part of the path, except a drive's
@@ -353,10 +427,17 @@ def _icacls(folder: str, file: str) -> str:
             return None
         return f'`icacls "{target}"`'
 
-    on_folder, on_file = command(folder), command(file)
-    if on_folder is None or on_file is None:
+    holders = list(link_folders)
+    commands = [command(target) for target in [*holders, folder, file]]
+    if holders and None in commands:
+        which = "folder that holds the link" if len(holders) == 1 else "folders that hold the links"
+        return (
+            f"run icacls on the {which}, {_join(holders)}, on the folder that holds the file, "
+            f"{folder}, and on the file, {file}"
+        )
+    if None in commands:
         return f"run icacls on the folder that holds it, {folder}, and on the file itself"
-    return f"run {on_folder} and {on_file}"
+    return f"run {_join([c for c in commands if c is not None])}"
 
 
 def warn_shared(
@@ -365,17 +446,23 @@ def warn_shared(
     *,
     holds_token: bool = True,
     sets_address: bool = True,
-) -> None:
+) -> BaseException | None:
     """Issue a `TokenFileShared` warning about `path`, or an `AddressFileShared` one if it
     does not hold the token (see `shared_message`), once per process for each path. If a
     warnings filter turns it into an error, it is logged instead, since this check must
-    never stop the SDK. Its caller may hold the token, so no exception, from the warning or
-    from a failure to show it (a closed stderr, say), is let out of this function."""
-    key = os.path.abspath(path)
-    if key in _shared_warned:
-        return
-    _shared_warned.add(key)
+    never stop the SDK.
+
+    Its caller may hold the token, so nothing is raised from here. An error, from the
+    warning or from a failure to show it (a closed stderr, say), is dropped. An
+    interruption, such as a `KeyboardInterrupt` while the warning is shown, is returned
+    without its traceback or chain, for the caller to raise once it has let go of the
+    token; the warning is then given again next time. None otherwise."""
+    key = None
     try:
+        key = os.path.abspath(path)
+        if key in _shared_warned:
+            return None
+        _shared_warned.add(key)
         message = shared_message(path, access, holds_token=holds_token, sets_address=sets_address)
         try:
             category = TokenFileShared if holds_token else AddressFileShared
@@ -384,6 +471,19 @@ def warn_shared(
             _log.warning("%s", message)
     except Exception:
         pass
+    except BaseException as error:
+        if key is not None:
+            _shared_warned.discard(key)
+        return _detached(error)
+    return None
+
+
+def _detached(error: BaseException) -> BaseException:
+    """`error` without its traceback or chain, so the frames it came through, which a
+    traceback that shows locals would display, go with neither."""
+    error = error.with_traceback(None)
+    error.__cause__ = error.__context__ = None
+    return error
 
 
 def _join(names: list[str], separator: str = ", ") -> str:

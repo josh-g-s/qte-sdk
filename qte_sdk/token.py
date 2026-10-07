@@ -57,6 +57,7 @@ from qte_sdk.dotenv import (
     MAX_DOTENV_SIZE,
     DotenvNotIgnored,
     FileShared,
+    _join,
     dotenv_path,
     is_ignored_by_git,
     is_inside_git_work_tree,
@@ -661,24 +662,32 @@ def _access_note(source: str) -> str:
 
 def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:
     """What a clean Windows access check shows: none of the broad groups it looks at may
-    read or change the file, or add or remove files in its folder, and its owner is you,
-    Administrators or SYSTEM. It says which of the folder and the owner it could not check,
-    and it looks at no other group or user, so it never says the file is private to you."""
+    read or change the file, or add or remove files in its folder (or, when it is reached
+    through a link, in the link's folder), and its owner is you, Administrators or SYSTEM.
+    It says which of the folders and the owner it could not check, and it looks at no other
+    group or user, so it never says the file is private to you."""
     names = [group.rsplit("\\", 1)[-1] for group in _fileaccess.BROAD_GROUPS]
     listed = ", ".join(names[:-1]) + f" or {names[-1]}"
     text = f"None of {listed} can read or change it"
-    if access.folder is not None:
-        text += ", or add or remove files in its folder"
+    folders: list[tuple[str, object]] = [("its folder", access.folder)]
+    if access.link_folders:
+        which = (
+            "the folder that holds the link"
+            if len(access.link_folders) == 1
+            else "the folders that hold the links"
+        )
+        folders.append((f"{which} it is reached through", access.link_folder))
+    checked = [part for part, known in folders if known is not None]
+    if checked:
+        text += f", or add or remove files in {' or '.join(checked)}"
     if access.other_owner is False:
         text += ", and it is owned by you, Administrators or SYSTEM"
     unchecked = [
-        part
-        for part, known in (("its folder", access.folder), ("its owner", access.other_owner))
-        if known is None
+        part for part, known in (*folders, ("its owner", access.other_owner)) if known is None
     ]
     note = "other groups and users are not checked"
     if unchecked:
-        note = f"{' and '.join(unchecked)} could not be checked, and {note}"
+        note = f"{_join(unchecked)} could not be checked, and {note}"
     return f"{text} ({note})"
 
 

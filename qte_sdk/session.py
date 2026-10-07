@@ -751,7 +751,9 @@ def token_source() -> str:
 
 def _find_token(token: str | None) -> tuple[str | None, str | None, str | None]:
     """The token, the name of its source and None; or None, None and the message for
-    `MissingToken`. Never raises, so no exception carries a frame that holds the token."""
+    `MissingToken`. Never raises, so no exception carries a frame that holds the token, but
+    for an interruption, such as a Ctrl-C, while a warning about a token file is shown,
+    which is raised from frames that no longer hold it (see `qte_sdk.dotenv.warn_shared`)."""
     source = None
     if token is None:
         token = os.environ.get(TOKEN_ENV_VAR) or None
@@ -837,6 +839,8 @@ def _token_from_file() -> tuple[str | None, str | None]:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return None, "is not UTF-8 text"
+    finally:
+        del data
     if text.endswith("\r\n"):
         text = text[:-2]
     elif text.endswith("\n"):
@@ -844,7 +848,12 @@ def _token_from_file() -> tuple[str | None, str | None]:
     if not text.strip():
         return None, "is empty or holds only whitespace"
     if access:
-        warn_shared(file_path, access, sets_address=False)
+        failure = warn_shared(file_path, access, sets_address=False)
+        if failure is not None:
+            # An interruption while warning, such as a Ctrl-C, is raised from a frame that
+            # no longer holds the token.
+            del text
+            raise failure
     return text, None
 
 

@@ -55,14 +55,12 @@ jobs:
       - run: pip install -e ".[dev]"
       - name: Run the tests marked windows
         run: pytest -m windows --junitxml=windows-tests.xml
-      - name: Fail if none of them ran or any was skipped
-        shell: python
-        run: |
-          import xml.etree.ElementTree as ET
-          suite = ET.parse("windows-tests.xml").getroot().find("testsuite")
-          tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
-          print(f"{tests} tests marked windows, {skipped} skipped")
-          assert tests > 0 and skipped == 0
+      # Every test in tests/test_windows_real.py, marked or not, and every test marked
+      # windows anywhere, must be in the report by name, and none skipped. The script lists
+      # them in a pytest process of its own, before any filter, so a test that loses its
+      # mark, or that -k, --deselect or a conftest hook leaves out, fails the job.
+      - name: Fail if a Windows test did not run or was skipped
+        run: python scripts/check_windows_tests.py windows-tests.xml
       # Left out:
       # - test_reconnect, test_resume, test_calendar, test_instruments,
       #   test_new_message_types and test_tickets: their fake exchange drops a connection
