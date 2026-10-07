@@ -38,7 +38,8 @@ Three safeguards apply:
   checked are those they lead to, and each folder that holds a link on the way, and its
   owner, is checked too. If a link cannot be followed, or Windows will not let the check
   see the access list of the file or of a folder it looks at, or the list is in a form it
-  cannot read, the warning says the file could not be fully checked, and why. The file is
+  cannot read, or its owner cannot be told, the warning says the file could not be fully
+  checked, and why. The file is
   still used, though a later release will refuse it. The same check applies to the file
   named by `QTE_TOKEN_FILE` (see `qte_sdk.session`).
 - If the `.env`, or the file it links to, is inside a git working tree and git tracks

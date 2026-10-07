@@ -816,6 +816,11 @@ def _read_sddl(path: str) -> "str | _Denied | None":
     status, text = _read_security(path)
     if status == _ERROR_ACCESS_DENIED:
         return DENIED
+    # Any other failure says nothing: it is not one another user can cause to hide a
+    # list. A drive that keeps no access lists, such as one formatted FAT32 or exFAT, is
+    # not a failure: Windows gives `O:WDD:NO_ACCESS_CONTROL` there (CI's windows job
+    # checks it), an owner of Everyone and no DACL, which the parser takes as letting
+    # Everyone read, change and replace the file, so a token there warns.
     return text if status == 0 else None
 
 

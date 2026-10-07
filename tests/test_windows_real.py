@@ -1135,10 +1135,16 @@ def test_a_token_on_a_drive_without_access_lists_warns(drive_without_lists, monk
     access = _fileaccess.broad_access(path)
     with capsys.disabled():  # shown in CI's log, to say what Windows gives there
         print(f"\nGetNamedSecurityInfoW (status, SDDL): {raw}; the check: {access!r}")
-    assert access is not None and access, (raw, access)
+    # Windows gives an owner of Everyone and no DACL (`O:WDD:NO_ACCESS_CONTROL`), not an
+    # error: the check takes it as Everyone may do anything.
+    assert access is not None, raw
+    assert (access.read, access.write, access.folder) == (("Everyone",),) * 3, (raw, access)
+    assert access.other_owner is True and access.unseen == (), (raw, access)
     monkeypatch.setenv("QTE_TOKEN_FILE", str(path))
     values: list[str] = []
     caught = shared_warnings(lambda: values.append(resolve_token()))
     assert values == [FAKE_TOKEN]
     assert [w.category for w in caught] == [TokenFileShared], (raw, access)
-    assert_no_token(str(caught[0].message))
+    message = str(caught[0].message)
+    assert message.startswith(f"{path} holds your token, and Windows lets Everyone read or ")
+    assert_no_token(message)
