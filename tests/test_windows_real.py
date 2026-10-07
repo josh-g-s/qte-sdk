@@ -643,3 +643,52 @@ def test_a_chain_of_links_warns_about_an_open_folder_in_the_middle(
     ), message
     assert "Windows lets" not in message
     assert_no_token(message)
+
+
+def test_a_junction_above_a_chain_of_links_warns_about_each_open_folder(
+    tmp_path, user_sid, monkeypatch
+):
+    # holder\\proj is a junction to project, whose .env links to shared\\redirect.env,
+    # which links to safe\\config.env. holder and shared are open to Users.
+    folders = {name: tmp_path / name for name in ("holder", "project", "shared", "safe")}
+    for folder in folders.values():
+        folder.mkdir()
+        make_folder_private(folder, user_sid)
+    target = folders["safe"] / "config.env"
+    target.write_text(f"QTE_TOKEN={FAKE_TOKEN}\n", encoding="utf-8")
+    make_file_private(target, user_sid)
+    middle = folders["shared"] / "redirect.env"
+    os.symlink(target, middle)
+    first = folders["project"] / ".env"
+    os.symlink(middle, first)
+    junction = folders["holder"] / "proj"
+    make_junction(junction, folders["project"])
+    open_folder_to_users(folders["holder"])
+    open_folder_to_users(folders["shared"])
+    try:
+        monkeypatch.chdir(junction)
+        access = _fileaccess.broad_access(junction / ".env")
+        assert access is not None
+        assert (access.read, access.write, access.folder) == ((), (), ())
+        assert access.link_folder == ("BUILTIN\\Users",)
+        assert access.links == (str(junction), str(first), str(middle))
+        assert [(f.path, f.groups) for f in access.link_folders] == [
+            (real(folders["holder"]), ("BUILTIN\\Users",)),
+            (real(folders["project"]), ()),
+            (real(folders["shared"]), ("BUILTIN\\Users",)),
+        ]
+
+        caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
+        assert [w.category for w in caught] == [TokenFileShared]
+        message = str(caught[0].message)
+        assert message.startswith(
+            f"{Path.cwd() / '.env'}, which leads to {real(target)} through the links "
+            f"{junction}, {first} and {middle}, holds your token, and other users can replace "
+            f"it: BUILTIN\\Users may add or remove files in {real(folders['holder'])}, which "
+            f"holds the link {junction}, and BUILTIN\\Users may add or remove files in "
+            f"{real(folders['shared'])}, which holds the link {middle}, so"
+        ), message
+        assert_no_token(message)
+    finally:
+        monkeypatch.chdir(tmp_path)
+        os.rmdir(junction)

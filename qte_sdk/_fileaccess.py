@@ -227,7 +227,10 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     link_folders: tuple[LinkFolder, ...] | None = None
     if walked is not None:
         links = tuple(link for link, _ in walked)
-        link_folders = _link_folders(walked, folder_path)
+        try:
+            link_folders = _link_folders(walked, folder_path)
+        except Exception:
+            walked, links = None, ()  # the folders could not be named: unknown
     try:
         user = _current_user_sid()
     except Exception:
@@ -253,7 +256,9 @@ def links_on_the_way(path: Path | str) -> list[tuple[str, str]] | None:
     """Each link met while `path` is resolved, in order, with the folder that holds it:
     links at the file and at folders on its path, and links in what each link points to.
     A link's folder is given resolved through every link before it. None if they cannot be
-    followed: a loop, more than `MAX_LINKS` links, or a link whose target cannot be read.
+    followed: a loop, more than `MAX_LINKS` links, a name that cannot be looked at, or a
+    link whose target cannot be read or is not an ordinary path (such as a volume's GUID
+    name), so no link on the way is left out unsaid.
 
     The path is resolved one name at a time, from its root. A link's target is joined to
     the link's folder, so a relative one is taken from there, and `..` in it is applied to
@@ -265,18 +270,23 @@ def links_on_the_way(path: Path | str) -> list[tuple[str, str]] | None:
     while pending:
         name = pending.pop(0)
         candidate = os.path.join(current, name)
-        if not _is_link(candidate):
+        link = _is_link(candidate)
+        if link is None:
+            return None
+        if not link:
             current = candidate
             continue
         # The same link with the same names left to resolve is a loop; the same link met
         # again with fewer names left, through a junction to a folder above it, is not.
-        state = (os.path.normcase(candidate), tuple(pending))
+        state = (os.path.normcase(candidate), tuple(map(os.path.normcase, pending)))
         if state in seen or len(found) >= MAX_LINKS:
             return None
         seen.add(state)
         try:
             target = _without_prefix(os.readlink(candidate))
         except (OSError, ValueError):
+            return None
+        if target is None:
             return None
         found.append((candidate, current))
         root, names = _split(os.path.normpath(os.path.join(current, target)))
@@ -291,16 +301,23 @@ def _split(path: str) -> tuple[str, list[str]]:
     return drive + os.sep, [name for name in rest.split(os.sep) if name]
 
 
-def _without_prefix(target: str) -> str:
+def _without_prefix(target: str) -> str | None:
     """A link's target without the `\\\\?\\` or `\\??\\` that Windows puts before the
-    target of a junction, so it is an ordinary path."""
-    for prefix in ("\\\\?\\UNC\\", "\\??\\UNC\\"):
-        if target.startswith(prefix):
-            return "\\\\" + target[len(prefix) :]
+    target of a junction, so it is an ordinary path; or None if what follows is not a
+    drive's path or a share's, such as a volume's GUID name, which is not followed."""
     for prefix in ("\\\\?\\", "\\??\\"):
         if target.startswith(prefix):
-            return target[len(prefix) :]
+            rest = target[len(prefix) :]
+            if rest[:4].upper() == "UNC\\":
+                return "\\\\" + rest[4:]
+            if _DRIVE_PATH.fullmatch(rest[:3]) or _DRIVE_PATH.fullmatch(rest):
+                return rest
+            return None
     return target
+
+
+# A drive's name at the start of a path: `C:` or `C:\\`.
+_DRIVE_PATH = re.compile(r"[A-Za-z]:\\?")
 
 
 def _link_folders(walked: list[tuple[str, str]], folder: str) -> tuple[LinkFolder, ...]:
@@ -335,13 +352,16 @@ def _link_finding(
     return ()
 
 
-def _is_link(path: str) -> bool:
-    """Whether `path` is a symbolic link or a junction (a mount point, to Windows). Other
-    reparse points, such as the placeholders of files kept in the cloud, are not links."""
+def _is_link(path: str) -> bool | None:
+    """Whether `path` is a symbolic link or a junction (a mount point, to Windows), or None
+    if it cannot be looked at. A name that does not exist is not a link. Other reparse
+    points, such as the placeholders of files kept in the cloud, are not links."""
     try:
         status = os.lstat(path)
-    except (OSError, ValueError):
+    except (FileNotFoundError, NotADirectoryError):
         return False
+    except (OSError, ValueError):
+        return None
     tag = getattr(status, "st_reparse_tag", 0)  # only on Windows
     return stat.S_ISLNK(status.st_mode) or tag in _LINK_TAGS
 

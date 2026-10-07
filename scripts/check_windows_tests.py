@@ -4,11 +4,12 @@
 
 The tests that must run are every test in tests/test_windows_real.py, marked `windows` or
 not, and every test marked `windows` anywhere. They are listed by a separate pytest
-process, with no `addopts` and no `PYTEST_ADDOPTS`, before any `-k`, `-m`, `--deselect` or
-conftest hook leaves a test out, so nothing that filters the real run can shrink the list
-too. Each must be in the JUnit report the real run wrote, by name, and not skipped. The
-report has no entry for a test the run deselected, so a deselected test is reported as one
-that did not run. It prints what is wrong and exits 1, or exits 0.
+process, with no `addopts` and no `PYTEST_ADDOPTS`, as each test is collected, before `-k`,
+`-m`, `--deselect` or any hook that selects tests can leave one out, so nothing that
+filters the real run can shrink the list too. Each must be in the JUnit report the real
+run wrote, by the name pytest gives it there, as many times as it is listed, and not
+skipped. The report has no entry for a test the run deselected, so a deselected test is
+reported as one that did not run. It prints what is wrong and exits 1, or exits 0.
 """
 
 import json
@@ -16,6 +17,7 @@ import os
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,13 +27,13 @@ INVENTORY = "--inventory"
 PREFIX = "windows tests: "
 
 
-def inventory() -> list[str]:
-    """The node IDs of the tests that must run, listed by a pytest process of their own
-    that no option meant for the real run reaches."""
+def inventory(root: Path = ROOT) -> list[str]:
+    """The node IDs of the tests that must run in the project at `root`, listed by a pytest
+    process of their own that no option meant for the real run reaches."""
     env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), INVENTORY],
-        cwd=ROOT,
+        cwd=root,
         env=env,
         capture_output=True,
         text=True,
@@ -51,48 +53,52 @@ def _list_tests() -> int:
     import pytest
 
     class Inventory:
-        ids: list[str] | None = None
+        def __init__(self) -> None:
+            self.ids: list[str] = []
+            self.finished = False
 
-        # First, so the list is taken before -k, -m, --deselect or a conftest hook, which
-        # all act in this hook, leave a test out.
-        @pytest.hookimpl(tryfirst=True)
-        def pytest_collection_modifyitems(self, items: list[pytest.Item]) -> None:
-            self.ids = [
-                item.nodeid
-                for item in items
-                if item.nodeid.startswith(MODULE + "::") or item.get_closest_marker(MARKER)
-            ]
+        # Called as each test is collected, before pytest_collection_modifyitems, where -k,
+        # -m, --deselect and any hook that selects tests act, whatever their order.
+        def pytest_itemcollected(self, item: pytest.Item) -> None:
+            if item.nodeid.startswith(MODULE + "::") or item.get_closest_marker(MARKER):
+                self.ids.append(item.nodeid)
+
+        def pytest_collection_finish(self) -> None:
+            self.finished = True
 
     found = Inventory()
     args = ["--collect-only", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "tests"]
     code = pytest.main(args, plugins=[found])
-    if code != 0 or found.ids is None:
+    if code != 0 or not found.finished:
         return 1
     print(PREFIX + json.dumps(found.ids))
     return 0
 
 
 def junit_key(nodeid: str) -> tuple[str, str]:
-    """The classname and name pytest's JUnit report gives the test with `nodeid`."""
-    path, *rest = nodeid.split("::")
-    module = path.removesuffix(".py").replace("/", ".")
-    return ".".join([module, *rest[:-1]]), rest[-1]
+    """The classname and name pytest's JUnit report gives the test with `nodeid`, by
+    pytest's own rules, which keep a parameter ID whole and escape what XML cannot hold."""
+    from _pytest.junitxml import bin_xml_escape, mangle_test_address
+
+    names = mangle_test_address(nodeid)
+    return ".".join(names[:-1]), bin_xml_escape(names[-1])
 
 
 def problems(report: Path, expected: list[str]) -> list[str]:
     """What is wrong with the run that wrote `report`, given the tests that must run."""
     if not any(nodeid.startswith(MODULE + "::") for nodeid in expected):
         return [f"no test was found in {MODULE}"]
-    cases = {
-        (case.get("classname"), case.get("name")): case
-        for case in ET.parse(report).getroot().iter("testcase")
-    }
+    cases: defaultdict[tuple[str | None, str | None], list[ET.Element]] = defaultdict(list)
+    for case in ET.parse(report).getroot().iter("testcase"):
+        cases[(case.get("classname"), case.get("name"))].append(case)
+    wanted = Counter(junit_key(nodeid) for nodeid in expected)
     found = []
-    for nodeid in expected:
-        case = cases.get(junit_key(nodeid))
-        if case is None:
+    for nodeid in dict.fromkeys(expected):
+        key = junit_key(nodeid)
+        ran = cases.get(key, [])
+        if len(ran) < wanted[key]:
             found.append(f"did not run (deselected, or not collected): {nodeid}")
-        elif case.find("skipped") is not None:
+        if any(case.find("skipped") is not None for case in ran):
             found.append(f"skipped: {nodeid}")
     return found
 

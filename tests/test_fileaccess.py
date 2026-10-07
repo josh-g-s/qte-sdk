@@ -1612,7 +1612,53 @@ def test_unknown_link_folders_are_said_to_be_unchecked():
         ("\\\\?\\UNC\\server\\share\\proj", "\\\\server\\share\\proj"),
         ("C:\\proj", "C:\\proj"),
         ("..\\shared\\redirect.env", "..\\shared\\redirect.env"),
+        ("\\\\?\\C:", "C:"),
+        # A volume's GUID name, or another namespace, is not followed: the walk is unknown.
+        ("\\??\\Volume{12345678-1234-1234-1234-123456789abc}\\shared", None),
+        ("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume2\\shared", None),
+        ("\\\\?\\C:shared", None),
     ],
 )
 def test_the_prefix_windows_gives_a_junctions_target_is_removed(target, plain):
     assert _fileaccess._without_prefix(target) == plain
+
+
+def test_a_link_to_a_volumes_guid_name_gives_unknown_folders(tmp_path, monkeypatch):
+    first, _, _ = chain(tmp_path)
+    monkeypatch.setattr(os, "readlink", lambda path, *a, **k: "\\??\\Volume{1234}\\shared")
+    assert _fileaccess.links_on_the_way(first) is None
+
+
+def test_a_name_that_cannot_be_looked_at_gives_unknown_folders(tmp_path, monkeypatch):
+    first, middle, _ = chain(tmp_path)
+    real_lstat = os.lstat
+
+    def denied(path, *args, **kwargs):
+        if str(path) == str(middle):
+            raise PermissionError("access denied")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", denied)
+    assert _fileaccess.links_on_the_way(first) is None
+
+
+def test_a_name_that_does_not_exist_is_not_a_link(tmp_path):
+    assert _fileaccess._is_link(str(tmp_path / "missing" / ".env")) is False
+
+
+def test_a_link_folder_that_cannot_be_resolved_is_unknown_not_an_error(
+    windows, tmp_path, monkeypatch
+):
+    first, middle, target = chain(tmp_path)
+    windows.sddl = PRIVATE_FILE
+    real = os.path.realpath
+
+    def failing(path, *args, **kwargs):
+        if str(path) == str(middle.parent):
+            raise OSError("cannot resolve")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, "realpath", failing)
+    found = _fileaccess.broad_access(first)
+    assert found is not None and found.file == str(target)
+    assert found.link_folders is None and found.link_folder is None and found.links == ()
