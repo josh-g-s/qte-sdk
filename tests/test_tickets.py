@@ -59,6 +59,7 @@ from qte_sdk.orders import (
     send_new,
 )
 from qte_sdk.reconnect import ReconnectingSession
+from qte_sdk.session import open_session
 from qte_sdk.tickets import (
     TICKET_EVENT_TYPES,
     URGENCY_HIGH,
@@ -647,6 +648,78 @@ CANCEL_REFUSED = {
 }
 
 
+# The instruments table, which the exchange sends straight after the calendar.
+INSTRUMENTS = frame(
+    "instruments",
+    {
+        "instruments": [
+            {
+                "instrument": "AAPL",
+                "kind": "EQUITY",
+                "tick_size": "10000",
+                "lot_size": "1",
+                "status": "INSTRUMENT_TRADING",
+                "tradable": True,
+                "sector_limit": "Information Technology",
+            }
+        ]
+    },
+)
+
+
+def connect_group(*states: str) -> list[str]:
+    """What the exchange sends a pod or desk after the ack and the calendar, before it
+    has read any resume: the instruments table, then the whole set of ticket states."""
+    return [INSTRUMENTS, *states]
+
+
+@pytest.mark.parametrize("wait_for_table", [False, True])
+async def test_a_fresh_session_delivers_the_ticket_states_read_ahead_by_its_resume(
+    wait_for_table,
+):
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "before_resume": connect_group(
+                ticket_frame("17", 10), ticket_frame("18", 10, "TICKET_COMPLETE")
+            ),
+            "answer": [resume_ack(True, 2), order_state(1), order_state(2)],
+            "after": [book(7)],
+        }
+    )
+    latest = LatestTickets()
+    async with serve_local(exchange) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            if wait_for_table:
+                assert await session.wait_for_instrument_table(timeout=5) is not None
+            # The exchange sends the ticket states before it reads the resume, so the
+            # session reads them ahead while it waits for the resume_ack.
+            await session.resume(0)
+            events = []
+            async with asyncio.timeout(5):
+                async for event in session:
+                    events.append(event)
+                    latest.update(event)
+                    if isinstance(event, Received) and event.type == "book":
+                        break
+            assert session.last_report_seq == 2
+    assert kinds(events) == [
+        "calendar:None",
+        "instruments:None",
+        "ticket_state:None",
+        "ticket_state:None",
+        "resume_ack:None",
+        "order_state:1",
+        "order_state:2",
+        "ResumeComplete",
+        "book:None",
+    ]
+    assert [(s.ticket_id, s.status) for s in latest] == [
+        ("17", TICKET_WORKING),
+        ("18", TICKET_COMPLETE),
+    ]
+
+
 async def read_until_book(exchange: Scripted) -> tuple[list, LatestTickets, int | None]:
     latest = LatestTickets()
     async with serve_local(exchange) as url:
@@ -662,34 +735,42 @@ async def read_until_book(exchange: Scripted) -> tuple[list, LatestTickets, int 
             return events, latest, rs.last_report_seq
 
 
-async def test_after_a_reconnect_the_states_resent_replace_what_was_held():
+async def test_a_reconnect_delivers_the_new_connections_ticket_states_before_its_replay():
     exchange = Scripted(
         {
             "term": TERM,
+            "before_resume": connect_group(ticket_frame("17", 10), ticket_frame("18", 10)),
             "answer": [resume_ack()],
-            "after": [order_state(1), ticket_frame("17", 10), ticket_frame("18", 10)],
+            "after": [order_state(1)],
             "drop": True,
         },
         {
             "term": TERM,
-            "answer": [resume_ack(True, 1)],
             # Every ticket of the term again, stopped or working: 17 stopped meanwhile.
-            "after": [
-                ticket_frame("17", 50, "TICKET_CANCELLED_BY_POD"),
-                ticket_frame("18", 50),
-                # A refused cancel changes nothing: 18 is still working.
-                frame("ticket_reject", CANCEL_REFUSED),
-                book(7),
-            ],
+            "before_resume": connect_group(
+                ticket_frame("17", 50, "TICKET_CANCELLED_BY_POD"), ticket_frame("18", 50)
+            ),
+            "answer": [resume_ack(True, 2), order_state(2)],
+            # A refused cancel changes nothing: 18 is still working.
+            "after": [frame("ticket_reject", CANCEL_REFUSED), book(7)],
         },
     )
     events, latest, last_report_seq = await read_until_book(exchange)
     # Ticket answers carry no report number, so they move no resume cursor.
-    assert last_report_seq == 1
-    names = kinds(events)
-    assert names.count("ticket_state:None") == 4
-    assert names.count("ticket_reject:None") == 1
-    assert "Disconnected" in names
+    assert last_report_seq == 2
+    reconnected = kinds(events)[kinds(events).index("Disconnected") :]
+    assert reconnected[:3] == ["Disconnected", "Retrying", "Connected"]
+    assert reconnected[3:] == [
+        "calendar:None",
+        "instruments:None",
+        "ticket_state:None",
+        "ticket_state:None",
+        "resume_ack:None",
+        "order_state:2",
+        "ResumeComplete",
+        "ticket_reject:None",
+        "book:None",
+    ]
     assert [(s.ticket_id, s.status) for s in latest] == [
         ("17", TICKET_CANCELLED_BY_POD),
         ("18", TICKET_WORKING),
@@ -702,12 +783,17 @@ async def test_a_ticket_of_an_earlier_term_is_not_held_after_reconnecting_in_a_n
     exchange = Scripted(
         {
             "term": TERM,
+            "before_resume": connect_group(ticket_frame("17", 10, "TICKET_EXPIRED")),
             "answer": [resume_ack()],
-            "after": [ticket_frame("17", 10, "TICKET_EXPIRED")],
             "drop": True,
         },
         # The new term has no tickets yet, so none is sent.
-        {"term": NEXT_TERM, "answer": [resume_ack()], "after": [book(7)]},
+        {
+            "term": NEXT_TERM,
+            "before_resume": connect_group(),
+            "answer": [resume_ack()],
+            "after": [book(7)],
+        },
     )
     events, latest, _ = await read_until_book(exchange)
     assert kinds(events).count("ticket_state:None") == 1

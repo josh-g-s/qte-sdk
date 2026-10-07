@@ -117,12 +117,17 @@ the position or cross zero: the whole order when the contract turns reducing-onl
 just the part that would, before a fill. Read these as any other reason, with
 `qte_sdk.orders.reason_code_name` or against `ReasonCodes`.
 
+Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
+present, and true, only on an option contract's `RESIDUAL` print that went through at the
+live print's own premium because the contract had no wall on the side the aggressor
+took. It is never sent as false, and it is absent on every other print: an equity's, an
+option contract's other kinds, and a residual that printed at the wall's price. Test it
+with `HasField("feed_only")`; absent means an ordinary print.
+
 Not published yet:
 
 - Options in the history service: it serves no `option_chain` or `option_greeks`, so
   `qte_sdk.replay` replays no Greeks.
-- The residual print of an option trade. It is to be marked by a new optional flag on
-  `TapePrint`; until that is published, nothing marks it.
 """
 
 import re
