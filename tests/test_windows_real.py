@@ -992,16 +992,17 @@ def test_a_link_that_cannot_be_looked_at_has_its_folder_checked(tmp_path, user_s
         access = _fileaccess.broad_access(link)
         assert access is not None
         assert access.unfollowed == f"{link} could not be looked at, or was not there"
-        assert access.links == (str(link),)
+        assert (access.links, access.unlooked) == ((), str(link))
         assert [(f.path, f.groups) for f in access.link_folders] == [
             (real(holder), ("BUILTIN\\Users",))
         ]
         assert access.link_folder == ("BUILTIN\\Users",)
         message = dotenv.shared_message(link, access)
-        assert (
-            f"BUILTIN\\Users may add or remove files in {real(holder)}, which holds the link, "
-            "so other people"
-        ) in message, message
+        assert message.startswith(
+            f"{link} holds your token, and other users can replace it: BUILTIN\\Users may add "
+            f"or remove files in {real(holder)}, which holds {link}, which could not be looked "
+            "at, so other people"
+        ), message
     finally:
         icacls(holder, "/remove:d", f"*{user_sid}")
         icacls(link, "/L", "/remove:d", f"*{user_sid}")

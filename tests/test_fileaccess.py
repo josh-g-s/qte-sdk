@@ -963,7 +963,9 @@ UNSEEN = "Windows would not let this check see who may open"
             f"files in {FOLDER}; and {FOLDER} is owned by another account, which can change "
             "who may add or remove files in it, so other people who use this computer could "
             "replace your token.",
-            "or remove that group's access.",
+            # Removing the group's access would not do: the folder's owner could give it back.
+            "Move it into a folder under your user profile (%USERPROFILE%), which is private by "
+            "default. To see",
         ),
         (
             replace(access([], [], [], None), unseen=(f"{UNSEEN} {AT}",)),
@@ -987,7 +989,7 @@ UNSEEN = "Windows would not let this check see who may open"
             "capture your token when you next connect. Also, it could not be fully checked: "
             f"{UNSEEN} {AT}; and the access list of {FOLDER} is in a form this check cannot "
             "read.",
-            "or remove that group's access.",
+            "which is private by default. To see",
         ),
     ],
 )
@@ -2040,14 +2042,18 @@ def test_the_folder_of_a_name_that_could_not_be_looked_at_is_checked(
     reason = unfollowable(monkeypatch, "not looked at", hop)
     found = _fileaccess.broad_access(first)
     assert found is not None and found.unfollowed == reason
-    assert found.links == (str(first), str(middle), str(hop))
+    # The name is not known to be a link, so it is not named as one, but its folder, which
+    # may hold one, is checked.
+    assert (found.links, found.unlooked) == ((str(first), str(middle)), str(hop))
     assert found.link_folder == (AUTHENTICATED,)
     assert (str(hop.parent), (str(hop),), (AUTHENTICATED,)) in [
         (f.path, f.links, f.groups) for f in found.link_folders
     ]
     message = shared_message(first, found)
+    assert message.startswith(f"{first}, a link that leads on through the link {middle}, ")
     assert (
-        f"{AUTHENTICATED} may add or remove files in {hop.parent}, which holds the link {hop}"
+        f"{AUTHENTICATED} may add or remove files in {hop.parent}, which holds {hop}, which "
+        "could not be looked at, so other people"
     ) in message
 
 

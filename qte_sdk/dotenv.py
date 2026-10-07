@@ -337,10 +337,22 @@ def shared_message(
         places.append(f"{_join(replacers)} may add or remove files in {folder}")
         if linked:
             places[-1] += f", which holds the file it {verb}"
+
+    def holding(held: list[str]) -> str:
+        """The links in a folder, as the message names them after "which holds"."""
+        unlooked = [name for name in held if name == access.unlooked]
+        confirmed = [name for name in held if name != access.unlooked]
+        named = []
+        if confirmed:
+            named.append(
+                "the link" if is_link and confirmed == links[:1] else _the_links(confirmed)
+            )
+        named += [f"{name}, which could not be looked at" for name in unlooked]
+        return _join(named)
+
     for holder in link_folders:
         if holder.groups:
-            held = list(holder.links)
-            the_links = "the link" if is_link and held == links[:1] else _the_links(held)
+            the_links = holding(list(holder.links))
             places.append(
                 f"{_join(list(holder.groups))} may add or remove files in {holder.path}, "
                 f"which holds {the_links}"
@@ -354,9 +366,7 @@ def shared_message(
         owned.append(f"{folder}, which holds the file it {verb}," if linked else folder)
     for holder in link_folders:
         if holder.other_owner:
-            held = list(holder.links)
-            the_links = "the link" if is_link and held == links[:1] else _the_links(held)
-            owned.append(f"{holder.path}, which holds {the_links},")
+            owned.append(f"{holder.path}, which holds {holding(list(holder.links))},")
     for place in owned:
         findings.append(
             f"{place} is owned by another account, which can change who may add or remove "
@@ -392,7 +402,10 @@ def shared_message(
             f"Move {it} into a folder under your user profile (%USERPROFILE%), which is "
             "private by default"
         )
-        fix += f", or remove {their} access." if groups else "."
+        # Removing a group's access is enough only when no other account owns a folder
+        # looked at, which could give it back, and every list was seen.
+        enough = not (access.folder_owner or access.link_owner or access.unseen)
+        fix += f", or remove {their} access." if groups and enough else "."
     what = "holds your token" if holds_token else f"sets {_URL_NAME}, the exchange address"
     name = f"{path}"
     if access.unfollowed:

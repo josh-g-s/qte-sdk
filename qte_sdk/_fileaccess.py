@@ -185,6 +185,9 @@ class BroadAccess:
     `file`, `folder_path`, `links` and `link_folders` say where those lists were read: the
     file the path resolves to, its folder, every link met on the way, in order, and each
     folder that holds one of them, other than the file's own folder (see `LinkFolder`).
+    `unlooked` is the name the walk stopped at when it could not be looked at: it is not
+    among `links`, since it is not known to be one, but its folder is in `link_folders`,
+    with it among that folder's links, since it may be one.
     These are not compared: two results are equal when they find the same. When `file` or
     `folder_path` is None, the path the check was asked about, or its folder, stands for
     it."""
@@ -202,6 +205,7 @@ class BroadAccess:
     folder_path: str | None = field(default=None, compare=False)
     links: tuple[str, ...] = field(default=(), compare=False)
     link_folders: tuple[LinkFolder, ...] = field(default=(), compare=False)
+    unlooked: str | None = field(default=None, compare=False)
 
     def __bool__(self) -> bool:
         return bool(self.read or self.write or self.changeable or self.incomplete)
@@ -298,7 +302,10 @@ def broad_access(path: Path | str) -> BroadAccess | None:
     folder = _look_at_folder(folder_path, user)
     if folder.unseen is not None:
         unseen.append(folder.unseen)
-    links = tuple(link for link, _ in walked)
+    # A name the walk could not look at is not known to be a link: its folder is checked as
+    # one that may hold one, but it is not named among the links.
+    unlooked = walked[-1][0] if walked and unfollowed == _not_looked_at(walked[-1][0]) else None
+    links = tuple(link for link, _ in walked if link != unlooked)
     try:
         link_folders, link_unseen = _link_folders(walked, folder_path, user)
     except Exception:
@@ -314,6 +321,7 @@ def broad_access(path: Path | str) -> BroadAccess | None:
         folder_owner=folder.other_owner,
         link_owner=_link_owner(link_folders),
         unseen=tuple(unseen),
+        unlooked=unlooked,
         file=file,
         folder_path=folder_path,
         links=links,
@@ -357,7 +365,7 @@ def links_on_the_way(path: Path | str) -> tuple[list[tuple[str, str]], str | Non
         link = _is_link(candidate)
         if link is None:
             found.append((candidate, current))  # so its folder is checked too
-            return found, f"{candidate} could not be looked at, or was not there"
+            return found, _not_looked_at(candidate)
         if not link:
             current = candidate
             continue
@@ -384,6 +392,11 @@ def links_on_the_way(path: Path | str) -> tuple[list[tuple[str, str]], str | Non
         root, names = _split(os.path.normpath(os.path.join(current, target)))
         current, pending = root, names + pending
     return found, None
+
+
+def _not_looked_at(name: str) -> str:
+    """Why the walk stopped at `name`, a name `_is_link` could not tell about."""
+    return f"{name} could not be looked at, or was not there"
 
 
 def _split(path: str) -> tuple[str, list[str]]:
