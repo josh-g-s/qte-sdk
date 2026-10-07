@@ -1,9 +1,13 @@
 """The published conformance session, run against a local exchange.
 
 `conformance/CONFORMANCE.md` is vendored byte for byte from the exchange's published
-conformance steps. This module runs its WebSocket session (steps 1 to 16, with 9a to 9c)
-through the public SDK API only: `open_session`, `subscribe`, the `send_*` functions and the message
-classes. The history service steps (H1 to H19) are not run here.
+conformance steps. This module runs its WebSocket session (steps 1 to 16, with 1a and 9a
+to 9c) through the public SDK API: `open_session`, `subscribe`, the `send_*` functions and
+the message classes. Step 15 checks what the SDK hides from its user on purpose (it answers
+every ping, absorbs heartbeats, parses payloads and drops a report it has already
+delivered), so most of its sub-steps also drive connections frame by frame with the
+`websockets` library, still building and reading messages with the SDK's codec and
+contract types (see `Wire`). The history service steps (H1 to H19) are not run here.
 
 It is skipped unless these are set, so CI and a plain `pytest` never reach an exchange:
 
@@ -26,11 +30,18 @@ Optional settings:
                              wait for a mark, which is published on a slower grid, is three
                              times this
 
-Each numbered step is its own test with its own session. Steps 4 to 14 start by mass
+Each numbered step is its own test with its own session, and step 15 is one test per
+sub-step. Steps 4 to 14, and the sub-steps of step 15 that rest orders, start by mass
 cancelling the team's resting orders, so a step that fails or is skipped leaves nothing
-behind for the next. Steps 3 to 14 need the instrument's session to be open; if it is
-not, they are skipped. Step 16 runs only after step 14 has closed the session in the same
-run.
+behind for the next. Steps 3 to 14 and those sub-steps need the instrument's session to be
+open; if it is not, they are skipped. Step 15's precondition puts its restart before step
+14's close and its empty marker after it, and step 16 needs no restart after that close,
+so the tests run in this order: steps 1 to 13; step 15's heartbeat, silence, replay,
+snapshot, restart and market data sub-steps; step 14; step 15's empty marker, and its
+heartbeat and silence sub-steps again, now outside a session; step 16. The empty marker
+and step 16 run only after step 14 has closed the session in the same run. Step 15's
+heartbeat and silence sub-steps wait out the exchange's own timers, about three minutes
+each time.
 
 Every timestamp on the wire is a count of milliseconds since the Unix epoch, UTC, as the
 vendored steps state. The steps only compare timestamps with each other, subtract one from
@@ -56,6 +67,13 @@ declared by setting a variable:
     QTE_CONFORMANCE_CLOSE_WITHIN=<seconds>
         step 14: the exchange runs a single configured session and closes it within this
         many seconds of the step resting its order.
+    QTE_CONFORMANCE_RESTART_CMD=<command>
+        step 15: a shell command that restarts the exchange under test on its own state,
+        run once, between two sub-steps, before step 14's close. It returns once the
+        exchange it restarts has stopped, and may return before the new one accepts
+        connections; the sub-step then waits up to QTE_CONFORMANCE_RESTART_WITHIN
+        seconds (default 120) for the command to finish and again for the exchange to
+        accept a connection. The instrument's session must still be open after it.
     QTE_CONFORMANCE_RECORDED_SESSION=1
         step 16: the exchange is fed the recorded market session the published step names,
         holding one valid quote of QTEA, a bid of 99.99 and an ask of 100.01 at the session
@@ -76,23 +94,46 @@ the order is still above mark x 1.05 at the mark in force at its release (step 1
 partial fill leaves at least two shares (step 7) and its spread leaves room for the
 prices a step needs. Step 13's "no budget consumed" is not checked, since no message
 reports a team's budget use. Step 12's resting sell for
-the second strategy is entered by the step itself. Step 15 has no checks until it is
-specified (see issue #12) and is reported as an expected failure.
+the second strategy is entered by the step itself. Step 1a's resend of `instruments` after
+a listing changes is not checked, since nothing here can change a listing. Step 15's
+snapshots are of orders with no fills, so their `remaining_size` is checked only as the
+whole order, and its replay is checked only for a cursor inside the window and one above
+the newest report, not one older than the window, whose size the steps do not name.
 """
 
 import asyncio
 import ipaddress
+import json
+import logging
+import math
 import os
+import re
 from collections.abc import Callable
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
+from datetime import date
 from urllib.parse import urlsplit
 
 import pytest
 from google.protobuf.message import Message
+from websockets.client import ClientProtocol
+from websockets.frames import Close, Frame, Opcode
+from websockets.http11 import Response
+from websockets.protocol import State
+from websockets.uri import WebSocketURI, parse_uri
 
 from qte_sdk.books import LatestBooks
 from qte_sdk.calendar import next_open
-from qte_sdk.connection import DecodeFailed, Received, SeqGap
+from qte_sdk.connection import (
+    DataUncertain,
+    DecodeFailed,
+    Received,
+    ReportGap,
+    ResumeComplete,
+    SeqGap,
+)
+from qte_sdk.contract import codec
+from qte_sdk.contract.registry import CONTRACT_VERSION, INBOUND
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     CLOSED,
@@ -125,7 +166,14 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     OrderState,
     Reject,
 )
+from qte_sdk.contract.v1.session_pb2 import CALL as RIGHT_CALL
+from qte_sdk.contract.v1.session_pb2 import PUT as RIGHT_PUT
+from qte_sdk.contract.v1.session_pb2 import Auth, OrderSnapshot, Resume, ResumeAck, Subscribe
+from qte_sdk.instruments import EQUITY, OPTION, InstrumentInfo, instrument_info
 from qte_sdk.market_data import as_market_data, subscribe
+from qte_sdk.options import CALL as CALL_LETTER
+from qte_sdk.options import PUT as PUT_LETTER
+from qte_sdk.options import option_underlyings, parse_option_symbol, strike_increment
 from qte_sdk.orders import (
     reason_code_name,
     request_ref_of,
@@ -223,12 +271,14 @@ class Client:
 
     Each step notes `mark()` before it sends, then waits for messages from that point, so a
     message that arrives before the step starts waiting for it is still found.
+    `report_seqs` holds each message's envelope `report_seq`, None where it has none.
     """
 
     def __init__(self, session: Session, config: Settings) -> None:
         self.session = session
         self.config = config
         self.seen: list[Message] = []
+        self.report_seqs: list[int | None] = []
         self.books = LatestBooks()
         self.state: SessionState | None = None
         self._queue: asyncio.Queue[object] = asyncio.Queue()
@@ -239,8 +289,10 @@ class Client:
     @classmethod
     async def connect(cls, config: Settings) -> "Client":
         session = await open_session(config.url, os.environ[TOKEN_VAR])
-        # Read before the reader starts: the calendar follows the acknowledgement.
+        # Read before the reader starts: the calendar and then the instruments table
+        # follow the acknowledgement.
         await session.wait_for_calendar(config.timeout)
+        await session.wait_for_instrument_table(config.timeout)
         return cls(session, config)
 
     async def _read(self) -> None:
@@ -276,7 +328,7 @@ class Client:
         if event is _END:
             self._ended = True
             return await self._pull(0)
-        if isinstance(event, SeqGap | DecodeFailed):
+        if isinstance(event, SeqGap | ReportGap | DecodeFailed):
             raise AssertionError(f"messages were missed or unreadable: {event!r}")
         if not isinstance(event, Received):
             return True
@@ -285,6 +337,7 @@ class Client:
         if isinstance(item, SessionState):
             self.state = item
         self.seen.append(event.message)
+        self.report_seqs.append(event.report_seq)
         return True
 
     async def wait_for(
@@ -331,6 +384,14 @@ class Client:
     def after(self, message: Message) -> int:
         """The index just past `message` in `seen`."""
         return next(i for i, m in enumerate(self.seen) if m is message) + 1
+
+    def report_seq_of(self, message: Message) -> int | None:
+        """The envelope `report_seq` that `message` arrived with, or None."""
+        return self.report_seqs[self.after(message) - 1]
+
+    def newest_report_seq(self) -> int | None:
+        """The highest `report_seq` this session has received, or None."""
+        return max((n for n in self.report_seqs if n is not None), default=None)
 
     def since(self, index: int, kind: type[Message]) -> list:
         return [m for m in self.seen[index:] if isinstance(m, kind)]
@@ -406,29 +467,34 @@ def check_release_time(accepted: Accepted) -> None:
 
 
 def assert_ladder(book: Book) -> None:
-    """The wall ladder: ten ask levels and up to ten bid levels, best first, every level at
-    least one share, and both sides spaced uniformly by the asks' own step.
+    """The wall ladder: up to ten levels a side, best first, every level at least one
+    share, and both sides spaced uniformly by the asks' own step.
 
-    The bid ladder of a low-priced instrument stops at its last level with a positive
-    price, so fewer than ten bids are accepted only when one more step below the last bid
-    would not be positive.
+    How many levels a side shows is the exchange's setting, one number for both sides, so
+    the ask ladder shows that many. The bid ladder of a low-priced instrument stops at its
+    last level with a positive price, so fewer bids than asks are accepted only when one
+    more step below the last bid would not be positive.
     """
     asks = [level.price for level in book.ask_levels]
     bids = [level.price for level in book.bid_levels]
-    assert len(asks) == 10, f"{len(asks)} ask levels, not ten"
-    assert 1 <= len(bids) <= 10, f"{len(bids)} bid levels"
-    step = asks[1] - asks[0]
-    assert step > 0, "asks not best first"
-    assert all(b - a == step for a, b in zip(asks[:-1], asks[1:], strict=True)), (
-        "asks not evenly spaced"
-    )
-    assert all(a - b == step for a, b in zip(bids[:-1], bids[1:], strict=True)), (
-        "bids not evenly spaced"
-    )
+    assert 1 <= len(asks) <= 10, f"{len(asks)} ask levels"
+    assert 1 <= len(bids) <= len(asks), f"{len(bids)} bid levels and {len(asks)} ask levels"
     assert bids[0] < asks[0], "the bid ladder crosses the ask ladder"
     assert bids[-1] > 0, "a bid level without a positive price"
-    if len(bids) < 10:
-        assert bids[-1] - step <= 0, f"{len(bids)} bid levels, though the next would be positive"
+    if len(asks) > 1:
+        step = asks[1] - asks[0]
+        assert step > 0, "asks not best first"
+        assert all(b - a == step for a, b in zip(asks[:-1], asks[1:], strict=True)), (
+            "asks not evenly spaced"
+        )
+        assert all(a - b == step for a, b in zip(bids[:-1], bids[1:], strict=True)), (
+            "bids not evenly spaced"
+        )
+        if len(bids) < len(asks):
+            assert bids[-1] - step <= 0, (
+                f"{len(bids)} bid levels and {len(asks)} ask levels, though the next bid "
+                "would be positive"
+            )
     sizes = [level.size for level in [*book.bid_levels, *book.ask_levels]]
     assert all(size >= 1 for size in sizes), "a level shows less than one share"
 
@@ -519,7 +585,117 @@ async def test_step_01_connect_and_authenticate(client: Client):
     assert calendar.sessions, "the calendar lists no sessions"
 
 
+# Shares of the underlying per option contract, as the vendored contract's `OptionTerms`
+# states. Like the figures the steps name, take it from there again on re-vendoring.
+OPTION_MULTIPLIER = 100
+# An `OptionTerms.right` and the letter of an OCC option symbol that names it.
+_SYMBOL_RIGHTS = {RIGHT_CALL: CALL_LETTER, RIGHT_PUT: PUT_LETTER}
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def assert_option_entry(info: InstrumentInfo) -> None:
+    """Step 1a's `OPTION` entry: an id in Alpaca's unpadded OCC form and `option` terms
+    with every field set, which agree with the id. The id's root is the underlying, its
+    YYMMDD the expiry, its C or P the right, and its eight digits the strike in thousandths
+    of a dollar, which `parse_option_symbol` gives in micro-dollars like `strike`."""
+    name = info.instrument
+    try:
+        symbol = parse_option_symbol(name)
+    except ValueError:
+        raise AssertionError(f"{name} is not an unpadded OCC option symbol") from None
+    assert info.HasField("option"), f"option {name} carries no option terms"
+    terms = info.option
+    assert terms.underlying, f"option {name} has no underlying"
+    assert terms.expiry, f"option {name} has no expiry"
+    assert terms.right in _SYMBOL_RIGHTS, f"option {name} has no right, CALL or PUT"
+    assert terms.strike > 0, f"option {name} has no positive strike"
+    assert terms.multiplier == OPTION_MULTIPLIER, (
+        f"option {name} has a multiplier of {terms.multiplier}, not {OPTION_MULTIPLIER}"
+    )
+    assert terms.underlying == symbol.underlying, f"{name}'s underlying is {terms.underlying}"
+    assert _ISO_DATE.fullmatch(terms.expiry), f"{name}'s expiry is not an ISO 8601 date"
+    try:
+        expiry = date.fromisoformat(terms.expiry)
+    except ValueError:
+        raise AssertionError(f"{name}'s expiry is not a real date") from None
+    assert expiry == symbol.expiry, f"{name}'s expiry is {terms.expiry}"
+    assert _SYMBOL_RIGHTS[terms.right] == symbol.right, f"{name}'s right does not match"
+    assert terms.strike == symbol.strike, f"{name}'s strike is {terms.strike} micro-dollars"
+
+
+# The fields step 1a names on each instrument, which must be on the wire even at their
+# zero value: `tradable` "present, `false` included".
+STEP_01A_FIELDS = ("kind", "tick_size", "lot_size", "status", "tradable")
+# Step 1a names the option underlyings every exchange lists. Like the figures of steps 10
+# and 16, take them from CONFORMANCE.md again whenever that file is re-vendored.
+STEP_01A_UNDERLYINGS = ("SPY", "GOOGL")
+
+
+async def test_step_01a_instruments():
+    config = settings()
+    session = await open_session(config.url, os.environ[TOKEN_VAR])
+    events: list = []
+    try:
+        # The session is read directly, rather than through `Client`, to see each
+        # message's `seq` and the payload as received.
+        async with asyncio.timeout(config.timeout):
+            async for event in session:
+                events.append(event)
+                if isinstance(event, Received) and event.type == "instruments":
+                    break
+    except TimeoutError:
+        pytest.fail(f"no instruments within {config.timeout} s of session_ack")
+    finally:
+        await session.close()
+    calendars = [
+        i for i, e in enumerate(events) if isinstance(e, Received) and e.type == "calendar"
+    ]
+    assert calendars, "no calendar before instruments"
+    *_, table_event = events
+    between = events[calendars[-1] + 1 : -1]
+    assert not between, f"messages between calendar and instruments: {between!r}"
+    calendar_event = events[calendars[-1]]
+    # A heartbeat between them is absorbed by the SDK but still takes a `seq`.
+    assert table_event.seq == calendar_event.seq + 1, "instruments is not the next seq"
+    table = table_event.message
+    assert table is session.instrument_table
+    ids = [info.instrument for info in table.instruments]
+    assert ids, "the instruments table lists no instrument"
+    assert all(a.encode() < b.encode() for a, b in zip(ids[:-1], ids[1:], strict=True)), (
+        "instruments not sorted by the byte order of instrument, or one listed twice"
+    )
+    for info, entry in zip(table.instruments, table_event.payload["instruments"], strict=True):
+        missing = [name for name in STEP_01A_FIELDS if name not in entry]
+        assert not missing, f"{info.instrument} has no {', '.join(missing)}"
+        if info.kind == OPTION:
+            assert_option_entry(info)
+        else:
+            assert info.kind == EQUITY, f"{info.instrument} is neither EQUITY nor OPTION"
+            assert not info.HasField("option"), f"equity {info.instrument} carries option terms"
+    raw_underlyings = {
+        entry.get("underlying"): entry
+        for entry in table_event.payload.get("option_underlyings", [])
+    }
+    for underlying in STEP_01A_UNDERLYINGS:
+        assert underlying in option_underlyings(table), (
+            f"option_underlyings does not name {underlying}"
+        )
+        entry = raw_underlyings[underlying]
+        assert "strike_increment" in entry, f"{underlying} has no strike_increment"
+        assert "contracts" in entry, f"{underlying} has no contracts"
+        assert strike_increment(table, underlying) > 0, f"{underlying}'s strike_increment"
+    # Not checked: that a client replaces its table with each `instruments` the exchange
+    # resends, since a resend needs a listing to change.
+    if instrument_info(table, config.instrument) is None:
+        pytest.skip(f"precondition: the exchange lists the instrument {config.instrument}")
+
+
 async def test_step_02_subscribe(client: Client):
+    # Step 1a: a client subscribes to an instrument from the exchange's table.
+    table = client.session.instrument_table
+    assert table is not None, "no instruments after the calendar"
+    if instrument_info(table, client.config.instrument) is None:
+        pytest.skip(f"precondition: the exchange lists the instrument {client.config.instrument}")
     start = client.mark()
     await subscribe(client.session, [client.config.instrument])
     first = await client.wait_for(
@@ -1149,7 +1325,871 @@ async def test_step_13_mass_cancel(market: Client):
     # "No budget consumed" is not checked: no message reports a team's budget use.
 
 
-# Steps 14 to 16: the close.
+# Steps 14 to 16: the close, and step 15, heartbeat and resume.
+#
+# Step 15's precondition puts a restart between two of its sub-steps and step 14's close
+# before its empty marker, and step 16 needs the exchange not to have restarted since
+# that close. So the sub-steps that need the session open, the restart among them, are
+# defined here, before step 14, and run before it; the empty marker runs after it. Its
+# heartbeat sub-steps run at whatever hour the run reaches them, and again after step
+# 14's close, so that one run sees them inside a session and outside one.
+
+# Step 15 names the heartbeat interval, the silence after which the exchange closes a
+# connection, that close's code and reason, and the 44 s between the frames of its second
+# sub-step. Like the figures of steps 10 and 16, these are what the vendored steps require
+# of the exchange under test, not values trading code may rely on: take them from
+# CONFORMANCE.md again whenever that file is re-vendored.
+STEP_15_HEARTBEAT_EVERY = 15.0  # seconds
+STEP_15_SILENCE = 45.0  # seconds
+STEP_15_CLOSE_CODE = 4000
+STEP_15_CLOSE_REASON = "heartbeat timeout"
+STEP_15_FRAME_EVERY = 44.0  # seconds
+
+# How far, in seconds of this machine's clock, a ping, a heartbeat or the close may come
+# before or after the instant step 15 names. A connection is taken to open when this end
+# has finished its handshake, a little after the exchange starts timing it, each frame
+# arrives a little after it is sent, and the exchange checks its timers on a tick of its
+# own.
+STEP_15_EARLY = 0.5
+STEP_15_LATE = 2.5
+
+# The six private messages that carry a `report_seq`, as step 15 names them.
+REPORT_TYPES = frozenset(
+    {"accepted", "reject", "execution", "order_cancelled", "order_state", "risk_notice"}
+)
+# The fields step 15 names on each `order_snapshot`.
+SNAPSHOT_FIELDS = ("strat_id", "instrument", "side", "price", "remaining_size", "timestamp")
+
+RESTART_VAR = "QTE_CONFORMANCE_RESTART_CMD"
+RESTART_WITHIN_VAR = "QTE_CONFORMANCE_RESTART_WITHIN"
+
+# What step 14 leaves for step 15's empty marker: the close's cancellation of the step's
+# order, its `report_seq`, and the team's newest `report_seq` after the close.
+_STEP_14_REPORTS: list[tuple[OrderCancelled, int | None, int]] = []
+
+
+class NotAccepted(Exception):
+    """The exchange did not complete the WebSocket handshake, as while it catches up after
+    a restart."""
+
+
+# The protocol's own logger, kept off: its debug lines show every frame, `auth` and its
+# token included, and `Wire` has none of the SDK's guards against that.
+_WIRE_LOGGER = logging.getLogger("test_conformance.wire")
+_WIRE_LOGGER.disabled = True
+
+
+class _Protocol(ClientProtocol):
+    """The `websockets` client protocol, answering a ping with a pong only if `pong`."""
+
+    def __init__(self, uri: WebSocketURI, *, pong: bool) -> None:
+        super().__init__(uri, max_size=None, logger=_WIRE_LOGGER)
+        self.pong = pong
+
+    def recv_frame(self, frame: Frame) -> None:
+        if frame.opcode is Opcode.PING and not self.pong:
+            self.events.append(frame)  # kept, and not answered
+            return
+        super().recv_frame(frame)
+
+
+@dataclass(frozen=True)
+class WireMessage:
+    """One message as a `Wire` received it. `at` is when, in seconds after the connection
+    opened on this machine's clock, and `payload_text` is the envelope's `payload` member
+    exactly as it was sent."""
+
+    at: float
+    type: str
+    seq: int | None
+    sent_at: int | None
+    report_seq: int | None
+    payload: dict
+    payload_text: str | None
+    message: Message | None
+
+
+_JSON = json.JSONDecoder()
+_SPACE = re.compile(r"[ \t\n\r]*")
+
+
+def member_text(text: str, name: str) -> str | None:
+    """The text of the member `name` of the JSON object `text`, exactly as it stands there,
+    or None if there is none. `text` must already be known to be valid JSON."""
+    index = _SPACE.match(text, 0).end()
+    if text[index : index + 1] != "{":
+        raise ValueError("not a JSON object")
+    index = _SPACE.match(text, index + 1).end()
+    while text[index : index + 1] not in ("}", ""):
+        key, index = _JSON.raw_decode(text, index)
+        index = _SPACE.match(text, index).end() + 1  # past the colon
+        start = _SPACE.match(text, index).end()
+        _, end = _JSON.raw_decode(text, start)
+        if key == name:
+            return text[start:end]
+        index = _SPACE.match(text, end).end()
+        if text[index : index + 1] == ",":
+            index = _SPACE.match(text, index + 1).end()
+    return None
+
+
+class Wire:
+    """One WebSocket connection to the exchange, driven frame by frame, for step 15.
+
+    Step 15 checks things the SDK does for its user on purpose and so hides: its connection
+    answers every ping with a pong and sends pings of its own, so it is never silent; it
+    absorbs heartbeats; and a session parses each payload, drops a report it has already
+    delivered and holds live reports until a resume is complete. So this drives the
+    `websockets` library's Sans-I/O client protocol over a socket of its own. It sends
+    exactly the frames a sub-step names, answers pings only if told to, and keeps every
+    message as it was received. Messages are still built and read with the SDK's codec and
+    contract types.
+    """
+
+    def __init__(
+        self, protocol: _Protocol, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self._protocol = protocol
+        self._reader = reader
+        self._writer = writer
+        self._loop = asyncio.get_running_loop()
+        self._opened = self._loop.time()
+        self.messages: list[WireMessage] = []
+        self.pings: list[float] = []
+        self.unreadable: list[str] = []
+        self._fragments: list[bytes] | None = None
+        self.closed_at: float | None = None
+        self.last_sent = 0.0
+        self.ended = False
+        self._changed = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    @classmethod
+    async def open(cls, url: str, *, pong: bool, timeout: float = 10.0) -> "Wire":
+        uri = parse_uri(url)
+        async with asyncio.timeout(timeout):
+            reader, writer = await asyncio.open_connection(
+                uri.host, uri.port, ssl=True if uri.secure else None
+            )
+            try:
+                protocol = _Protocol(uri, pong=pong)
+                protocol.send_request(protocol.connect())
+                writer.write(b"".join(protocol.data_to_send()))
+                events: list = []
+                while not any(isinstance(event, Response) for event in events):
+                    data = await reader.read(65536)
+                    if not data:
+                        break
+                    protocol.receive_data(data)
+                    events += protocol.events_received()
+            except BaseException:
+                writer.close()
+                raise
+        if protocol.state is not State.OPEN:
+            writer.close()
+            status = [event.status_code for event in events if isinstance(event, Response)]
+            raise NotAccepted(f"the handshake was answered with {status or 'nothing'}")
+        wire = cls(protocol, reader, writer)
+        wire._take(events)
+        wire._task = asyncio.create_task(wire._read())
+        return wire
+
+    async def __aenter__(self) -> "Wire":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
+    def now(self) -> float:
+        """Seconds since the connection opened."""
+        return self._loop.time() - self._opened
+
+    @property
+    def close_frame(self) -> Close | None:
+        """The close frame the exchange sent, once it has."""
+        return self._protocol.close_rcvd
+
+    def _take(self, events: list) -> None:
+        for event in events:
+            if not isinstance(event, Frame):
+                continue
+            at = self.now()
+            if event.opcode is Opcode.PING:
+                self.pings.append(at)
+            elif event.opcode is Opcode.CLOSE:
+                self.closed_at = at
+            elif event.opcode is Opcode.TEXT or (
+                event.opcode is Opcode.CONT and self._fragments is not None
+            ):
+                # A message may come in fragments: it is read once its last has arrived.
+                self._fragments = [*(self._fragments or []), bytes(event.data)]
+                if event.fin:
+                    data, self._fragments = b"".join(self._fragments), None
+                    try:
+                        text = data.decode()
+                    except UnicodeDecodeError:
+                        self.unreadable.append("a text message that is not UTF-8")
+                        continue
+                    self._take_text(at, text)
+            elif event.opcode is not Opcode.PONG:
+                self.unreadable.append(f"a {event.opcode.name} frame")
+        self._changed.set()
+
+    def _take_text(self, at: float, text: str) -> None:
+        try:
+            decoded = codec.decode(text)
+            envelope = decoded.envelope
+            kind = INBOUND.get(envelope.type)
+            message = None if kind is None else codec.unpack(decoded.payload, kind)
+            payload_text = member_text(text, "payload")
+        except Exception as error:
+            self.unreadable.append(f"a frame that could not be decoded ({type(error).__name__})")
+            return
+        self.messages.append(
+            WireMessage(
+                at=at,
+                type=envelope.type,
+                seq=envelope.seq if envelope.HasField("seq") else None,
+                sent_at=envelope.sent_at if envelope.HasField("sent_at") else None,
+                report_seq=envelope.report_seq if envelope.HasField("report_seq") else None,
+                payload=decoded.payload,
+                payload_text=payload_text,
+                message=message,
+            )
+        )
+
+    def _flush(self) -> None:
+        # What the protocol queued itself: a pong if `pong`, and the reply to a close.
+        for data in self._protocol.data_to_send():
+            if data:
+                self._writer.write(data)
+
+    async def _read(self) -> None:
+        try:
+            while True:
+                data = await self._reader.read(65536)
+                if data:
+                    self._protocol.receive_data(data)
+                else:
+                    self._protocol.receive_eof()
+                self._take(self._protocol.events_received())
+                self._flush()
+                if not data:
+                    break
+        except OSError:
+            pass
+        finally:
+            self.ended = True
+            self._changed.set()
+
+    async def send(self, type_: str, payload: Message) -> None:
+        self._protocol.send_text(codec.encode(CONTRACT_VERSION, type_, payload).encode())
+        self._flush()
+        self.last_sent = self.now()
+        await self._writer.drain()
+
+    async def login(self, timeout: float) -> int:
+        """Send `auth` with the conformance token and read through the `session_ack`,
+        `calendar` and `instruments` that answer it. Returns the index just past them."""
+        await self.send("auth", Auth(token=os.environ[TOKEN_VAR]))
+        reply = await self.wait_for(
+            lambda m: m.type in ("instruments", "session_reject"),
+            "session_ack, calendar and instruments",
+            0,
+            timeout,
+        )
+        assert reply.type == "instruments", "the exchange rejected the session"
+        return self.after(reply)
+
+    def after(self, message: WireMessage) -> int:
+        """The index just past `message` in `messages`."""
+        return next(i for i, m in enumerate(self.messages) if m is message) + 1
+
+    async def until(self, done: Callable[[], bool], what: str, timeout: float) -> None:
+        """Read until `done()` is true or the connection ends, with one deadline."""
+        deadline = self._loop.time() + timeout
+        while True:
+            self._changed.clear()
+            if self.unreadable:
+                raise AssertionError(f"the exchange sent {self.unreadable[0]}")
+            if done():
+                return
+            if self.ended:
+                raise AssertionError(f"the connection ended before {what}")
+            remaining = deadline - self._loop.time()
+            if remaining <= 0:
+                raise NoMessage(f"no {what} within {timeout} s")
+            try:
+                async with asyncio.timeout(remaining):
+                    await self._changed.wait()
+            except TimeoutError:
+                pass
+
+    async def wait_for(
+        self, match: Callable[[WireMessage], bool], what: str, since: int, timeout: float
+    ) -> WireMessage:
+        """The first message from index `since` on that `match` accepts."""
+        found: list[WireMessage] = []
+
+        def done() -> bool:
+            found[:] = [m for m in self.messages[since:] if match(m)][:1]
+            return bool(found)
+
+        await self.until(done, what, timeout)
+        return found[0]
+
+    async def wait_closed(self, timeout: float) -> None:
+        """Wait until the exchange has closed the connection."""
+        deadline = self._loop.time() + timeout
+        while not self.ended:
+            self._changed.clear()
+            remaining = deadline - self._loop.time()
+            if remaining <= 0:
+                raise AssertionError(f"the connection was still open after {self.now():.1f} s")
+            try:
+                async with asyncio.timeout(remaining):
+                    await self._changed.wait()
+            except TimeoutError:
+                pass
+
+    async def sleep_until(self, at: float) -> None:
+        """Sleep until `at` seconds after the connection opened."""
+        await asyncio.sleep(max(0.0, at - self.now()))
+
+    async def aclose(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._task
+        with suppress(Exception):
+            if self._protocol.state is State.OPEN:
+                self._protocol.send_close()
+                self._flush()
+        self._writer.close()
+        with suppress(Exception):
+            async with asyncio.timeout(2):
+                await self._writer.wait_closed()
+
+
+def reports_of(w: Wire, since: int) -> list[WireMessage]:
+    """The private reports `w` received from index `since` on."""
+    return [m for m in w.messages[since:] if m.report_seq is not None]
+
+
+def assert_seq_increasing(w: Wire) -> None:
+    seqs = [m.seq for m in w.messages]
+    assert None not in seqs, "a message without a seq"
+    assert all(a < b for a, b in zip(seqs[:-1], seqs[1:], strict=True)), (
+        "seq does not increase from one message of the connection to the next"
+    )
+
+
+def assert_numbered(reports: list[WireMessage], first: int) -> None:
+    numbers = [m.report_seq for m in reports]
+    assert numbers == list(range(first, first + len(reports))), (
+        f"report_seq {numbers}, not a run from {first} with no gap or duplicate"
+    )
+
+
+def assert_same_reports(got: list[WireMessage], sent: list[WireMessage]) -> None:
+    """`got` are the reports `sent`, each with the type, `report_seq` and payload bytes it
+    was first sent with."""
+    assert [(m.type, m.report_seq) for m in got] == [(m.type, m.report_seq) for m in sent]
+    for again, first in zip(got, sent, strict=True):
+        assert again.payload_text == first.payload_text, (
+            f"report {again.report_seq} was not sent with the payload bytes it was first sent with"
+        )
+
+
+def assert_nothing_but(messages: list[WireMessage], what: str, *also: str) -> None:
+    """Nothing in `messages` but private reports and the types named in `also`. Heartbeats
+    are the connection's own, sent every 15 s whatever else it carries, so they are not
+    counted."""
+    for m in messages:
+        if m.type == "heartbeat" or m.type in also:
+            continue
+        assert m.type in REPORT_TYPES and m.report_seq is not None, f"a {m.type} {what}"
+
+
+def assert_snapshot_first(answer: list[WireMessage], count: int) -> None:
+    """`answer`, what followed a `resume_ack` other than heartbeats, opens with exactly
+    `count` `order_snapshot` and has none after them."""
+    kinds = [m.type for m in answer]
+    assert kinds[:count] == ["order_snapshot"] * count, "fewer order_snapshot than snapshot_count"
+    assert "order_snapshot" not in kinds[count:], "more order_snapshot than snapshot_count"
+
+
+async def answer_to_resume(r: Wire, since: int, timeout: float) -> WireMessage:
+    """The first message after `since` other than a heartbeat, which must be `resume_ack`."""
+    answer = await r.wait_for(lambda m: m.type != "heartbeat", "resume_ack", since, timeout)
+    assert answer.type == "resume_ack", f"{answer.type} answered resume, not resume_ack"
+    return answer
+
+
+async def resting_reports(
+    c: Client, witness: Wire, orders: list[tuple[str, int, int]]
+) -> list[WireMessage]:
+    """Rest each (strategy, side, price) order and return the reports `witness`, another
+    connection of the team, received for them as they were first sent."""
+    start = len(witness.messages)
+    for strat, side, price in orders:
+        await c.rest(strat, side, price)
+        await witness.wait_for(
+            lambda m, side=side, price=price: (
+                isinstance(m.message, OrderState)
+                and m.message.instrument == c.config.instrument
+                and m.message.side == side
+                and m.message.price == price
+            ),
+            "order_state on a second connection of the team",
+            start,
+            c.config.timeout,
+        )
+    sent = reports_of(witness, start)
+    assert_numbered(sent, sent[0].report_seq)
+    return sent
+
+
+def check_snapshots(
+    snapshots: list[WireMessage], orders: list[tuple[str, int, int]], c: Client
+) -> None:
+    """`snapshots` describe `orders`, each resting whole, in level-key order: instrument
+    ascending, then BUY before SELL, then price ascending."""
+    expected = sorted(orders, key=lambda o: (o[1] != BUY, o[2]))  # one instrument
+    assert len(snapshots) == len(expected), f"{len(snapshots)} order_snapshot, not {len(expected)}"
+    for m, (strat, side, price) in zip(snapshots, expected, strict=True):
+        assert m.report_seq is None, "an order_snapshot carries a report_seq"
+        missing = [name for name in SNAPSHOT_FIELDS if name not in m.payload]
+        assert not missing, f"an order_snapshot has no {', '.join(missing)}"
+        s = m.message
+        assert (s.strat_id, s.instrument, s.side, s.price) == (
+            strat,
+            c.config.instrument,
+            side,
+            price,
+        ), "order_snapshot not in level-key order, or not the team's resting order"
+        assert s.remaining_size == c.config.size
+        assert s.timestamp > 0
+
+
+async def sdk_resume(config: Settings, last: int) -> tuple[ResumeAck, list[Received]]:
+    """Resume through the SDK's own `Session.resume`, as a client would, and return the
+    `resume_ack` and every message the session delivered before its `ResumeComplete`."""
+    session = await open_session(config.url, os.environ[TOKEN_VAR])
+    delivered: list[Received] = []
+    try:
+        await session.wait_for_calendar(config.timeout)
+        ack = await session.resume(last, timeout=config.timeout)
+        async with asyncio.timeout(config.timeout):
+            async for event in session:
+                assert not isinstance(event, DataUncertain), f"{event!r} during the resume"
+                if isinstance(event, ResumeComplete):
+                    break
+                if isinstance(event, Received) and event.type not in (
+                    "calendar",
+                    "instruments",
+                    "resume_ack",
+                ):
+                    delivered.append(event)
+    finally:
+        await session.close()
+    return ack, delivered
+
+
+async def silent_heartbeats(config: Settings) -> None:
+    """Step 15's first sub-step on a connection that never sends `auth` and one that sends
+    only `auth`, neither sending anything else, not even a pong."""
+    async with (
+        await Wire.open(config.url, pong=False) as unauthenticated,
+        await Wire.open(config.url, pong=False) as authenticated,
+    ):
+        await authenticated.login(config.timeout)
+        wait = STEP_15_SILENCE + STEP_15_LATE + config.timeout
+        for w, quiet_since in ((unauthenticated, 0.0), (authenticated, authenticated.last_sent)):
+            await w.wait_closed(wait)
+            assert w.closed_at is not None, "the connection ended without a close frame"
+            # It stays connected for as long as the exchange's own timer allows.
+            assert w.closed_at >= quiet_since + STEP_15_SILENCE - STEP_15_EARLY, (
+                f"closed {w.closed_at:.1f} s after opening, before 45 s of silence"
+            )
+            assert_heartbeats(w)
+
+
+def assert_heartbeats(w: Wire) -> None:
+    """A WebSocket ping and a `heartbeat` 15 s after the connection opened and every 15 s
+    after that, until the exchange closed it, each heartbeat an envelope with `seq` and
+    `sent_at`, no payload fields and no `report_seq`."""
+    assert w.closed_at is not None
+    beats = [m for m in w.messages if m.type == "heartbeat"]
+    for m in beats:
+        assert m.seq is not None and m.sent_at is not None, "a heartbeat without seq or sent_at"
+        assert m.payload == {}, "a heartbeat with payload fields"
+        assert m.report_seq is None, "a heartbeat with a report_seq"
+    assert_seq_increasing(w)
+    every = STEP_15_HEARTBEAT_EVERY
+    for kind, times in (("heartbeat", [m.at for m in beats]), ("ping", w.pings)):
+        for at in times:
+            due = max(1, round(at / every)) * every
+            assert due - STEP_15_EARLY <= at <= due + STEP_15_LATE, (
+                f"a {kind} {at:.1f} s after the connection opened, off its 15 s beat"
+            )
+        for k in range(1, int((w.closed_at + STEP_15_EARLY) // every) + 1):
+            due = k * every
+            count = sum(due - STEP_15_EARLY <= at <= due + STEP_15_LATE for at in times)
+            # One may or may not come before a close that falls on a beat.
+            if due + STEP_15_LATE < w.closed_at:
+                assert count == 1, f"{count} {kind}s {due:.0f} s after opening, not one"
+            else:
+                assert count <= 1, f"{count} {kind}s {due:.0f} s after opening"
+    assert beats, "no heartbeat"
+
+
+def assert_closed_for_silence(w: Wire, quiet_since: float) -> None:
+    """The exchange closed `w` with 4000 "heartbeat timeout" 45 s after `quiet_since`."""
+    close = w.close_frame
+    assert close is not None and w.closed_at is not None, "ended without a close frame"
+    assert (close.code, close.reason) == (STEP_15_CLOSE_CODE, STEP_15_CLOSE_REASON), (
+        f"closed with {close.code} {close.reason!r}"
+    )
+    due = quiet_since + STEP_15_SILENCE
+    assert due - STEP_15_EARLY <= w.closed_at <= due + STEP_15_LATE, (
+        f"closed {w.closed_at:.1f} s after opening, not {due:.1f} s"
+    )
+
+
+async def silence_closes(config: Settings) -> None:
+    """Step 15's second sub-step, on three connections side by side."""
+    wait = STEP_15_SILENCE + STEP_15_LATE + config.timeout
+
+    async def authenticated_and_silent() -> None:
+        async with await Wire.open(config.url, pong=False) as w:
+            await w.login(config.timeout)
+            await w.wait_closed(wait)
+            assert_closed_for_silence(w, w.last_sent)
+
+    async def never_authenticated_but_answers_pings() -> None:
+        async with await Wire.open(config.url, pong=True) as w:
+            await w.wait_closed(wait)
+            assert len(w.pings) >= 2, "fewer than two pings to answer before the close"
+            assert_closed_for_silence(w, 0.0)
+
+    async def a_frame_at_44_s_and_another_44_s_later() -> None:
+        async with await Wire.open(config.url, pong=False) as w:
+            await w.login(config.timeout)
+            for k in (1, 2):
+                await w.sleep_until(k * STEP_15_FRAME_EVERY)
+                assert not w.ended, (
+                    f"closed {w.closed_at} s after opening, before its frame at "
+                    f"{k * STEP_15_FRAME_EVERY:.0f} s"
+                )
+                # Any frame will do; a subscribe is one the exchange answers harmlessly.
+                await w.send("subscribe", Subscribe(instruments=[config.instrument]))
+            await w.wait_closed(wait)
+            assert_closed_for_silence(w, w.last_sent)
+
+    async with asyncio.TaskGroup() as group:
+        group.create_task(authenticated_and_silent())
+        group.create_task(never_authenticated_but_answers_pings())
+        group.create_task(a_frame_at_44_s_and_another_44_s_later())
+
+
+async def test_step_15a_heartbeat_with_the_client_silent():
+    await silent_heartbeats(settings())
+
+
+async def test_step_15b_silence_closes_with_4000():
+    await silence_closes(settings())
+
+
+async def test_step_15c_resume_inside_the_window_replays(market: Client):
+    c = market
+    config = c.config
+    low, high = inside_prices(c.books.get(config.instrument), config.tick, 2)
+    async with await Wire.open(config.url, pong=True) as witness:
+        await witness.login(config.timeout)
+        sent = await resting_reports(
+            c, witness, [(config.strat_a, BUY, low), (config.strat_b, BUY, high)]
+        )
+        # L is just below the reports the witness saw first sent, so each replayed one can
+        # be compared with its first sending; at least 1, as the step requires.
+        last = max(1, sent[0].report_seq - 1)
+        newest = sent[-1].report_seq
+        replayed = [m for m in sent if m.report_seq > last]
+        async with await Wire.open(config.url, pong=True) as r:
+            start = await r.login(config.timeout)
+            await r.send("resume", Resume(last_report_seq=last))
+            ack = await answer_to_resume(r, start, config.timeout)
+            assert (
+                ack.message.replayed,
+                ack.message.as_of_report_seq,
+                ack.message.snapshot_count,
+            ) == (True, newest, 0)
+            answered = r.after(ack)
+            await r.until(
+                lambda: len(reports_of(r, answered)) >= len(replayed),
+                "the replayed reports",
+                config.timeout,
+            )
+            # Then live reports from H + 1: the cancel's.
+            live_start = len(witness.messages)
+            await send_cancel(c.session, instrument=config.instrument, side=BUY, price=low)
+            await witness.wait_for(
+                lambda m: isinstance(m.message, OrderCancelled) and m.message.price == low,
+                "order_cancelled on a second connection of the team",
+                live_start,
+                config.timeout,
+            )
+            live = reports_of(witness, live_start)
+            assert_numbered(live, newest + 1)
+            await r.until(
+                lambda: len(reports_of(r, answered)) >= len(replayed) + len(live),
+                "the live reports after the replay",
+                config.timeout,
+            )
+            await asyncio.sleep(1.0)  # so anything sent after them is read too
+            assert_nothing_but(r.messages[answered:], "after resume_ack")
+            assert_same_reports(reports_of(r, answered), replayed + live)
+            assert_seq_increasing(r)
+    # The SDK's own resume, as a client makes it, gets the same replay.
+    ack, delivered = await sdk_resume(config, last)
+    expected = replayed + live
+    assert (ack.replayed, ack.as_of_report_seq) == (True, expected[-1].report_seq)
+    assert [(e.type, e.report_seq, e.payload) for e in delivered] == [
+        (m.type, m.report_seq, m.payload) for m in expected
+    ]
+
+
+async def test_step_15d_resume_with_no_cursor_gets_a_snapshot(market: Client):
+    c = market
+    config = c.config
+    low, middle, high = inside_prices(c.books.get(config.instrument), config.tick, 3)
+    # Rested out of level-key order, so a snapshot in the order the orders were accepted
+    # fails.
+    orders = [
+        (config.strat_a, SELL, high),
+        (config.strat_b, BUY, middle),
+        (config.strat_a, BUY, low),
+    ]
+    async with await Wire.open(config.url, pong=True) as witness, AsyncExitStack() as stack:
+        await witness.login(config.timeout)
+        sent = await resting_reports(c, witness, orders)
+        newest = sent[-1].report_seq
+        # No cursor, and one above the newest report, which a replay cannot serve either.
+        resumed: list[tuple[Wire, int]] = []
+        for last in (0, newest + 1000):
+            r = await stack.enter_async_context(await Wire.open(config.url, pong=True))
+            start = await r.login(config.timeout)
+            await r.send("resume", Resume(last_report_seq=last))
+            ack = await answer_to_resume(r, start, config.timeout)
+            assert (
+                ack.message.replayed,
+                ack.message.as_of_report_seq,
+                ack.message.snapshot_count,
+            ) == (False, newest, len(orders)), f"resume_ack for last_report_seq {last}"
+            answered = r.after(ack)
+            await r.until(
+                lambda r=r, answered=answered: (
+                    sum(m.type == "order_snapshot" for m in r.messages[answered:]) >= len(orders)
+                ),
+                "order_snapshot for each resting order",
+                config.timeout,
+            )
+            resumed.append((r, answered))
+        # Then reports from N + 1: the cancel's.
+        live_start = len(witness.messages)
+        await send_cancel(c.session, instrument=config.instrument, side=SELL, price=high)
+        await witness.wait_for(
+            lambda m: isinstance(m.message, OrderCancelled) and m.message.side == SELL,
+            "order_cancelled on a second connection of the team",
+            live_start,
+            config.timeout,
+        )
+        live = reports_of(witness, live_start)
+        assert_numbered(live, newest + 1)
+        for r, answered in resumed:
+            await r.until(
+                lambda r=r, answered=answered: len(reports_of(r, answered)) >= len(live),
+                "the reports after the snapshot",
+                config.timeout,
+            )
+        await asyncio.sleep(1.0)  # so anything sent after them is read too
+        for r, answered in resumed:
+            answer = [m for m in r.messages[answered:] if m.type != "heartbeat"]
+            assert_nothing_but(answer, "after resume_ack", "order_snapshot")
+            assert_snapshot_first(answer, len(orders))
+            snapshots = answer[: len(orders)]
+            check_snapshots(snapshots, orders, c)
+            assert_same_reports(reports_of(r, answered), live)
+            assert_seq_increasing(r)
+    # The SDK's own resume, as a client makes it, gets the snapshot of the two buys left.
+    ack, delivered = await sdk_resume(config, 0)
+    assert (ack.replayed, ack.as_of_report_seq, ack.snapshot_count) == (
+        False,
+        live[-1].report_seq,
+        len(orders) - 1,
+    )
+    # Compared order by order, not by timestamp: each answer may stamp its own.
+    assert all(isinstance(e.message, OrderSnapshot) for e in delivered)
+    as_received = [
+        WireMessage(
+            at=0.0,
+            type=e.type,
+            seq=e.seq,
+            sent_at=None,
+            report_seq=e.report_seq,
+            payload=e.payload,
+            payload_text=None,
+            message=e.message,
+        )
+        for e in delivered
+    ]
+    check_snapshots(as_received, [o for o in orders if o[1] == BUY], c)
+
+
+def restart_within() -> float:
+    """The seconds QTE_CONFORMANCE_RESTART_WITHIN allows, 120 if it is not set."""
+    text = os.environ.get(RESTART_WITHIN_VAR, "120")
+    try:
+        within = float(text)
+    except ValueError:
+        within = math.nan
+    if not (math.isfinite(within) and within > 0):
+        pytest.fail(f"{RESTART_WITHIN_VAR} must be a positive number of seconds")
+    return within
+
+
+async def restart_exchange() -> None:
+    """Run the operator's restart command, as given, and wait for it to finish."""
+    within = restart_within()
+    process = await asyncio.create_subprocess_shell(os.environ[RESTART_VAR])
+    try:
+        async with asyncio.timeout(within):
+            status = await process.wait()
+    except TimeoutError:
+        process.kill()
+        pytest.fail(f"{RESTART_VAR} did not finish within {within} s")
+    assert status == 0, f"{RESTART_VAR} exited with status {status}"
+
+
+async def reopened(config: Settings) -> Wire:
+    """A connection to the restarted exchange, once it accepts one: until it has caught up
+    with its log, it refuses the handshake."""
+    within = restart_within()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + within
+    while True:
+        try:
+            return await Wire.open(config.url, pong=True)
+        except (OSError, NotAccepted, TimeoutError):
+            if loop.time() >= deadline:
+                pytest.fail(f"the exchange accepted no connection within {within} s of its restart")
+            await asyncio.sleep(0.5)
+
+
+@pytest.mark.skipif(
+    not os.environ.get(RESTART_VAR),
+    reason=f"precondition: the exchange can be restarted between sub-steps ({RESTART_VAR})",
+)
+async def test_step_15e_resume_across_a_restart(market: Client):
+    c = market
+    config = c.config
+    low, high = inside_prices(c.books.get(config.instrument), config.tick, 2)
+    # Rested out of level-key order, so a snapshot in the order the orders were accepted
+    # fails.
+    orders = [(config.strat_b, BUY, high), (config.strat_a, BUY, low)]
+    async with await Wire.open(config.url, pong=True) as witness:
+        await witness.login(config.timeout)
+        sent = await resting_reports(c, witness, orders)
+    newest = sent[-1].report_seq
+    last = newest - 1  # inside the window before the restart
+    await c.close()
+    await restart_exchange()
+    async with await reopened(config) as r:
+        start = await r.login(config.timeout)
+        await r.send("resume", Resume(last_report_seq=last))
+        ack = await answer_to_resume(r, start, config.timeout)
+        assert (
+            ack.message.replayed,
+            ack.message.as_of_report_seq,
+            ack.message.snapshot_count,
+        ) == (False, newest, len(orders))
+        answered = r.after(ack)
+        await r.until(
+            lambda: sum(m.type == "order_snapshot" for m in r.messages[answered:]) >= len(orders),
+            "order_snapshot for each resting order",
+            config.timeout,
+        )
+        # Then reports from N + 1, numbered as an uninterrupted run would have numbered them.
+        again = await Client.connect(config)
+        try:
+            mark = again.mark()
+            ref = await send_cancel(
+                again.session, instrument=config.instrument, side=BUY, price=low
+            )
+            await again.wait_for(
+                lambda m: isinstance(m, OrderCancelled) and request_ref_of(m) == ref,
+                "order_cancelled for the cancel",
+                mark,
+            )
+            own = [n for n in again.report_seqs[mark:] if n is not None]
+        finally:
+            await again.close()
+        await r.until(
+            lambda: len(reports_of(r, answered)) >= len(own),
+            "the reports after the snapshot",
+            config.timeout,
+        )
+        await asyncio.sleep(1.0)  # so anything sent after them is read too
+        answer = [m for m in r.messages[answered:] if m.type != "heartbeat"]
+        assert_nothing_but(answer, "after resume_ack", "order_snapshot")
+        assert_snapshot_first(answer, len(orders))
+        check_snapshots(answer[: len(orders)], orders, c)
+        reports = reports_of(r, answered)
+        assert_numbered(reports, newest + 1)
+        assert [m.report_seq for m in reports] == own
+        assert_seq_increasing(r)
+
+
+async def test_step_15g_market_data_is_not_replayed(market: Client):
+    c = market
+    config = c.config
+    (price,) = inside_prices(c.books.get(config.instrument), config.tick, 1)
+    await c.rest(config.strat_a, BUY, price)
+    newest = c.newest_report_seq()
+    assert newest is not None and newest >= 2
+    for last in (newest - 1, 0):  # a replay, then a snapshot
+        async with await Wire.open(config.url, pong=True) as r:
+            start = await r.login(config.timeout)
+            await r.send("resume", Resume(last_report_seq=last))
+            ack = await answer_to_resume(r, start, config.timeout)
+            assert ack.message.replayed == (last != 0)
+            answered = r.after(ack)
+            # Market data goes on being published meanwhile, as the subscribed client sees.
+            published = c.mark()
+            await c.until(
+                lambda published=published: len(c.since(published, SessionState)) >= 3,
+                "session_state on the subscribed connection",
+            )
+            await asyncio.sleep(0.5)
+            answer = [m for m in r.messages[answered:] if m.type != "heartbeat"]
+            assert_nothing_but(answer, "after resume_ack", "order_snapshot")
+            assert_snapshot_first(answer, ack.message.snapshot_count)
+            # A client closes the gap by subscribing again, which is answered with the latest
+            # book.
+            latest = c.books.get(config.instrument)
+            asked = len(r.messages)
+            await r.send("subscribe", Subscribe(instruments=[config.instrument]))
+            book = await r.wait_for(
+                lambda m: m.type == "book" and m.message.instrument == config.instrument,
+                "book for the subscribe",
+                asked,
+                config.timeout,
+            )
+            await c.drain(0.5)
+            assert book.message.grid_time >= latest.grid_time, "older than the latest book"
+            assert any(book.message == m for m in c.seen if isinstance(m, Book)), (
+                "not a book the exchange published"
+            )
 
 
 @pytest.mark.skipif(
@@ -1196,13 +2236,70 @@ async def test_step_14_close(market: Client):
     assert reject.reason_code == ReasonCodes.RELEASE_AFTER_CLOSE, reason_code_name(
         reject.reason_code
     )
+    # What step 15's empty marker is checked against, once anything else is read.
+    await c.drain(1.0)
+    newest = c.newest_report_seq()
+    assert newest is not None
+    _STEP_14_REPORTS.append((cancelled, c.report_seq_of(cancelled), newest))
 
 
-@pytest.mark.xfail(
-    reason="step 15 (heartbeat and resume) is not yet specified; see issue #12", run=False
-)
-async def test_step_15_heartbeat_and_resume():
-    raise NotImplementedError
+async def test_step_15f_resume_after_the_close_gets_the_empty_marker():
+    config = settings()
+    if not _STEP_14_REPORTS:
+        pytest.skip("precondition: step 14's close has cancelled every order, in this run")
+    cancelled, cancelled_seq, newest = _STEP_14_REPORTS[0]
+    async with await Wire.open(config.url, pong=True) as r:
+        start = await r.login(config.timeout)
+        await r.send("resume", Resume(last_report_seq=0))
+        ack = await answer_to_resume(r, start, config.timeout)
+        assert (
+            ack.message.replayed,
+            ack.message.as_of_report_seq,
+            ack.message.snapshot_count,
+        ) == (False, newest, 0)
+        answered = r.after(ack)
+        await asyncio.sleep(2.0)  # so anything sent after it is read too
+        rest = [m.type for m in r.messages[answered:] if m.type != "heartbeat"]
+        assert not rest, f"{rest[0]} after the empty marker"
+    # A last_report_seq the exchange can still replay gets the replay, the close's
+    # SESSION_CLOSE cancellation included.
+    assert cancelled_seq is not None, "step 14's SESSION_CLOSE order_cancelled has no report_seq"
+    async with await Wire.open(config.url, pong=True) as r:
+        start = await r.login(config.timeout)
+        await r.send("resume", Resume(last_report_seq=cancelled_seq - 1))
+        ack = await answer_to_resume(r, start, config.timeout)
+        assert (
+            ack.message.replayed,
+            ack.message.as_of_report_seq,
+            ack.message.snapshot_count,
+        ) == (True, newest, 0)
+        answered = r.after(ack)
+        await r.until(
+            lambda: len(reports_of(r, answered)) >= newest - cancelled_seq + 1,
+            "the replayed reports",
+            config.timeout,
+        )
+        await asyncio.sleep(1.0)  # so anything sent after them is read too
+        assert_nothing_but(r.messages[answered:], "after resume_ack")
+        replayed = reports_of(r, answered)
+        assert_numbered(replayed, cancelled_seq)
+        assert replayed[0].message == cancelled, (
+            "the replay does not start with the close's cancellation"
+        )
+
+
+async def test_step_15a_heartbeat_after_the_close():
+    config = settings()
+    if not _CLOSED_BY_STEP_14:
+        pytest.skip("precondition: step 14 closed the instrument's session in this run")
+    await silent_heartbeats(config)
+
+
+async def test_step_15b_silence_closes_with_4000_after_the_close():
+    config = settings()
+    if not _CLOSED_BY_STEP_14:
+        pytest.skip("precondition: step 14 closed the instrument's session in this run")
+    await silence_closes(config)
 
 
 def unknown_among(reject: Reject, names: tuple[str, ...]) -> bool:

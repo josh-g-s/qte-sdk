@@ -39,8 +39,40 @@ def test_a_missing_interior_bid_level_fails():
 
 
 def test_a_bid_ladder_cut_short_above_zero_fails():
-    with pytest.raises(AssertionError, match="next would be positive"):
+    with pytest.raises(AssertionError, match="next bid would be positive"):
         assert_ladder(book([10, 9, 8], ASKS))
+
+
+def test_a_ladder_of_fewer_than_ten_levels_a_side_passes():
+    assert_ladder(book([10, 9, 8, 7, 6], [11, 12, 13, 14, 15]))
+
+
+def test_a_ladder_of_one_level_a_side_passes():
+    assert_ladder(book([10], [11]))
+
+
+def test_a_short_bid_ladder_cut_short_at_zero_passes():
+    assert_ladder(book([2, 1], [3, 4, 5, 6, 7]))
+
+
+def test_a_short_bid_ladder_cut_short_above_zero_fails():
+    with pytest.raises(AssertionError, match="next bid would be positive"):
+        assert_ladder(book([10, 9], [11, 12, 13, 14, 15]))
+
+
+def test_more_bid_levels_than_ask_levels_fail():
+    with pytest.raises(AssertionError, match="10 bid levels and 5 ask levels"):
+        assert_ladder(book(list(range(10, 0, -1)), [11, 12, 13, 14, 15]))
+
+
+def test_more_than_ten_ask_levels_fail():
+    with pytest.raises(AssertionError, match="11 ask levels"):
+        assert_ladder(book(list(range(10, 0, -1)), list(range(11, 22))))
+
+
+def test_an_empty_side_fails():
+    with pytest.raises(AssertionError, match="0 bid levels"):
+        assert_ladder(book([], ASKS))
 
 
 def test_a_missing_interior_ask_level_fails():
