@@ -133,6 +133,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
 | [`qte_sdk.replay`](qte_sdk/replay.py) | `replay`: a past session's market data in one stream, in time order, to run your loop on; market data only, with no orders or fills |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
+| [`qte_sdk.tickets`](qte_sdk/tickets.py) | `send_ticket`, `send_ticket_cancel`, `send_ticket_urgency`: a Fundamentals pod's tickets to its Execution desk; `is_ticket_event`, `LatestTickets`: the exchange's answers and each ticket's state, for pods and desks |
 | [`qte_sdk.account`](qte_sdk/account.py) | `send_account_query`, `is_account_state`: your team's positions, cash, equity and limit use; `AccountReports`: count each fill once against a reply |
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |

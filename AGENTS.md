@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.16
+**Version:** 1.17
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -41,6 +41,7 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 - A new order carries a strategy ID registered for your team. Ask the Head of Technology, Joshua, to register one.
 - Prices are whole numbers of micro-dollars (`199_970_000` is $199.97). Convert with `qte_sdk.units` (`to_micros`, `to_decimal`) and never use `float` for a price.
 - An option contract's instrument id is its OCC symbol without spaces, such as `SPY240119C00470000`. Build and read it with `qte_sdk.options` (`option_symbol`, `parse_option_symbol`, `is_option_symbol`) rather than slicing strings. An option order's size is in contracts, never shares, and its prices are per share. Read an option book's `trading_state` with `qte_sdk.options.trading_state`, which treats a state it does not know as suspended, and keep the latest Greeks per contract with `qte_sdk.options.LatestGreeks`. Take a first option contract to subscribe to from the instruments table (`qte_sdk.options.listed_contracts`), never by guessing a symbol. Convert Greeks with `greek_to_decimal` and `vol_to_decimal`, never `float`.
+- A Fundamentals pod sends no orders: it sends its Execution desk tickets with `qte_sdk.tickets` (`send_ticket`, `send_ticket_cancel`, `send_ticket_urgency`), reads the answers with `is_ticket_event`, and keeps each ticket's newest state with `LatestTickets`. There is no ticket amend: cancel, then send a new ticket naming the old one in `replaces_ticket_id`. A ticket stops only when a `ticket_state` says so, never on a `ticket_reject`, and on every connection the exchange resends each ticket's whole state, which replaces what you held.
 - Send with the functions in `qte_sdk.orders` (`send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`) and the generated message types in `qte_sdk.contract.v1`. Do not build JSON by hand, and do not edit the generated files or the `.proto` files.
 
 ## Market data

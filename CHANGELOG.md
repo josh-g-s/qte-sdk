@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.6
+**Version:** 0.7
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,7 +8,11 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-Nothing yet.
+- The SDK reads the exchange's contract 11.
+- `qte_sdk.tickets`, for Fundamentals tickets: a pod sends its Execution desk a ticket with `send_ticket`, cancels it with `send_ticket_cancel` and raises a cure ticket's urgency with `send_ticket_urgency`. Pods and desks pick out the exchange's answers (`ticket_accepted`, `ticket_reject`, `ticket_state`) with `is_ticket_event`, and `LatestTickets` keeps each ticket's newest state, forgetting them all on a `Disconnected` so that the states resent on the next connection rebuild it. `stopped_time_of` and `stopped_mark_of` read when a ticket stopped and the mark then, and `parent_ticket_of` names the ticket a desk's fill works.
+- A desk's child order cancelled because its ticket stopped carries the reason `PARENT_STOPPED`.
+- The order helpers never set the contract's new `house_team` field, which only the exchange's own sessions may send.
+- The smoke test counts the ticket states a pod or desk is sent, instead of naming `ticket_state` as a type the SDK does not know.
 
 ## 1.0.2
 

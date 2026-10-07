@@ -31,6 +31,10 @@ message carries: `request_ref` and `strat_id` must be 1 to 32 bytes of UTF-8, an
 character outside ASCII counts two to four, and none may contain the NUL character. A
 send that breaks this raises `ValueError` and sends nothing. A `new` that carries
 `parent_ticket_id`, which only an Execution desk sends, is checked too: see `send_new`.
+
+A Fundamentals pod's tickets are in `qte_sdk.tickets`, not here. The contract's
+`house_team` field on `new`, `cancel` and `amend` is for the exchange's own Director
+sessions only; a team session that sends it is refused, so no function here sets it.
 """
 
 import uuid
@@ -160,7 +164,8 @@ async def send_new(
     The exchange checks the rest: a value it cannot accept is rejected `MALFORMED_MESSAGE`,
     and a well-formed one is rejected `PARENT_NOT_WORKING` on a `new` from any team other
     than an Execution desk, as is a desk's `new` that names no working parent ticket
-    assigned to the desk.
+    assigned to the desk. When the parent ticket stops, a child still resting is cancelled
+    with an `order_cancelled` whose reason is `PARENT_STOPPED`.
     """
     ref = _ref(request_ref)
     _id("strat_id", strat_id)
@@ -250,9 +255,11 @@ async def send_mass_cancel(conn: Sender, *, request_ref: str | None = None) -> s
 def is_order_event(event: Event) -> TypeGuard[Received]:
     """Whether `event` is a decoded order event, one of `ORDER_EVENT_TYPES`.
 
-    Its `message` is then one of `OrderEvent`. Every rejected message shares the one
-    `reject` shape, so a rejected subscription is included too; its `request_type` says
-    which kind of message was rejected.
+    Its `message` is then one of `OrderEvent`. Every rejected order, query or subscription
+    message shares the one `reject` shape, so a rejected subscription is included too; its
+    `request_type` says which kind of message was rejected. A refused ticket message is a
+    `ticket_reject` instead, which is not an order event: see
+    `qte_sdk.tickets.is_ticket_event`.
     """
     return isinstance(event, Received) and event.type in ORDER_EVENT_TYPES
 
