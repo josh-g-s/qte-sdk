@@ -2082,3 +2082,17 @@ def test_releases_json_is_read_no_further_than_one_byte_past_its_limit(
     with pytest.raises(update._CannotTell):
         update._read_releases(5)
     assert len(body) - len(response.body) == update._MAX_RELEASES_SIZE + 1
+
+
+@pytest.mark.windows
+def test_the_daily_record_and_its_lock_work_on_real_windows(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    repository = behind_a_release(monkeypatch)
+    assert run_in_background() is not None
+    assert len(repository.requests) == 1
+    assert automatic.exists()
+    assert not (automatic.parent / "update-check.lock").exists()
+    new_program(monkeypatch)
+    run_in_background()
+    assert len(repository.requests) == 1
