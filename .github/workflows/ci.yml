@@ -63,6 +63,7 @@ jobs:
         if: success() || failure()
         shell: bash
         run: |
+          set +e
           pip install pytest-timeout
           for f in tests/test_*.py; do
             [ "$f" = tests/test_windows_real.py ] && continue
@@ -70,6 +71,7 @@ jobs:
             echo "status $f: $?"
             tail -120 out.txt
           done
+          exit 1
 
   test-websockets-floor:
     runs-on: ubuntu-latest
