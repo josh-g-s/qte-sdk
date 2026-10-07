@@ -52,6 +52,7 @@ URL = "ws://127.0.0.1:8080/ws"
 SYSTEM = "S-1-5-18"
 ADMINISTRATORS = "S-1-5-32-544"
 USERS = "S-1-5-32-545"
+TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 QTE_VARIABLES = ("QTE_TOKEN", "QTE_TOKEN_FILE", "QTE_URL")
 # What `token set` and `token check` say when no broad group may read, change or replace
 # the file and its owner is you, Administrators or SYSTEM.
@@ -1018,8 +1019,9 @@ def test_windows_own_folders_are_owned_by_no_other_account(user_sid, capsys):
     owners = {str(folder): owner(folder) for folder in folders}
     with capsys.disabled():  # shown in CI's log, to say who owns them there
         print(f"\nowners of Windows' own folders: {owners}")
+    # On the runner C:\ is TrustedInstaller's, and C:\Users and the profile SYSTEM's.
     for folder in folders:
-        assert _fileaccess.owner_is_other(sddl(folder), user_sid) is not True, owners
+        assert _fileaccess.owner_is_other(sddl(folder), user_sid) is False, owners
 
 
 def test_a_dotenv_reached_through_documents_and_settings_has_no_owner_finding(
@@ -1037,9 +1039,12 @@ def test_a_dotenv_reached_through_documents_and_settings_has_no_owner_finding(
     root = Path("C:\\")
     with capsys.disabled():
         print(f"\n{root} is owned by {owner(root)}; through {junction}: {access!r}")
+    # The owner that, untrusted, would be a finding: C:\, which holds the junction, is
+    # TrustedInstaller's.
+    assert owner(root) == TRUSTED_INSTALLER
     assert access.links == (str(junction),)
     assert [f.path for f in access.link_folders] == ["C:\\"]
-    assert access.link_owner is not True
+    assert access.link_owner is False
     assert not access, access
 
     monkeypatch.chdir(via)
