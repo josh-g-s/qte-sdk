@@ -38,6 +38,52 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest
 
+  windows:
+    # The Windows token-file and console checks (tests marked `windows`) read real access
+    # lists, owners and consoles, so they run only here. The rest of the suite runs too,
+    # except the files below, which do not work on Windows yet. See "Windows" in
+    # docs/development.md.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      # Check out the vendored contract with its exact bytes, which the tests hash.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - name: Run the tests marked windows
+        run: pytest -m windows --junitxml=windows-tests.xml
+      - name: Fail if none of them ran or any was skipped
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          suite = ET.parse("windows-tests.xml").getroot().find("testsuite")
+          tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
+          print(f"{tests} tests marked windows, {skipped} skipped")
+          assert tests > 0 and skipped == 0
+      # Left out:
+      # - test_reconnect, test_resume, test_calendar, test_instruments,
+      #   test_new_message_types and test_tickets: their fake exchange drops a connection
+      #   with transport.abort(), and on Windows the reset discards the frames sent just
+      #   before it, so the client sees the drop a message early; one test hangs.
+      # - test_history: its cancellation and TLS shutdown tests time out on Windows.
+      # - test_examples: it sends SIGINT to child processes and uses preexec_fn, which
+      #   Windows does not have.
+      - name: Run the rest of the suite
+        if: success() || failure()
+        run: >-
+          pytest -m "not windows"
+          --ignore=tests/test_reconnect.py
+          --ignore=tests/test_resume.py
+          --ignore=tests/test_calendar.py
+          --ignore=tests/test_instruments.py
+          --ignore=tests/test_new_message_types.py
+          --ignore=tests/test_tickets.py
+          --ignore=tests/test_history.py
+          --ignore=tests/test_examples.py
+
   test-websockets-floor:
     runs-on: ubuntu-latest
     steps:
