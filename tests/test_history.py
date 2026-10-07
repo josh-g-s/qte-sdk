@@ -12,6 +12,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -1574,38 +1575,118 @@ async def test_cancelling_an_https_fetch_ends_the_worker_at_once(certificate, he
     assert_token_absent(token, shown(caught.value))
 
 
-def test_shutting_down_a_tls_connection_never_lets_a_write_out_in_the_clear(
-    certificate, monkeypatch
-):
-    # `ssl.SSLSocket.shutdown` drops the TLS layer before it shuts the connection down. A
-    # worker that sent the request in between would send it, token and all, in the clear.
-    # Here the request is sent at exactly that moment, from inside the shutdown.
-    token = synthetic_token()
+@contextmanager
+def connected(
+    certificate: tuple[str, str], tls: bool
+) -> Iterator[tuple[Any, socket.socket, socket.socket]]:
+    """A `_WakeableSocket` connected to a server socket, with the handshake made if `tls`,
+    and the plain socket under the server's TLS layer, to read what is on the wire."""
     plain_client, plain_server = socket.socketpair()
-    server = server_context(certificate).wrap_socket(
-        plain_server, server_side=True, do_handshake_on_connect=False
-    )
-    client = trusting(certificate).wrap_socket(
-        plain_client, server_hostname="127.0.0.1", do_handshake_on_connect=False
-    )
-    with server, client:
-        shaking = threading.Thread(target=server.do_handshake)
-        shaking.start()
-        client.do_handshake()
-        shaking.join()
-        request = b"GET / HTTP/1.1\r\nAuthorization: Bearer " + token.encode() + b"\r\n\r\n"
-        shutdown = socket.socket.shutdown
+    client, server = plain_client, plain_server
+    if tls:
+        server = server_context(certificate).wrap_socket(
+            plain_server, server_side=True, do_handshake_on_connect=False
+        )
+        client = trusting(certificate).wrap_socket(
+            plain_client, server_hostname="127.0.0.1", do_handshake_on_connect=False
+        )
+    with server:
+        stream = history._WakeableSocket(client, timeout=60)
+        try:
+            if tls:
+                shaking = threading.Thread(target=server.do_handshake)  # type: ignore[attr-defined]
+                shaking.start()
+                stream.do_handshake()
+                shaking.join()
+            yield stream, client, server
+        finally:
+            stream.close()
+    assert client.fileno() == -1 and plain_client.fileno() == -1
 
-        def sending_meanwhile(sock: socket.socket, how: int) -> None:
-            client.sendall(request)
-            shutdown(sock, how)
 
-        monkeypatch.setattr(socket.socket, "shutdown", sending_meanwhile)
-        history._shut_down(client)
+def on_the_wire(server: socket.socket) -> bytes:
+    """Everything that reaches `server` within half a second, read below any TLS layer."""
+    socket.socket.settimeout(server, 0.5)
+    wire = b""
+    try:
+        while chunk := socket.socket.recv(server, 65536):
+            wire += chunk
+    except TimeoutError:
+        pass
+    return wire
+
+
+def a_request(token: str) -> bytes:
+    return b"GET / HTTP/1.1\r\nAuthorization: Bearer " + token.encode() + b"\r\n\r\n"
+
+
+@pytest.mark.parametrize("tls", [False, True])
+def test_a_woken_connection_sends_nothing_more(certificate, tls):
+    # Once the fetch has given up, the worker must not send the request, token and all,
+    # whatever it was about to do.
+    token = synthetic_token()
+    with connected(certificate, tls) as (stream, _, server):
+        stream.wake()
+        with pytest.raises(ConnectionAbortedError):
+            stream.sendall(a_request(token))
+        with pytest.raises(ConnectionAbortedError):
+            stream.recv_into(bytearray(10))
+        assert on_the_wire(server) == b""
+    stream.wake()  # harmless once closed
+
+
+@pytest.mark.parametrize("tls", [False, True])
+def test_a_wake_while_sending_lets_nothing_more_out_and_nothing_in_the_clear(
+    certificate, tls, monkeypatch
+):
+    # The fetch gives up at exactly the moment the worker sends its request, from inside
+    # the send. What was being sent may still go out, encrypted over TLS, but nothing
+    # after it, and never the token in the clear.
+    token = synthetic_token()
+    with connected(certificate, tls) as (stream, client, server):
+        send = type(client).send
+        wakers: list[threading.Thread] = []
+
+        def woken_meanwhile(sock: socket.socket, *args: Any) -> int:
+            if sock is client and not wakers:
+                wakers.append(threading.Thread(target=stream.wake))
+                wakers[0].start()
+            return send(sock, *args)
+
+        monkeypatch.setattr(type(client), "send", woken_meanwhile)
+        try:
+            stream.sendall(a_request(token))
+        except ConnectionAbortedError:
+            pass
+        wakers[0].join(5)
+        assert not wakers[0].is_alive()
+        with pytest.raises(ConnectionAbortedError):
+            stream.sendall(a_request(token))
         monkeypatch.undo()
-        # What reached the other end, read below its TLS layer.
-        wire = socket.socket.recv(server, 65536)
-    assert wire and token.encode() not in wire
+        wire = on_the_wire(server)
+    if tls:
+        assert wire and token.encode() not in wire
+    else:
+        assert wire in (b"", a_request(token))
+
+
+def test_sending_is_bounded_as_a_whole_even_if_each_send_succeeds(monkeypatch):
+    plain_client, plain_server = socket.socketpair()
+    with plain_server:
+        stream = history._WakeableSocket(plain_client, timeout=0.2)
+        send = socket.socket.send
+
+        def slowly(sock: socket.socket, data: Any, *args: Any) -> int:
+            if sock is not plain_client:
+                return send(sock, data, *args)
+            time.sleep(0.05)
+            return send(sock, bytes(data[:1]))
+
+        monkeypatch.setattr(socket.socket, "send", slowly)
+        with pytest.raises(TimeoutError):
+            stream.sendall(b"x" * 100)
+        monkeypatch.undo()
+        stream.close()
 
 
 class HeldHandshake:
