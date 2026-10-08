@@ -69,7 +69,7 @@ import subprocess
 import sys
 import unicodedata
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 from qte_sdk import _fileaccess
@@ -236,7 +236,10 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     neither it nor an `OSError` may reach the caller's exception as its cause or context.
     """
     path = dotenv_path()
-    _warn_if_not_ignored(path)
+    failure = _warn_if_not_ignored(path)
+    if failure is not None:
+        del path  # raised from a frame that no longer holds the path, which can hold the token
+        raise failure
     # Read before the file is, so no frame that holds the token calls the Windows API.
     access = shared_access(path)
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
@@ -277,18 +280,23 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             "so only you can",
             _errors.TOKEN_SHARED,
         )
-    warn = access is not None and (
+    warn = access is not None and bool(
         (holds_token and access)
         or ((access.changeable or access.incomplete) and _assigns(text, _URL_NAME))
     )
     value, problem = _parse(text, name)
+    # A path that holds the token is withheld from the warning.
+    withhold = withholding(_parse(text, _TOKEN_NAME)[0] if holds_token else None) if warn else None
     del text  # released before the warning, which runs code that is not the SDK's
     if warn:
         assert access is not None
-        failure = warn_shared(path, access, holds_token=holds_token, sets_address=True)
+        failure = warn_shared(
+            path, access, holds_token=holds_token, sets_address=True, withhold=withhold
+        )
         if failure is not None:
-            del value
-            raise failure  # from a frame that no longer holds the token
+            # From a frame that no longer holds the token, nor the path, which can hold it.
+            del value, path, access
+            raise failure
     if problem is not None:
         return None, problem
     return value or None, None
@@ -309,15 +317,19 @@ def _assigns(text: str, name: str) -> bool:
     return False
 
 
-def _warn_if_not_ignored(path: Path) -> None:
+def _warn_if_not_ignored(path: Path) -> BaseException | None:
     """Warn, once per process for each `.env`, if `path`, or the file it links to, is inside
     a git working tree and git tracks it or does not ignore it. Called before the file is
     read, so no frame on the stack holds the token. If a warnings filter turns the warning
-    into an error, it is logged instead, since this check must never stop the SDK."""
+    into an error, it is logged instead, since this check must never stop the SDK.
+
+    Any other error while warning, or an interruption such as a Ctrl-C, is returned without
+    its traceback or chain, for the caller to raise from a frame that no longer holds the
+    path, which can hold the token. None otherwise."""
     key = str(path)
     afresh = _afresh.get()
     if (key in _git_checked and not afresh) or not path.exists():
-        return
+        return None
     if not afresh:
         _git_checked.add(key)
     candidates = [path]
@@ -326,16 +338,25 @@ def _warn_if_not_ignored(path: Path) -> None:
     # Every remedy is given: fixing the link alone would leave a tracked target exposed.
     exposures = [m for m in map(_git_exposure, candidates) if m is not None]
     if not exposures:
-        return
+        return None
     tracked = any(each == _errors.DOTENV_TRACKED for each, _ in exposures)
     code = _errors.DOTENV_TRACKED if tracked else _errors.DOTENV_NOT_IGNORED
+    # No token has been read from the file yet, so the shape of one is withheld too.
+    withhold = withholding()
     warning = DotenvNotIgnored(
-        " ".join(summary(each, **fields) for each, fields in exposures), code=code
+        " ".join(summary(each, withhold=withhold, **fields) for each, fields in exposures),
+        code=code,
     )
     try:
-        warnings.warn(warning, stacklevel=_caller_level())
-    except Warning:
-        _log.warning("%s", warning, extra={"code": code})
+        try:
+            warnings.warn(warning, stacklevel=_caller_level())
+        except Warning:
+            # Logged without the traceback it was raised with, whose frames hold the path.
+            _log.warning("%s", _detached(warning), extra={"code": code})
+    except BaseException as error:
+        # Including one raised while logging the warning a filter made an error.
+        return _detached(error)
+    return None
 
 
 def shared_access(path: Path) -> "_fileaccess.BroadAccess | None":
@@ -369,6 +390,7 @@ def shared_message(
     *,
     holds_token: bool = True,
     sets_address: bool = True,
+    withhold: Callable[[str], bool] | None = None,
 ) -> str:
     """What to tell the person when broad groups of users may read, change or replace
     `path`, or another account owns it or a folder looked at, or it could not be fully
@@ -377,7 +399,17 @@ def shared_message(
     only the path, and when it is reached through links, the links and the file they lead
     to; their folders; and the groups; and, if a link on the way could not be followed or a
     list could not be seen, why. Resolves no path: where the lists were read is taken from
-    `access`."""
+    `access`.
+
+    `withhold`, if given, is asked about each path and reason the text would name, as given
+    and in one line; one it says yes to (one that holds the token, say) is named as
+    `errors.WITHHELD`, and no command names it."""
+
+    def shown(text: str) -> str:
+        if withhold is not None and (withhold(text) or withhold(_errors.one_line(text))):
+            return _errors.WITHHELD
+        return text
+
     changers = list(access.write)
     readers = [group for group in access.read if group not in changers] if holds_token else []
     replacers = list(access.folder or ())
@@ -391,6 +423,8 @@ def shared_message(
     via = links[1:] if is_link else links
     verb = "leads to" if via else "links to"
     link_folders = list(access.link_folders or ())
+    # As the text names them: the paths above are compared as they are.
+    file, folder, via_shown = shown(file), shown(folder), [shown(link) for link in via]
     granted = []
     if changers:
         granted.append(f"{_join(changers)} {'read or change' if holds_token else 'change'} it")
@@ -407,12 +441,14 @@ def shared_message(
 
     def holding(held: list[str]) -> str:
         """The links in a folder, as the message names them after "which holds"."""
-        unlooked = [name for name in held if name == access.unlooked]
+        unlooked = [shown(name) for name in held if name == access.unlooked]
         confirmed = [name for name in held if name != access.unlooked]
         named = []
         if confirmed:
             named.append(
-                "the link" if is_link and confirmed == links[:1] else _the_links(confirmed)
+                "the link"
+                if is_link and confirmed == links[:1]
+                else _the_links([shown(name) for name in confirmed])
             )
         named += [f"{name}, which could not be looked at" for name in unlooked]
         return _join(named)
@@ -421,7 +457,7 @@ def shared_message(
         if holder.groups:
             the_links = holding(list(holder.links))
             places.append(
-                f"{_join(list(holder.groups))} may add or remove files in {holder.path}, "
+                f"{_join(list(holder.groups))} may add or remove files in {shown(holder.path)}, "
                 f"which holds {the_links}"
             )
     if places:
@@ -433,7 +469,7 @@ def shared_message(
         owned.append(f"{folder}, which holds the file it {verb}," if linked else folder)
     for holder in link_folders:
         if holder.other_owner:
-            owned.append(f"{holder.path}, which holds {holding(list(holder.links))},")
+            owned.append(f"{shown(holder.path)}, which holds {holding(list(holder.links))},")
     for place in owned:
         findings.append(
             f"{place} is owned by another account, which can change who may add or remove "
@@ -474,26 +510,28 @@ def shared_message(
         enough = not (access.folder_owner or access.link_owner or access.unseen)
         fix += f", or remove {their} access." if groups and enough else "."
     what = "holds your token" if holds_token else f"sets {_URL_NAME}, the exchange address"
-    name = f"{path}"
+    path_shown = shown(str(path))
+    name = path_shown
     if access.unfollowed:
         # Where the links lead is not known, so no file is named as their end. (A list that
         # was not seen does not change where they lead.)
         if is_link and via:
-            name = f"{path}, a link that leads on through {_the_links(via)},"
+            name = f"{path_shown}, a link that leads on through {_the_links(via_shown)},"
         elif is_link:
-            name = f"{path}, a link,"
+            name = f"{path_shown}, a link,"
         elif via:
-            name = f"{path}, reached through {_the_links(via)},"
+            name = f"{path_shown}, reached through {_the_links(via_shown)},"
     elif is_link and via:
-        name = f"{path}, a link that leads to {file} through {_the_links(via)},"
+        name = f"{path_shown}, a link that leads to {file} through {_the_links(via_shown)},"
     elif is_link:
-        name = f"{path}, a link to {file},"
+        name = f"{path_shown}, a link to {file},"
     elif via:
-        name = f"{path}, which leads to {file} through {_the_links(via)},"
-    reasons = list(access.unseen)
+        name = f"{path_shown}, which leads to {file} through {_the_links(via_shown)},"
+    reasons = [shown(reason) for reason in access.unseen]
     if access.unfollowed:
         reasons.append(
-            f"{access.unfollowed}; a link on the way could not be followed, so check where it leads"
+            f"{shown(access.unfollowed)}; a link on the way could not be followed, so check "
+            "where it leads"
         )
     unchecked = f"it could not be fully checked: {_join(reasons, '; ')}"
     if findings:
@@ -505,7 +543,7 @@ def shared_message(
             said += f" Also, {unchecked}."
     else:
         said = f"{name} {what}, but {unchecked}."
-    holders = [holder.path for holder in link_folders]
+    holders = [shown(holder.path) for holder in link_folders]
     folders = "folders" if holders else "folder"
     # The SDK still uses such a file (see the module's docstring), so this says why it
     # matters before the fix and the command that ends the message.
@@ -526,9 +564,11 @@ def _icacls(folder: str, file: str, link_folders: Sequence[str] = ()) -> str:
     cmd or PowerShell would expand or end a quote at inside double quotes is not put in a
     command, so the command never names another folder; nor is one that ends in a
     backslash, where the closing quote would be taken as part of the path, except a drive's
-    root, such as `D:\\`, which needs no quotes."""
+    root, such as `D:\\`, which needs no quotes; nor one withheld (see `shared_message`)."""
 
     def command(target: str) -> str | None:
+        if target == _errors.WITHHELD:
+            return None
         if _DRIVE_ROOT.fullmatch(target):
             return f"`icacls {target}`"
         if any(c in target for c in _UNSAFE_IN_DOUBLE_QUOTES) or target.endswith(("\\", "/")):
@@ -554,11 +594,12 @@ def warn_shared(
     *,
     holds_token: bool = True,
     sets_address: bool = True,
+    withhold: Callable[[str], bool] | None = None,
 ) -> BaseException | None:
     """Issue a `TokenFileShared` warning about `path`, or an `AddressFileShared` one if it
-    does not hold the token (see `shared_message`), once per process for each path. If a
-    warnings filter turns it into an error, it is logged instead, since this check must
-    never stop the SDK.
+    does not hold the token (see `shared_message`, which is given `withhold`), once per
+    process for each path. If a warnings filter turns it into an error, it is logged
+    instead, since this check must never stop the SDK.
 
     Its caller may hold the token, so nothing is raised from here. An error, from the
     warning or from a failure to show it (a closed stderr, say), is dropped. An
@@ -572,14 +613,17 @@ def warn_shared(
             if key in _shared_warned:
                 return None
             _shared_warned.add(key)
-        message = shared_message(path, access, holds_token=holds_token, sets_address=sets_address)
+        message = shared_message(
+            path, access, holds_token=holds_token, sets_address=sets_address, withhold=withhold
+        )
         code = shared_code(access, holds_token=holds_token)
         category = TokenFileShared if holds_token else AddressFileShared
         warning = category(message, code=code)
         try:
             warnings.warn(warning, stacklevel=_caller_level())
         except Warning:
-            _log.warning("%s", warning, extra={"code": code})
+            # Logged without the traceback it was raised with, whose frames hold the path.
+            _log.warning("%s", _detached(warning), extra={"code": code})
     except Exception:
         pass
     except BaseException as error:
@@ -595,6 +639,25 @@ def _detached(error: BaseException) -> BaseException:
     error = error.with_traceback(None)
     error.__cause__ = error.__context__ = None
     return error
+
+
+def withholding(token: str | None = None) -> Callable[[str], bool]:
+    """Whether a path or other text a warning names is to be withheld: it holds `token`, if
+    given, or the token in the `QTE_TOKEN` environment variable, if set, in any form a
+    message could show it, or is shaped like a token the exchange issues (see
+    `errors.token_shaped`), which may be one pasted by mistake that the SDK has not read.
+    Each token is held as `qte_sdk.session` holds it, so no repr shows it."""
+    # Imported here: qte_sdk.session imports this module.
+    from qte_sdk.session import _Secret, _text_holds_token
+
+    known = [_Secret(each) for each in (token, os.environ.get(_TOKEN_NAME)) if each]
+
+    def withhold(text: str) -> bool:
+        return any(_text_holds_token(text, secret) for secret in known) or (
+            _errors.token_shaped(text)
+        )
+
+    return withhold
 
 
 def _join(names: list[str], separator: str = ", ") -> str:
