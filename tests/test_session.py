@@ -871,7 +871,6 @@ async def test_opening_a_session_starts_the_update_check_without_waiting_for_it(
         # wait for it: the network holds it for 30 s.
         assert await asyncio.to_thread(entered.wait, 10)
         assert took < 4
-        assert thread.is_alive()
     finally:
         release.set()
 

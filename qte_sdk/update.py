@@ -935,9 +935,10 @@ def _claim_the_day() -> bool:
         held = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         # Another program is deciding. A lock left by one that stopped part way is removed
-        # once it is old, for the next program.
+        # once it is old, for the next program, or dated in the future, as one left before
+        # the clock was set back is.
         try:
-            if time.time() - lock.stat().st_mtime > _STALE_LOCK:
+            if abs(time.time() - lock.stat().st_mtime) > _STALE_LOCK:
                 lock.unlink()
         except OSError:
             pass

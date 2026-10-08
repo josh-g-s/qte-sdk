@@ -2055,6 +2055,23 @@ def test_two_programs_deciding_at_once_do_not_both_check(
     assert lock.exists()
 
 
+def test_a_lock_dated_in_the_future_is_cleared_for_the_next(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    # A program stopped while the clock was ahead, and the clock was then set back.
+    automatic.parent.mkdir(parents=True)
+    lock = automatic.parent / "update-check.lock"
+    lock.write_text("")
+    ahead = time.time() + 24 * 60 * 60
+    os.utime(lock, (ahead, ahead))
+    repository = behind_a_release(monkeypatch)
+    run_in_background()
+    assert not lock.exists()
+    new_program(monkeypatch)
+    run_in_background()
+    assert len(repository.requests) == 1
+
+
 def test_a_lock_left_by_a_program_that_stopped_is_cleared_for_the_next(
     monkeypatch: pytest.MonkeyPatch, automatic: Path
 ):
