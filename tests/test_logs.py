@@ -20,6 +20,7 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from fake_exchange import serve_local
@@ -425,7 +426,7 @@ def test_token_check_s_json_would_show_the_token_without_redaction(
     token_command.main(["check", "--json"])
     assert_no_form_of(token, capsys.readouterr().out)
     monkeypatch.setattr(token_command, "_redact", lambda text, secret: text)
-    monkeypatch.setattr(token_command, "_holds_token", lambda value, secret: False)
+    monkeypatch.setattr(token_command, "_text_holds_token", lambda text, secret: False)
     token_command.main(["check", "--json"])
     with pytest.raises(AssertionError):
         assert_no_form_of(token, capsys.readouterr().out)
@@ -496,3 +497,39 @@ def load_smoke_test() -> Any:
     from test_examples import load_example
 
     return load_example(SMOKE_TEST)
+
+
+def test_token_check_withholds_a_path_holding_the_token_percent_encoded(tmp_path: Path):
+    token = synthetic_token() + "/+=" + synthetic_token()
+    folder = tmp_path / quote(token, safe="")
+    folder.mkdir()
+    path = folder / "token"
+    path.write_text(token)
+    path.chmod(0o600)
+    for args in (("check",), ("check", "--json")):
+        code, out, err = run_command(
+            "qte_sdk.token", *args, QTE_TOKEN_FILE=str(path), QTE_URL="wss://x/ws"
+        )
+        assert "withheld" in out, out
+        assert_no_form_of(token, out + err)
+
+
+def test_the_smoke_test_s_json_says_a_ctrl_c_before_it_connects(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    smoke = load_smoke_test()
+
+    def interrupted(report: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(smoke, "check_sdk_version", interrupted)
+    assert smoke.main(["--json"]) == 130
+    out, err = capsys.readouterr()
+    document = json.loads(out)
+    assert (document["exit_code"], document["stopped_by"]) == (130, "SIGINT")
+    assert document["warnings"] == ["interrupted"]
+    assert json.loads(err)["message"] == "interrupted"
+    # Afterwards the logging setup, and say(), are as before.
+    assert json_handlers() == [] and smoke.JSON_REPORT == []
+    smoke.say("plain")
+    assert capsys.readouterr().err == "plain\n"

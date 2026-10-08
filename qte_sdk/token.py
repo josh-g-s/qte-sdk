@@ -95,10 +95,10 @@ from qte_sdk.session import (
     URL_ENV_VAR,
     MissingURL,
     _find_token,
-    _holds_token,
     _missing_token,
     _redact,
     _Secret,
+    _text_holds_token,
     url_source,
 )
 
@@ -692,7 +692,8 @@ def _check(json_output: bool = False) -> int:
     process, and records nothing, so a session still warns (see
     `dotenv.checking_afresh`)."""
     try:
-        with _logs._for_command(json_output), dotenv_module.checking_afresh():
+        json_format = "json" if json_output else None
+        with _logs.configured(json_format, capture_warnings=True), dotenv_module.checking_afresh():
             return _check_afresh(json_output)
     except _logs.LogFormatInvalid as error:
         print(f"error: {error}", file=sys.stderr)
@@ -722,7 +723,8 @@ def _check_afresh(json_output: bool = False) -> int:
         del token
 
         def withhold(text: str) -> bool:
-            return secret is not None and _holds_token(text, secret)
+            # As written, escaped or percent-encoded, as in a folder's name.
+            return secret is not None and _text_holds_token(text, secret)
 
         def redacted(text: str) -> str:
             return text if secret is None else _redact(text, secret)

@@ -178,7 +178,7 @@ try:
         instruments_by_id,
         tradable_instruments,
     )
-    from qte_sdk.logs import LogFormatInvalid, configure
+    from qte_sdk.logs import LogFormatInvalid, configured
     from qte_sdk.market_data import (
         Book,
         DecodeFailed,
@@ -1875,16 +1875,27 @@ async def run_checks(url: str, args: argparse.Namespace, report: Report) -> None
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        # SDK log records and warnings as JSON lines with --json, else as QTE_LOG_FORMAT says.
-        configure("json" if args.json else None, capture_warnings=True)
+        # SDK log records and warnings as JSON lines with --json, else as QTE_LOG_FORMAT
+        # says, while the checks run; then as they were.
+        with configured("json" if args.json else None, capture_warnings=True):
+            return check_all(args)
     except LogFormatInvalid as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    finally:
+        JSON_REPORT.clear()
+
+
+def check_all(args: argparse.Namespace) -> int:
     report = Report(json_output=args.json)
     if args.json:
         JSON_REPORT[:] = [report]
-    check_sdk_version(report)
-    url, problems = check_setup(report)
+    try:
+        check_sdk_version(report)
+        url, problems = check_setup(report)
+    except KeyboardInterrupt:
+        say("interrupted")
+        return stopped(finished(report, 130, "SIGINT"))
     if problems or url is None:
         reason = "no token or no usable address"
         report.add(SKIP, "connect", reason)

@@ -33,6 +33,7 @@ log file or pytest's caplog set up on the root logger still gets every SDK recor
 also have a handler on the root logger that writes to the terminal, SDK records then show
 twice; in that case put `JsonFormatter` on your own handler instead of calling
 `configure()`. Calling it again replaces the handler, and `configure("text")` removes it.
+`with configured(...):` sets it up for the length of the block only.
 
 SDK warnings (`QteWarning`, such as `QTE-DOTENV-NOT-IGNORED`) are Python warnings, not log
 records. With `capture_warnings=True`, while the format is json, each one shown is logged
@@ -65,6 +66,7 @@ __all__ = [
     "LogFormatInvalid",
     "coded",
     "configure",
+    "configured",
 ]
 
 # Set to json for JSON lines, or text (the default), before configure() is called.
@@ -128,17 +130,23 @@ def configure(
 
 
 @contextlib.contextmanager
-def _for_command(json_output: bool) -> Iterator[None]:
-    """`configure` as the SDK's commands call it, with warnings captured: "json" with
-    `--json`, else as `QTE_LOG_FORMAT` says. Afterwards, the handlers and the capture are
-    as they were before, so a program that runs a command's `main` keeps its own setup.
-    Raises `LogFormatInvalid` as `configure` does, changing nothing."""
+def configured(
+    format: str | None = None,
+    *,
+    stream: TextIO | None = None,
+    level: int = logging.WARNING,
+    capture_warnings: bool = False,
+) -> Iterator[logging.Handler | None]:
+    """`configure` for the length of a `with` block, which gets what it returns; afterwards
+    the handler and the capture of warnings are as they were before. The SDK's commands
+    use it, so a program that calls a command's `main` keeps its own setup. Raises
+    `LogFormatInvalid` as `configure` does, changing nothing."""
     logger = logging.getLogger(_SDK_LOGGER)
     handlers = [h for h in logger.handlers if isinstance(h, _JsonHandler)]
     showwarning, shown_before = warnings.showwarning, _shown_before
-    configure("json" if json_output else None, capture_warnings=True)
+    handler = configure(format, stream=stream, level=level, capture_warnings=capture_warnings)
     try:
-        yield
+        yield handler
     finally:
         _restore(logger, handlers, showwarning, shown_before)
 

@@ -2783,7 +2783,9 @@ def test_the_short_form_is_none_without_a_reason(monkeypatch: pytest.MonkeyPatch
     assert update._short_message(replace(result, message="something else")) is None
 
 
-def run_both(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, list[str], dict]:
+def run_both(
+    argv: list[str], capsys: pytest.CaptureFixture[str], same_description: bool = True
+) -> tuple[int, list[str], dict]:
     """The command's status and lines, and its --json document, checking they agree."""
     status = update.main(argv)
     lines = capsys.readouterr().out.splitlines()
@@ -2798,7 +2800,8 @@ def run_both(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, 
         1,
         status,
     )
-    assert document["installed"]["description"] == lines[0].removeprefix("installed: ")
+    if same_description:
+        assert document["installed"]["description"] == lines[0].removeprefix("installed: ")
     return status, lines, document
 
 
@@ -2836,15 +2839,28 @@ def test_the_json_document_when_current_with_newer_commits_on_main(
 
 @pytest.mark.parametrize(
     ("revision", "shown"),
-    [("x\x1b[2Jy", "other"), ("a" * 40, "a" * 12), ("main", "main"), ("v1.0.0", "v1.0.0")],
+    [
+        ("x\x1b[2Jy", "other"),
+        ("a" * 40, "a" * 12),
+        ("b" * 64, "b" * 12),
+        ("main", "main"),
+        ("v1.0.0", "v1.0.0"),
+        ("v123456789.123456789.123456789", "v123456789.123456789.123456789"),
+    ],
 )
-def test_the_json_document_shows_a_revision_as_the_text_does(
+def test_the_json_document_shows_a_revision_as_the_text_does_but_cuts_a_commit(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], revision: str, shown: str
 ):
+    # A commit is cut to 12 hex digits, in the description too, so that no run of 32 (the
+    # shape of a token) is ever in the document.
     installed(monkeypatch, git_install(revision))
     answer(monkeypatch, refs_with((tag_for(VERSION), INSTALLED)))
-    document = run_both([], capsys)[2]
+    document = run_both([], capsys, same_description=len(revision) < 32)[2]
     assert document["installed"]["revision"] == shown
+    assert document["installed"]["description"].endswith(
+        f"pinned to {shown}" if shown not in ("other", "main") else ""
+    )
+    assert not errors.token_shaped(json.dumps(document))
 
 
 @pytest.mark.parametrize(
@@ -2912,3 +2928,31 @@ def test_a_bad_log_format_exits_2_with_its_code(
     answer(monkeypatch, refs_with((tag_for(VERSION), INSTALLED)))
     assert update.main(["--json"]) == 0
     assert json.loads(capsys.readouterr().out)["exit_code"] == 0
+
+
+def test_a_filter_that_changes_the_message_is_not_undone_by_the_shorter_one(
+    monkeypatch: pytest.MonkeyPatch, pipe: Any, lone: logging.Logger
+):
+    read, stream = pipe
+    handler = json_handler(stream)
+    result = recommended_result(monkeypatch, WHYS["emoji"])
+
+    def redact(record: logging.LogRecord) -> bool:
+        record.msg, record.args = "%s", (record.getMessage().replace("archive", "ARCHIVE"),)
+        return True
+
+    handler.addFilter(redact)
+    lone.addHandler(handler)
+    log_result(result)
+    assert read_all(read) == b""  # too long as the filter left it: dropped, never undone
+
+
+def test_the_shorter_line_passes_the_filters_too(
+    monkeypatch: pytest.MonkeyPatch, pipe: Any, lone: logging.Logger
+):
+    read, stream = pipe
+    handler = json_handler(stream)
+    handler.addFilter(lambda record: "says why" not in record.getMessage())
+    lone.addHandler(handler)
+    log_result(recommended_result(monkeypatch, WHYS["emoji"]))
+    assert read_all(read) == b""

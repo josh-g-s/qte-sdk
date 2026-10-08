@@ -4,8 +4,10 @@ terminal, or when FORCE_COLOR is set, so every parser turns that off."""
 
 import json
 import os
+import select
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -139,7 +141,13 @@ def test_json_output_on_a_terminal_has_no_colour_or_carriage_return(name: str, t
         os.close(terminal)
         terminal = -1
         output = b""
+        deadline = time.monotonic() + 60
         while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([controller], [], [], left)[0]:
+                process.kill()
+                process.wait()
+                pytest.fail(f"{name} was still running after 60 s: {output!r}")
             try:
                 chunk = os.read(controller, 65536)
             except OSError:  # Linux: the terminal's other end is closed

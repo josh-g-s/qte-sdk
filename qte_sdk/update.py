@@ -1045,6 +1045,7 @@ def _log_without_waiting(
     if not handlers and logging.lastResort is not None:
         handlers = [logging.lastResort]
     later: list[tuple[str, Any, int]] = []
+    shortened = None if short is None else (message, short)
     # Handlers that never wait first, so a write that does wait (another writer filled
     # the pipe after the check) cannot keep the record from a log file or caplog.
     for handler in handlers:
@@ -1057,9 +1058,9 @@ def _log_without_waiting(
             later.append((route, handler, fd))
     for route, handler, fd in later:
         if route == "direct":
-            _write_or_drop(handler, fd, record, short)
+            _write_or_drop(handler, fd, record, shortened)
         else:
-            _handle_if_ready(handler, fd, record, short)
+            _handle_if_ready(handler, fd, record, shortened)
 
 
 def _route(handler: logging.Handler) -> tuple[str, int | None]:
@@ -1155,11 +1156,12 @@ def _write_or_drop(
     handler: logging.StreamHandler,
     fd: int,
     record: logging.LogRecord,
-    short: str | None = None,
+    shortened: tuple[str, str] | None = None,
 ) -> None:
     """Write `record` as `handler` would, in one `os.write` on `fd` holding no lock, when
     the stream can take the whole line now; otherwise drop it. A line over 512 bytes is
-    written with the message `short` instead, if given and that fits (see `_line`). Never
+    written with a shorter message instead, if `shortened` gives one and that fits (see
+    `_line`). Never
     truncates, and never
     writes to a descriptor the program made non-blocking, where a write could stop part
     way (on Windows, from Python 3.12, which can tell). A short write is not retried,
@@ -1176,7 +1178,7 @@ def _write_or_drop(
             return
         if isinstance(passed, logging.LogRecord):
             record = passed
-        _, data = _line(handler, record, short)
+        _, data = _line(handler, record, shortened)
         if len(data) > _MAX_DIRECT_LINE:
             return
         try:
@@ -1194,10 +1196,10 @@ def _handle_if_ready(
     handler: logging.StreamHandler,
     fd: int,
     record: logging.LogRecord,
-    short: str | None = None,
+    shortened: tuple[str, str] | None = None,
 ) -> None:
     """Write `record` to `handler`'s stream (a wrapper), as `handle` and `emit` would, only
-    when the line (made with `short`, as `_write_or_drop` does, if it is too long) is at
+    when the line (made shorter, as `_write_or_drop` does, if it is too long) is at
     most 512 bytes and the pipe, socket or terminal behind `fd` can
     take it whole now; otherwise drop it. The handler's filters run once, before the line
     is measured, and the line written is the one measured. The wrapper then passes on at
@@ -1213,7 +1215,7 @@ def _handle_if_ready(
             return
         if isinstance(passed, logging.LogRecord):
             record = passed
-        text, data = _line(handler, record, short)
+        text, data = _line(handler, record, shortened)
         if len(data) > _MAX_DIRECT_LINE or not _can_take(fd, len(data)):
             return
         handler.acquire()
@@ -1227,19 +1229,33 @@ def _handle_if_ready(
 
 
 def _line(
-    handler: logging.StreamHandler, record: logging.LogRecord, short: str | None
+    handler: logging.StreamHandler,
+    record: logging.LogRecord,
+    shortened: tuple[str, str] | None,
 ) -> tuple[str, bytes]:
     """The line `handler` writes for `record`, as text and as the bytes it becomes. When
-    those are over 512 bytes and `short` is given, the line for a copy of the record with
-    the message `short` instead, its code, next step and fields unchanged."""
+    those are over 512 bytes and `shortened` is (the message logged, a shorter one), the
+    line for a copy of the record with the shorter message instead, its code, next step
+    and fields unchanged, once the logger's and the handler's filters have passed that
+    copy too; but not when a filter has already changed the message, which is then kept
+    as the filter made it (and so dropped, being too long)."""
     text = handler.format(record) + handler.terminator
     data = _encoded(handler, text)
-    if len(data) > _MAX_DIRECT_LINE and short is not None:
-        shorter = copy.copy(record)
-        shorter.msg, shorter.args = "%s", (short,)
-        text = handler.format(shorter) + handler.terminator
-        data = _encoded(handler, text)
-    return text, data
+    if len(data) <= _MAX_DIRECT_LINE or shortened is None:
+        return text, data
+    message, short = shortened
+    if record.getMessage() != message:
+        return text, data
+    shorter = copy.copy(record)
+    shorter.msg, shorter.args = "%s", (short,)
+    for check in (logger.filter, handler.filter):
+        passed = check(shorter)
+        if not passed:
+            return text, data
+        if isinstance(passed, logging.LogRecord):
+            shorter = passed
+    text = handler.format(shorter) + handler.terminator
+    return text, _encoded(handler, text)
 
 
 def _encoded(handler: logging.StreamHandler, text: str) -> bytes:
@@ -1426,7 +1442,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        with _logs._for_command(args.json):
+        with _logs.configured("json" if args.json else None, capture_warnings=True):
             result = check_for_update(args.timeout)
             if args.json:
                 print(_logs.dumps(_document(result)))
@@ -1460,11 +1476,9 @@ def _document(result: UpdateCheck) -> dict[str, Any]:
     else:
         next_step = None
     revision = result.installed_revision
-    if revision is not None and not (
-        revision == "main"
-        or _RELEASE_TAG.fullmatch(revision)
-        or re.fullmatch(r"[0-9a-f]{7,64}", revision)
-    ):
+    if revision is not None and re.fullmatch(r"[0-9a-f]{7,64}", revision):
+        revision = revision[:12]  # a commit, cut as commits are
+    elif revision is not None and revision != "main" and not _RELEASE_TAG.fullmatch(revision):
         revision = "other"
     archive = result.installed_archive
     if archive is not None and archive != "main" and not _RELEASE_TAG.fullmatch(archive):
@@ -1480,9 +1494,10 @@ def _document(result: UpdateCheck) -> dict[str, Any]:
         "next_step": next_step,
         "installed": {
             "version": result.installed_version,
-            "description": _describe_install(result),
+            # As the text gives it, with the revision as shown here.
+            "description": _describe_install(replace(result, installed_revision=revision)),
             "commit": None if commit is None else commit[:12],
-            "revision": None if revision is None else revision[:12],
+            "revision": revision,
             "archive": archive,
         },
         "latest_release": result.latest_release,
