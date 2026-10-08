@@ -124,7 +124,7 @@ def configure(
     handler = _JsonHandler(stream, level)
     handler.setFormatter(JsonFormatter())
     logger.addHandler(handler)
-    if capture_warnings:
+    if capture_warnings and level <= logging.WARNING:
         _capture_warnings()
     return handler
 
@@ -314,15 +314,21 @@ def _show_warning(
     line: str | None = None,
 ) -> None:
     """Log an SDK warning through `WARNINGS_LOGGER`, with its code; show any other warning
-    as it was shown before."""
-    if file is None and isinstance(message, _errors.QteWarning):
+    as it was shown before, and an SDK warning too when that logger would drop it (a level
+    above WARNING set on it, or on `qte_sdk`): a warning about the token is never lost."""
+    warnings_logger = logging.getLogger(WARNINGS_LOGGER)
+    if (
+        file is None
+        and isinstance(message, _errors.QteWarning)
+        and warnings_logger.isEnabledFor(logging.WARNING)
+    ):
         code = message.code
         fields = message.fields
         if code is not None and isinstance(fields, dict):
             next_step: str | None = _errors.next_step(code, **fields)
         else:
             next_step = _fix(code)
-        logging.getLogger(WARNINGS_LOGGER).warning(
+        warnings_logger.warning(
             "%s",
             str(message),
             extra={"code": code, "next_step": next_step, "fields": {"category": category.__name__}},

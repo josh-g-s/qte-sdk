@@ -308,6 +308,17 @@ def test_captured_sdk_warnings_are_json_lines_and_others_are_shown_as_before():
     assert "UserWarning: an ordinary warning" in rest[0]
 
 
+def test_an_sdk_warning_the_logger_would_drop_is_shown_as_before():
+    code = CAPTURE.replace(
+        "import warnings, qte_sdk.logs",
+        "import logging, warnings, qte_sdk.logs\n"
+        "logging.getLogger('qte_sdk').setLevel(logging.ERROR)",
+    ).format(capture=True)
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert "QteWarning: QTE-DOTENV-NOT-IGNORED: " in done.stderr
+
+
 def test_warnings_are_not_captured_unless_asked():
     lines = run_warnings(False)
     assert any("QteWarning: QTE-DOTENV-NOT-IGNORED: " in line for line in lines)
