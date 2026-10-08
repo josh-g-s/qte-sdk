@@ -26,18 +26,22 @@ Three safeguards apply:
   holds `QTE_TOKEN` lets a broad group read or change it: Everyone, Authenticated Users,
   Users, INTERACTIVE or Domain Users. It is issued too if the access list of the file's
   folder lets such a group add or remove files there, since they could then replace the
-  file with one of their own, or if the file's owner is another account than you,
-  Administrators or SYSTEM, since an owner can change who may open it. An
-  `AddressFileShared` warning is issued instead if such a group may change or replace,
-  or another account owns, a `.env` that sets only `QTE_URL`, since whoever changes the
-  address can capture a token kept elsewhere when you next connect. Both are kinds of
-  `FileShared`. A folder under your user profile is private by default; a folder on
-  another drive, such as `D:\\`, usually is not. When the `.env` is reached through
-  symbolic links or junctions, the file and the folder checked are those they lead to,
-  and each folder that holds a link on the way is checked too; if a link cannot be
-  followed, the warning says the file could not be fully checked. The file is still used,
-  though a later release will refuse it. The same check applies to the file named by
-  `QTE_TOKEN_FILE` (see `qte_sdk.session`).
+  file with one of their own, or if the file's owner, or its folder's, is another account
+  than you, Administrators, SYSTEM or Windows' own TrustedInstaller, since an owner can
+  change who may open the file, or add or remove files in the folder. An
+  `AddressFileShared` warning is issued instead if
+  such a group may change or replace, or another account owns, a `.env` that sets only
+  `QTE_URL`, since whoever changes the address can capture a token kept elsewhere when you
+  next connect. Both are kinds of `FileShared`. A folder under your user profile is
+  private by default; a folder on another drive, such as `D:\\`, usually is not. When
+  the `.env` is reached through symbolic links or junctions, the file and the folder
+  checked are those they lead to, and each folder that holds a link on the way, and its
+  owner, is checked too. If a link cannot be followed, or Windows will not let the check
+  see the access list of the file or of a folder it looks at, or the list is in a form it
+  cannot read, or its owner cannot be told, the warning says the file could not be fully
+  checked, and why. The file is
+  still used, though a later release will refuse it. The same check applies to the file
+  named by `QTE_TOKEN_FILE` (see `qte_sdk.session`).
 - If the `.env`, or the file it links to, is inside a git working tree and git tracks
   it or does not ignore it, a `DotenvNotIgnored` warning is issued, once per process,
   since the token could be committed. It never stops the SDK: if a warnings filter makes
@@ -99,20 +103,23 @@ class DotenvNotIgnored(UserWarning):
 
 class FileShared(UserWarning):
     """On Windows, a broad group of users, such as Everyone or Users, may read, change or
-    replace a file the SDK reads its setup from, or another account owns it, or a link on
-    the way to it could not be followed, so it could not be fully checked. Catch this to
-    handle both kinds below."""
+    replace a file the SDK reads its setup from, or another account owns it or a folder it
+    is in or reached through; or it could not be fully checked, since a link on the way to
+    it could not be followed or an access list could not be seen. Catch this to handle both
+    kinds below."""
 
 
 class TokenFileShared(FileShared):
     """On Windows, a broad group of users may read, change or replace the `.env`, or the
-    file named by `QTE_TOKEN_FILE`, that holds the token, or another account owns it."""
+    file named by `QTE_TOKEN_FILE`, that holds the token, or another account owns it or a
+    folder it is in, or it could not be fully checked."""
 
 
 class AddressFileShared(FileShared):
     """On Windows, a broad group of users may change or replace a `.env` that sets
-    `QTE_URL` but holds no token, or another account owns it. Whoever changes the address
-    could capture a token kept elsewhere."""
+    `QTE_URL` but holds no token, or another account owns it or a folder it is in, or it
+    could not be fully checked. Whoever changes the address could capture a token kept
+    elsewhere."""
 
 
 def dotenv_path() -> Path:
@@ -179,7 +186,8 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     refused whichever name is asked for, and no value is returned. On Windows, such a file
     that a broad group may read, change or replace, or a file setting `QTE_URL` that a
     broad group may change or replace, gives a `TokenFileShared` or `AddressFileShared`
-    warning and is still used, as does either kind owned by another account.
+    warning and is still used, as does either kind owned by another account, or in a
+    folder another account owns, or that could not be fully checked.
 
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected, so
     neither it nor an `OSError` may reach the caller's exception as its cause or context.
@@ -227,7 +235,7 @@ def read_value(name: str) -> tuple[str | None, str | None]:
         )
     warn = access is not None and (
         (holds_token and access)
-        or ((access.changeable or access.unfollowed) and _assigns(text, _URL_NAME))
+        or ((access.changeable or access.incomplete) and _assigns(text, _URL_NAME))
     )
     value, problem = _parse(text, name)
     del text  # released before the warning, which runs code that is not the SDK's
@@ -281,7 +289,8 @@ def _warn_if_not_ignored(path: Path) -> None:
 
 def shared_access(path: Path) -> "_fileaccess.BroadAccess | None":
     """The broad groups Windows lets read or change `path`, or add or remove files in its
-    folder, and whether another account owns it (see `_fileaccess.broad_access`), if this
+    folder, whether another account owns it or a folder looked at, and what could not be
+    seen (see `_fileaccess.broad_access`), if this
     is Windows, the SDK has not already warned about `path` in this process, and the access
     list can be read; None otherwise. Takes only the path, so call it before the file is
     read."""
@@ -298,10 +307,11 @@ def shared_message(
     sets_address: bool = True,
 ) -> str:
     """What to tell the person when broad groups of users may read, change or replace
-    `path`, or another account owns it. `path` holds the token if `holds_token`, and is a
-    `.env` that can set the exchange address if `sets_address`. Names only the path, and
-    when it is reached through links, the links and the file they lead to; their folders;
-    and the groups; and, if a link on the way could not be followed, why. Resolves no
+    `path`, or another account owns it or a folder looked at, or it could not be fully
+    checked. `path` holds the token if `holds_token`, and is a `.env` that can set the
+    exchange address if `sets_address`. Names only the path, and when it is reached through
+    links, the links and the file they lead to; their folders; and the groups; and, if a
+    link on the way could not be followed or a list could not be seen, why. Resolves no
     path: where the lists were read is taken from `access`."""
     changers = list(access.write)
     readers = [group for group in access.read if group not in changers] if holds_token else []
@@ -329,10 +339,22 @@ def shared_message(
         places.append(f"{_join(replacers)} may add or remove files in {folder}")
         if linked:
             places[-1] += f", which holds the file it {verb}"
+
+    def holding(held: list[str]) -> str:
+        """The links in a folder, as the message names them after "which holds"."""
+        unlooked = [name for name in held if name == access.unlooked]
+        confirmed = [name for name in held if name != access.unlooked]
+        named = []
+        if confirmed:
+            named.append(
+                "the link" if is_link and confirmed == links[:1] else _the_links(confirmed)
+            )
+        named += [f"{name}, which could not be looked at" for name in unlooked]
+        return _join(named)
+
     for holder in link_folders:
         if holder.groups:
-            held = list(holder.links)
-            the_links = "the link" if is_link and held == links[:1] else _the_links(held)
+            the_links = holding(list(holder.links))
             places.append(
                 f"{_join(list(holder.groups))} may add or remove files in {holder.path}, "
                 f"which holds {the_links}"
@@ -341,6 +363,17 @@ def shared_message(
         findings.append(f"other users can replace it: {', and '.join(places)}")
     if access.other_owner:
         findings.append("it is owned by another account, which can change who may open it")
+    owned = []
+    if access.folder_owner:
+        owned.append(f"{folder}, which holds the file it {verb}," if linked else folder)
+    for holder in link_folders:
+        if holder.other_owner:
+            owned.append(f"{holder.path}, which holds {holding(list(holder.links))},")
+    for place in owned:
+        findings.append(
+            f"{place} is owned by another account, which can change who may add or remove "
+            "files in it"
+        )
     risks = []
     if holds_token and (access.read or access.other_owner):
         risks.append("read your token")
@@ -352,12 +385,13 @@ def shared_message(
     elif access.changeable:
         risks.append("replace your token")
     groups = set(changers + readers + replacers + link_replacers)
-    if not findings:
+    if not findings and linked:
         fix = (
             "Keep the file itself, not a link to it, in a folder under your user profile "
             "(%USERPROFILE%), which is private by default."
         )
-    elif access.other_owner:
+    elif access.other_owner or not findings:
+        # Another account owns the file, or may have hidden who can open it.
         it = f"the file it {verb}" if linked else "it"
         fix = (
             f"Delete {it} and make it again yourself, in a folder under your user profile "
@@ -368,12 +402,17 @@ def shared_message(
         their = "that group's" if len(groups) == 1 else "those groups'"
         fix = (
             f"Move {it} into a folder under your user profile (%USERPROFILE%), which is "
-            f"private by default, or remove {their} access."
+            "private by default"
         )
+        # Removing a group's access is enough only when no other account owns a folder
+        # looked at, which could give it back, and every list was seen.
+        enough = not (access.folder_owner or access.link_owner or access.unseen)
+        fix += f", or remove {their} access." if groups and enough else "."
     what = "holds your token" if holds_token else f"sets {_URL_NAME}, the exchange address"
     name = f"{path}"
     if access.unfollowed:
-        # Where the links lead is not known, so no file is named as their end.
+        # Where the links lead is not known, so no file is named as their end. (A list that
+        # was not seen does not change where they lead.)
         if is_link and via:
             name = f"{path}, a link that leads on through {_the_links(via)},"
         elif is_link:
@@ -386,16 +425,18 @@ def shared_message(
         name = f"{path}, a link to {file},"
     elif via:
         name = f"{path}, which leads to {file} through {_the_links(via)},"
-    unchecked = (
-        f"it could not be fully checked: {access.unfollowed}; a link on the way could not be "
-        "followed, so check where it leads"
-    )
+    reasons = list(access.unseen)
+    if access.unfollowed:
+        reasons.append(
+            f"{access.unfollowed}; a link on the way could not be followed, so check where it leads"
+        )
+    unchecked = f"it could not be fully checked: {_join(reasons, '; ')}"
     if findings:
         said = (
             f"{name} {what}, and {_join(findings, '; ')}, so other people who use this "
             f"computer could {' or '.join(risks)}."
         )
-        if access.unfollowed:
+        if access.incomplete:
             said += f" Also, {unchecked}."
     else:
         said = f"{name} {what}, but {unchecked}."
