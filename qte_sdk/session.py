@@ -64,7 +64,7 @@ from qte_sdk.contract.v1.session_pb2 import (
     ResumeAck,
     SessionAck,
 )
-from qte_sdk.dotenv import DOTENV_NAME, read_value, shared_access, warn_shared
+from qte_sdk.dotenv import DOTENV_NAME, read_value, shared_access, warn_shared, withholding
 from qte_sdk.errors import Problem, QteError, flatten, one_line, plain
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
@@ -397,7 +397,13 @@ class Session:
             self._keep(event)
 
     def __repr__(self) -> str:
-        return f"Session({self.connection.url!r}, {self.info!r})"
+        # A mistake can put the token in the address, and a traceback that shows locals
+        # shows this. A session has no token to look for, so an address shaped like one
+        # the exchange mints is withheld.
+        url = self.connection.url
+        if _errors.token_shaped(str(url)):
+            url = _errors.WITHHELD
+        return f"Session({url!r}, {self.info!r})"
 
     @property
     def calendar(self) -> Calendar | None:
@@ -919,7 +925,8 @@ def _token_from_file() -> tuple[str | None, str | None]:
     if not text.strip():
         return None, "is empty or holds only whitespace"
     if access:
-        failure = warn_shared(file_path, access, sets_address=False)
+        # The path, which a mistaken setting could make hold the token, is withheld if so.
+        failure = warn_shared(file_path, access, sets_address=False, withhold=withholding(text))
         if failure is not None:
             # An interruption while warning, such as a Ctrl-C, is raised from a frame that
             # no longer holds the token.
@@ -987,6 +994,9 @@ async def _open_session(
     _update.check_in_background()
     # Connection keeps the token out of the websockets log itself, for any logger passed.
     conn = Connection(url, **connection_options)
+    # A mistake can put the token in the address: an error leaves without this frame
+    # holding it (the connection's repr does not show it).
+    del url
     interrupted = False
     deadline = asyncio.timeout(ack_timeout)
     try:
@@ -1246,14 +1256,18 @@ def _scan_for_token(value: object, secret: _Secret) -> bool:
 
 
 def _text_holds_token(text: str, secret: _Secret) -> bool:
-    """Whether the caller's `text` holds the token as it is or as its repr shows it: a
-    repr writes a line break as two characters, which an escaped token can hold."""
-    return _holds_token(text, secret) or _holds_token(repr(text), secret)
+    """Whether the caller's `text` holds the token as it is, percent-encoded, or as its
+    repr shows it: a repr writes a line break as two characters, which an escaped token can
+    hold."""
+    decoded = unquote(text)
+    return any(_holds_token(form, secret) for form in (text, repr(text), decoded, repr(decoded)))
 
 
 def _url_holds_token(url: str, secret: _Secret) -> bool:
-    """Whether the address `url` holds the token, as written or percent-encoded."""
-    return _holds_token(url, secret) or _holds_token(unquote(url), secret)
+    """Whether the address `url` holds the token, as written, percent-encoded, or as its
+    repr shows it, or holds text shaped like a token the exchange mints (see
+    `qte_sdk.errors.token_shaped`), which may be another one pasted by mistake."""
+    return _text_holds_token(url, secret) or _errors.token_shaped(url)
 
 
 def _redact(text: str, secret: _Secret) -> str:

@@ -107,7 +107,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, TypeVar, cast
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from qte_sdk import errors as _errors
 from qte_sdk.connection import DecodeFailed, Unknown, _decode_error
@@ -1366,11 +1366,16 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
 
 def _server_text(text: str, secret: _Secret) -> str | None:
     """The service's `text` with any echo of the token redacted, or None if it still
-    shares a run of characters with the token, as sent or flattened to one line (which
-    drops the control and format characters that could split a run)."""
+    shares a run of characters with the token, as sent or percent-decoded, each also
+    flattened to one line (which drops the control and format characters that could split
+    a run)."""
     screened = _screened(_redact(text, secret), secret)
-    if screened is None or _screened(flatten(screened), secret) is None:
+    if screened is None:
         return None
+    decoded = unquote(screened)
+    for form in (flatten(screened), decoded, flatten(decoded)):
+        if _screened(form, secret) is None:
+            return None
     return screened
 
 

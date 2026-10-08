@@ -76,9 +76,9 @@ from datetime import date
 
 from qte_sdk import errors as _errors
 from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, SessionState, Trades
-from qte_sdk.errors import QteError
+from qte_sdk.errors import QteError, token_shaped
 from qte_sdk.history import HistoryClient, HistoryItem, _date_text, _Guarded
-from qte_sdk.session import _text_holds_token
+from qte_sdk.session import _detached, _text_holds_token
 
 __all__ = ["CHANNELS", "ReplayOutOfOrder", "replay"]
 
@@ -115,8 +115,43 @@ def replay(
     Whether the session and the instruments exist only the history service can say, as
     the replay runs. See the module docstring for the order and the errors.
     """
+    # The arguments can hold the token, pasted by mistake: an error for them is raised from
+    # a frame that no longer holds them, without the frames that checked them.
+    failure: Exception
+    try:
+        day, streams = _checked(client, session_date, instruments, channels, speed)
+    except Exception as error:
+        failure = _detached(error)
+    else:
+        # Errors leave without the traceback gathered inside the replay, whose frames hold
+        # the messages it read and the instruments asked for.
+        return _Guarded(_replay(client, day, streams, speed))
+    del session_date, instruments, channels
+    raise failure
+
+
+def _checked(
+    client: HistoryClient,
+    session_date: date | str,
+    instruments: Iterable[str],
+    channels: Iterable[str],
+    speed: float | None,
+) -> tuple[str, list[tuple[int, str]]]:
+    """The session date as text and the streams to merge, or the error for arguments the
+    replay cannot use. A date or channel it names is withheld if it holds the client's
+    token, or is shaped like a token the exchange mints (see `errors.token_shaped`)."""
+    secret = getattr(client, "_secret", None)
+
+    def withhold(text: str) -> bool:
+        return (secret is not None and _text_holds_token(text, secret)) or token_shaped(text)
+
     if isinstance(session_date, str):
-        session_date = date.fromisoformat(session_date)  # ValueError if it does not parse
+        try:
+            session_date = date.fromisoformat(session_date)
+        except ValueError:
+            if withhold(session_date):
+                raise ValueError(f"Invalid isoformat string: {_errors.WITHHELD}") from None
+            raise
     elif not isinstance(session_date, date):
         raise TypeError("pass a session date as a datetime.date or 'YYYY-MM-DD'")
     if isinstance(instruments, str):
@@ -129,7 +164,11 @@ def replay(
     wanted = list(channels)
     unknown = sorted(set(wanted) - set(CHANNELS))
     if unknown:
-        raise ValueError(f"unknown channels {unknown}: choose from {list(CHANNELS)}")
+        shown = [
+            _errors.WITHHELD if withhold(c if isinstance(c, str) else repr(c)) else c
+            for c in unknown
+        ]
+        raise ValueError(f"unknown channels {shown}: choose from {list(CHANNELS)}")
     if not wanted:
         raise ValueError(f"name at least one channel from {list(CHANNELS)}")
     if not names and _PER_INSTRUMENT & set(wanted):
@@ -143,9 +182,7 @@ def replay(
         for instrument in (sorted(set(names)) if channel in _PER_INSTRUMENT else [""])
     ]
     # _date_text refuses a datetime, which is also a date.
-    # Errors leave without the traceback gathered inside the replay, whose frames hold the
-    # messages it read and the instruments asked for.
-    return _Guarded(_replay(client, _date_text(session_date), streams, speed))
+    return _date_text(session_date), streams
 
 
 class ReplayOutOfOrder(QteError, ValueError):
