@@ -319,6 +319,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # Spelled out in full only: an abbreviation such as --pl must never place an order.
         allow_abbrev=False,
     )
+    parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     default = os.environ.get("QTE_INSTRUMENT")
     parser.add_argument(
         "--instruments",
