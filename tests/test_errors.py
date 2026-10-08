@@ -438,8 +438,8 @@ def token_file_unreadable(token: str, ctx: Context) -> str:
 
 
 def token_shared(token: str, ctx: Context) -> str:
+    path = private_dotenv(f"QTE_TOKEN={token}\n")
     if os.name == "posix":
-        path = private_dotenv(f"QTE_TOKEN={token}\n")
         path.chmod(0o644)
         posix = raised(resolve_token)
         path.chmod(0o600)
