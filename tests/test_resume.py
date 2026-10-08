@@ -8,7 +8,7 @@ import typing
 from contextlib import aclosing
 
 import pytest
-from fake_exchange import LoopClock, frame, serve_local, wait_until
+from fake_exchange import LoopClock, drop_connection, frame, serve_local, wait_until
 from test_calendar import CALENDAR, CALENDAR_PAYLOAD, calendar_frame
 from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
@@ -171,7 +171,7 @@ class Scripted:
         for f in script.get("after", ()):
             await ws.send(f)
         if script.get("drop"):
-            ws.transport.abort()
+            await drop_connection(ws)
             return
         if script.get("close") is not None:
             code, reason = script["close"]
@@ -1451,7 +1451,8 @@ async def test_a_failed_attempt_keeps_the_term_the_cursor_belongs_to():
     )
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
-        async with rs:
+        # Bounded: if the client missed report 1, the replay it is told of never completes.
+        async with rs, asyncio.timeout(5):
             async for event in rs:
                 if isinstance(event, ResumeComplete) and event.replayed:
                     break
@@ -1671,7 +1672,7 @@ async def test_without_resume_a_calendar_too_late_to_check_still_forgets_an_old_
             await ws.send(calendar(TERM))
             await ws.recv()  # the subscription, so the session is up before it drops
             await ws.send(order_state(100))
-            ws.transport.abort()
+            await drop_connection(ws)
             return
         # The client subscribes only once it has stopped waiting for the calendar, so the
         # calendar sent after the subscription is certain to come too late for the check.
@@ -2296,7 +2297,7 @@ async def test_a_term_change_close_forgets_the_cursor_even_when_a_rejection_is_t
             await ws.recv()  # the subscription, so the session is up before it drops
             await ws.send(order_state(6))
             await ws.send(order_state(7))
-            ws.transport.abort()
+            await drop_connection(ws)
             return
         await ws.send(ack())
         await ws.send(session_reject("TEAM_DISABLED"))

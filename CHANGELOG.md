@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.16
+**Version:** 0.17
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- CI's Windows job runs the reconnect, resume, calendar, instruments, tickets, new message types and examples tests too: the tests' fake exchange now delivers every frame sent before it drops a connection, on Windows as elsewhere. Tests and CI only, no change to the SDK itself.
 
 ## 1.1.1
 

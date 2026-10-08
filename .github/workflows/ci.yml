@@ -40,9 +40,9 @@ jobs:
 
   windows:
     # The Windows token-file and console checks (tests marked `windows`) read real access
-    # lists, owners and consoles, so they run only here. The rest of the suite runs too,
-    # except the files below, which do not work on Windows yet, and the contract code is
-    # regenerated. See "Windows" in docs/development.md.
+    # lists, owners and consoles, so they run only here. The rest of the suite runs too; the
+    # few tests that cannot run on Windows skip themselves and say why. The contract code is
+    # regenerated as well. See "Windows" in docs/development.md.
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -62,24 +62,9 @@ jobs:
       # mark, or that -k, --deselect or a conftest hook leaves out, fails the job.
       - name: Fail if a Windows test did not run or was skipped
         run: python scripts/check_windows_tests.py windows-tests.xml
-      # Left out:
-      # - test_reconnect, test_resume, test_calendar, test_instruments,
-      #   test_new_message_types and test_tickets: their fake exchange drops a connection
-      #   with transport.abort(), and on Windows the reset discards the frames sent just
-      #   before it, so the client sees the drop a message early; one test hangs.
-      # - test_examples: it sends SIGINT to child processes and uses preexec_fn, which
-      #   Windows does not have.
       - name: Run the rest of the suite
         if: success() || failure()
-        run: >-
-          pytest -m "not windows"
-          --ignore=tests/test_reconnect.py
-          --ignore=tests/test_resume.py
-          --ignore=tests/test_calendar.py
-          --ignore=tests/test_instruments.py
-          --ignore=tests/test_new_message_types.py
-          --ignore=tests/test_tickets.py
-          --ignore=tests/test_examples.py
+        run: pytest -m "not windows"
       # scripts/generate_contract.py must write LF here too, so a regeneration on Windows
       # leaves the committed code unchanged. git diff ignores CRLF in a file .gitattributes
       # marks as text, so `git ls-files --eol` checks the bytes as well, before and after.
