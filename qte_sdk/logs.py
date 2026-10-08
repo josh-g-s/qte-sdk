@@ -164,10 +164,13 @@ def _restore(
     other handler removed meanwhile left out), then any other handler added meanwhile; and
     the capture of warnings as it was."""
     global _shown_before
-    now = list(logger.handlers)
-    kept = [h for h in before if isinstance(h, _JsonHandler) or h in now]
-    added = [h for h in now if h not in before and not isinstance(h, _JsonHandler)]
-    logger.handlers = kept + added  # one assignment: a record sees one list or the other
+    # Under the lock `Logger.addHandler` and `removeHandler` take (logging's own, the same
+    # in 3.11 to 3.14), so a handler another thread adds or removes meanwhile is kept so.
+    with getattr(logging, "_lock", None) or contextlib.nullcontext():
+        now = list(logger.handlers)
+        kept = [h for h in before if isinstance(h, _JsonHandler) or h in now]
+        added = [h for h in now if h not in before and not isinstance(h, _JsonHandler)]
+        logger.handlers = kept + added
     warnings.showwarning, _shown_before = showwarning, shown_before
 
 
@@ -230,8 +233,8 @@ class JsonFormatter(logging.Formatter):
         line: dict[str, Any] = {
             "time": _utc(record),
             "level": record.levelname,
-            "logger": record.name,
-            "code": code,
+            "logger": _withheld(record.name, withhold),
+            "code": _withheld(code, withhold),
             "message": _withheld(message_of(text, code, next_step), withhold),
             "next_step": _withheld(next_step, withhold),
             "fields": fields,
@@ -253,12 +256,14 @@ def _withholding() -> Callable[[str], bool]:
 
 
 def _withheld(value: Any, withhold: Callable[[str], bool]) -> Any:
-    """`value` with each text in it that `withhold` says yes to (as written, or as str()
-    writes it) replaced by `qte_sdk.errors.WITHHELD`; keys are kept."""
+    """`value` with each text in it, a key of a dict included, that `withhold` says yes to
+    (as written, or as str() writes it) replaced by `qte_sdk.errors.WITHHELD`."""
     if isinstance(value, str):
         return _errors.WITHHELD if withhold(value) else value
     if isinstance(value, dict):
-        return {key: _withheld(item, withhold) for key, item in value.items()}
+        return {
+            _withheld(str(key), withhold): _withheld(item, withhold) for key, item in value.items()
+        }
     if isinstance(value, list | tuple):
         return [_withheld(item, withhold) for item in value]
     if value is None or isinstance(value, bool | int | float):

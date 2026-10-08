@@ -596,6 +596,17 @@ def test_a_record_holding_the_token_in_its_arguments_or_fields_is_withheld(
         assert parsed["next_step"] == errors.WITHHELD
         assert parsed["fields"] == {"path": errors.WITHHELD, "nested": [errors.WITHHELD], "n": 3}
         assert_no_form_of(token, line)
+        # A key, the logger's name and the code are withheld too.
+        stream = io.StringIO()
+        logs.configure("json", stream=stream)
+        logging.getLogger(f"qte_sdk.{token}").warning(
+            "plain", extra={"code": token, "fields": {token: 1}}
+        )
+        line = stream.getvalue()
+        parsed = json.loads(line)
+        assert (parsed["logger"], parsed["code"]) == (errors.WITHHELD, errors.WITHHELD)
+        assert parsed["fields"] == {errors.WITHHELD: 1}
+        assert_no_form_of(token, line)
     # With no token set, the shape of a minted one is withheld all the same.
     monkeypatch.delenv(TOKEN_ENV_VAR)
     shaped = json.loads(log_line(message=f"x {minted_token()} y"))
