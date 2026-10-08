@@ -1075,7 +1075,10 @@ def _pipe_write_quota(fd: int) -> int | None:
     `WriteQuotaAvailable`, from `NtQueryInformationFile(FilePipeLocalInformation)`
     (documented in the Windows Driver Kit). None when it cannot be read. A read waiting
     on the pipe takes its size off this, so it can be less than the pipe would take: the
-    caller then drops a line it could have written, never writes one that waits."""
+    caller then drops a line it could have written, never writes one that waits. Nothing
+    else the write end reports tells the two apart: measured on CI's Windows runner, its
+    `ReadDataAvailable` is always 0, and a full 4 KiB pipe and an empty one with an 8 KiB
+    read waiting report the same fields, `WriteQuotaAvailable` 0 in both."""
     try:
         import ctypes
         import msvcrt
