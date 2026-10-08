@@ -1245,6 +1245,12 @@ def _scan_for_token(value: object, secret: _Secret) -> bool:
     return False
 
 
+def _text_holds_token(text: str, secret: _Secret) -> bool:
+    """Whether the caller's `text` holds the token as it is or as its repr shows it: a
+    repr writes a line break as two characters, which an escaped token can hold."""
+    return _holds_token(text, secret) or _holds_token(repr(text), secret)
+
+
 def _url_holds_token(url: str, secret: _Secret) -> bool:
     """Whether the address `url` holds the token, as written or percent-encoded."""
     return _holds_token(url, secret) or _holds_token(unquote(url), secret)

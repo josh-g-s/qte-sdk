@@ -1167,3 +1167,16 @@ async def test_reconnect_and_replay_errors_keep_their_arguments_as_given():
     error = replay._out_of_order(None, DAY, replay._Stream(None, 0, "AAA\nBBB"), 5)
     assert error.args[0].startswith(f"the book of AAA\nBBB on {DAY} goes back in time: ")
     assert f"the book of AAA BBB on {DAY} goes back in time: " in str(error)
+
+
+async def test_text_that_a_repr_turns_into_the_token_is_withheld_from_the_arguments():
+    token = synthetic_token() + "\\n" + synthetic_token()  # a backslash and an n
+    given = token.replace("\\n", "\n")  # a line break there: its repr is the token
+    session = ReconnectingSession("ws://127.0.0.1:9", token)
+    with pytest.raises(NotConnected) as caught:
+        await session.send(given, Auth())
+    client = HistoryClient("https://history.example.test", token)
+    error = replay._out_of_order(client, DAY, replay._Stream(None, 0, given), 5)
+    for withheld in (caught.value, error):
+        assert errors.WITHHELD in withheld.args[0]
+        assert_no_form_of(token, shown(withheld))

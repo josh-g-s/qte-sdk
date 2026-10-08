@@ -78,7 +78,7 @@ from qte_sdk import errors as _errors
 from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, SessionState, Trades
 from qte_sdk.errors import QteError
 from qte_sdk.history import HistoryClient, HistoryItem, _date_text, _Guarded
-from qte_sdk.session import _holds_token
+from qte_sdk.session import _text_holds_token
 
 __all__ = ["CHANNELS", "ReplayOutOfOrder", "replay"]
 
@@ -234,11 +234,15 @@ def _out_of_order(
     what = f"a message at {moment} follows one at {stream.last}"
     secret = getattr(client, "_secret", None)
     fields = _errors.withheld(
-        lambda shown: secret is not None and _holds_token(shown, secret), where=where, what=what
+        lambda shown: secret is not None and _text_holds_token(shown, secret),
+        where=where,
+        what=what,
     )
     # The arguments keep the text as given, unless it was withheld.
     if fields["where"] == _errors.WITHHELD:
         where = _errors.WITHHELD
+    if fields["what"] == _errors.WITHHELD:
+        what = _errors.WITHHELD
     return ReplayOutOfOrder(f"the {where} goes back in time: {what}", fields=fields)
 
 
