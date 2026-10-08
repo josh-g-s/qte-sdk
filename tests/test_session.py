@@ -4,7 +4,6 @@ import dataclasses
 import json
 import logging
 import os
-import queue
 import secrets
 import subprocess
 import sys
@@ -13,6 +12,7 @@ import time
 import traceback
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, NamedTuple
 
 import pytest
 from fake_exchange import (
@@ -959,15 +959,30 @@ async def test_the_update_checks_warning_is_logged_from_its_own_thread_not_the_l
 
 TESTS = Path(__file__).resolve().parent
 NO_NETWORK = TESTS / "no_network"
-# A program whose stderr is a pipe that nothing reads until it is done. A helper thread fills
-# the pipe, whatever its size (about 4 KiB on Windows, 64 KiB elsewhere), and stays blocked
-# in its write; only then does GitHub answer that the SDK is behind, so the check's warning
-# has to wait behind it. A timer on the session's loop prints a tick to stdout every 100 ms
-# throughout. Once the check's thread is seen stuck in its warning, the program waits for 10
-# more ticks, closes the session, prints "done", and waits for the parent to read stderr.
-# Nothing in the main thread writes to stderr.
-FULL_STDERR_CHILD = """
+# A program that runs the automatic update check, with stderr as the test sets it up. GitHub
+# (faked) says the SDK is behind only once the scenario has made stderr ready, so the
+# warning is written to it as it is then. The program prints "report <json>" last, and
+# exits; nothing waits for stderr to be read.
+#
+# exit      stderr is full; the program waits for the check to end, and exits
+# race      the same, but the check is told the pipe can take the line, so it waits in
+#           its write, as when another writer fills the pipe just after the check looked
+# open      stderr is full while a session is open and a timer ticks on its loop
+# nearly    (Windows) stderr has 100 bytes of room left; the main thread writes a short
+#           line to it while a timer ticks on the loop
+# wrapped   as exit, with sys.stderr wrapped as colorama wraps it
+# proxied   as exit, with sys.stderr replaced as rich's progress display replaces it
+# room      stderr is left as it is
+# long      stderr is left as it is, and logging is set up to write lines over 512 bytes
+#
+# Stderr is filled with unlocked writes (os.write), so no Python lock is held by them. On
+# Windows, exactly the room the pipe reports is written, and no write there ever waits: one
+# that did would hold the C runtime's lock on fd 2 and stop every other write to it.
+# Elsewhere, a thread writes until it makes no progress, and stays blocked in that write.
+UPDATE_CHILD = """
 import asyncio
+import io
+import json
 import logging
 import os
 import sys
@@ -985,41 +1000,52 @@ from test_update import MAIN, Repository, refs_with
 from qte_sdk import update
 from qte_sdk.session import open_session
 
-written = [0]
-filling = threading.Event()
+cache, scenario = sys.argv[1], sys.argv[2]
+# Where to write the report too, for a child whose stdout is a console the test cannot read.
+report_file = sys.argv[3] if len(sys.argv) > 3 else None
+report = {}
+codes = []
+ready = threading.Event()
 
 
-def fill():
-    filling.set()
-    for _ in range(1024):
-        sys.stderr.write("x" * 1023 + "\\n")
-        written[0] += 1
+class Codes(logging.Handler):
+    def emit(self, record):
+        codes.append(getattr(record, "code", None))
 
 
-def filled():
-    # The filler has stopped making progress: the pipe is full and nothing reads it.
-    filling.wait()
-    last, still = -1, 0
-    while still < 3:
-        time.sleep(0.1)
-        still = still + 1 if written[0] == last else 0
+def fill_stderr(leave=0):
+    if sys.platform == "win32":
+        room = update._pipe_write_quota(2)
+        os.write(2, b"x" * (room - leave))
+        report["room"] = [room, update._pipe_write_quota(2)]
+        return
+    written = [0]
+
+    def write():
+        while True:
+            os.write(2, b"x" * 1023 + b"\\n")
+            written[0] += 1
+
+    threading.Thread(target=write, daemon=True).start()
+    last = -1
+    while written[0] != last:
         last = written[0]
-    return written[0] < 1024
+        time.sleep(0.3)
 
 
 github = Repository(refs_with(("v999.0.0", MAIN)))
 
 
-def answer_behind_once_stderr_is_full(request, timeout):
-    if not filled():
-        raise RuntimeError("stderr never filled up")
+def answer_once_ready(request, timeout):
+    if not ready.wait(30):
+        raise RuntimeError("stderr was never made ready")
     return github(request, timeout)
 
 
-update._cache_dir = lambda: Path(sys.argv[1])
+update._cache_dir = lambda: Path(cache)
 update._installed = lambda version: update._Install("1" * 40)
-update._open = answer_behind_once_stderr_is_full
-checked = threading.Event()
+update._open = answer_once_ready
+answered = threading.Event()
 real_check = update.check_for_update
 
 
@@ -1027,17 +1053,19 @@ def check_and_say(timeout=update.DEFAULT_TIMEOUT):
     try:
         return real_check(timeout)
     finally:
-        checked.set()
+        answered.set()
 
 
 update.check_for_update = check_and_say
-# Set when the warning is about to be written: the default handler's filters run just
-# before it takes its lock and writes.
-warning = threading.Event()
-logging.lastResort.addFilter(lambda record: warning.set() or True)
 started = []
 real_start = update.check_in_background
 update.check_in_background = lambda: started.append(real_start()) or started[-1]
+
+
+def check_done():
+    [thread] = started
+    thread.join(3)
+    return not thread.is_alive()
 
 
 async def tick(count):
@@ -1047,99 +1075,378 @@ async def tick(count):
         print(f"tick {count[0]}", flush=True)
 
 
-async def main():
-    filler = threading.Thread(target=fill, daemon=True)
+async def ten_more_ticks(count):
+    seen = count[0]
+    while count[0] < seen + 10:
+        await asyncio.sleep(0.05)
+
+
+async def in_a_session():
     async with serve_local(Server(ack())) as url:
         async with await open_session(url, synthetic_token()):
             count = [0]
             ticker = asyncio.create_task(tick(count))
-            filler.start()
-            [thread] = started
-            while not (checked.is_set() and warning.is_set()):
-                await asyncio.sleep(0.05)
-            await asyncio.sleep(0.5)
-            if not thread.is_alive():
-                print("not stuck", flush=True)
-                return
-            print("stuck", flush=True)
-            seen = count[0]
-            while count[0] < seen + 10:
-                await asyncio.sleep(0.05)
+            await asyncio.to_thread(fill_stderr)
+            ready.set()
+            await asyncio.to_thread(answered.wait, 20)
+            print("answered", flush=True)
+            await ten_more_ticks(count)
             ticker.cancel()
-            # The warning is still being written: only the parent reading stderr ends it.
-            if not thread.is_alive():
-                print("not stuck", flush=True)
-                return
-    print("done", flush=True)
-    # The parent reads stderr now; both threads then finish their writes.
-    await asyncio.to_thread(filler.join, 20)
-    await asyncio.to_thread(thread.join, 20)
-    print("exiting", flush=True)
+            report["check_done"] = await asyncio.to_thread(check_done)
 
 
-asyncio.run(main())
+async def nearly_full():
+    count = [0]
+    ticker = asyncio.create_task(tick(count))
+    fill_stderr(leave=100)
+    update.check_in_background()
+    ready.set()
+    await asyncio.to_thread(answered.wait, 20)
+    # On the loop's own thread, while the check decides what to do with its warning.
+    sys.stderr.write("a short line\\n")
+    sys.stderr.flush()
+    print("written", flush=True)
+    await ten_more_ticks(count)
+    ticker.cancel()
+    report["check_done"] = await asyncio.to_thread(check_done)
+
+
+class ColoramaLike:
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    def write(self, text):
+        self._wrapped.write(text.replace(chr(27) + "[0m", ""))
+
+
+class FileProxyLike(io.TextIOBase):
+    def __init__(self, wrapped):
+        super().__init__()
+        self._wrapped = wrapped
+        self._pending = ""
+
+    def write(self, text):
+        self._pending += text
+        if chr(10) in self._pending:
+            lines, _, self._pending = self._pending.rpartition(chr(10))
+            self._wrapped.write(lines + chr(10))
+            self._wrapped.flush()
+        return len(text)
+
+    def fileno(self):
+        return self._wrapped.fileno()
+
+
+if scenario == "wrapped":
+    sys.stderr = ColoramaLike(sys.stderr)
+if scenario == "proxied":
+    sys.stderr = FileProxyLike(sys.stderr)
+if scenario == "race":
+    update._can_take = lambda fd, size: True
+if scenario in ("race", "long"):
+    # A stream handler on stderr, and another handler beside it.
+    logging.basicConfig(format="%(message)s" + (" padding" * 50 if scenario == "long" else ""))
+    logging.getLogger().addHandler(Codes())
+else:
+    # Only logging's last resort: its filters run just before it writes or drops the line.
+    logging.lastResort.addFilter(lambda record: codes.append(record.code) or True)
+if scenario == "open":
+    asyncio.run(in_a_session())
+elif scenario == "nearly":
+    asyncio.run(nearly_full())
+else:
+    if scenario == "room" and sys.platform == "win32":
+        report["room"] = [update._pipe_write_quota(2)]
+    # How the last resort's stream is written: "handle" for a console.
+    report["route"] = update._route(logging.lastResort)[0]
+    update.check_in_background()
+    if scenario in ("exit", "race", "wrapped", "proxied"):
+        fill_stderr()
+    ready.set()
+    answered.wait(20)
+    report["check_done"] = check_done()
+report["codes"] = codes
+if sys.platform != "win32":
+    report["blocking"] = os.get_blocking(2)
+report["stderr_is_a_terminal"] = os.isatty(2)
+if report_file:
+    Path(report_file).write_text(json.dumps(report), encoding="utf-8")
+print("report " + json.dumps(report), flush=True)
 """
+WARNING_LINE = "QTE-UPDATE-AVAILABLE: qte-sdk "
 
 
-def test_a_full_stderr_pipe_never_stops_the_sessions_loop(tmp_path: Path):
+class Child(NamedTuple):
+    stdout: list[str]
+    report: dict[str, Any]
+    exit_seconds: float  # from its report to its exit
+    stderr: str
+
+
+def run_update_child(tmp_path: Path, scenario: str, stderr: Any, read_stderr: Any) -> Child:
+    """Run UPDATE_CHILD with `stderr`, and `read_stderr()` once it has exited, which gives
+    what was written to it. Fails if the child does not exit within 45 s."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(NO_NETWORK), str(TESTS), env.get("PYTHONPATH")])
     )
     child = subprocess.Popen(
-        [sys.executable, "-c", FULL_STDERR_CHILD, str(tmp_path / "cache")],
+        [sys.executable, "-c", UPDATE_CHILD, str(tmp_path / "cache"), scenario],
         env=env,
         cwd=tmp_path,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=stderr,
         text=True,
     )
-    assert child.stdout is not None and child.stderr is not None
-    stdout, stderr = child.stdout, child.stderr
-    lines: queue.Queue[str | None] = queue.Queue()
+    assert child.stdout is not None
+    stdout = child.stdout
+    lines: list[tuple[float, str]] = []
 
-    def read_stdout() -> None:
-        try:
-            for line in stdout:
-                lines.put(line.rstrip("\n"))
-        except (OSError, ValueError):
-            pass
-        lines.put(None)
+    def read() -> None:
+        for line in stdout:
+            lines.append((time.monotonic(), line.rstrip("\n")))
 
-    reader = threading.Thread(target=read_stdout, daemon=True)
-    seen: list[str | None] = []
-    errors: list[str] = []
-
-    def until(wanted: str, within: float) -> None:
-        deadline = time.monotonic() + within
-        while wanted not in seen:
-            try:
-                seen.append(lines.get(timeout=max(0.0, deadline - time.monotonic())))
-            except queue.Empty:
-                pytest.fail(f"no {wanted!r} within {within:g} s; stdout so far: {seen}")
-            if seen[-1] is None:
-                pytest.fail(f"stdout ended before {wanted!r}: {seen}")
-
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
     try:
-        reader.start()
-        # Stderr stays unread until the child says it is done.
-        until("stuck", 30)
-        until("done", 10)
-        after = seen[seen.index("stuck") + 1 : seen.index("done")]
-        # The loop kept running while the check's thread was stuck in its warning.
-        assert len([line for line in after if line and line.startswith("tick ")]) >= 10
-        # Now stderr is read, the stuck writes finish and the child exits.
-        drain = threading.Thread(target=lambda: errors.append(stderr.read()), daemon=True)
-        drain.start()
-        until("exiting", 20)
-        assert child.wait(20) == 0
-        drain.join(20)
+        child.wait(45)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(20)
+        pytest.fail(f"{scenario}: the program did not exit; stdout: {[x for _, x in lines]}")
     finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait(20)
+        ended = time.monotonic()
         reader.join(10)
         stdout.close()
-        stderr.close()
-    [err] = errors
-    assert "QTE-UPDATE-AVAILABLE: qte-sdk " in err
+    err = read_stderr()
+    seen = [line for _, line in lines]
+    assert child.returncode == 0, (scenario, seen, err[-2000:])
+    [(at, line)] = [(at, line) for at, line in lines if line.startswith("report ")]
+    assert "Fatal Python error" not in err
+    return Child(seen, json.loads(line.removeprefix("report ")), ended - at, err)
+
+
+def run_with_a_pipe(tmp_path: Path, scenario: str, *, read_throughout: bool = False) -> Child:
+    """Run the child with stderr a pipe that nothing reads until it has exited, or, with
+    `read_throughout`, that a thread reads all along, as a coding agent reads it."""
+    read, write = os.pipe()
+    stream = open(read, "rb")  # noqa: SIM115
+    got: list[bytes] = []
+    drain = threading.Thread(target=lambda: got.append(stream.read()), daemon=True)
+    if read_throughout:
+        drain.start()
+        time.sleep(0.2)  # its read is waiting long before the child starts writing
+
+    open_ends = [write]
+
+    def read_stderr() -> str:
+        os.close(open_ends.pop())  # the child, the only other writer, has exited
+        if not read_throughout:
+            drain.start()
+        drain.join(20)
+        return got[0].decode("utf-8", "replace")
+
+    try:
+        return run_update_child(tmp_path, scenario, write, read_stderr)
+    finally:
+        for fd in open_ends:  # the child did not exit, and was killed
+            os.close(fd)
+        if drain.is_alive():
+            drain.join(20)
+        stream.close()
+
+
+def unread_pipe(tmp_path: Path, scenario: str) -> Child:
+    return run_with_a_pipe(tmp_path, scenario)
+
+
+def read_live(tmp_path: Path, scenario: str) -> Child:
+    return run_with_a_pipe(tmp_path, scenario, read_throughout=True)
+
+
+def ticks_after(stdout: list[str], mark: str) -> int:
+    return len([line for line in stdout[stdout.index(mark) :] if line.startswith("tick ")])
+
+
+def test_a_full_stderr_pipe_at_exit_holds_up_neither_the_check_nor_the_exit(tmp_path: Path):
+    child = unread_pipe(tmp_path, "exit")
+    assert child.exit_seconds < 10
+    # The warning was dropped, not written or waited for.
+    assert WARNING_LINE not in child.stderr
+    assert child.report["check_done"] is True
+    assert child.report["codes"] == [update.UPDATE_AVAILABLE]
+    if sys.platform == "win32":
+        assert child.report["room"][1] == 0
+    else:
+        # stderr was never made non-blocking.
+        assert child.report["blocking"] is True
+
+
+def test_a_full_stderr_pipe_never_stops_the_sessions_loop_or_its_exit(tmp_path: Path):
+    child = unread_pipe(tmp_path, "open")
+    # The loop kept running after GitHub answered, and the program exited at once, with
+    # nothing reading stderr.
+    assert ticks_after(child.stdout, "answered") >= 10
+    assert child.exit_seconds < 10
+    assert WARNING_LINE not in child.stderr
+    assert child.report["check_done"] is True
+
+
+@pytest.mark.parametrize("scenario", ["wrapped", "proxied"])
+def test_a_wrapped_full_stderr_pipe_holds_up_neither_the_check_nor_the_exit(
+    tmp_path: Path, scenario: str
+):
+    child = unread_pipe(tmp_path, scenario)
+    assert child.exit_seconds < 10
+    assert WARNING_LINE not in child.stderr
+    assert child.report["check_done"] is True
+
+
+def test_a_write_that_waits_after_the_check_still_never_holds_up_the_exit(tmp_path: Path):
+    child = unread_pipe(tmp_path, "race")
+    assert child.exit_seconds < 10
+    # Its thread is still waiting in the write, holding no lock, and the other handlers
+    # had the record first.
+    assert child.report["check_done"] is False
+    assert child.report["codes"] == [update.UPDATE_AVAILABLE]
+
+
+def test_a_warning_over_512_bytes_is_dropped_on_a_pipe_and_handlers_still_get_it(
+    tmp_path: Path,
+):
+    child = unread_pipe(tmp_path, "long")
+    assert child.exit_seconds < 10
+    assert WARNING_LINE not in child.stderr
+    assert child.report["check_done"] is True
+    assert child.report["codes"] == [update.UPDATE_AVAILABLE]
+
+
+@pytest.mark.windows
+def test_on_windows_a_nearly_full_pipe_never_stops_the_main_threads_writes_or_the_loop(
+    tmp_path: Path,
+):
+    child = unread_pipe(tmp_path, "nearly")
+    room, left = child.report["room"]
+    assert room >= update._MAX_DIRECT_LINE and left == 100
+    # The main thread's write went through at once, and the loop kept ticking.
+    assert ticks_after(child.stdout, "written") >= 10
+    assert child.exit_seconds < 10
+    assert "a short line" in child.stderr
+    # The warning, longer than the room left, was dropped.
+    assert WARNING_LINE not in child.stderr
+    assert child.report["check_done"] is True
+
+
+def on_a_terminal(tmp_path: Path, scenario: str) -> Child:
+    import pty
+
+    main, terminal = pty.openpty()
+    got = bytearray()
+
+    def read() -> None:
+        while True:
+            try:
+                chunk = os.read(main, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            got.extend(chunk)
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+
+    def read_stderr() -> str:
+        time.sleep(0.3)
+        os.close(terminal)
+        reader.join(10)
+        os.close(main)
+        return got.decode("utf-8", "replace")
+
+    return run_update_child(tmp_path, scenario, terminal, read_stderr)
+
+
+def in_a_file(tmp_path: Path, scenario: str) -> Child:
+    with open(tmp_path / "stderr.txt", "w+b") as file:
+
+        def read_stderr() -> str:
+            file.seek(0)
+            return file.read().decode("utf-8", "replace")
+
+        return run_update_child(tmp_path, scenario, file, read_stderr)
+
+
+ROOMY = {
+    "a pipe read after exit": unread_pipe,
+    "a pipe read throughout": read_live,
+    "a terminal": on_a_terminal,
+    "a file": in_a_file,
+}
+
+
+@pytest.mark.parametrize("stderr", ROOMY)
+def test_stderr_that_can_take_the_warning_gets_it_once(tmp_path: Path, stderr: str):
+    if stderr == "a terminal" and sys.platform == "win32":
+        pytest.skip("no pseudo-terminal on Windows: see the console test below")
+    if stderr == "a pipe read throughout" and sys.platform == "win32":
+        pytest.skip("on Windows such a pipe reports no room: see the windows test below")
+    child = ROOMY[stderr](tmp_path, "room")
+    assert child.exit_seconds < 10
+    assert child.report["check_done"] is True
+    warnings = [line for line in child.stderr.splitlines() if "QTE-UPDATE-AVAILABLE" in line]
+    assert len(warnings) == 1, child.stderr
+    assert warnings[0].strip().startswith(WARNING_LINE)
+
+
+@pytest.mark.windows
+def test_on_windows_a_pipe_whose_reader_is_waiting_reports_no_room_so_the_line_is_skipped(
+    tmp_path: Path,
+):
+    """A read waiting on a Windows pipe takes its size off the room the pipe reports to its
+    writer, and the reader here (a Python program reading all of it) asks for more than the
+    pipe holds. So the SDK cannot tell that the line would fit, and skips it rather than
+    risk a write that waits. The quickstart says so."""
+    child = read_live(tmp_path, "room")
+    [room] = child.report["room"]
+    assert room is not None and room < len(WARNING_LINE), room
+    assert child.exit_seconds < 10
+    assert child.report["check_done"] is True
+    assert WARNING_LINE not in child.stderr
+    assert child.report["codes"] == [update.UPDATE_AVAILABLE]
+
+
+@pytest.mark.windows
+def test_on_windows_a_console_gets_the_warning_through_its_handler(tmp_path: Path):
+    """A console is written as logging writes it (its writes do not wait). The child runs
+    in a console of its own, so it writes its report to a file: capturing its output would
+    redirect its handles away from the console."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(NO_NETWORK), str(TESTS), env.get("PYTHONPATH")])
+    )
+    report = tmp_path / "report.json"
+    startup = subprocess.STARTUPINFO(
+        dwFlags=subprocess.STARTF_USESHOWWINDOW,
+        wShowWindow=0,
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", UPDATE_CHILD, str(tmp_path / "cache"), "room", str(report)],
+            env=env,
+            cwd=tmp_path,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            startupinfo=startup,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("the program in its own console was still running after 30 s")
+    assert result.returncode == 0
+    said = json.loads(report.read_text(encoding="utf-8"))
+    assert said["stderr_is_a_terminal"] is True
+    assert said["route"] == "handle"
+    assert said["check_done"] is True
+    # Through the last resort's handle(), which ran its filters and wrote to the console.
+    assert said["codes"] == [update.UPDATE_AVAILABLE]
