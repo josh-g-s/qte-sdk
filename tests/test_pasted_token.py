@@ -548,3 +548,40 @@ def test_a_ctrl_c_while_logging_the_git_warning_made_an_error_shows_the_path_in_
         with pytest.raises(KeyboardInterrupt) as caught:
             resolve_url()
     assert_no_form_of(token, shown(caught.value))
+
+
+@needs_git
+def test_the_git_warning_made_an_error_is_logged_without_its_traceback(
+    monkeypatch, tmp_path, caplog
+):
+    token = minted_token()
+    monkeypatch.chdir(folder_named(token, tmp_path))
+    git("init", "-q", ".")
+    Path(".env").write_text("QTE_URL=ws://127.0.0.1:8080/ws\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DotenvNotIgnored)
+        with caplog.at_level(logging.WARNING):
+            resolve_url()
+    logged = [arg for r in caplog.records for arg in r.args if isinstance(arg, Warning)]
+    assert logged
+    for warning in logged:
+        assert warning.__traceback__ is None
+        assert_no_form_of(token, shown(warning))
+
+
+def test_a_shared_file_warning_made_an_error_is_logged_without_its_traceback(
+    windows, monkeypatch, tmp_path, caplog
+):
+    token, name = as_written()
+    path = folder_named(name, tmp_path) / "token"
+    path.write_text(token)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FileShared)
+        with caplog.at_level(logging.WARNING):
+            assert resolve_token() == token
+    logged = [arg for r in caplog.records for arg in r.args if isinstance(arg, Warning)]
+    assert logged
+    for warning in logged:
+        assert warning.__traceback__ is None
+        assert_no_form_of(token, shown(warning))

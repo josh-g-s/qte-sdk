@@ -351,7 +351,8 @@ def _warn_if_not_ignored(path: Path) -> BaseException | None:
         try:
             warnings.warn(warning, stacklevel=_caller_level())
         except Warning:
-            _log.warning("%s", warning, extra={"code": code})
+            # Logged without the traceback it was raised with, whose frames hold the path.
+            _log.warning("%s", _detached(warning), extra={"code": code})
     except BaseException as error:
         # Including one raised while logging the warning a filter made an error.
         return _detached(error)
@@ -621,7 +622,8 @@ def warn_shared(
         try:
             warnings.warn(warning, stacklevel=_caller_level())
         except Warning:
-            _log.warning("%s", warning, extra={"code": code})
+            # Logged without the traceback it was raised with, whose frames hold the path.
+            _log.warning("%s", _detached(warning), extra={"code": code})
     except Exception:
         pass
     except BaseException as error:
