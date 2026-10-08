@@ -969,13 +969,18 @@ async def open_session(
     logs a WARNING when a newer release is out and never delays or fails the session; set
     `QTE_UPDATE_CHECK=0` to turn it off (see `qte_sdk.update`).
     """
+    # A mistake can put the token in the address: held so that no repr shows it, and passed
+    # on without this frame keeping it as text, whatever is raised here.
+    address = None if url is None else _Secret(url)
+    del url
     secret = _Secret(resolve_token(token))
     del token
-    # Passed on without this frame keeping it: a mistake can put the token in the address.
-    given = [url]
-    del url
     return await _open_session(
-        resolve_url(given.pop()), secret, None, ack_timeout=ack_timeout, **connection_options
+        resolve_url(None if address is None else address.value),
+        secret,
+        None,
+        ack_timeout=ack_timeout,
+        **connection_options,
     )
 
 

@@ -465,6 +465,13 @@ async def test_a_failed_connect_to_an_address_holding_the_token_shows_it_in_no_f
     assert_no_form_of(token, shown(caught.value))
 
 
+async def test_a_token_passed_as_the_address_with_no_token_shows_it_in_no_frame():
+    token = synthetic_token()
+    with pytest.raises(MissingToken) as caught:
+        await open_session(f"ws://127.0.0.1:1/{token}")
+    assert_no_form_of(token, shown(caught.value))
+
+
 async def test_a_refused_connection_option_shows_an_address_holding_the_token_in_no_frame():
     token = synthetic_token()
     with pytest.raises(ValueError, match="liveness_timeout") as caught:
