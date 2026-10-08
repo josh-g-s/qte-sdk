@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_contract_eol.py"
 OUT = "qte_sdk/contract/v1"
@@ -39,6 +41,15 @@ def test_the_expected_files_are_init_and_a_py_and_pyi_per_pinned_proto():
         assert f"{OUT}/{proto.stem}_pb2.pyi" in expected
 
 
+def in_a_git_checkout() -> bool:
+    top = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=ROOT, capture_output=True, text=True
+    )
+    return top.returncode == 0 and Path(top.stdout.strip()).resolve() == ROOT.resolve()
+
+
+# CI's wheel job runs the suite from the unpacked sdist, which is not a git checkout.
+@pytest.mark.skipif(not in_a_git_checkout(), reason="needs a git checkout of the repository")
 def test_this_checkout_passes():
     git = subprocess.run(
         ["git", "ls-files", "--eol", OUT], cwd=ROOT, capture_output=True, text=True
