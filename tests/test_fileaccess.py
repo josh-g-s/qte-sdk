@@ -72,6 +72,14 @@ SECOND_DRIVE = "D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1301bf;;;AU)(A;ID;0x1200
 REAL_SECOND_DRIVE = "D:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;FA;;;AU)(A;ID;0x1200a9;;;BU)"
 
 
+def uncoded(warning: Warning) -> str:
+    """A coded warning's message without its code, once it is checked to start with it."""
+    text = str(warning)
+    code = getattr(warning, "code", None)
+    assert code is not None and text.startswith(f"{code}: "), text
+    return text[len(code) + 2 :]
+
+
 def access(
     read: list[str],
     write: list[str],
@@ -499,7 +507,7 @@ def test_a_shared_dotenv_warns_once_naming_the_groups_and_the_fix(windows):
         resolve_url()
     shared = [w for w in caught if issubclass(w.category, TokenFileShared)]
     assert len(shared) == 1
-    message = str(shared[0].message)
+    message = uncoded(shared[0].message)
     assert str(path) in message
     assert f"{AUTHENTICATED} read or change it, and {USERS} read it" in message
     assert "read your token or change QTE_URL in it" in message
@@ -540,7 +548,7 @@ def test_a_changeable_dotenv_setting_only_the_address_warns(windows, monkeypatch
         assert resolve_token() == token
     assert len(caught) == 1
     assert caught[0].category is AddressFileShared
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(f"{path} sets QTE_URL, the exchange address, and Windows lets ")
     assert f"lets {AUTHENTICATED} change it, so" in message
     assert USERS not in message  # reading the address alone gives nothing away
@@ -566,7 +574,7 @@ def test_a_changeable_token_file_says_the_token_could_be_replaced(windows, monke
     monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert f"lets {AUTHENTICATED} read or change it, so" in message
     assert "could replace your token." in message and "QTE_URL" not in message
 
@@ -580,7 +588,7 @@ def test_a_shared_token_file_warns(windows, monkeypatch, tmp_path):
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
     assert len(caught) == 1
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert str(path) in message and "Everyone" in message
     assert "that group's access" in message
     assert "could read your token." in message and "QTE_URL" not in message
@@ -661,7 +669,7 @@ def test_a_relative_token_file_is_checked_in_each_folder(windows, monkeypatch, t
         monkeypatch.chdir(folder)
         with pytest.warns(TokenFileShared) as caught:
             assert resolve_token() == token
-        assert str(folder / "token") in str(caught[0].message)
+        assert str(folder / "token") in uncoded(caught[0].message)
     assert windows.asked == [
         str(tmp_path / name / part) for name in ("first", "second") for part in ("token", "")
     ]
@@ -756,12 +764,13 @@ def test_a_private_dotenv_in_an_open_folder_warns_about_the_folder_only(windows)
         assert resolve_token() == token
         resolve_url()
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{path} holds your token, and other users can replace it: {AUTHENTICATED} may add "
         f"or remove files in {path.parent}, so other people who use this computer could "
         "change QTE_URL in it to a server of their own, which would capture your token when "
-        "you next connect. Move it into a folder under your user profile (%USERPROFILE%), "
+        "you next connect. A later release will refuse such a file. "
+        "Move it into a folder under your user profile (%USERPROFILE%), "
         "which is private by default, or remove that group's access."
     )
     assert "Windows lets" not in message and USERS not in message
@@ -777,7 +786,7 @@ def test_a_dotenv_owned_by_another_account_warns(windows):
     path = write_dotenv(f"QTE_TOKEN={token}\n")
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{path} holds your token, and it is owned by another account, which can change "
         "who may open it, so other people who use this computer could read your token or "
@@ -828,7 +837,7 @@ def test_a_replaceable_dotenv_setting_only_the_address_warns(windows, monkeypatc
     path = write_dotenv("QTE_URL=ws://127.0.0.1:8080/ws\n")
     with pytest.warns(AddressFileShared) as caught:
         assert resolve_url() == "ws://127.0.0.1:8080/ws"
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(f"{path} sets QTE_URL, the exchange address, and ")
     assert "change QTE_URL in it to a server of their own" in message
     assert "read your token" not in message
@@ -846,7 +855,7 @@ def test_a_token_file_in_an_open_folder_says_the_token_could_be_replaced(
     monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert f"may add or remove files in {tmp_path}, so" in message
     assert "could replace your token." in message and "QTE_URL" not in message
     assert_token_absent(token, message)
@@ -970,7 +979,8 @@ UNSEEN = "Windows would not let this check see who may open"
             f"{AT} holds your token, and {FOLDER} is owned by another account, which can "
             "change who may add or remove files in it, so other people who use this computer "
             "could change QTE_URL in it to a server of their own, which would capture your "
-            "token when you next connect. Move it into a folder under your user profile "
+            "token when you next connect. A later release will refuse such a file. "
+            "Move it into a folder under your user profile "
             "(%USERPROFILE%), which is private by default. To see",
             "private by default. To see",
         ),
@@ -988,7 +998,8 @@ UNSEEN = "Windows would not let this check see who may open"
         (
             replace(access([], [], [], None), unseen=(f"{UNSEEN} {AT}",)),
             {},
-            f"{AT} holds your token, but it could not be fully checked: {UNSEEN} {AT}. Delete "
+            f"{AT} holds your token, but it could not be fully checked: {UNSEEN} {AT}. "
+            "A later release will refuse such a file. Delete "
             "it and make it again yourself",
             "Delete it and make it again yourself",
         ),
@@ -1019,8 +1030,7 @@ def test_the_message_for_each_combination(monkeypatch, found, kwargs, start, fix
     assert message.startswith(start)
     assert fix in message
     assert message.endswith(
-        f'To see who can open the folder and the file, run `icacls "{FOLDER}"` and '
-        f'`icacls "{AT}"`. A later release will refuse such a file.'
+        f'To see who can open the folder and the file, run `icacls "{FOLDER}"` and `icacls "{AT}"`.'
     )
     assert "  " not in message and message.count("; and") <= 1
 
@@ -1174,7 +1184,7 @@ def test_a_dotenv_linking_into_an_open_folder_warns_about_that_folder(
     monkeypatch.chdir(link.parent)
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{link}, a link to {target}, holds your token, and other users can replace it: "
         f"{AUTHENTICATED} may add or remove files in {target.parent}, which holds the file "
@@ -1200,7 +1210,7 @@ def test_a_dotenv_link_in_an_open_folder_warns_about_the_links_folder(
     monkeypatch.chdir(link.parent)
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{link}, a link to {target}, holds your token, and other users can replace it: "
         f"{AUTHENTICATED} may add or remove files in {link.parent}, which holds the link, so"
@@ -1221,7 +1231,7 @@ def test_both_open_folders_of_a_linked_token_file_are_named(windows, tmp_path, m
     monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(link))
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert (
         f"other users can replace it: {AUTHENTICATED} may add or remove files in "
         f"{target.parent}, which holds the file it links to, and {USERS} may add or remove "
@@ -1438,12 +1448,13 @@ def test_a_token_file_reached_through_a_linked_folder_names_the_link(
     monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(alias / "token"))
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{alias / 'token'}, which leads to {target} through the link {alias}, holds your "
         f"token, and other users can replace it: {AUTHENTICATED} may add or remove files in "
         f"{tmp_path / 'open'}, which holds the link {alias}, so other people who use this "
-        "computer could replace your token. Move the file it leads to, and the link, into a "
+        "computer could replace your token. A later release will refuse such a file. "
+        "Move the file it leads to, and the link, into a "
         "folder under your user profile"
     )
     assert_token_absent(token, message)
@@ -1540,7 +1551,7 @@ def test_a_dotenv_at_the_start_of_a_chain_names_the_open_middle_folder(
     monkeypatch.chdir(first.parent)
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{first}, a link that leads to {target} through the link {middle}, holds your "
         f"token, and other users can replace it: {AUTHENTICATED} may add or remove files in "
@@ -1770,7 +1781,7 @@ def test_a_link_that_cannot_be_followed_warns_when_the_token_is_read(
     reason = unfollowable(monkeypatch, cause, hop)
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(f"{first}, a link that leads on through the link")
     assert (
         f"other users can replace it: {AUTHENTICATED} may add or remove files in "
@@ -1802,13 +1813,15 @@ def test_a_link_that_cannot_be_followed_warns_on_its_own(
     assert found and not found.changeable
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{first}, a link that leads on through the link"
-    ) and message.endswith(" A later release will refuse such a file.")
+    ) and message.endswith("`.")
+    assert caught[0].message.code == "QTE-TOKEN-UNCHECKED"
     assert (
         f"holds your token, but it could not be fully checked: {reason}; a link on the way "
-        "could not be followed, so check where it leads. Keep the file itself, not a link to "
+        "could not be followed, so check where it leads. A later release will refuse such a "
+        "file. Keep the file itself, not a link to "
         "it, in a folder under your user profile (%USERPROFILE%), which is private by default."
     ) in message
     assert "other people" not in message
@@ -1826,7 +1839,7 @@ def test_an_address_file_reached_through_a_link_that_cannot_be_followed_warns(
         assert resolve_url() == "ws://127.0.0.1:8080/ws"
     assert (
         f"sets QTE_URL, the exchange address, but it could not be fully checked: {reason};"
-    ) in str(caught[0].message)
+    ) in uncoded(caught[0].message)
 
 
 def test_the_folders_of_the_links_met_before_one_that_cannot_be_followed_are_checked(
@@ -2112,6 +2125,7 @@ UNSEEN_CASES = {
         {"sddl": DENIED, "folder_sddl": PROFILE_FOLDER},
         lambda path: (
             f"holds your token, but it could not be fully checked: {not_shown(path)}. "
+            "A later release will refuse such a file. "
             "Delete it and make it again yourself, in a folder under your user profile"
         ),
     ),
@@ -2154,9 +2168,11 @@ def test_each_case_warns_when_the_token_is_read(windows, monkeypatch, tmp_path, 
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
     assert len(caught) == 1
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(f"{path} {said(path)}"), message
-    assert message.endswith(" A later release will refuse such a file.")
+    assert message.endswith("`.")
+    owner = case == "folder owner"
+    assert caught[0].message.code == ("QTE-TOKEN-SHARED" if owner else "QTE-TOKEN-UNCHECKED")
     assert_token_absent(token, message)
 
 
@@ -2170,7 +2186,7 @@ def test_each_case_warns_about_an_address_only_dotenv(windows, monkeypatch, case
     path = write_dotenv("QTE_URL=ws://127.0.0.1:8080/ws\n")
     with pytest.warns(AddressFileShared) as caught:
         assert resolve_url() == "ws://127.0.0.1:8080/ws"
-    assert str(caught[0].message).startswith(f"{path} sets QTE_URL, the exchange address, ")
+    assert uncoded(caught[0].message).startswith(f"{path} sets QTE_URL, the exchange address, ")
     assert_token_absent(token, str(caught[0].message))
 
 
@@ -2189,7 +2205,7 @@ def test_a_link_folder_not_shown_warns_when_the_token_is_read(
     windows.lists = {str(middle.parent): DENIED, str(hop.parent): OTHER_FOLDER}
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert (
         f"holds your token, and {hop.parent}, which holds the link {hop}, is owned by another "
         "account, which can change who may add or remove files in it, so other people"
@@ -2367,7 +2383,7 @@ def test_an_owner_that_cannot_be_placed_warns(windows, tmp_path, monkeypatch, ow
     assert found and not found.changeable
     with pytest.warns(TokenFileShared) as caught:
         assert resolve_token() == token
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert (
         f"holds your token, but it could not be fully checked: who owns {place} could not be told."
     ) in message

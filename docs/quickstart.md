@@ -90,6 +90,8 @@ To see where the SDK will take the token and the address from, without showing t
 python -m qte_sdk.token check
 ```
 
+It exits 0 when both are found and nothing needs fixing, 1 when something must be fixed and 2 when it could not tell; each problem it prints starts with a code such as `QTE-DOTENV-NOT-IGNORED`, which [errors.md](errors.md) explains, with every other code and exit status.
+
 To set it up by hand instead, first make sure git will never commit the file, then create it readable only by you:
 
 ```sh
