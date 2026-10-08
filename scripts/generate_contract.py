@@ -60,7 +60,9 @@ def main() -> int:
             f"-I{well_known}",
             f"--python_out={tmp}",
             f"--pyi_out={tmp}",
-            *[str(p.relative_to(PROTO_ROOT)) for p in protos],
+            # protoc looks these names up under -I, and takes only forward slashes there,
+            # also on Windows.
+            *[p.relative_to(PROTO_ROOT).as_posix() for p in protos],
         ]
         if protoc.main(args) != 0:
             print("protoc failed", file=sys.stderr)
@@ -69,12 +71,15 @@ def main() -> int:
         if OUT.exists():
             shutil.rmtree(OUT)
         OUT.mkdir(parents=True)
-        (OUT / "__init__.py").write_text(INIT)
+        # Written with LF on every OS, as .gitattributes checks it out, so a regeneration on
+        # Windows leaves the tree unchanged. Reading protoc's output with universal newlines
+        # first means its own line endings never reach the files.
+        (OUT / "__init__.py").write_text(INIT, newline="\n")
         generated = Path(tmp) / "qte" / "contract" / "v1"
         for src in sorted(generated.iterdir()):
             text = IMPORT.sub("from qte_sdk.contract.v1 import ", src.read_text())
             text = MODULE_NAME.sub(r"\1'qte_sdk.contract.v1.", text)
-            (OUT / src.name).write_text(text)
+            (OUT / src.name).write_text(text, newline="\n")
     print(f"generated {len(protos)} protos into {OUT.relative_to(ROOT)}")
     return 0
 

@@ -819,7 +819,8 @@ def _token_from_file() -> tuple[str | None, str | None]:
     with the file. (None, None) if the variable is unset or empty.
 
     On Windows, a `qte_sdk.dotenv.TokenFileShared` warning is issued if a broad group of
-    users may read, change or replace the file, or another account owns it.
+    users may read, change or replace the file, or another account owns it or a folder it
+    is in or reached through, or it could not be fully checked.
 
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected and an
     `OSError` keeps the path (which a mistaken setting could make the token itself), so
