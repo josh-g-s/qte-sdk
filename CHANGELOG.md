@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.17
+**Version:** 0.18
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- CI's Windows job checks the generated contract code's line endings with `scripts/check_contract_eol.py`, which fails if git lists none of it, misses a generated file or lists one too many, rather than passing on an empty listing. CI only, no change to the SDK itself.
 - CI's Windows job runs the reconnect, resume, calendar, instruments, tickets, new message types and examples tests too: the tests' fake exchange now delivers every frame sent before it drops a connection, on Windows as elsewhere. Tests and CI only, no change to the SDK itself.
 
 ## 1.1.1
