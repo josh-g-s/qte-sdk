@@ -1142,6 +1142,10 @@ def _token_forms(secret: _Secret) -> tuple[_Secret, ...]:
     raise failure
 
 
+# The shortest one-line or flattened form of the token that counts as a form of it.
+_MIN_SHOWN_FORM = 8
+
+
 def _make_token_forms(secret: _Secret) -> tuple[_Secret, ...]:
     # surrogatepass: a lone surrogate would make a plain encode() raise an error that holds
     # the token.
@@ -1155,10 +1159,13 @@ def _make_token_forms(secret: _Secret) -> tuple[_Secret, ...]:
         secret.value.encode("unicode_escape").decode("ascii"),
         repr(raw)[2:-1],
         repr(raw + b"'\"")[2:-4],
-        # As a coded message shows text: a field in one line, and server text flattened.
-        one_line(secret.value),
-        flatten(secret.value),
     }
+    # As a coded message shows text: a field in one line, and server text flattened. Only
+    # when what is left is long enough to be told from ordinary text, since either can
+    # shrink a malformed token to a few characters.
+    for shown in (one_line(secret.value), flatten(secret.value)):
+        if len(shown.strip()) >= _MIN_SHOWN_FORM:
+            texts.add(shown)
     texts.discard("")
     return tuple(map(_Secret, sorted(texts, key=len, reverse=True)))
 

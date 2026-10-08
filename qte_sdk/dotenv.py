@@ -58,6 +58,8 @@ carries its code in `code` and at the start of its message, and a warning logged
 carries it as the record's `code`: docs/errors.md says what each code means.
 """
 
+import contextlib
+import contextvars
 import logging
 import os
 import re
@@ -67,7 +69,7 @@ import subprocess
 import sys
 import unicodedata
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from qte_sdk import _fileaccess
@@ -102,6 +104,22 @@ _GIT_ENV = frozenset(
 _log = logging.getLogger(__name__)
 _git_checked: set[str] = set()  # the .env files already checked, so each warns once
 _shared_warned: set[str] = set()  # the token files already warned about on Windows
+# True while `python -m qte_sdk.token check` runs: it looks at each file afresh, whatever was
+# warned about before in this process, and leaves that record alone. A context variable, so
+# it holds only for the thread or task that set it.
+_afresh: contextvars.ContextVar[bool] = contextvars.ContextVar("qte_sdk_afresh", default=False)
+
+
+@contextlib.contextmanager
+def checking_afresh() -> Iterator[None]:
+    """Within this, the git and Windows checks run, and warn, for every file each time,
+    as if nothing had been checked before in this process; and what they find is not
+    recorded, so the SDK still warns once later as it otherwise would."""
+    reset = _afresh.set(True)
+    try:
+        yield
+    finally:
+        _afresh.reset(reset)
 
 
 class DotenvNotIgnored(QteWarning):
@@ -297,9 +315,11 @@ def _warn_if_not_ignored(path: Path) -> None:
     read, so no frame on the stack holds the token. If a warnings filter turns the warning
     into an error, it is logged instead, since this check must never stop the SDK."""
     key = str(path)
-    if key in _git_checked or not path.exists():
+    afresh = _afresh.get()
+    if (key in _git_checked and not afresh) or not path.exists():
         return
-    _git_checked.add(key)
+    if not afresh:
+        _git_checked.add(key)
     candidates = [path]
     if path.is_symlink():
         candidates.append(path.resolve())
@@ -325,7 +345,9 @@ def shared_access(path: Path) -> "_fileaccess.BroadAccess | None":
     is Windows, the SDK has not already warned about `path` in this process, and the access
     list can be read; None otherwise. Takes only the path, so call it before the file is
     read."""
-    if not _fileaccess.on_windows() or os.path.abspath(path) in _shared_warned:
+    if not _fileaccess.on_windows():
+        return None
+    if os.path.abspath(path) in _shared_warned and not _afresh.get():
         return None
     return _fileaccess.broad_access(path)
 
@@ -545,10 +567,11 @@ def warn_shared(
     token; the warning is then given again next time. None otherwise."""
     key = None
     try:
-        key = os.path.abspath(path)
-        if key in _shared_warned:
-            return None
-        _shared_warned.add(key)
+        if not _afresh.get():
+            key = os.path.abspath(path)
+            if key in _shared_warned:
+                return None
+            _shared_warned.add(key)
         message = shared_message(path, access, holds_token=holds_token, sets_address=sets_address)
         code = shared_code(access, holds_token=holds_token)
         category = TokenFileShared if holds_token else AddressFileShared

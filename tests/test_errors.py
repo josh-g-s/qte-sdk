@@ -831,3 +831,22 @@ def test_check_gives_the_same_answer_however_often_it_runs(monkeypatch, capsys):
         warnings.simplefilter("always")
         resolve_url()
     assert after == []
+
+
+def test_check_records_nothing_so_a_session_still_warns_once(monkeypatch, capsys):
+    (Path.cwd() / ".git").mkdir()
+    monkeypatch.setattr(dotenv, "is_tracked_by_git", lambda path: False)
+    monkeypatch.setattr(dotenv, "is_ignored_by_git", lambda path: False)
+    private_dotenv(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    assert check(capsys)[0] == 1
+    assert dotenv._git_checked == set() and dotenv._shared_warned == set()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        resolve_url()
+    assert [w.category for w in caught] == [DotenvNotIgnored]
+
+
+def test_a_token_shrunk_by_flattening_does_not_count_in_its_short_form():
+    secret = _Secret("\x01e\x02")  # malformed: flattened, it would be the letter e
+    assert not _holds_token("/home/student/algo/.env", secret)
+    assert _holds_token("a \x01e\x02 b", secret)

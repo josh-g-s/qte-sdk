@@ -675,18 +675,10 @@ def _check() -> int:
 
     The SDK gives its git and Windows warnings once per process for each file; `check`
     looks afresh each time it runs, whatever was read or checked before it in the same
-    process, and leaves that record as it found it, so a session still warns."""
-    git_checked = set(dotenv_module._git_checked)
-    shared_warned = set(dotenv_module._shared_warned)
-    dotenv_module._git_checked.clear()
-    dotenv_module._shared_warned.clear()
-    try:
+    process, and records nothing, so a session still warns (see
+    `dotenv.checking_afresh`)."""
+    with dotenv_module.checking_afresh():
         return _check_afresh()
-    finally:
-        dotenv_module._git_checked.clear()
-        dotenv_module._git_checked.update(git_checked)
-        dotenv_module._shared_warned.clear()
-        dotenv_module._shared_warned.update(shared_warned)
 
 
 def _check_afresh() -> int:
