@@ -125,6 +125,7 @@ SIDE_NAMES = {BUY: "BUY", SELL: "SELL"}
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rest a quote on both sides and manage it.")
+    parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     parser.add_argument(
         "--instrument",
         default=os.environ.get("QTE_INSTRUMENT", "AAPL"),

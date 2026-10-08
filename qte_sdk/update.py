@@ -1407,6 +1407,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m qte_sdk.update",
         description="Say whether the installed qte-sdk is the latest release.",
     )
+    parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     parser.add_argument(
         "--timeout",
         type=_seconds,

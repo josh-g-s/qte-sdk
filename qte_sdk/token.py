@@ -154,6 +154,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="python -m qte_sdk.token",
         description="Set up the exchange address and your token for qte_sdk.",
     )
+    parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     commands = parser.add_subparsers(dest="command", required=True)
     set_ = commands.add_parser(
         "set",
@@ -174,11 +175,13 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=f"store only the token, in PATH (default {DEFAULT_TOKEN_FILE})",
     )
+    set_.color = False
     check = commands.add_parser(
         "check",
         help="say where the SDK would take the token and the address from",
         description="Say where the SDK would take the token and the address from.",
     )
+    check.color = False
     check.add_argument(
         "--json",
         action="store_true",

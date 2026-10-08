@@ -59,6 +59,7 @@ def positive_count(text: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay a past session's book of one instrument.")
+    parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     parser.add_argument(
         "--date",
         required=True,
