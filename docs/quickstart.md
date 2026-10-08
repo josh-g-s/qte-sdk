@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.50
+**Version:** 0.51
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -43,6 +43,8 @@ pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.1.1.zip
 ```
 
 That is the latest release, v1.1.1, as this is written; the [changelog](../CHANGELOG.md) lists each release. Later releases have the same address with their own tag, and the update check below prints it for you.
+
+If you use a coding agent, such as Claude Code or Codex, have it run `python -m qte_sdk.agents` first: it prints the guidance for coding agents that comes with the SDK, on setup, your token, updates and the SDK's message codes.
 
 This installs the `qte_sdk` package only. The worked examples (step 11) are not installed with it. To run or read them, clone this repository or, without git, download the source zip of the release you installed (the address above, or the repository's Releases or Tags page on GitHub) and unzip it, so the examples match your SDK. A zip of `main` may be newer than the release you installed. Then copy its `examples` folder into your project folder, the one that will hold your `.env` (step 2), and run the examples from the project folder, inside the virtual environment where the SDK is installed: the SDK reads `.env` only from the folder you run in. You do not need the examples for anything else in this guide.
 

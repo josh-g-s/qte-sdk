@@ -54,6 +54,8 @@ only-include = [
     "docs",
     "examples",
     "README.md",
+    "AGENTS.md",
+    "llms.txt",
     "CHANGELOG.md",
     "releases.json",
     "LICENSE",

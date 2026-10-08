@@ -1,0 +1,21 @@
+# qte-sdk
+
+> The Python client SDK for the Queen's Tower Exchange (QTE), used by student teams to connect their trading programs to the exchange. A coding agent working with it should first read AGENTS.md, which also ships inside the package: after any install, `python -m qte_sdk.agents` prints it.
+
+Never ask for, print or read the team token, or the `.env` or token file that holds it. At the start of work, run `python -m qte_sdk.update` and tell the person about any `QTE-UPDATE-AVAILABLE` line it prints.
+
+## Guidance for coding agents
+
+- [AGENTS.md](qte_sdk/AGENTS.md): setup (Windows, and installs without git), the token rules, the update check and the message codes. Print the installed copy with `python -m qte_sdk.agents`.
+- [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/qte_sdk/AGENTS.md): the same file, for a reader with no install.
+
+## Docs
+
+- [Quickstart](docs/quickstart.md): from a fresh install to a program that connects, reads market data, places an order and cancels it.
+- [Warning and error codes](docs/errors.md): every `QTE-` code with its cause and fix, and the exit codes of the SDK's commands.
+
+## Optional
+
+- [README](README.md): what the SDK is, how to install it and a first program.
+- [Developing your algo](docs/developing-your-algo.md): from past market data to a program trading on the exchange.
+- [Changelog](CHANGELOG.md): the changes in each release.

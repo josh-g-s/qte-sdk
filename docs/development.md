@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.17
+**Version:** 0.18
 
 ## Requirements
 
@@ -18,6 +18,8 @@ Run `pip install --upgrade "websockets>=15,<18"` afterwards to go back to the ne
 ## Layout
 
 The package uses a flat layout: the importable package is `qte_sdk/` at the repo root, tests live in `tests/`, and the build backend is hatchling, configured in `pyproject.toml`. The package version is read from `qte_sdk/__init__.py`.
+
+`AGENTS.md`, the guidance for participants and their coding agents, is in two places: at the repo root for a clone, and as `qte_sdk/AGENTS.md`, which ships in the wheel and the sdist so `python -m qte_sdk.agents` can print it after any install. The two must be identical, byte for byte: edit one, copy it over the other, and `tests/test_agents_doc.py` fails until they match. Its links must be full GitHub URLs, since an install has no `docs/` folder. `llms.txt` at the repo root points coding agents to it, the quickstart and `docs/errors.md`.
 
 ## Set up
 
