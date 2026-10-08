@@ -311,9 +311,38 @@ def test_the_last_line_of_a_traceback_is_the_coded_summary():
 
 
 def check(capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
+    """`token check`'s status and output; and, run again with --json, that its document
+    says the same: the same status, and a finding for each code the text names."""
     status = token_command.main(["check"])
     out, err = capsys.readouterr()
+    assert json_check(capsys, status, set(CODE_IN_TEXT.findall(out))) is not None
     return status, out + err
+
+
+def json_check(capsys: pytest.CaptureFixture[str], status: int, codes: set[str]) -> dict:
+    assert token_command.main(["check", "--json"]) == status
+    out, err = capsys.readouterr()
+    assert out.count("\n") == 1 and out.isascii(), out
+    document = json.loads(out)
+    assert list(document) == [
+        "command",
+        "schema",
+        "exit_code",
+        "result",
+        "token",
+        "address",
+        "findings",
+    ]
+    assert document["exit_code"] == status
+    assert document["result"] == {0: "ok", 1: "fix", 2: "cannot-tell"}[status]
+    assert {finding["code"] for finding in document["findings"]} == codes
+    for finding in document["findings"]:
+        assert finding["kind"] == (
+            "cannot-tell" if finding["code"] in token_command._COULD_NOT_TELL else "fix"
+        )
+        assert not finding["message"].startswith("QTE-")
+        assert finding["next_step"] and not finding["next_step"].endswith(".")
+    return document
 
 
 def test_check_exits_0_when_all_is_found_and_safe(monkeypatch, capsys):
@@ -496,8 +525,14 @@ class Context:
         self.windows = windows
 
     def cli(self, argv: list[str], **kwargs: Any) -> str:
-        token_command.main(argv, **kwargs)
+        status = token_command.main(argv, **kwargs)
         out, err = self.capsys.readouterr()
+        if argv == ["check"]:
+            # The --json document is checked for the token too, and must agree.
+            assert token_command.main(["check", "--json"]) == status
+            json_out, json_err = self.capsys.readouterr()
+            assert json.loads(json_out)["exit_code"] == status
+            return out + err + json_out + json_err
         return out + err
 
     def warned(self, call: Callable[[], object]) -> str:
@@ -854,7 +889,11 @@ def log_format_invalid(token: str, ctx: Context) -> str:
 
     ctx.monkeypatch.setenv(logs.LOG_FORMAT_ENV_VAR, token)
     parts = [raised(logs.configure), raised(lambda: logs.configure(token))]
-    parts.append(ctx.cli(["check"]))
+    # The command exits 2 with the code (--json asks for JSON whatever the variable says).
+    assert token_command.main(["check"]) == 2
+    out, err = ctx.capsys.readouterr()
+    assert out == ""
+    parts.append(err)
     return "\n".join(parts)
 
 
@@ -1071,9 +1110,10 @@ def test_a_token_shrunk_by_flattening_does_not_count_in_its_short_form():
     assert _holds_token("a \x01e\x02 b", secret)
 
 
+@pytest.mark.parametrize("json_output", [False, True], ids=["text", "json"])
 @pytest.mark.parametrize("git_can_tell", [True, False])
 def test_check_interrupted_while_printing_keeps_the_token_out_of_its_locals(
-    monkeypatch, git_can_tell
+    monkeypatch, git_can_tell, json_output
 ):
     if os.name == "nt":
         pytest.skip("Windows allows no control character in a file name")
@@ -1100,7 +1140,7 @@ def test_check_interrupted_while_printing_keeps_the_token_out_of_its_locals(
 
     monkeypatch.setattr("builtins.print", closed)
     with pytest.raises(BrokenPipeError) as caught:
-        token_command.main(["check"])
+        token_command.main(["check", "--json"] if json_output else ["check"])
     assert_no_form_of(token, shown(caught.value))
 
 

@@ -2,6 +2,7 @@
 text. Python 3.14's argparse colours usage lines, errors and help when the output is a
 terminal, or when FORCE_COLOR is set, so every parser turns that off."""
 
+import json
 import os
 import subprocess
 import sys
@@ -65,3 +66,91 @@ def test_every_parser_turns_colour_off():
             + text.count("= Parser(")  # the smoke test's subclass
         )
         assert text.count(".color = False") == parsers, path
+
+
+# The JSON output (#180) and the log lines: no colour, no carriage return to redraw a line
+# (a spinner or progress bar), on a pipe with FORCE_COLOR set and, on POSIX, on a terminal.
+
+NO_NETWORK = ROOT / "tests" / "no_network"
+SMOKE_TEST = str(ROOT / "examples" / "smoke_test.py")
+JSON_RUNS = {
+    "token check --json": (["-m", "qte_sdk.token", "check", "--json"], {}),
+    "token check --json, found": (
+        ["-m", "qte_sdk.token", "check", "--json"],
+        {"QTE_TOKEN": "x" * 43, "QTE_URL": "wss://exchange.example/ws"},
+    ),
+    "update --json": (["-m", "qte_sdk.update", "--json", "--timeout", "1"], {}),
+    "smoke_test --json, no token": ([SMOKE_TEST, "--json"], {}),
+    "smoke_test --json, no exchange": (
+        [SMOKE_TEST, "--json", "--seconds", "1"],
+        {"QTE_TOKEN": "x" * 43, "QTE_URL": "ws://127.0.0.1:1/ws"},
+    ),
+    "smoke_test, JSON log lines": (
+        [SMOKE_TEST, "--seconds", "1"],
+        {"QTE_TOKEN": "x" * 43, "QTE_URL": "ws://127.0.0.1:1/ws", "QTE_LOG_FORMAT": "json"},
+    ),
+}
+
+
+def json_env(extra: dict[str, str]) -> dict[str, str]:
+    """No QTE_ variable but `extra`, colour forced, and no request leaving this machine."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("NO_COLOR", "PYTHON_COLORS") and not key.startswith("QTE_")
+    }
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(NO_NETWORK), env.get("PYTHONPATH")]))
+    return {**env, "FORCE_COLOR": "1", **extra}
+
+
+def assert_plain(output: bytes) -> None:
+    assert b"\x1b" not in output, output
+    # A carriage return only as part of a line ending (a terminal's, or Windows').
+    assert b"\r" not in output.replace(b"\r\n", b"\n"), output
+
+
+@pytest.mark.parametrize("name", list(JSON_RUNS))
+def test_json_output_on_a_pipe_has_no_colour_or_carriage_return(name: str, tmp_path: Path):
+    args, extra = JSON_RUNS[name]
+    result = subprocess.run(
+        [sys.executable, *args], cwd=tmp_path, env=json_env(extra), capture_output=True, timeout=60
+    )
+    assert_plain(result.stdout + result.stderr)
+    if "--json" in args:
+        assert json.loads(result.stdout)["exit_code"] == result.returncode
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a terminal needs pty, which is POSIX only")
+@pytest.mark.parametrize("name", list(JSON_RUNS))
+def test_json_output_on_a_terminal_has_no_colour_or_carriage_return(name: str, tmp_path: Path):
+    import pty
+
+    args, extra = JSON_RUNS[name]
+    controller, terminal = pty.openpty()
+    try:
+        process = subprocess.Popen(
+            [sys.executable, *args],
+            cwd=tmp_path,
+            env=json_env(extra),
+            stdin=subprocess.DEVNULL,
+            stdout=terminal,
+            stderr=terminal,
+        )
+        os.close(terminal)
+        terminal = -1
+        output = b""
+        while True:
+            try:
+                chunk = os.read(controller, 65536)
+            except OSError:  # Linux: the terminal's other end is closed
+                break
+            if not chunk:
+                break
+            output += chunk
+        assert process.wait(timeout=60) is not None
+    finally:
+        if terminal != -1:
+            os.close(terminal)
+        os.close(controller)
+    assert output, name
+    assert_plain(output)
