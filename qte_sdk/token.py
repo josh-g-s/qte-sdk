@@ -722,7 +722,9 @@ def _check_afresh() -> int:
         else:
             # The address itself is not shown: a mistake could have put the token there.
             where = _describe(source, withhold)
-            if url.startswith(("ws://", "wss://")):
+            shaped = url.startswith(("ws://", "wss://"))
+            del url  # a mistake could have put the token in it
+            if shaped:
                 say(f"address: set, from {where}")
             else:
                 findings.append(_errors.ADDRESS_INVALID)
@@ -735,25 +737,35 @@ def _check_afresh() -> int:
                 say(f"address: set, from {where}; {invalid}")
             if source == DOTENV_NAME and token_from != DOTENV_NAME and _dotenv_list_unread():
                 unchecked.append((_errors.ADDRESS_UNCHECKED, where))
+    # The SDK's warnings name paths, and were written without the token: each is redacted,
+    # and the warnings let go of, before anything else is done.
+    warned = [
+        (getattr(w.message, "code", None) or _errors.TOKEN_SHARED, redacted(str(w.message)))
+        for w in caught
+        if issubclass(w.category, (DotenvNotIgnored, FileShared))
+    ]
+    git_warned = any(issubclass(w.category, DotenvNotIgnored) for w in caught)
+    caught.clear()
     shown: set[str] = set()
-    for warning in caught:
-        if issubclass(warning.category, (DotenvNotIgnored, FileShared)):
-            findings.append(getattr(warning.message, "code", None) or _errors.TOKEN_SHARED)
-            # The SDK's warnings name paths, and were written without the token.
-            message = redacted(str(warning.message))
-            if message not in shown:
-                shown.add(message)
-                say(f"warning: {message}")
+    for code, message in warned:
+        findings.append(code)
+        if message not in shown:
+            shown.add(message)
+            say(f"warning: {message}")
     for code, where in unchecked:
         findings.append(code)
         say(f"warning: {render(code, withhold=withhold, path=where)}")
-    if not any(issubclass(w.category, DotenvNotIgnored) for w in caught) and _git_unknown():
+    if not git_warned and _git_unknown():
         findings.append(_errors.DOTENV_GIT_UNKNOWN)
-        path = dotenv_path()
-        git_unknown = render(
-            _errors.DOTENV_GIT_UNKNOWN, withhold=withhold, path=path, name=path.name
+        say(
+            "warning: "
+            + render(
+                _errors.DOTENV_GIT_UNKNOWN,
+                withhold=withhold,
+                path=dotenv_path(),
+                name=DOTENV_NAME,
+            )
         )
-        say(f"warning: {git_unknown}")
     secret = None  # let go of the token; `withhold` and `redacted` read this name too
     for line in lines:
         print(line)

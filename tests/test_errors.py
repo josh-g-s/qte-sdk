@@ -852,7 +852,10 @@ def test_a_token_shrunk_by_flattening_does_not_count_in_its_short_form():
     assert _holds_token("a \x01e\x02 b", secret)
 
 
-def test_check_interrupted_while_printing_keeps_the_token_out_of_its_locals(monkeypatch):
+@pytest.mark.parametrize("git_can_tell", [True, False])
+def test_check_interrupted_while_printing_keeps_the_token_out_of_its_locals(
+    monkeypatch, git_can_tell
+):
     if os.name == "nt":
         pytest.skip("Windows allows no control character in a file name")
     token = synthetic_token() + "\t" + synthetic_token()
@@ -860,13 +863,21 @@ def test_check_interrupted_while_printing_keeps_the_token_out_of_its_locals(monk
     folder.mkdir()
     monkeypatch.chdir(folder)
     (folder / ".git").mkdir()
-    monkeypatch.setattr(dotenv, "is_tracked_by_git", lambda path: False)
-    monkeypatch.setattr(dotenv, "is_ignored_by_git", lambda path: False)
+    if git_can_tell:
+        monkeypatch.setattr(dotenv, "is_tracked_by_git", lambda path: False)
+        monkeypatch.setattr(dotenv, "is_ignored_by_git", lambda path: False)
+    else:
+        monkeypatch.setattr(dotenv, "_run_git", lambda *args, **kwargs: None)
     monkeypatch.setenv(TOKEN_ENV_VAR, token)
     private_dotenv(f"QTE_URL={URL}\n")
 
     def closed(*args: object, **kwargs: object) -> None:
         raise BrokenPipeError(32, "Broken pipe")
+
+    # As Python 3.14 shows a recorded warning, so a traceback's locals would show its text.
+    monkeypatch.setattr(
+        warnings.WarningMessage, "__repr__", lambda self: f"WarningMessage({self.message!r})"
+    )
 
     monkeypatch.setattr("builtins.print", closed)
     with pytest.raises(BrokenPipeError) as caught:
