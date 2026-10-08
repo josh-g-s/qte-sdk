@@ -452,12 +452,72 @@ def test_the_history_service_s_text_holding_the_token_percent_encoded_is_dropped
     assert history._server_text("no such object", _Secret(token)) == "no such object"
 
 
+@pytest.mark.parametrize("given", [False, True], ids=["from-qte-url", "passed"])
 async def test_a_failed_connect_to_an_address_holding_the_token_shows_it_in_no_frame(
-    monkeypatch,
+    monkeypatch, given
 ):
-    # The address comes from QTE_URL, so no frame of the caller's holds it.
     token = synthetic_token()
-    monkeypatch.setenv("QTE_URL", f"ws://127.0.0.1:1/{token}")
+    address = f"ws://127.0.0.1:1/{token}"
+    if not given:
+        monkeypatch.setenv("QTE_URL", address)
     with pytest.raises(OSError) as caught:
-        await open_session(token=token, ack_timeout=5)
+        await open_session(address if given else None, token=token, ack_timeout=5)
+    assert_no_form_of(token, shown(caught.value))
+
+
+async def test_a_refused_connection_option_shows_an_address_holding_the_token_in_no_frame():
+    token = synthetic_token()
+    with pytest.raises(ValueError, match="liveness_timeout") as caught:
+        await open_session(f"ws://127.0.0.1:1/{token}", token=token, liveness_timeout=0)
+    assert_no_form_of(token, shown(caught.value))
+
+
+def interrupt_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(warnings, "showwarning", interrupted)
+
+
+def test_a_ctrl_c_while_warning_about_a_shared_token_file_shows_its_path_in_no_frame(
+    windows, monkeypatch, tmp_path
+):
+    token, name = as_written()
+    path = folder_named(name, tmp_path) / "token"
+    path.write_text(token)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        interrupt_warnings(monkeypatch)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            resolve_token()
+    assert_no_form_of(token, shown(caught.value))
+
+
+def test_a_ctrl_c_while_warning_about_a_shared_dotenv_shows_its_path_in_no_frame(
+    windows, monkeypatch, tmp_path
+):
+    token, name = as_written()
+    monkeypatch.chdir(folder_named(name, tmp_path))
+    Path(".env").write_text(f"QTE_TOKEN={token}\n")
+    Path(".env").chmod(0o600)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        interrupt_warnings(monkeypatch)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            resolve_token()
+    assert_no_form_of(token, shown(caught.value))
+
+
+@needs_git
+def test_a_ctrl_c_while_giving_the_git_warning_shows_the_path_in_no_frame(monkeypatch, tmp_path):
+    token = minted_token()
+    monkeypatch.chdir(folder_named(token, tmp_path))
+    git("init", "-q", ".")
+    Path(".env").write_text("QTE_URL=ws://127.0.0.1:8080/ws\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        interrupt_warnings(monkeypatch)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            resolve_url()
     assert_no_form_of(token, shown(caught.value))

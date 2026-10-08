@@ -929,8 +929,8 @@ def _token_from_file() -> tuple[str | None, str | None]:
         failure = warn_shared(file_path, access, sets_address=False, withhold=withholding(text))
         if failure is not None:
             # An interruption while warning, such as a Ctrl-C, is raised from a frame that
-            # no longer holds the token.
-            del text
+            # no longer holds the token, nor the path, which can hold it.
+            del text, path, file_path, access, file
             raise failure
     return text, None
 
@@ -971,8 +971,11 @@ async def open_session(
     """
     secret = _Secret(resolve_token(token))
     del token
+    # Passed on without this frame keeping it: a mistake can put the token in the address.
+    given = [url]
+    del url
     return await _open_session(
-        resolve_url(url), secret, None, ack_timeout=ack_timeout, **connection_options
+        resolve_url(given.pop()), secret, None, ack_timeout=ack_timeout, **connection_options
     )
 
 
@@ -993,10 +996,16 @@ async def _open_session(
     # In a daemon thread, at most once in a program and once a day: it never waits here.
     _update.check_in_background()
     # Connection keeps the token out of the websockets log itself, for any logger passed.
-    conn = Connection(url, **connection_options)
     # A mistake can put the token in the address: an error leaves without this frame
-    # holding it (the connection's repr does not show it).
+    # holding it (the connection's repr does not show it), nor the constructor's frames.
+    failure: BaseException | None = None
+    try:
+        conn = Connection(url, **connection_options)
+    except BaseException as error:
+        failure = _detached(error)
     del url
+    if failure is not None:
+        raise failure
     interrupted = False
     deadline = asyncio.timeout(ack_timeout)
     try:

@@ -236,7 +236,10 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     neither it nor an `OSError` may reach the caller's exception as its cause or context.
     """
     path = dotenv_path()
-    _warn_if_not_ignored(path)
+    failure = _warn_if_not_ignored(path)
+    if failure is not None:
+        del path  # raised from a frame that no longer holds the path, which can hold the token
+        raise failure
     # Read before the file is, so no frame that holds the token calls the Windows API.
     access = shared_access(path)
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
@@ -277,7 +280,7 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             "so only you can",
             _errors.TOKEN_SHARED,
         )
-    warn = access is not None and (
+    warn = access is not None and bool(
         (holds_token and access)
         or ((access.changeable or access.incomplete) and _assigns(text, _URL_NAME))
     )
@@ -291,8 +294,9 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             path, access, holds_token=holds_token, sets_address=True, withhold=withhold
         )
         if failure is not None:
-            del value
-            raise failure  # from a frame that no longer holds the token
+            # From a frame that no longer holds the token, nor the path, which can hold it.
+            del value, path, access
+            raise failure
     if problem is not None:
         return None, problem
     return value or None, None
@@ -313,15 +317,19 @@ def _assigns(text: str, name: str) -> bool:
     return False
 
 
-def _warn_if_not_ignored(path: Path) -> None:
+def _warn_if_not_ignored(path: Path) -> BaseException | None:
     """Warn, once per process for each `.env`, if `path`, or the file it links to, is inside
     a git working tree and git tracks it or does not ignore it. Called before the file is
     read, so no frame on the stack holds the token. If a warnings filter turns the warning
-    into an error, it is logged instead, since this check must never stop the SDK."""
+    into an error, it is logged instead, since this check must never stop the SDK.
+
+    Any other error while warning, or an interruption such as a Ctrl-C, is returned without
+    its traceback or chain, for the caller to raise from a frame that no longer holds the
+    path, which can hold the token. None otherwise."""
     key = str(path)
     afresh = _afresh.get()
     if (key in _git_checked and not afresh) or not path.exists():
-        return
+        return None
     if not afresh:
         _git_checked.add(key)
     candidates = [path]
@@ -330,7 +338,7 @@ def _warn_if_not_ignored(path: Path) -> None:
     # Every remedy is given: fixing the link alone would leave a tracked target exposed.
     exposures = [m for m in map(_git_exposure, candidates) if m is not None]
     if not exposures:
-        return
+        return None
     tracked = any(each == _errors.DOTENV_TRACKED for each, _ in exposures)
     code = _errors.DOTENV_TRACKED if tracked else _errors.DOTENV_NOT_IGNORED
     # No token has been read from the file yet, so the shape of one is withheld too.
@@ -343,6 +351,9 @@ def _warn_if_not_ignored(path: Path) -> None:
         warnings.warn(warning, stacklevel=_caller_level())
     except Warning:
         _log.warning("%s", warning, extra={"code": code})
+    except BaseException as error:
+        return _detached(error)
+    return None
 
 
 def shared_access(path: Path) -> "_fileaccess.BroadAccess | None":
