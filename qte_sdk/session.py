@@ -21,6 +21,9 @@ the session opens, a message from the exchange that repeats the token is also ke
 the exception raised; once the session is open a `Session` no longer holds the token, and
 what the exchange sends is passed on as it arrives. A `qte_sdk.reconnect.ReconnectingSession`
 keeps it, in a wrapper no repr shows, to authenticate each new session.
+
+Every exception here has a code, such as `QTE-TOKEN-MISSING`, in its `code` attribute and
+at the start of its message: docs/errors.md says what each means and how to fix it.
 """
 
 import asyncio
@@ -34,6 +37,7 @@ from typing import Any
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
+from qte_sdk import errors as _errors
 from qte_sdk import update as _update
 from qte_sdk.connection import (
     Connection,
@@ -60,6 +64,7 @@ from qte_sdk.contract.v1.session_pb2 import (
     SessionAck,
 )
 from qte_sdk.dotenv import DOTENV_NAME, read_value, shared_access, warn_shared
+from qte_sdk.errors import Problem, QteError, plain
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
 TOKEN_FILE_ENV_VAR = "QTE_TOKEN_FILE"
@@ -68,38 +73,66 @@ DEFAULT_ACK_TIMEOUT = 10.0
 DEFAULT_CALENDAR_TIMEOUT = 5.0
 
 
-class MissingToken(ValueError):
+class MissingToken(QteError, ValueError):
     """No token was given, `QTE_TOKEN` is unset or empty, `QTE_TOKEN_FILE` is unset or names
     a file that holds no readable token, or `.env` holds no token the SDK may use. The
-    message says which; it never holds any of the file's contents."""
+    message and `code` say which (`QTE-TOKEN-MISSING`, `QTE-TOKEN-FILE-UNREADABLE`,
+    `QTE-TOKEN-SHARED`, `QTE-DOTENV-UNREADABLE` or `QTE-DOTENV-INVALID`); it never holds any
+    of the file's contents."""
+
+    code = _errors.TOKEN_MISSING
 
 
-class MissingURL(ValueError):
+class MissingURL(QteError, ValueError):
     """No exchange address was given, `QTE_URL` is unset or empty, and `.env` sets no
-    usable `QTE_URL`. The message says which; it never holds any of the file's contents."""
+    usable `QTE_URL`. The message and `code` say which (`QTE-ADDRESS-MISSING`, or a
+    `QTE-DOTENV-...` or `QTE-TOKEN-SHARED` code for the `.env`); it never holds any of the
+    file's contents."""
+
+    code = _errors.ADDRESS_MISSING
 
 
-class SessionNotAcknowledged(Exception):
+class SessionNotAcknowledged(QteError, Exception):
     """The connection ended, or the acknowledgement could not be read, before the session
-    was acknowledged.
+    was acknowledged. Code `QTE-SESSION-NOT-ACKNOWLEDGED`.
 
     `close_code` is the close code the exchange sent, when it closed the connection, for
     example `qte_sdk.connection.TERM_CHANGE_CLOSE_CODE`; otherwise None.
     """
 
+    code = _errors.SESSION_NOT_ACKNOWLEDGED
+
     def __init__(self, *args: object, close_code: int | None = None) -> None:
-        super().__init__(*args)
+        what = plain(" ".join(map(str, args))) or "the connection ended first"
+        super().__init__(*args, fields={"what": what})
         self.close_code = close_code
 
 
 class AuthNotSent(SessionNotAcknowledged):
     """The `auth` message could not be encoded or sent, for a reason other than the
-    connection closing, such as a bad `contract_version`. Trying again fails the same way."""
+    connection closing, such as a bad `contract_version`. Trying again fails the same way.
+    Code `QTE-SESSION-AUTH-NOT-SENT`."""
+
+    code = _errors.SESSION_AUTH_NOT_SENT
 
 
 class ResumeNotAcknowledged(SessionNotAcknowledged):
     """The connection ended, or the `resume_ack` could not be decoded, before the exchange
-    answered a `resume`."""
+    answered a `resume`. Code `QTE-SESSION-RESUME-NOT-ACKNOWLEDGED`."""
+
+    code = _errors.SESSION_RESUME_NOT_ACKNOWLEDGED
+
+
+class SessionTimeout(QteError, TimeoutError):
+    """The session was not acknowledged within `ack_timeout` (code `QTE-SESSION-TIMEOUT`),
+    or the exchange did not answer a `resume` in time (`QTE-SESSION-RESUME-TIMEOUT`).
+    A `TimeoutError`, as these were before they had codes. `seconds` is the limit."""
+
+    code = _errors.SESSION_TIMEOUT
+
+    def __init__(self, message: str, *, seconds: float | None, code: str | None = None) -> None:
+        super().__init__(message, code=code, fields={"seconds": seconds})
+        self.seconds = seconds
 
 
 class ResumeRejected(SessionRejected):
@@ -108,8 +141,10 @@ class ResumeRejected(SessionRejected):
     does not serve `resume` yet answers it.
 
     The connection stays open and the session goes on, but no report is replayed and no
-    snapshot is sent.
+    snapshot is sent. Code `QTE-SESSION-RESUME-REJECTED`.
     """
+
+    code = _errors.SESSION_RESUME_REJECTED
 
 
 def _report_seq(event: Event) -> int | None:
@@ -516,8 +551,8 @@ class Session:
 
         Returns the `resume_ack`. Raises `ResumeRejected` if the exchange refuses the
         resume, `ResumeNotAcknowledged` if the connection ends or the answer cannot be
-        decoded first, and `TimeoutError` if no answer arrives in time. Call it from the
-        task that iterates the session.
+        decoded first, and `SessionTimeout`, a `TimeoutError`, if no answer arrives in time.
+        Call it from the task that iterates the session.
         """
         if (
             isinstance(last_report_seq, bool)
@@ -547,7 +582,11 @@ class Session:
         if answer is None:
             self._buffer.extend(reports.abandon())
         if timed_out:
-            raise TimeoutError(f"the exchange did not answer resume within {timeout} s")
+            raise SessionTimeout(
+                f"the exchange did not answer resume within {timeout} s",
+                seconds=timeout,
+                code=_errors.SESSION_RESUME_TIMEOUT,
+            )
         if answer is None:
             if isinstance(self._failure, SessionRejected):
                 # The exchange refused the session itself; that is the error to report.
@@ -734,7 +773,7 @@ def resolve_token(token: str | None = None) -> str:
     if problem is not None:
         # Raised outside any handler, from a frame that holds neither the file's path nor
         # its contents, so the exception carries neither.
-        raise MissingToken(problem)
+        raise _missing_token(problem)
     assert token is not None
     return token
 
@@ -745,16 +784,21 @@ def token_source() -> str:
     token, source, problem = _find_token(None)
     del token
     if problem is not None:
-        raise MissingToken(problem)
+        raise _missing_token(problem)
     assert source is not None
     return source
 
 
-def _find_token(token: str | None) -> tuple[str | None, str | None, str | None]:
-    """The token, the name of its source and None; or None, None and the message for
-    `MissingToken`. Never raises, so no exception carries a frame that holds the token, but
-    for an interruption, such as a Ctrl-C, while a warning about a token file is shown,
-    which is raised from frames that no longer hold it (see `qte_sdk.dotenv.warn_shared`)."""
+def _missing_token(problem: Problem) -> MissingToken:
+    return MissingToken(str(problem), code=problem.code, fields=problem.fields)
+
+
+def _find_token(token: str | None) -> tuple[str | None, str | None, Problem | None]:
+    """The token, the name of its source and None; or None, None and the problem for
+    `MissingToken`, which carries its code. Never raises, so no exception carries a frame
+    that holds the token, but for an interruption, such as a Ctrl-C, while a warning about
+    a token file is shown, which is raised from frames that no longer hold it (see
+    `qte_sdk.dotenv.warn_shared`)."""
     source = None
     if token is None:
         token = os.environ.get(TOKEN_ENV_VAR) or None
@@ -762,22 +806,40 @@ def _find_token(token: str | None) -> tuple[str | None, str | None, str | None]:
     problem = None
     if token is None:
         source = TOKEN_FILE_ENV_VAR
-        token, problem = _token_from_file()
-        if problem is not None:
-            return None, None, f"no token: {TOKEN_FILE_ENV_VAR} names a file that {problem}"
+        token, file_problem = _token_from_file()
+        if file_problem is not None:
+            return (
+                None,
+                None,
+                Problem(
+                    f"no token: {TOKEN_FILE_ENV_VAR} names a file that {file_problem}",
+                    _errors.TOKEN_FILE_UNREADABLE,
+                    problem=plain(file_problem),
+                ),
+            )
     if token is None:
         source = DOTENV_NAME
         token, problem = read_value(TOKEN_ENV_VAR)
         if problem is not None:
-            return None, None, f"no token: {DOTENV_NAME} {problem}"
+            code, fields = _coded(problem)
+            return None, None, Problem(f"no token: {DOTENV_NAME} {problem}", code, **fields)
     if not token:
-        problem = (
+        problem = Problem(
             f"no token: pass token=, set the {TOKEN_ENV_VAR} environment variable, set "
             f"{TOKEN_FILE_ENV_VAR} to the path of a file holding it, or put {TOKEN_ENV_VAR} "
-            f"in a {DOTENV_NAME} file in the working directory"
+            f"in a {DOTENV_NAME} file in the working directory",
+            _errors.TOKEN_MISSING,
+            where=f"token=, {TOKEN_ENV_VAR}, {TOKEN_FILE_ENV_VAR} or ./{DOTENV_NAME}",
         )
         return None, None, problem
     return token, source, None
+
+
+def _coded(problem: str) -> tuple[str, dict[str, object]]:
+    """The code and fields a problem from `read_value` carries."""
+    if isinstance(problem, Problem):
+        return problem.code, problem.fields
+    return _errors.DOTENV_UNREADABLE, {"problem": plain(problem), "name": "a value"}
 
 
 def resolve_url(url: str | None = None) -> str:
@@ -805,11 +867,15 @@ def url_source(url: str | None = None) -> tuple[str, str]:
         source = DOTENV_NAME
         url, problem = read_value(URL_ENV_VAR)
     if problem is not None:
-        raise MissingURL(f"no exchange address: {DOTENV_NAME} {problem}")
+        code, fields = _coded(problem)
+        raise MissingURL(
+            f"no exchange address: {DOTENV_NAME} {problem}", code=code, fields=dict(fields)
+        )
     if not url:
         raise MissingURL(
             f"no exchange address: pass url=, set the {URL_ENV_VAR} environment variable, "
-            f"or put {URL_ENV_VAR} in a {DOTENV_NAME} file in the working directory"
+            f"or put {URL_ENV_VAR} in a {DOTENV_NAME} file in the working directory",
+            fields={"where": f"url=, {URL_ENV_VAR} or ./{DOTENV_NAME}"},
         )
     return source, url
 
@@ -884,9 +950,10 @@ async def open_session(
     exchange refuses the session, raises `SessionRejected` carrying the contract reason
     code, or `ContractVersionMismatch` when the exchange does not serve this contract
     version.
-    Raises `SessionNotAcknowledged` if the connection ends first, and `TimeoutError` if the
-    session is not acknowledged within `ack_timeout` seconds. The connection is closed
-    whenever no session is returned, which can take up to `close_timeout` seconds more.
+    Raises `SessionNotAcknowledged` if the connection ends first, and `SessionTimeout`, a
+    `TimeoutError`, if the session is not acknowledged within `ack_timeout` seconds. The
+    connection is closed whenever no session is returned, which can take up to
+    `close_timeout` seconds more.
 
     It also starts the SDK's update check in the background, at most once a day, which
     logs a WARNING when a newer release is out and never delays or fails the session; set
@@ -934,7 +1001,9 @@ async def _open_session(
             on_close(close_code)
         if isinstance(error, TimeoutError) and deadline.expired():
             # A fresh error, not the one asyncio chained to the cancelled step.
-            safe = TimeoutError(f"the session was not acknowledged within {ack_timeout} s")
+            safe = SessionTimeout(
+                f"the session was not acknowledged within {ack_timeout} s", seconds=ack_timeout
+            )
         else:
             safe = _without_token(error, secret)
         if safe is None and not interrupted:

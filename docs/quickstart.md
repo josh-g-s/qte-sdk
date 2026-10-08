@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.48
+**Version:** 0.49
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -89,6 +89,8 @@ To see where the SDK will take the token and the address from, without showing t
 ```sh
 python -m qte_sdk.token check
 ```
+
+It exits 0 when both are found and nothing needs fixing, 1 when something must be fixed and 2 when it could not tell; each problem it prints starts with a code such as `QTE-DOTENV-NOT-IGNORED`, which [errors.md](errors.md) explains, with every other code and exit status.
 
 To set it up by hand instead, first make sure git will never commit the file, then create it readable only by you:
 

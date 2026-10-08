@@ -221,7 +221,12 @@ async def test_a_version_mismatch_raises_a_typed_error_on_either_reject(type_):
             await collect(url)
     assert info.value.reason_code == ReasonCodes.VERSION_MISMATCH
     assert info.value.detail == "contract version not served"
-    assert str(info.value) == "VERSION_MISMATCH: contract version not served"
+    assert info.value.args == ("VERSION_MISMATCH: contract version not served",)
+    assert info.value.code == "QTE-SESSION-VERSION-MISMATCH"
+    assert str(info.value).startswith(
+        "QTE-SESSION-VERSION-MISMATCH: the exchange does not serve the contract version this "
+        "SDK sends (VERSION_MISMATCH: contract version not served). "
+    )
 
 
 async def test_any_other_session_reject_raises_session_rejected():
@@ -911,7 +916,12 @@ async def test_a_session_reject_with_an_unknown_reason_name_raises_with_the_name
     assert not isinstance(info.value, ContractVersionMismatch)
     assert info.value.reason_code == ReasonCodes.REASON_CODE_UNSPECIFIED
     assert info.value.reason_name == "BRAND_NEW_REASON"
-    assert str(info.value) == "BRAND_NEW_REASON: try later"
+    assert info.value.args == ("BRAND_NEW_REASON: try later",)
+    assert str(info.value) == (
+        "QTE-SESSION-REJECTED: the exchange refused the session (BRAND_NEW_REASON: try later). "
+        "It will not serve this session, and trying again does not help until the cause is "
+        "fixed. Look up BRAND_NEW_REASON under QTE-SESSION-REJECTED in docs/errors.md."
+    )
 
 
 def test_session_rejected_names_known_and_numeric_codes():

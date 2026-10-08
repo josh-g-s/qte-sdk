@@ -87,6 +87,14 @@ def user_sid() -> str:
     return sid
 
 
+def uncoded(warning: Warning) -> str:
+    """A coded warning's message without its code, once it is checked to start with it."""
+    text = str(warning)
+    code = getattr(warning, "code", None)
+    assert code is not None and text.startswith(f"{code}: "), text
+    return text[len(code) + 2 :]
+
+
 def icacls(path: Path, *args: str) -> None:
     result = subprocess.run(
         ["icacls", str(path), *args], capture_output=True, text=True, timeout=TIMEOUT
@@ -286,7 +294,7 @@ def test_a_private_dotenv_in_a_folder_open_to_users_warns_about_the_folder(
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert (
         f"other users can replace it: BUILTIN\\Users may add or remove files in "
         f"{folder_of(path)}" in message
@@ -307,7 +315,7 @@ def test_a_dotenv_that_inherits_users_access_warns_about_the_file_too(private_fo
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert "Windows lets BUILTIN\\Users read or change it" in message
     assert f"BUILTIN\\Users may add or remove files in {folder_of(path)}" in message
     assert_no_token(message)
@@ -318,7 +326,8 @@ def test_token_check_in_a_folder_open_to_users_warns(private_folder, user_sid):
     make_file_private(path, user_sid)
     open_folder_to_users(private_folder)
     result = run_sdk("qte_sdk.token", "check", cwd=private_folder)
-    assert "warning:" in result.stdout, result.stdout + result.stderr
+    assert "warning: QTE-TOKEN-SHARED: " in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 1, result.stdout + result.stderr  # a report; sessions warn
     assert "BUILTIN\\Users may add or remove files in" in result.stdout
     assert "None of Everyone" not in result.stdout
     assert_no_token(result.stdout, result.stderr)
@@ -329,7 +338,7 @@ def test_an_address_only_dotenv_in_a_folder_open_to_users_warns(private_folder):
     write_dotenv(private_folder, token=False)
     caught = shared_warnings(lambda: dotenv.read_value("QTE_URL"))
     assert [w.category for w in caught] == [AddressFileShared]
-    assert "change QTE_URL in it to a server of their own" in str(caught[0].message)
+    assert "change QTE_URL in it to a server of their own" in uncoded(caught[0].message)
 
 
 def test_a_token_file_in_a_folder_open_to_users_warns(private_folder, monkeypatch):
@@ -339,7 +348,7 @@ def test_a_token_file_in_a_folder_open_to_users_warns(private_folder, monkeypatc
     monkeypatch.setenv("QTE_TOKEN_FILE", str(path))
     caught = shared_warnings(resolve_token)
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert "Windows lets BUILTIN\\Users read or change it" in message
     assert "replace your token" in message
     assert_no_token(message)
@@ -389,7 +398,7 @@ def test_a_file_owned_by_another_account_warns(private_folder):
     assert access.other_owner is True
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert "it is owned by another account" in message
     assert_no_token(message)
 
@@ -474,7 +483,7 @@ def test_a_dotenv_link_to_a_file_in_a_folder_open_to_users_warns_about_that_fold
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{Path.cwd() / '.env'}, a link to {real(target)}, holds your token, and Windows "
         "lets BUILTIN\\Users read or change it; and other users can replace it: "
@@ -507,7 +516,7 @@ def test_a_dotenv_link_in_a_folder_open_to_users_warns_about_the_links_folder(
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{Path.cwd() / '.env'}, a link to {real(target)}, holds your token, and other users "
         f"can replace it: BUILTIN\\Users may add or remove files in {real(here)}, which "
@@ -541,7 +550,7 @@ def test_a_dotenv_reached_through_a_junction_warns_about_the_folder_holding_it(
 
         caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
         assert [w.category for w in caught] == [TokenFileShared]
-        message = str(caught[0].message)
+        message = uncoded(caught[0].message)
         assert message.startswith(
             f"{Path.cwd() / '.env'}, which leads to {real(path)} through the link "
             f"{junction}, holds your token, and other users can replace it: BUILTIN\\Users "
@@ -636,7 +645,7 @@ def test_a_chain_of_links_warns_about_an_open_folder_in_the_middle(
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{Path.cwd() / '.env'}, a link that leads to {real(target)} through the link "
         f"{middle}, holds your token, and other users can replace it: BUILTIN\\Users may "
@@ -681,7 +690,7 @@ def test_a_junction_above_a_chain_of_links_warns_about_each_open_folder(
 
         caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
         assert [w.category for w in caught] == [TokenFileShared]
-        message = str(caught[0].message)
+        message = uncoded(caught[0].message)
         assert message.startswith(
             f"{Path.cwd() / '.env'}, which leads to {real(target)} through the links "
             f"{junction}, {first} and {middle}, holds your token, and other users can replace "
@@ -721,7 +730,7 @@ def test_a_chain_longer_than_the_sdk_follows_warns_when_the_token_is_read(
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert (
         "holds your token, but it could not be fully checked: there are more than "
         f"{_fileaccess.MAX_LINKS} links on the way; a link on the way could not be followed, "
@@ -767,7 +776,7 @@ def test_a_junction_to_a_volumes_guid_name_warns_with_the_open_folder_before_it(
 
         caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
         assert [w.category for w in caught] == [TokenFileShared]
-        message = str(caught[0].message)
+        message = uncoded(caught[0].message)
         assert (
             f"BUILTIN\\Users may add or remove files in {real(holder)}, which holds the link "
             f"{junction}, so other people"
@@ -831,7 +840,7 @@ def test_a_folder_whose_list_is_not_shown_warns_when_the_token_is_read(
         caught = shared_warnings(lambda: values.append(resolve_token()))
         assert values == [FAKE_TOKEN]
         assert [w.category for w in caught] == [TokenFileShared]
-        message = str(caught[0].message)
+        message = uncoded(caught[0].message)
         assert (
             f"holds your token, but it could not be fully checked: {NOT_SHOWN} add or remove "
             f"files in {folder}."
@@ -842,6 +851,8 @@ def test_a_folder_whose_list_is_not_shown_warns_when_the_token_is_read(
         result = run_sdk("qte_sdk.token", "check", cwd=locked)
         # The working directory the command is given may be written with short 8.3 names.
         assert result.stdout.count("warning:") == 1, result.stdout + result.stderr
+        assert "warning: QTE-TOKEN-UNCHECKED: " in result.stdout, result.stdout
+        assert result.returncode == 2, result.stdout + result.stderr  # it could not tell
         assert (
             f".env holds your token, but it could not be fully checked: {NOT_SHOWN} add or "
             f"remove files in {folder}."
@@ -894,7 +905,7 @@ def test_a_folder_owned_by_another_account_warns(private_folder, user_sid):
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{Path.cwd() / '.env'} holds your token, and {folder} is owned by another account, "
         "which can change who may add or remove files in it, so other people"
@@ -902,6 +913,7 @@ def test_a_folder_owned_by_another_account_warns(private_folder, user_sid):
     assert_no_token(message)
     result = run_sdk("qte_sdk.token", "check", cwd=private_folder)
     assert f"{folder} is owned by another account" in result.stdout, result.stdout
+    assert result.returncode == 1, result.stdout + result.stderr
     assert_no_token(result.stdout, result.stderr)
 
 
@@ -923,7 +935,7 @@ def test_a_folder_that_holds_a_link_and_is_owned_by_another_account_warns(
 
     caught = shared_warnings(lambda: dotenv.read_value("QTE_TOKEN"))
     assert [w.category for w in caught] == [TokenFileShared]
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(
         f"{Path.cwd() / '.env'}, a link to {real(target)}, holds your token, and "
         f"{real(holder)}, which holds the link, is owned by another account, which can "
@@ -955,7 +967,7 @@ def test_a_folder_that_holds_a_link_and_whose_list_is_not_shown_warns(
         caught = shared_warnings(lambda: values.append(resolve_token()))
         assert values == [FAKE_TOKEN]
         assert [w.category for w in caught] == [TokenFileShared]
-        message = str(caught[0].message)
+        message = uncoded(caught[0].message)
         assert message.startswith(
             f"{link}, a link to {real(target)}, holds your token, but it could not be fully "
             f"checked: {NOT_SHOWN} add or remove files in {real(holder)}. Keep the file "
@@ -1145,6 +1157,6 @@ def test_a_token_on_a_drive_without_access_lists_warns(drive_without_lists, monk
     caught = shared_warnings(lambda: values.append(resolve_token()))
     assert values == [FAKE_TOKEN]
     assert [w.category for w in caught] == [TokenFileShared], (raw, access)
-    message = str(caught[0].message)
+    message = uncoded(caught[0].message)
     assert message.startswith(f"{path} holds your token, and Windows lets Everyone read or ")
     assert_no_token(message)

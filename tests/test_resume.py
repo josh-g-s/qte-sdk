@@ -670,7 +670,10 @@ async def test_a_resume_cut_off_by_the_connection_raises_not_acknowledged():
         async with await open_session(url, synthetic_token()) as session:
             with pytest.raises(ResumeNotAcknowledged) as caught:
                 await session.resume(0)
-    assert str(caught.value) == "the connection closed before resume_ack"
+    assert caught.value.args == ("the connection closed before resume_ack",)
+    assert str(caught.value).startswith(
+        "QTE-SESSION-RESUME-NOT-ACKNOWLEDGED: the connection closed before resume_ack. "
+    )
     assert caught.value.close_code is None  # dropped, with no close frame
 
 
@@ -688,7 +691,10 @@ async def test_a_resume_cut_off_by_a_term_change_says_so(reason: str, shown: str
         async with await open_session(url, synthetic_token()) as session:
             with pytest.raises(ResumeNotAcknowledged) as caught:
                 await session.resume(0)
-    assert str(caught.value) == f"the connection closed before resume_ack{shown}"
+    assert caught.value.args == (f"the connection closed before resume_ack{shown}",)
+    assert str(caught.value).startswith(
+        f"QTE-SESSION-RESUME-NOT-ACKNOWLEDGED: the connection closed before resume_ack{shown}. "
+    )
     assert is_retryable(caught.value)
     assert caught.value.close_code == TERM_CHANGE_CLOSE_CODE
 
@@ -2262,7 +2268,10 @@ async def test_a_term_change_close_before_auth_is_sent_forgets_the_cursor(
     assert len(failed) == 1
     error, cursor = failed[0]
     assert isinstance(error, SessionNotAcknowledged)
-    assert str(error).startswith("could not send auth: ConnectionClosedError")
+    assert error.args[0].startswith("could not send auth: ConnectionClosedError")
+    assert str(error).startswith(
+        "QTE-SESSION-NOT-ACKNOWLEDGED: could not send auth: ConnectionClosedError"
+    )
     assert error.close_code == TERM_CHANGE_CLOSE_CODE
     assert cursor is None
     resumes = [e for e in scripted.received if e["type"] == "resume"]

@@ -61,9 +61,13 @@ opening handshake and response headers, and redirects, which are not followed. F
 traces are not logged, and log records carry only a snapshot of the connection's id and
 address. A frame that fails to decode is reported without its text, since the parser's
 error keeps it. Server-supplied protocol content (a rejection's reason_detail) is passed
-through as-is, because it is what a caller needs to understand a failure; the QTE gateway
-never echoes credentials. A token placed in the caller's own URL or headers is the
-caller's configuration.
+through, because it is what a caller needs to understand a failure: as-is in the
+`detail` attribute, and flattened to one line in the message. The QTE gateway never echoes
+credentials. A token placed in the caller's own URL or headers is the caller's
+configuration.
+
+Every exception here has a code, such as `QTE-SESSION-REJECTED`, in its `code` attribute
+and at the start of its message: docs/errors.md says what each means and how to fix it.
 """
 
 import asyncio
@@ -79,10 +83,12 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, InvalidHandshake
 from websockets.frames import Close, Frame
 
+from qte_sdk import errors as _errors
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import CONTRACT_VERSION, INBOUND
 from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.session_pb2 import ResumeAck, SessionAck
+from qte_sdk.errors import QteError, plain
 
 DEFAULT_LIVENESS_TIMEOUT = 45.0
 """Seconds with no message from the exchange after which a connection presumes the link
@@ -407,12 +413,15 @@ class ResumeComplete:
 Event = Received | Unknown | DecodeFailed | SeqGap | ReportGap | ResumeComplete
 
 
-class SessionRejected(Exception):
-    """The exchange rejected the session.
+class SessionRejected(QteError, Exception):
+    """The exchange rejected the session. Code `QTE-SESSION-REJECTED`; its message's next
+    step depends on the reason.
 
     `reason_name` is the reason as a name. A name from a newer contract that this SDK
     does not know is kept there, while `reason_code` is `REASON_CODE_UNSPECIFIED`.
     """
+
+    code = _errors.SESSION_REJECTED
 
     def __init__(
         self, reason_code: int, detail: str | None, *, reason_name: str | None = None
@@ -422,7 +431,15 @@ class SessionRejected(Exception):
                 reason_name = ReasonCodes.ReasonCode.Name(reason_code)
             except ValueError:  # a code from a newer contract
                 reason_name = str(reason_code)
-        super().__init__(f"{reason_name}: {detail}" if detail else reason_name)
+        name = plain(reason_name)
+        step = _errors.SESSION_REJECTED_STEPS.get(
+            reason_name, _errors.SESSION_REJECTED_DEFAULT_STEP.format(reason_name=name)
+        )
+        reason = plain(f"{reason_name}: {detail}" if detail else reason_name)
+        super().__init__(
+            f"{reason_name}: {detail}" if detail else reason_name,
+            fields={"reason": reason, "step": step},
+        )
         self.reason_code = reason_code
         self.detail = detail
         self.reason_name = reason_name
@@ -433,15 +450,23 @@ class ContractVersionMismatch(SessionRejected):
 
     Raised whether the exchange reports it on `session_reject` or on an order `reject`:
     every message carries the same version, so the session cannot work either way.
+    Code `QTE-SESSION-VERSION-MISMATCH`.
     """
 
+    code = _errors.SESSION_VERSION_MISMATCH
 
-class LivenessTimeout(TimeoutError):
+
+class LivenessTimeout(QteError, TimeoutError):
     """Nothing arrived from the exchange for `timeout` seconds, so the link was presumed
-    dead and dropped. A new connection may succeed."""
+    dead and dropped. A new connection may succeed. Code `QTE-CONNECT-LIVENESS-TIMEOUT`."""
+
+    code = _errors.CONNECT_LIVENESS_TIMEOUT
 
     def __init__(self, timeout: float) -> None:
-        super().__init__(f"no message from the exchange for {timeout} s; the link is presumed dead")
+        super().__init__(
+            f"no message from the exchange for {timeout} s; the link is presumed dead",
+            fields={"seconds": timeout},
+        )
         self.timeout = timeout
 
 
@@ -453,19 +478,32 @@ class _connect(connect):
         return exc
 
 
-class HandshakeFailed(InvalidHandshake):
+class HandshakeFailed(QteError, InvalidHandshake):
     """The opening handshake failed. Only the kind of failure and the HTTP status are kept:
     the library's own error carries header values and the response, which a server could
-    fill with reflected text."""
+    fill with reflected text. Code `QTE-CONNECT-HANDSHAKE-FAILED`; its message's next step
+    depends on the status."""
+
+    code = _errors.CONNECT_HANDSHAKE_FAILED
 
     def __init__(self, kind: str, status_code: int | None) -> None:
-        super().__init__(kind, status_code)
+        status = f", HTTP {status_code}" if status_code is not None else ""
+        why, step = _errors.HANDSHAKE_STEPS[_handshake_kind(status_code)]
+        fields = {"kind": plain(kind), "status": status, "why": why, "step": step}
+        super().__init__(kind, status_code, fields=fields)
         self.kind = kind
         self.status_code = status_code
 
-    def __str__(self) -> str:
-        status = f", HTTP {self.status_code}" if self.status_code is not None else ""
-        return f"opening handshake failed ({self.kind}{status}); details withheld"
+
+def _handshake_kind(status_code: int | None) -> str:
+    """Which of `errors.HANDSHAKE_STEPS` fits a failed handshake's HTTP status."""
+    if status_code in (401, 403):
+        return "refused"
+    if status_code == 404:
+        return "not-found"
+    if status_code in (408, 429) or (status_code is not None and status_code >= 500):
+        return "busy"
+    return "other"
 
 
 class Connection:

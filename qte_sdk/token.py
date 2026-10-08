@@ -35,6 +35,16 @@ Windows it also reports whether a broad group of users can read or change the fi
 token is in, or add or remove files in its folder, and whether another account owns the
 file or a folder it is in; it gives the same warning as when the token is read.
 
+Every finding and every refusal starts with its code, such as `QTE-TOKEN-MISSING`;
+docs/errors.md says what each means. `check` exits with 0 when the token and the address
+are found and nothing needs fixing; 1 when something must be fixed (no token or address,
+an address that does not start with ws:// or wss://, a `.env` git tracks or does not
+ignore, or, on Windows, a file others may read, change or replace); and 2 when it could
+not tell (git could not say whether it ignores the `.env`, or Windows would not let it
+fully check the file the token is in). Exit 1 is a report: sessions still only warn about
+what `check` warns about. `set` exits with 0 when it saved, 1 when it refused, and 130 if
+stopped. Either exits with 2, after a `usage:` line, if the command line is wrong.
+
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
 a terminal: it refuses to run with its input redirected, rather than read the token from
@@ -54,6 +64,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from qte_sdk import _fileaccess
+from qte_sdk import errors as _errors
 from qte_sdk.dotenv import (
     DOTENV_NAME,
     MAX_DOTENV_SIZE,
@@ -66,17 +77,20 @@ from qte_sdk.dotenv import (
     is_tracked_by_git,
     parse_assignment,
     read_value,
+    shared_code,
     shared_message,
     tracked_ignoring_case,
 )
+from qte_sdk.errors import render
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     TOKEN_FILE_ENV_VAR,
     URL_ENV_VAR,
-    MissingToken,
     MissingURL,
+    _find_token,
+    _holds_token,
+    _missing_token,
     _Secret,
-    token_source,
     url_source,
 )
 
@@ -88,7 +102,15 @@ Prompt = Callable[[str], str]
 
 
 class _Refused(Exception):
-    """A reason to stop, shown to the person as it is. Never holds the token."""
+    """A reason to stop, shown to the person as its coded message. Never holds the token."""
+
+    def __init__(self, code: str, **fields: object) -> None:
+        super().__init__(code)
+        self.code = code
+        self.fields = fields
+
+    def __str__(self) -> str:
+        return render(self.code, **self.fields)
 
 
 def main(
@@ -108,10 +130,7 @@ def main(
         if args.command == "check":
             return _check()
         if not interactive():
-            raise _Refused(
-                "this command asks for your token, so it needs a terminal; run it directly, "
-                "without redirecting its input"
-            )
+            raise _Refused(_errors.TOKEN_NO_TERMINAL)
         if args.file is not None:
             return _set_file(args.file, ask, ask_secret)
         return _set_dotenv(args.url, ask, ask_secret)
@@ -194,7 +213,12 @@ def _is_console(fileno: int) -> bool:
 def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     path = dotenv_path()
     if path.is_symlink():
-        raise _Refused(f"{path} is a symbolic link; edit the file it points to by hand")
+        raise _Refused(
+            _errors.TOKEN_SET_PATH,
+            path=path,
+            problem="is a symbolic link",
+            fix="Edit the file it points to by hand",
+        )
     lines = _existing_lines(path)
     _refuse_if_tracked(_on_disk(path))
     address = _ask_address(url, ask)
@@ -203,7 +227,12 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     text = _merge(lines, {URL_ENV_VAR: address, TOKEN_ENV_VAR: secret.value})
     if len(text.encode("utf-8")) > MAX_DOTENV_SIZE:
         del text, secret, lines
-        raise _Refused(f"{path} would be larger than the SDK reads; make it smaller first")
+        raise _Refused(
+            _errors.TOKEN_SET_PATH,
+            path=path,
+            problem=f"would be larger than the {MAX_DOTENV_SIZE // 1024} KiB the SDK reads",
+            fix="Make it smaller first",
+        )
     _write_private(path, text)
     # The old lines may hold the old token: none is kept for the access check below.
     del text, secret, lines
@@ -226,21 +255,28 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
 def _existing_lines(path: Path) -> list[str]:
     """The lines of the existing `.env`, with their endings, or none if there is no file."""
     if path.exists() and not path.is_file():
-        raise _Refused(f"{path} is not a regular file, so it was left unchanged")
+        raise _Refused(
+            _errors.TOKEN_SET_PATH,
+            path=path,
+            problem="is not a regular file",
+            fix="Move it out of the way, or edit it by hand",
+        )
     try:
         data = path.read_bytes()
     except FileNotFoundError:
         return []
     except OSError as error:
         raise _Refused(
-            f"{path} cannot be read ({error.strerror or type(error).__name__})"
+            _errors.TOKEN_SET_WRITE, action="read", path=path, strerror=_why(error)
         ) from None
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         text = None
     if text is None:
-        raise _Refused(f"{path} is not UTF-8 text, so it was left unchanged; fix it by hand")
+        raise _Refused(
+            _errors.TOKEN_SET_PATH, path=path, problem="is not UTF-8 text", fix="Fix it by hand"
+        )
     return text.splitlines(keepends=True)
 
 
@@ -256,11 +292,15 @@ def _ask_address(url: str | None, ask: Prompt) -> str:
         if not url and current:
             url = current
     if not url:
-        raise _Refused("an exchange address is needed; ask the course team for it")
+        raise _Refused(_errors.ADDRESS_MISSING, where="what was entered")
     if not url.startswith(("ws://", "wss://")) or not _is_plain(url):
         raise _Refused(
-            "the exchange address should look like wss://host/ws or ws://127.0.0.1:8080/ws, "
-            "with no spaces or quotes"
+            _errors.ADDRESS_INVALID,
+            source="what was entered",
+            problem=(
+                "does not look like wss://host/ws or ws://127.0.0.1:8080/ws, with no spaces "
+                "or quotes"
+            ),
         )
     return url
 
@@ -269,15 +309,12 @@ def _ask_token(ask_secret: Prompt) -> _Secret:
     secret = _read_secret(ask_secret)
     problem = None
     if not secret.value:
-        problem = "no token was entered"
+        problem = _Refused(_errors.TOKEN_MISSING, where="what was entered")
     elif not _is_plain(secret.value):
-        problem = (
-            "the token has a space, quote or control character, which a token never has; "
-            "check how it was copied"
-        )
+        problem = _Refused(_errors.TOKEN_MALFORMED)
     if problem is not None:
         del secret
-        raise _Refused(problem)
+        raise problem
     return secret
 
 
@@ -297,10 +334,7 @@ def _read_secret(ask_secret: Prompt) -> _Secret:
         failed = True
     # Raised outside the handler, so the original error and its traceback are dropped.
     assert failed
-    raise _Refused(
-        "could not read the token without showing it, so nothing was read; run this "
-        "command in an ordinary terminal window"
-    )
+    raise _Refused(_errors.TOKEN_NO_TERMINAL)
 
 
 def _is_plain(value: str) -> bool:
@@ -324,20 +358,21 @@ def _refuse_if_tracked(path: Path) -> None:
             return
         else:
             raise _Refused(
-                f"git tracks {matches[0]}, which is the same file as {path} on this "
-                "filesystem, so your token in it would be committed. Choose another path, "
-                "or stop git tracking that file first. Nothing was changed."
+                _errors.DOTENV_TRACKED,
+                path=f"{matches[0]} (the same file as {path} on this filesystem)",
+                name=path.name,
+                command=(
+                    f"`git rm --cached -- {shlex.quote(matches[0])}` at the top of the "
+                    "repository, or choose another path"
+                ),
             )
     if tracked is None:
-        raise _Refused(
-            f"{path} is inside a git repository, but git could not say whether it tracks "
-            "the file (is git installed and on your PATH?), so nothing was changed. Install "
-            f"git and run this again, or choose a location outside the repository."
-        )
+        raise _Refused(_errors.DOTENV_GIT_UNKNOWN, path=path, name=path.name)
     raise _Refused(
-        f"git tracks {path}, so your token in it would be committed, and adding it to "
-        f".gitignore does not stop that. Run `{_untrack_command(path)}` and commit, then "
-        "run this command again. Nothing was changed."
+        _errors.DOTENV_TRACKED,
+        path=path,
+        name=path.name,
+        command=f"`{_untrack_command(path)}`",
     )
 
 
@@ -409,7 +444,7 @@ def _offer_gitignore(path: Path, ask: Prompt) -> None:
             file.write(f"{path.name}\n".encode())
     except OSError as error:
         raise _Refused(
-            f"could not update {gitignore} ({error.strerror or type(error).__name__})"
+            _errors.TOKEN_SET_WRITE, action="update", path=gitignore, strerror=_why(error)
         ) from None
     if is_ignored_by_git(path) is False:
         print(
@@ -449,7 +484,7 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
     if not path.is_absolute():
         path = Path.cwd() / path
     if path.is_symlink() or path.is_dir():
-        raise _Refused(f"{path} is a directory or a symbolic link; choose another path")
+        raise _not_a_file(path)
     directory = path.parent
     try:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -457,14 +492,19 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             directory.chmod(0o700)
     except OSError as error:
         raise _Refused(
-            f"could not create {directory} ({error.strerror or type(error).__name__})"
+            _errors.TOKEN_SET_WRITE, action="create", path=directory, strerror=_why(error)
         ) from None
     # The real directory, so a symbolic link on the way cannot hide a git working tree.
     path = _on_disk(directory.resolve() / path.name)
     if path.is_symlink() or path.is_dir():
-        raise _Refused(f"{path} is a directory or a symbolic link; choose another path")
+        raise _not_a_file(path)
     if path.name.lower() == ".gitignore":
-        raise _Refused("the token cannot go in a .gitignore file; choose another path")
+        raise _Refused(
+            _errors.TOKEN_SET_PATH,
+            path=path,
+            problem="is a .gitignore file, which cannot hold the token",
+            fix="Choose another path with --file PATH",
+        )
     _refuse_if_tracked(path)
     secret = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")
@@ -489,6 +529,20 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             + _unset_advice([TOKEN_ENV_VAR], "to use the token file")
         )
     return 0
+
+
+def _not_a_file(path: Path) -> _Refused:
+    return _Refused(
+        _errors.TOKEN_SET_PATH,
+        path=path,
+        problem="is a directory or a symbolic link",
+        fix="Choose another path with --file PATH",
+    )
+
+
+def _why(error: OSError) -> str:
+    """The system's reason for `error`, never its path."""
+    return error.strerror or type(error).__name__
 
 
 def _print_token_file_setting(path: Path) -> None:
@@ -563,7 +617,8 @@ def _privacy(path: Path, *, sets_address: bool = True) -> str:
         )
     if not access:
         return f". {_none_of_the_checked_groups(access)}."
-    return f".\nWarning: {shared_message(path, access, sets_address=sets_address)}"
+    code = shared_code(access)
+    return f".\nWarning: {code}: {shared_message(path, access, sets_address=sets_address)}"
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -574,9 +629,9 @@ def _write_private(path: Path, text: str) -> None:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError as error:
         raise _Refused(
-            f"could not write in {path.parent} ({error.strerror or type(error).__name__})"
+            _errors.TOKEN_SET_WRITE, action="write in", path=path.parent, strerror=_why(error)
         ) from None
-    failure = None
+    failure: _Refused | None = None
     replaced = False
     try:
         with os.fdopen(descriptor, "wb") as file:
@@ -588,7 +643,7 @@ def _write_private(path: Path, text: str) -> None:
         os.replace(temporary, path)
         replaced = True
     except OSError as error:
-        failure = f"could not write {path} ({error.strerror or type(error).__name__})"
+        failure = _Refused(_errors.TOKEN_SET_WRITE, action="write", path=path, strerror=_why(error))
     finally:
         # Also on an interrupt: a partial copy of the token is never left behind.
         if not replaced:
@@ -598,69 +653,112 @@ def _write_private(path: Path, text: str) -> None:
                 pass
     if failure is not None:
         # Raised outside the handler, so no frame that holds the text is chained to it.
-        raise _Refused(failure)
+        raise failure
 
 
 # check
 
 
+# The codes of findings `check` could not settle, which make it exit with 2, not 1.
+_COULD_NOT_TELL = frozenset(
+    {_errors.TOKEN_UNCHECKED, _errors.ADDRESS_UNCHECKED, _errors.DOTENV_GIT_UNKNOWN}
+)
+
+
 def _check() -> int:
-    ok = True
+    """Print where the token and the address come from, and each finding with its code.
+    Returns 1 if a finding must be fixed, else 2 if one could not be settled, else 0."""
+    findings: list[str] = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DotenvNotIgnored)
         warnings.simplefilter("always", FileShared)
-        problem = None
-        try:
-            source = token_source()
-        except MissingToken as error:
-            problem = str(error)
-        if problem is None:
-            print(f"token:   {_describe(source)}{_access_note(source)}")
+        token, source, problem = _find_token(None)
+        secret = None if token is None else _Secret(token)
+        del token
+        unchecked = None
+        if problem is not None:
+            findings.append(problem.code)
+            print(f"token:   none usable. {_missing_token(problem)}")
         else:
-            ok = False
-            print(f"token:   none usable. {problem}")
-        problem = None
+            assert source is not None
+            where = _describe(source, secret)
+            note, unchecked = _access_note(source, where)
+            print(f"token:   {where}{note}")
+        del secret
         try:
             source, url = url_source()
         except MissingURL as error:
-            problem = str(error)
-        if problem is None:
-            # The address itself is not shown: a mistake could have put the token there.
-            shape = (
-                ""
-                if url.startswith(("ws://", "wss://"))
-                else ("; it does not start with ws:// or wss://, so check it")
-            )
-            print(f"address: set, from {_describe(source)}{shape}")
-            ok = ok and not shape
+            findings.append(error.code)
+            print(f"address: none. {error}")
         else:
-            ok = False
-            print(f"address: none. {problem}")
+            # The address itself is not shown: a mistake could have put the token there.
+            where = _describe(source, None)
+            if url.startswith(("ws://", "wss://")):
+                print(f"address: set, from {where}")
+            else:
+                findings.append(_errors.ADDRESS_INVALID)
+                invalid = render(
+                    _errors.ADDRESS_INVALID,
+                    source=where,
+                    problem="does not start with ws:// or wss://",
+                )
+                print(f"address: set, from {where}; {invalid}")
     shown: set[str] = set()
     for warning in caught:
-        message = str(warning.message)
         if issubclass(warning.category, (DotenvNotIgnored, FileShared)):
+            findings.append(getattr(warning.message, "code", None) or _errors.TOKEN_SHARED)
+            message = str(warning.message)
             if message not in shown:
                 shown.add(message)
                 print(f"warning: {message}")
-    return 0 if ok else 1
+    if unchecked is not None:
+        findings.append(_errors.TOKEN_UNCHECKED)
+        print(f"warning: {unchecked}")
+    if not any(issubclass(w.category, DotenvNotIgnored) for w in caught) and _git_unknown():
+        findings.append(_errors.DOTENV_GIT_UNKNOWN)
+        path = dotenv_path()
+        print(f"warning: {render(_errors.DOTENV_GIT_UNKNOWN, path=path, name=path.name)}")
+    if any(code not in _COULD_NOT_TELL for code in findings):
+        return 1
+    return 2 if findings else 0
 
 
-def _access_note(source: str) -> str:
+def _git_unknown() -> bool:
+    """Whether the SDK reads the `.env` here, which is in a git working tree, and git could
+    not say whether it tracks or ignores it (git is not installed, say)."""
+    token_elsewhere = os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR)
+    if token_elsewhere and os.environ.get(URL_ENV_VAR):
+        return False
+    path = dotenv_path()
+    if not path.exists() or not is_inside_git_work_tree(path.parent):
+        return False
+    tracked = is_tracked_by_git(path)
+    if tracked is None:
+        return True
+    return not tracked and is_ignored_by_git(path) is None
+
+
+def _access_note(source: str, where: str) -> tuple[str, str | None]:
     """On Windows, a note that no broad group of users can read, change or replace the file
-    the token comes from, when the access lists of the file and its folder say so. A file
-    they can, or that another account owns, gets a warning instead."""
+    the token comes from, when the access lists of the file and its folder say so, and
+    None; or no note and the `QTE-TOKEN-UNCHECKED` message, when its access list cannot be
+    read at all. A file they can, or that another account owns, gets a warning instead.
+    `where` names the file as `check` shows it."""
     if source == DOTENV_NAME:
         path = dotenv_path()
     elif source == TOKEN_FILE_ENV_VAR:
         path = Path(os.environ[TOKEN_FILE_ENV_VAR])
     else:
-        return ""
+        return "", None
     access = _fileaccess.broad_access(path)
-    if access is not None and not access:
+    if access is None:
+        if _fileaccess.on_windows():
+            return "", render(_errors.TOKEN_UNCHECKED, path=where)
+        return "", None
+    if not access:
         text = _none_of_the_checked_groups(access)
-        return f"; {text[0].lower()}{text[1:]}"
-    return ""
+        return f"; {text[0].lower()}{text[1:]}", None
+    return "", None
 
 
 def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:
@@ -698,11 +796,16 @@ def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:
     return f"{text} ({note})"
 
 
-def _describe(source: str) -> str:
+def _describe(source: str, secret: _Secret | None) -> str:
+    """Where a value comes from, as `check` shows it. The path in `QTE_TOKEN_FILE` is
+    withheld if it holds any form of the token `secret`, as when it was set to the token."""
     if source == DOTENV_NAME:
         return f"{dotenv_path()}"
     if source == TOKEN_FILE_ENV_VAR:
-        return f"the file named by {TOKEN_FILE_ENV_VAR} ({os.environ[TOKEN_FILE_ENV_VAR]})"
+        path = os.environ[TOKEN_FILE_ENV_VAR]
+        if secret is not None and _holds_token(path, secret):
+            return f"the file named by {TOKEN_FILE_ENV_VAR} (path withheld: it holds the token)"
+        return f"the file named by {TOKEN_FILE_ENV_VAR} ({path})"
     return f"the {source} environment variable"
 
 
