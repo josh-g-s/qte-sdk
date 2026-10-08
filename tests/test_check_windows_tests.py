@@ -88,14 +88,16 @@ HIDING_CONFTEST = """
 """
 
 
-def project(tmp_path: Path, conftest: str = "") -> Path:
+def project(tmp_path: Path, conftest: str = "", settings: str = "") -> Path:
     tests = tmp_path / "tests"
     tests.mkdir()
     (tests / "__init__.py").write_text("")
     (tests / "test_windows_real.py").write_text(textwrap.dedent(WINDOWS_TESTS))
     (tests / "test_other.py").write_text(textwrap.dedent(OTHER_TESTS))
     (tests / "conftest.py").write_text(textwrap.dedent(conftest))
-    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    windows: real Windows\n")
+    (tmp_path / "pytest.ini").write_text(
+        f"[pytest]\nmarkers =\n    windows: real Windows\n{settings}"
+    )
     return tmp_path
 
 
@@ -123,6 +125,8 @@ def run(root: Path, *args: str) -> Path:
 
 
 EXPECTED = 7  # test_one, four of test_two, test_dropped and TestThing::test_marked
+# The parameter IDs of test_two, as pytest gives them.
+TWO = ["a::b", "x[1]", "tab\\there", "bell\\x07"]
 
 
 def test_a_full_run_passes(tmp_path):
@@ -245,3 +249,36 @@ def test_plugins_named_in_the_environment_do_not_shrink_the_list(tmp_path, monke
     assert check.problems(run(root), expected) == [
         "did not run (deselected, or not collected): tests/test_windows_real.py::test_dropped"
     ]
+
+
+@pytest.mark.parametrize(
+    ("settings", "left_out"),
+    [
+        (
+            "python_functions = test_one test_two test_marked\n",
+            ["tests/test_windows_real.py::test_dropped"],
+        ),
+        (
+            "python_classes = Thing\n",
+            ["tests/test_other.py::TestThing::test_marked"],
+        ),
+        (
+            "python_files = test_other.py\n",
+            [
+                "tests/test_windows_real.py::test_one",
+                *(f"tests/test_windows_real.py::test_two[{v}]" for v in TWO),
+                "tests/test_windows_real.py::test_dropped",
+            ],
+        ),
+    ],
+)
+def test_the_projects_test_name_settings_do_not_shrink_the_list(tmp_path, settings, left_out):
+    # Review of #163: python_functions, python_classes or python_files in the project's
+    # pytest settings could leave a Windows test out of the run and the list alike.
+    root = project(tmp_path, settings=settings)
+    expected = check.inventory(root)
+    assert len(expected) == EXPECTED
+    found = check.problems(run(root), expected)
+    assert sorted(found) == sorted(
+        f"did not run (deselected, or not collected): {nodeid}" for nodeid in left_out
+    )
