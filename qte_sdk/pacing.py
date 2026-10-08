@@ -73,7 +73,7 @@ import logging
 import math
 import threading
 import time
-from bisect import insort
+from bisect import bisect_right, insort
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -203,12 +203,16 @@ class PacingDraining(PacingLimit):
 class _Window:
     """One budget window: a sliding log of stamps, in time order, and its limit.
 
-    A stamp counts until `length + guard` seconds after it. `limit` None counts stamps but
-    checks none (a new-order window the budget gives no cap). `held_until` holds every send
-    the window applies to until then, after a budget reject or at a session's start."""
+    A stamp counts until `length + guard` seconds after it, and is kept a whole window
+    longer, so a reject read late can still be matched against the window that held its
+    message; `forgotten_before` says how far back the log is complete. `limit` None counts
+    stamps but checks none (a new-order window the budget gives no cap). `held_until` holds
+    every send the window applies to until then, after a budget reject or at a session's
+    start."""
 
     __slots__ = (
         "cap",
+        "forgotten_before",
         "guard",
         "held_by_reject",
         "held_until",
@@ -227,12 +231,14 @@ class _Window:
         self.stamps: deque[float] = deque()
         self.held_until = -math.inf
         self.held_by_reject = False
+        self.forgotten_before = -math.inf
 
     def prune(self, now: float) -> None:
+        cutoff = now - 2 * self.length - self.guard
         stamps = self.stamps
-        span = self.length + self.guard
-        while stamps and stamps[0] + span <= now + _EPSILON:
+        while stamps and stamps[0] <= cutoff:
             stamps.popleft()
+        self.forgotten_before = max(self.forgotten_before, cutoff)
 
     def add(self, stamp: float) -> None:
         stamps = self.stamps
@@ -253,17 +259,23 @@ class _Window:
         wait, by_reject = 0.0, False
         if self.held_until > now:
             wait, by_reject = self.held_until - now, self.held_by_reject
-        if self.limit is not None and len(self.stamps) >= self.limit:
+        stamps = self.stamps
+        # The stamps that still count: those less than `length + guard` old.
+        counting = len(stamps) - bisect_right(stamps, now - self.length - self.guard + _EPSILON)
+        if self.limit is not None and counting >= self.limit:
             # Room comes when the stamp that leaves `limit - 1` after it expires.
-            frees = self.stamps[len(self.stamps) - self.limit] + self.length + self.guard - now
+            frees = stamps[len(stamps) - self.limit] + self.length + self.guard - now
             if frees > wait:
                 wait, by_reject = frees, False
         return wait, by_reject
 
-    def count_within(self, now: float) -> int:
-        """The stamps in the exchange's window ending at `now`, (now - length, now]."""
-        start = now - self.length
-        return sum(1 for stamp in self.stamps if start < stamp <= now)
+    def count_within(self, end: float) -> int | None:
+        """The stamps in the exchange's window ending at `end`, (end - length, end], or None
+        when the log no longer holds all of that window."""
+        if end - self.length < self.forgotten_before:
+            return None
+        stamps = self.stamps
+        return bisect_right(stamps, end) - bisect_right(stamps, end - self.length)
 
 
 class Pacer:
@@ -339,14 +351,23 @@ class Pacer:
             None if new_orders is None else self._limit(new_orders),
         )
         self._by_name = {BURST: self._burst, SUSTAINED: self._sustained, NEW_ORDER: self._new_order}
+        # The windows every paced type waits for; a `new` waits for the new-order window
+        # first, on its own.
+        self._shared = (self._burst, self._smooth, self._sustained)
         # One send at a time, first come, first served. A `new` first waits its turn among
         # news for the new-order window alone, so news held by their own cap never hold up
         # a cancel or an amend.
         self._lock = asyncio.Lock()
         self._new_lock = asyncio.Lock()
-        # request_refs this pacer sent, and (request_ref, type) of foreign reports counted,
-        # with when, so a report is never counted twice.
-        self._known: OrderedDict[object, float] = OrderedDict()
+        # This pacer's sends that no report has answered yet, by request_ref, each as a
+        # one-item list holding its stamp, oldest first; and all of them in the order sent,
+        # to forget those never answered.
+        self._own: dict[str, deque[list[float]]] = {}
+        self._own_order: deque[tuple[list[float], str]] = deque()
+        # The reports already seen, by (request_ref, type, receipt_time): the same report
+        # reaches every connection of the team, and a resume can replay it.
+        self._seen: OrderedDict[tuple[str, str, int], float] = OrderedDict()
+        self._last_stamp = -math.inf
         # Since when this pacer has seen everything this program sent: a reject teaches the
         # cap only once it has watched a whole window.
         self._watching_since = clock()
@@ -391,8 +412,17 @@ class Pacer:
 
     async def _send(self, type_: str, payload: Message, write: Write) -> None:
         if type_ not in PACED_TYPES:
-            await write(type_, payload)
-            return
+            # Not paced, and perhaps `auth`, which holds the token: no copy of it stays in
+            # this frame when the write fails.
+            failure: BaseException
+            try:
+                await write(type_, payload)
+            except BaseException as error:
+                failure = error
+            else:
+                return
+            del payload
+            raise failure
         ref = getattr(payload, "request_ref", None) or None
         start = self._clock()
         if type_ == "new":
@@ -406,17 +436,20 @@ class Pacer:
         self, type_: str, payload: Message, write: Write, ref: str | None, start: float
     ) -> None:
         async with self._lock:
-            await self._wait_for_room(self._windows(type_), type_, start)
-            if ref is not None:
-                self._remember(ref, self._clock())
+            # The new-order window is not checked again here: a `new` waiting for it would
+            # hold up every cancel and amend.
+            await self._wait_for_room(self._shared, type_, start)
+            entry = None if ref is None else self._sent(ref)
             try:
                 await write(type_, payload)
             finally:
-                # Stamped when the write returns, or fails: it may have been sent.
-                stamp = self._clock()
+                # Stamped when the write returns, or fails: it may have been sent. No two
+                # sends share a stamp, so a reject can be placed among them.
+                stamp = max(self._clock(), math.nextafter(self._last_stamp, math.inf))
+                self._last_stamp = stamp
+                if entry is not None:
+                    entry[0] = stamp
                 self._record(type_, stamp)
-                if ref is not None:
-                    self._remember(ref, stamp)
 
     def _windows(self, type_: str) -> tuple[_Window, ...]:
         if type_ == "new":
@@ -460,16 +493,45 @@ class Pacer:
         for window in self._windows(type_):
             window.add(stamp)
 
-    def _remember(self, key: object, now: float) -> None:
-        known = self._known
-        known[key] = now
-        known.move_to_end(key)
-        horizon = 2 * self.budget.sustained_window + self.guard
-        while known:
-            first = next(iter(known))
-            if known[first] + horizon >= now:
+    def _sent(self, ref: str) -> list[float]:
+        """Note a send of this pacer's, before its write, so a report that answers it is not
+        counted again. Returns its entry, whose stamp the write's end sets."""
+        now = self._clock()
+        entry = [now]
+        self._own.setdefault(ref, deque()).append(entry)
+        self._own_order.append((entry, ref))
+        self._forget(now)
+        return entry
+
+    def _claim(self, ref: str) -> list[float] | None:
+        """The oldest send of this pacer's with `ref` that no report has answered, now
+        answered, or None if there is none."""
+        waiting = self._own.get(ref)
+        if not waiting:
+            return None
+        entry = waiting.popleft()
+        if not waiting:
+            del self._own[ref]
+        return entry
+
+    def _forget(self, now: float) -> None:
+        """Forget sends and reports older than two sustained windows: a report that comes
+        later is counted as another connection's, which only makes the pacer more careful."""
+        horizon = now - 2 * self.budget.sustained_window - self.guard
+        order = self._own_order
+        while order and order[0][0][0] < horizon:
+            entry, ref = order.popleft()
+            waiting = self._own.get(ref)
+            if waiting and waiting[0] is entry:
+                waiting.popleft()
+                if not waiting:
+                    del self._own[ref]
+        seen = self._seen
+        while seen:
+            first = next(iter(seen))
+            if seen[first] >= horizon:
                 break
-            del known[first]
+            del seen[first]
 
     def _observe(self, event: Event, anchor: tuple[float, int] | None) -> None:
         """`observe`, with the session's anchor: the local time it was acknowledged and the
@@ -487,38 +549,42 @@ class Pacer:
             return
         now = self._clock()
         stamp = _exchange_stamp(message.receipt_time, anchor, now)
+        mine = None
+        if ref:
+            key = (ref, event.type, message.receipt_time)
+            if key in self._seen:
+                return  # the same report, on another connection or replayed
+            self._seen[key] = now
+            self._forget(now)
+            mine = self._claim(ref)
         if reason is not None:
             window = self._by_name[reason]
             # A reject older than its window (a replay, say) says nothing about now.
             if stamp + window.length + window.guard > now:
-                self._on_budget_reject(window, message.reason_code, now, ref or None)
+                self._on_budget_reject(window, message.reason_code, now, mine)
+        if mine is not None:
+            return  # this pacer's own message, counted when it was sent
         kind = _REQUEST_TYPES.get(request_type) if request_type is not None else None
         if kind is None or not self.count_foreign:
             return
-        ref = ref or None
-        key = None if ref is None else (ref, event.type)
-        if ref is not None and (ref in self._known or key in self._known):
-            return  # this pacer's own message, or a report already counted
         if stamp + self._sustained.length + self.guard <= now:
             return  # older than every window
-        if key is not None:
-            self._remember(key, now)
         for window in self._windows(kind):
             if window is not self._smooth and stamp + window.length + window.guard > now:
                 window.add(stamp)
 
     def _on_budget_reject(
-        self, window: _Window, reason_code: int, now: float, ref: str | None
+        self, window: _Window, reason_code: int, now: float, mine: list[float] | None
     ) -> None:
         fresh = not (window.held_by_reject and window.held_until > now)
         learned = None
         # The exchange held at least the cap in its window when the rejected message
         # arrived: counted up to that message's own stamp when it is this pacer's, and up
         # to now otherwise (later sends, still in flight, would count too).
-        sent = self._known.get(ref) if ref is not None else None
-        end, itself = (sent, 1) if sent is not None else (now, 0)
-        if end - self._watching_since >= window.length:
-            count = window.count_within(end) - itself
+        end, itself = (mine[0], 1) if mine is not None else (now, 0)
+        within = window.count_within(end)
+        if within is not None and end - self._watching_since >= window.length:
+            count = within - itself
             inferred = self._limit(count) if count > 0 else None
             if inferred is not None and (window.limit is None or inferred < window.limit):
                 window.limit = inferred
@@ -567,7 +633,16 @@ class PacedSender:
         self.sender = sender
 
     async def send(self, type_: str, payload: Message) -> None:
-        await self.pacer._send(type_, payload, self.sender.send)
+        failure: BaseException
+        try:
+            await self.pacer._send(type_, payload, self.sender.send)
+        except BaseException as error:
+            failure = error
+        else:
+            return
+        # The message may be `auth`, which holds the token: no copy stays in this frame.
+        del payload
+        raise failure
 
 
 def _exchange_stamp(receipt_time: int, anchor: tuple[float, int] | None, now: float) -> float:
@@ -631,9 +706,8 @@ def _budget_rejected(event: Event, anchor: tuple[float, int] | None) -> None:
 
 def _warn(code: str, **fields: Any) -> None:
     """Log `code`'s message at WARNING through this module's logger, with `code` on the
-    record."""
-    if _log.disabled or not _log.isEnabledFor(logging.WARNING):
-        return
+    record. Whether the logger is enabled is asked in the warning's thread too: asking can
+    wait for logging's lock."""
     _emit(_errors.render(code, **fields), code)
 
 

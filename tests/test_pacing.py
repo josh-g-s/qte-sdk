@@ -637,8 +637,8 @@ async def test_wrong_values_four_times_the_real_caps_converge_within_two_drains(
         Budget(sustained_per_minute=4800, burst_per_second=800), clock=sim.clock, sleep=sim.sleep
     )
     pacer._session_started()
-    # Each write takes 0.1 ms, so no two sends share a stamp, as on a real computer.
-    wire = Wire(sim, pacer, exchange, write_time=0.0001)
+    # Every write returns at once, so many sends share a clock reading, as on a coarse clock.
+    wire = Wire(sim, pacer, exchange)
     sender = pacer.wrap(wire)
     n = 0
     while sim.now < 300:
@@ -958,3 +958,135 @@ def test_a_pacing_limit_survives_pickling():
     assert type(error) is PacingDraining
     assert (error.type, error.limit, error.retry_after) == ("cancel", "sustained", 12.5)
     assert str(error).startswith("QTE-PACING-DRAINING: ")
+
+
+# Found in review
+
+
+async def test_a_new_held_after_its_turn_never_holds_up_a_cancel():
+    budget = Budget(sustained_per_minute=1000, burst_per_second=200, new_orders_per_minute=120)
+    sim = Sim()
+    pacer = Pacer(budget, clock=sim.clock, sleep=sim.sleep)
+    wire = Wire(sim)
+    sender = pacer.wrap(wire)
+    await blast(sender, 40, "cancel", "c")  # the burst window's first quarter is full
+    # The next new passes the new-order window, then waits for the burst window, while
+    # other connections' news fill the new-order window.
+    sim.at(0.1, lambda: [pacer.observe(accepted(f"f{n}")) for n in range(96)])
+    await asyncio.gather(send_one(sender, "new", "n"), send_one(sender, "cancel", "late"))
+    assert [ref for _, _, ref in wire.sent[-2:]] == ["n", "late"]
+    assert wire.sent[-1][0] < 1
+
+
+async def test_an_order_queued_before_a_disconnect_is_not_sent_on_the_next_session():
+    from types import SimpleNamespace
+
+    from qte_sdk.reconnect import NotConnected
+
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    old, replacement = Wire(sim), Wire(sim)
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token(), pacing=pacer)
+    rs._session, rs._up = SimpleNamespace(connection=old), True
+    pacer.observe(reject(BURST))
+
+    def down() -> None:
+        rs._session, rs._up = None, False
+
+    def up() -> None:
+        rs._session, rs._up = SimpleNamespace(connection=replacement), True
+
+    sim.at(0.25, down)
+    sim.at(0.5, up)
+    with pytest.raises(NotConnected):
+        await send_one(rs, "new", "stale")
+    assert old.sent == [] and replacement.sent == []
+
+
+def frames_hold(error: BaseException, secret: str) -> list[str]:
+    """The SDK frames in `error`'s traceback whose locals show `secret`."""
+    import traceback
+
+    found = []
+    summary = traceback.TracebackException.from_exception(error, capture_locals=True)
+    for frame_ in summary.stack:
+        if "qte_sdk" in frame_.filename and secret in repr(frame_.locals):
+            found.append(f"{frame_.name}")
+    return found
+
+
+async def test_an_unpaced_message_that_fails_leaves_no_copy_in_the_pacer_frames():
+    from qte_sdk.contract.v1.session_pb2 import Auth
+
+    token = synthetic_token()
+    session = Session(Connection("ws://127.0.0.1:9"), info(), [], Pacer(ONE_X))
+    with pytest.raises(Exception) as caught:
+        await session.send("auth", Auth(token=token))
+    assert frames_hold(caught.value, token) == []
+
+    class Failing:
+        async def send(self, type_, payload):
+            raise OSError("broken pipe")
+
+    with pytest.raises(OSError) as caught:
+        await Pacer(ONE_X).wrap(Failing()).send("auth", Auth(token=token))
+    assert frames_hold(caught.value, token) == []
+
+
+async def test_a_wrong_pacing_argument_leaves_no_token_in_the_traceback():
+    from qte_sdk.session import open_session
+
+    token = synthetic_token()
+    with pytest.raises(TypeError) as caught:
+        await open_session("ws://127.0.0.1:9", token, pacing=0.8)
+    assert frames_hold(caught.value, token) == []
+    with pytest.raises(TypeError) as caught:
+        ReconnectingSession("ws://127.0.0.1:9", token, pacing=0.8)
+    assert frames_hold(caught.value, token) == []
+
+
+async def test_a_reject_read_late_is_matched_against_the_window_that_held_its_message():
+    sim = Sim()
+    pacer = Pacer(
+        Budget(sustained_per_minute=10_000, burst_per_second=100), clock=sim.clock, sleep=sim.sleep
+    )
+    sender = pacer.wrap(Wire(sim))
+    sim.now = 1.0
+    await blast(sender, 8, prefix="a")
+    sim.now = 1.5
+    await send_one(sender, "new", "b")
+    sim.now = 1.95
+    await send_one(sender, "new", "rejected")
+    sim.now = 2.06
+    await send_one(sender, "new", "after")  # the 8 sent at 1.0 no longer count here
+    sim.now = 2.1
+    pacer.observe(reject(BURST, "rejected"))
+    # Nine were in the exchange's window ahead of it, so the cap is at most nine.
+    assert pacer.limits["burst"] == 7
+
+
+async def test_foreign_reports_that_reuse_a_request_ref_each_count():
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    pacer.observe(accepted("r1", receipt=1.0))
+    pacer.observe(accepted("r1", receipt=2.0))
+    pacer.observe(accepted("r1", receipt=2.0))  # the same report, again
+    assert len(pacer._sustained.stamps) == 2
+
+
+def test_a_warning_never_asks_the_logger_on_the_event_loop_thread(monkeypatch):
+    monkeypatch.setattr(pacing, "_budget_warned_at", None)
+    asked: list[str] = []
+    logger = logging.getLogger("qte_sdk.pacing")
+    real = logger.isEnabledFor
+
+    def is_enabled_for(level: int) -> bool:
+        asked.append(threading.current_thread().name)
+        return real(level)
+
+    monkeypatch.setattr(logger, "isEnabledFor", is_enabled_for)
+    before = set(threading.enumerate())
+    pacing._budget_rejected(reject(BURST), None)
+    for thread in set(threading.enumerate()) - before:
+        thread.join(5)
+    assert asked and set(asked) == {"qte-sdk pacing warning"}

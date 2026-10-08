@@ -776,7 +776,7 @@ class Session:
         `qte_sdk.pacing`)."""
         failure: BaseException
         try:
-            if self._pacer is None:
+            if self._pacer is None or type_ not in _pacing.PACED_TYPES:
                 await self.connection.send(type_, payload)
             else:
                 await self._pacer._send(type_, payload, self.connection.send)
@@ -1011,13 +1011,13 @@ async def open_session(
     logs a WARNING when a newer release is out and never delays or fails the session; set
     `QTE_UPDATE_CHECK=0` to turn it off (see `qte_sdk.update`).
     """
-    _pacing._checked(pacing)
     # A mistake can put the token in the address: held so that no repr shows it, and passed
     # on without this frame keeping it as text, whatever is raised here.
     address = None if url is None else _Secret(url)
     del url
     secret = _Secret(resolve_token(token))
     del token
+    _pacing._checked(pacing)
     return await _open_session(
         resolve_url(None if address is None else address.value),
         secret,

@@ -139,6 +139,7 @@ error this module delivers or raises that would repeat the token has it replaced
 """
 
 import asyncio
+import functools
 import random
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -352,9 +353,9 @@ class ReconnectingSession:
         pacing: Pacer | None = None,
         **connection_options: Any,
     ) -> None:
-        self._pacing = _pacing._checked(pacing)
         self._secret = _Secret(resolve_token(token))
         del token
+        self._pacing = _pacing._checked(pacing)
         self.url = resolve_url(url)
         self.resting = resting
         self.backoff = backoff
@@ -491,7 +492,9 @@ class ReconnectingSession:
             del type_
             raise failure
         if self._pacing is not None and type_ in _pacing.PACED_TYPES:
-            await self._pacing._send(type_, payload, self._send_now)
+            # Sent only on this session: an order queued before a disconnect is never sent
+            # on the next one, which knows nothing of what it was based on.
+            await self._pacing._send(type_, payload, functools.partial(self._send_on, session))
             return
         if isinstance(payload, Subscribe):
             self._instruments.update(dict.fromkeys(payload.instruments))
@@ -509,10 +512,10 @@ class ReconnectingSession:
         del payload
         raise failure
 
-    async def _send_now(self, type_: str, payload: Message) -> None:
-        """Send a paced order on the session up now, once the pacer has let it go."""
-        session = self._session
-        if session is None or not self._up:
+    async def _send_on(self, session: Session, type_: str, payload: Message) -> None:
+        """Send a paced order, once the pacer has let it go, on `session` if it is still the
+        one up."""
+        if self._session is not session or not self._up:
             raise self._not_connected(type_)
         await session.connection.send(type_, payload)
 
