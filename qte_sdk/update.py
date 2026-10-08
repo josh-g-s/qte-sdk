@@ -58,7 +58,9 @@ in the background, at most once a day on each computer and once in each program.
 in a daemon thread, so it never delays, holds up the end of, or fails a session, and it
 never raises or prints. When the installed SDK is behind a release, it logs that one line
 at WARNING through the `qte_sdk.update` logger, with the code on the record as `code`, and
-it is silent when the SDK is current, when it cannot tell, and when the network fails. It
+it is silent when the SDK is current, when it cannot tell, and when the network fails. The
+warning is logged on the session's event loop, not in the check's thread, so that thread
+never writes to stderr; a warning ready after the loop has closed is dropped. It
 sends the same requests as the command, and nothing more. The day is counted from a
 file holding the time of the last check, written just before the check starts, so a failed
 check is not retried until the next day: `qte-sdk/update-check` in your cache folder
@@ -90,6 +92,7 @@ in a new release.
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import math
@@ -881,15 +884,31 @@ def check_in_background() -> threading.Thread | None:
     `CHECK_INTERVAL` on this computer, and logs `UpdateCheck.message` at WARNING through
     this module's logger only when the installed SDK is behind a release. Returns the
     thread, or None when none was started. Never raises, and does nothing else in the
-    calling thread, so it never delays the caller."""
+    calling thread, so it never delays the caller.
+
+    Only the network and the cache folder are used in the thread. The warning is logged on
+    the event loop running when this is called: `open_session` and `ReconnectingSession`
+    always call it inside one, so the warning is logged on the loop's thread and the
+    check's own thread never takes a logging handler's lock or writes to stderr. Were it
+    to, a full stderr pipe would block it while it held that lock, and the program would
+    hang at exit, waiting for the lock. Called outside a running loop, the thread logs the
+    warning itself. A warning ready after the loop has closed is dropped: the program is
+    ending, and the next day's check says it again."""
     global _automatic_done
     try:
         with _automatic_lock:
             if _automatic_done or not _automatic_wanted():
                 return None
             _automatic_done = True
+        try:
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
         thread = threading.Thread(
-            target=_check_and_log, name="qte-sdk daily update check", daemon=True
+            target=_check_and_log,
+            args=(loop,),
+            name="qte-sdk daily update check",
+            daemon=True,
         )
         thread.start()
         return thread
@@ -907,17 +926,35 @@ def _automatic_wanted() -> bool:
     return os.environ.get(UPDATE_CHECK_ENV_VAR, "").strip().lower() not in _OFF
 
 
-def _check_and_log() -> None:
-    """The automatic check, in its own thread: silent unless the SDK is behind a release."""
+def _check_and_log(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """The automatic check, in its own thread: silent unless the SDK is behind a release.
+    The warning is logged on `loop` when one is given (see `check_in_background`)."""
     try:
         if not _claim_the_day():
             return
         result = check_for_update()
-        if result.status is Status.BEHIND:
-            logger.warning("%s", result.message, extra={"code": UPDATE_AVAILABLE})
+        if result.status is not Status.BEHIND:
+            return
+        if loop is None:
+            _emit(result.message)
+            return
+        try:
+            loop.call_soon_threadsafe(_emit, result.message)
+        except RuntimeError:
+            # The loop has closed, so the program is ending: the warning is dropped.
+            return
     except BaseException:
         # Never into the program: a thread's uncaught error would be printed.
         return
+
+
+def _emit(message: str) -> None:
+    """Log the line that says the SDK is behind a release. Never raises, so it never
+    reaches the event loop's own error handling."""
+    try:
+        logger.warning("%s", message, extra={"code": UPDATE_AVAILABLE})
+    except Exception:
+        pass
 
 
 def _claim_the_day() -> bool:
@@ -936,7 +973,9 @@ def _claim_the_day() -> bool:
     except FileExistsError:
         # Another program is deciding. A lock left by one that stopped part way is removed
         # once it is old, for the next program, or dated in the future, as one left before
-        # the clock was set back is.
+        # the clock was set back is. Two programs can both find it old, and the second can
+        # then remove a fresh lock a third has just taken. That race is accepted: its only
+        # effect is one extra check of GitHub that day.
         try:
             if abs(time.time() - lock.stat().st_mtime) > _STALE_LOCK:
                 lock.unlink()

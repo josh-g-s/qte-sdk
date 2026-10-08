@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -21,6 +22,7 @@ from fake_exchange import (
     silent_server,
     wait_until,
 )
+from test_update import MAIN, Repository, ThreadRecorder, refs_with
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
@@ -887,3 +889,140 @@ async def test_the_update_check_is_off_in_the_tests(monkeypatch: pytest.MonkeyPa
         async with await open_session(url, synthetic_token()):
             pass
     assert started == [None]
+
+
+def behind_a_newer_release(monkeypatch: pytest.MonkeyPatch) -> Repository:
+    """Turn the update check on, as outside the tests, for a git install of the repository
+    (whatever installed the SDK under test) that GitHub answers at once is behind a release."""
+    monkeypatch.delenv(update.UPDATE_CHECK_ENV_VAR, raising=False)
+    monkeypatch.setattr(update, "_installed", lambda version: update._Install("1" * 40))
+    repository = Repository(refs_with(("v999.0.0", MAIN)))
+    monkeypatch.setattr(update, "_open", repository)
+    return repository
+
+
+async def test_the_update_checks_warning_is_logged_on_the_sessions_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository = behind_a_newer_release(monkeypatch)
+    started: list[threading.Thread | None] = []
+    real_start = update.check_in_background
+    monkeypatch.setattr(
+        update, "check_in_background", lambda: started.append(real_start()) or started[-1]
+    )
+    emitted = ThreadRecorder()
+    update.logger.addHandler(emitted)
+    try:
+        server = Server(ack())
+        async with serve_local(server) as url:
+            async with await open_session(url, synthetic_token()):
+                pass
+        [thread] = started
+        assert thread is not None
+        # The warning was handed to the loop before the thread ended, so it is logged first.
+        assert await asyncio.to_thread(thread.join, 10) is None
+        assert not thread.is_alive()
+    finally:
+        update.logger.removeHandler(emitted)
+    assert len(repository.requests) == 1
+    [(record, on)] = emitted.records
+    assert record.levelno == logging.WARNING
+    assert record.code == update.UPDATE_AVAILABLE
+    assert record.getMessage().startswith("QTE-UPDATE-AVAILABLE: qte-sdk ")
+    # Logged on the loop's thread, never by the check's own.
+    assert on is threading.current_thread()
+    assert on is not thread
+
+
+TESTS = Path(__file__).resolve().parent
+NO_NETWORK = TESTS / "no_network"
+# A program that opens a session, with the update check on, finds the SDK behind a release,
+# closes the session once the check has ended and exits. With `blocking`, a write to stderr
+# from any thread but the main one never returns, as a write to a full pipe that nothing
+# reads never does; the main thread's writes go through.
+STDERR_CHILD = """
+import asyncio
+import os
+import sys
+import threading
+from pathlib import Path
+
+
+class Blocked:
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        if threading.current_thread() is not threading.main_thread():
+            threading.Event().wait()
+        return self._stream.write(text)
+
+    def flush(self):
+        if threading.current_thread() is not threading.main_thread():
+            threading.Event().wait()
+        return self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+if sys.argv[1] == "blocking":
+    sys.stderr = Blocked(sys.stderr)
+# tests/no_network/sitecustomize.py turned the check off; it is on outside the tests.
+os.environ["QTE_UPDATE_CHECK"] = "1"
+
+from fake_exchange import serve_local
+from test_session import Server, ack, synthetic_token
+from test_update import MAIN, Repository, refs_with
+
+from qte_sdk import update
+from qte_sdk.session import open_session
+
+update._cache_dir = lambda: Path(sys.argv[2])
+update._installed = lambda version: update._Install("1" * 40)
+update._open = Repository(refs_with(("v999.0.0", MAIN)))
+started = []
+real_start = update.check_in_background
+update.check_in_background = lambda: started.append(real_start()) or started[-1]
+
+
+async def main():
+    async with serve_local(Server(ack())) as url:
+        async with await open_session(url, synthetic_token()):
+            pass
+    [thread] = started
+    await asyncio.to_thread(thread.join, 10)
+
+
+asyncio.run(main())
+print("exiting", flush=True)
+"""
+
+
+@pytest.mark.parametrize("stderr", ["blocking", "open"])
+def test_a_program_whose_stderr_blocks_exits_after_the_update_check_warns(
+    tmp_path: Path, stderr: str
+):
+    # The warning is logged on the session's loop, in the main thread, so the check's thread
+    # never holds a logging handler's lock in a write that blocks, and the exit, which waits
+    # for that lock, is never held up. The warning still reaches stderr.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(NO_NETWORK), str(TESTS), env.get("PYTHONPATH")])
+    )
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", STDERR_CHILD, stderr, str(tmp_path / "cache")],
+            env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as stuck:
+        # Its stdout shows how far it got: "exiting" means it hung at exit.
+        pytest.fail(f"the program did not exit within 30 s; its stdout: {stuck.stdout!r}")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == "exiting\n"
+    assert "QTE-UPDATE-AVAILABLE: qte-sdk " in done.stderr
+    assert (tmp_path / "cache" / "update-check").exists()

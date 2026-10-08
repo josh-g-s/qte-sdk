@@ -2,6 +2,7 @@
 list of references, and what it says. No test here uses the network: every read of the
 repository is answered by a canned list, and any other is an error."""
 
+import asyncio
 import email.message
 import http.server
 import json
@@ -1972,6 +1973,84 @@ def test_the_automatic_check_never_raises_or_prints(
 
     monkeypatch.setattr(update, "check_for_update", broken)
     run_in_background()
+    assert raised == []
+    assert capsys.readouterr() == ("", "")
+
+
+class ThreadRecorder(logging.Handler):
+    """Records each record it handles with the thread that logged it."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.records: list[tuple[logging.LogRecord, threading.Thread]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append((record, threading.current_thread()))
+
+
+def test_the_automatic_check_started_in_a_loop_logs_its_warning_on_that_loop(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path, caplog: pytest.LogCaptureFixture
+):
+    behind_a_release(monkeypatch)
+    caplog.set_level(logging.DEBUG)
+    emitted = ThreadRecorder()
+    update.logger.addHandler(emitted)
+
+    async def start_and_wait() -> threading.Thread:
+        thread = update.check_in_background()
+        assert thread is not None
+        # The warning was handed to the loop before the thread ended, so it is logged first.
+        await asyncio.to_thread(thread.join, 30)
+        return thread
+
+    try:
+        thread = asyncio.run(start_and_wait())
+    finally:
+        update.logger.removeHandler(emitted)
+    [(record, on)] = emitted.records
+    assert record.code == "QTE-UPDATE-AVAILABLE"
+    assert on is threading.current_thread()
+    assert on is not thread
+
+
+def test_a_warning_ready_after_the_loop_has_closed_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+    automatic: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+):
+    repository = behind_a_release(monkeypatch)
+    caplog.set_level(logging.DEBUG)
+    raised: list[object] = []
+    monkeypatch.setattr(threading, "excepthook", raised.append)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def held(request: Any, timeout: float) -> Any:
+        entered.set()
+        release.wait(30)
+        return repository(request, timeout)
+
+    monkeypatch.setattr(update, "_open", held)
+
+    async def start() -> threading.Thread | None:
+        return update.check_in_background()
+
+    loop = asyncio.new_event_loop()
+    try:
+        thread = loop.run_until_complete(start())
+    finally:
+        loop.close()
+    assert thread is not None
+    try:
+        assert entered.wait(10)
+    finally:
+        release.set()
+    thread.join(30)
+    assert not thread.is_alive()
+    # The check ran and found the SDK behind, and the warning went nowhere, without an error.
+    assert len(repository.requests) == 1
+    assert update_records(caplog) == []
     assert raised == []
     assert capsys.readouterr() == ("", "")
 

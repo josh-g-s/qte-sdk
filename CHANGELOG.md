@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.19
+**Version:** 0.20
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -10,7 +10,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 - `python -m qte_sdk.update`, `check_for_update()` and the smoke test say when an update is a recommended one, and why. [`releases.json`](releases.json), at the root of the repository, lists each release with whether it is recommended, a one-sentence reason and the platforms it is recommended on; 1.1.1 is recommended on Windows. The check reads it from `main` only when the installed SDK is behind a release, with the same timeout, at most 64 KiB and no redirect, and still takes the latest release from the release tags, so when the file cannot be read the check says what it did before. `UpdateCheck` gains `recommended`, `why` and `code`.
 - Behind a release, the check's message is now one line with the code `QTE-UPDATE-AVAILABLE`, such as `QTE-UPDATE-AVAILABLE: qte-sdk 1.1.0 is behind 1.1.1, a recommended update on Windows: <why>. Update with <command>.` The exit codes are unchanged.
-- `open_session`, and a `ReconnectingSession` on its first connect, run the update check in the background, at most once a day on a computer (the time of the last check is kept in `qte-sdk/update-check` in the user's cache folder) and once in a program. It never delays or fails a session and never prints: when the SDK is behind a release, it logs the `QTE-UPDATE-AVAILABLE` line at WARNING through the `qte_sdk.update` logger, and otherwise says nothing. It sends nothing beyond the `qte-sdk/<version>` user agent, as the command does. Set `QTE_UPDATE_CHECK=0` to turn it off. Replays and the history service never start it.
+- `open_session`, and a `ReconnectingSession` on its first connect, run the update check in the background, at most once a day on a computer (the time of the last check is kept in `qte-sdk/update-check` in the user's cache folder) and once in a program. It never delays or fails a session and never prints: when the SDK is behind a release, it logs the `QTE-UPDATE-AVAILABLE` line at WARNING through the `qte_sdk.update` logger, and otherwise says nothing. The warning is logged on the session's event-loop thread, so the check's own thread never writes to stderr, and a full stderr pipe cannot hold up the program's exit; a warning ready after the loop has closed is dropped. It sends nothing beyond the `qte-sdk/<version>` user agent, as the command does. Set `QTE_UPDATE_CHECK=0` to turn it off. Replays and the history service never start it.
 - CI's Windows job checks the generated contract code's line endings with `scripts/check_contract_eol.py`, which fails if git lists none of it, misses a generated file or lists one too many, rather than passing on an empty listing. CI only, no change to the SDK itself.
 - CI's Windows job runs the reconnect, resume, calendar, instruments, tickets, new message types and examples tests too: the tests' fake exchange now delivers every frame sent before it drops a connection, on Windows as elsewhere. Tests and CI only, no change to the SDK itself.
 
