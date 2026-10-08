@@ -850,3 +850,25 @@ def test_a_token_shrunk_by_flattening_does_not_count_in_its_short_form():
     secret = _Secret("\x01e\x02")  # malformed: flattened, it would be the letter e
     assert not _holds_token("/home/student/algo/.env", secret)
     assert _holds_token("a \x01e\x02 b", secret)
+
+
+def test_check_interrupted_while_printing_keeps_the_token_out_of_its_locals(monkeypatch):
+    if os.name == "nt":
+        pytest.skip("Windows allows no control character in a file name")
+    token = synthetic_token() + "\t" + synthetic_token()
+    folder = Path.cwd() / token
+    folder.mkdir()
+    monkeypatch.chdir(folder)
+    (folder / ".git").mkdir()
+    monkeypatch.setattr(dotenv, "is_tracked_by_git", lambda path: False)
+    monkeypatch.setattr(dotenv, "is_ignored_by_git", lambda path: False)
+    monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    private_dotenv(f"QTE_URL={URL}\n")
+
+    def closed(*args: object, **kwargs: object) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr("builtins.print", closed)
+    with pytest.raises(BrokenPipeError) as caught:
+        token_command.main(["check"])
+    assert_no_form_of(token, shown(caught.value))

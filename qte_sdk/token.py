@@ -696,27 +696,34 @@ def _check_afresh() -> int:
         def withhold(text: str) -> bool:
             return secret is not None and _holds_token(text, secret)
 
+        def redacted(text: str) -> str:
+            return text if secret is None else _redact(text, secret)
+
+        def say(line: str) -> None:
+            # Redacted as soon as it is written, so no local holds a copy that is not.
+            lines.append(redacted(line))
+
         unchecked = []
         if problem is not None:
             findings.append(problem.code)
-            lines.append(f"token:   none usable. {_missing_token(problem)}")
+            say(f"token:   none usable. {_missing_token(problem)}")
         else:
             assert token_from is not None
             where = _describe(token_from, withhold)
             note, not_read = _access_note(token_from)
-            lines.append(f"token:   {where}{note}")
+            say(f"token:   {where}{note}")
             if not_read:
                 unchecked.append((_errors.TOKEN_UNCHECKED, where))
         try:
             source, url = url_source()
         except MissingURL as error:
             findings.append(error.code)
-            lines.append(f"address: none. {error}")
+            say(f"address: none. {error}")
         else:
             # The address itself is not shown: a mistake could have put the token there.
             where = _describe(source, withhold)
             if url.startswith(("ws://", "wss://")):
-                lines.append(f"address: set, from {where}")
+                say(f"address: set, from {where}")
             else:
                 findings.append(_errors.ADDRESS_INVALID)
                 invalid = render(
@@ -725,31 +732,31 @@ def _check_afresh() -> int:
                     source=where,
                     problem="does not start with ws:// or wss://",
                 )
-                lines.append(f"address: set, from {where}; {invalid}")
+                say(f"address: set, from {where}; {invalid}")
             if source == DOTENV_NAME and token_from != DOTENV_NAME and _dotenv_list_unread():
                 unchecked.append((_errors.ADDRESS_UNCHECKED, where))
     shown: set[str] = set()
     for warning in caught:
         if issubclass(warning.category, (DotenvNotIgnored, FileShared)):
             findings.append(getattr(warning.message, "code", None) or _errors.TOKEN_SHARED)
-            message = str(warning.message)
+            # The SDK's warnings name paths, and were written without the token.
+            message = redacted(str(warning.message))
             if message not in shown:
                 shown.add(message)
-                lines.append(f"warning: {message}")
+                say(f"warning: {message}")
     for code, where in unchecked:
         findings.append(code)
-        lines.append(f"warning: {render(code, withhold=withhold, path=where)}")
+        say(f"warning: {render(code, withhold=withhold, path=where)}")
     if not any(issubclass(w.category, DotenvNotIgnored) for w in caught) and _git_unknown():
         findings.append(_errors.DOTENV_GIT_UNKNOWN)
         path = dotenv_path()
         git_unknown = render(
             _errors.DOTENV_GIT_UNKNOWN, withhold=withhold, path=path, name=path.name
         )
-        lines.append(f"warning: {git_unknown}")
+        say(f"warning: {git_unknown}")
+    secret = None  # let go of the token; `withhold` and `redacted` read this name too
     for line in lines:
-        # A second guard: the SDK's warnings name paths, and were written without the token.
-        print(line if secret is None else _redact(line, secret))
-    secret = None  # let go of the token; `withhold` reads this name too
+        print(line)
     if any(code not in _COULD_NOT_TELL for code in findings):
         return 1
     return 2 if findings else 0

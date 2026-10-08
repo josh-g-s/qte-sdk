@@ -1142,7 +1142,8 @@ def _token_forms(secret: _Secret) -> tuple[_Secret, ...]:
     raise failure
 
 
-# The shortest one-line or flattened form of the token that counts as a form of it.
+# The fewest characters other than spaces that a one-line or flattened form of the token
+# must keep to count as a form of it.
 _MIN_SHOWN_FORM = 8
 
 
@@ -1164,7 +1165,7 @@ def _make_token_forms(secret: _Secret) -> tuple[_Secret, ...]:
     # when what is left is long enough to be told from ordinary text, since either can
     # shrink a malformed token to a few characters.
     for shown in (one_line(secret.value), flatten(secret.value)):
-        if len(shown.strip()) >= _MIN_SHOWN_FORM:
+        if len("".join(shown.split())) >= _MIN_SHOWN_FORM:
             texts.add(shown)
     texts.discard("")
     return tuple(map(_Secret, sorted(texts, key=len, reverse=True)))
