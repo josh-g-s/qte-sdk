@@ -48,7 +48,7 @@ that: whether the SDK is behind, and the latest release, still come from the rel
 so an entry for a release not yet tagged is ignored, and when the file cannot be read, or
 does not hold a list of entries in that form, the check says what it said before. An entry
 that is not in that form is ignored, and keys it does not know are too. The reason is shown
-as plain text, on one line, without control or formatting characters, and at most 300
+as plain text, on one line, without control or formatting characters, and at most 200
 characters long.
 
 The automatic check
@@ -65,13 +65,15 @@ stderr is a pipe or terminal that cannot take the whole line at that moment (a f
 that nothing reads, say), or the line is over 512 bytes, it is not written there, and the
 next day's check says it again. On Windows, a pipe that cannot take the line, by the room
 it reports, is also skipped, not waited on; a pipe whose reader is already waiting for
-output can report none, so there the line may be skipped although it would have fit.
-Handlers the program configures (a log file, pytest's caplog, a
-JSON formatter) still receive it, with its `code`; a handler the SDK cannot see into, such
-as a custom emit or a queue listener, writes as it always has. It sends the same requests
-as the command, and nothing more. The day is counted from a file holding
-the time of the last check, written just before the check starts, so a failed check is not
-retried until the next day: `qte-sdk/update-check` in your cache folder
+output can report none, so there the line may be skipped although it would have fit. A
+Windows console that is paused, or in which text is being selected, can hold the line
+until it resumes, as it holds the program's own output. Handlers the program configures
+(a log file, pytest's caplog, a JSON formatter) still receive it, with its `code`; a
+handler the SDK cannot see into, such as a custom emit or a queue listener, writes as it
+always has. It sends the same requests as the command, and nothing more. The day is
+counted from a file holding the time of the last check, written just before the check
+starts, so a failed check is not retried until the next day: `qte-sdk/update-check` in
+your cache folder
 (`%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` or
 `~/.cache` elsewhere). While a program reads and writes it, it holds
 `update-check.lock` beside it, so two programs started together do not both check. When
@@ -100,6 +102,7 @@ in a new release.
 """
 
 import argparse
+import io
 import json
 import logging
 import math
@@ -165,7 +168,7 @@ _CHUNK = 1 << 16
 # Far more than releases.json needs, and a bound on what is read.
 _MAX_RELEASES_SIZE = 64 * 1024
 # The longest reason shown, in characters.
-_MAX_WHY = 300
+_MAX_WHY = 200
 # A `sys.platform` name in releases.json, such as "win32", "darwin" or "linux".
 _PLATFORM = re.compile(r"[a-z][a-z0-9_]{0,31}")
 _PLATFORM_NAMES = {"win32": "Windows", "darwin": "macOS", "linux": "Linux"}
@@ -900,11 +903,13 @@ def check_in_background() -> threading.Thread | None:
     stream handlers it never holds up the program's exit either: a stream handler on a
     pipe, socket or terminal gets the line in one write holding no lock, and only when the
     stream can take it whole at once (on Windows, when the pipe reports the room for it,
-    which a pipe whose reader is already waiting may not);
-    otherwise, and for a line over 512 bytes, the line is dropped there, and the next
-    day's check says it again. Every other handler gets the record, with its `code`, as
-    logging would give it; one the SDK cannot see into, such as a custom emit or a queue
-    listener, writes as it always has. See `_log_without_waiting`."""
+    which a pipe whose reader is already waiting may not); otherwise, and for a line over
+    512 bytes, the line is dropped there, and the next day's check says it again. Every
+    other handler, a Windows console's included, gets the record, with its `code`, as
+    logging would give it; a console that is paused, or in which text is being selected,
+    can hold it until it resumes, as it holds the program's own output, and a handler
+    the SDK cannot see into, such as a custom emit or a queue listener, writes as it
+    always has. See `_log_without_waiting`."""
     global _automatic_done
     try:
         with _automatic_lock:
@@ -962,10 +967,11 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
     file descriptor blocks.
 
     Another writer can still fill the pipe between the check and the write. The write then
-    waits in this thread, holding no Python lock; on Windows, the C runtime's lock on that
-    descriptor is held meanwhile, so the program's own later writes to it, and a flush of
-    what it left in `sys.stderr` at exit, wait too, as they would for the full pipe
-    anyway. A program that writes nothing more to stderr exits as usual."""
+    waits in this thread, holding no Python lock. On Windows, the C runtime's lock on that
+    descriptor is held meanwhile, so any later write of the program's own to it, even a
+    short one the pipe could have taken, and a flush of what it left in `sys.stderr` at
+    exit, wait behind the line until the pipe is read. A program that writes nothing more
+    to stderr exits as usual."""
     if logger.disabled or not logger.isEnabledFor(level):
         return
     try:
@@ -994,57 +1000,98 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
     for handler in handlers:
         if record.levelno < handler.level:
             continue
-        if _no_stream(handler):
-            continue
-        fd = _fd_that_may_wait(handler)
-        if fd is None:
+        route, fd = _route(handler)
+        if route == "handle":
             handler.handle(record)
-        else:
-            direct.append((handler, fd))
+        elif route == "direct" and fd is not None:
+            direct.append((handler, fd))  # type: ignore[arg-type]  # a StreamHandler
     for handler, fd in direct:
         _write_or_drop(handler, fd, record)
 
 
-def _no_stream(handler: logging.Handler) -> bool:
-    """Whether `handler` is a stream handler with nowhere to write: no stderr at all (as
-    under pythonw), or a closed stream, for which logging would only report the failed
-    write, on stderr, holding the handler's lock. A `FileHandler` with no stream yet
-    (`delay=True`) opens its file when it first writes, so it has somewhere to write."""
+def _route(handler: logging.Handler) -> tuple[str, int | None]:
+    """How the warning reaches `handler`: ("handle", None) through `handler.handle`, as
+    logging would; ("direct", fd) in one `os.write` on `fd`, for a stream that writes
+    straight to a pipe, socket or terminal; or ("skip", None), for a stream handler that
+    has nowhere to write, or could only write by waiting."""
     if not isinstance(handler, logging.StreamHandler):
-        return False
-    if handler.stream is None:
-        return not isinstance(handler, logging.FileHandler)
+        return "handle", None  # caplog, a queue, JSON or custom handlers
+    stream = handler.stream
+    if stream is None:
+        if not isinstance(handler, logging.FileHandler):
+            return "skip", None  # no stderr at all, as under pythonw
+        # A file handler with delay=True opens its file when it first writes. Opening a
+        # FIFO, socket or terminal there (/dev/stderr, say) could wait, so it is skipped,
+        # with nothing opened; a file, or one not made yet, is opened as usual.
+        return ("skip", None) if _path_may_wait(handler.baseFilename) else ("handle", None)
     try:
-        return handler.stream.closed is True
-    except Exception:  # a stream that cannot even say so (a detached wrapper): unusable
-        return True
-
-
-def _fd_that_may_wait(handler: logging.Handler) -> int | None:
-    """The file descriptor of `handler`'s stream when a write to it can wait for a reader:
-    a pipe, a socket or a terminal. None for any other handler, and for a stream that is a
-    file, a device such as /dev/null, a Windows console (whose writes do not wait), or has
-    no usable descriptor (StringIO, closed): `handle` writes those as logging would."""
-    if not isinstance(handler, logging.StreamHandler):
-        return None  # caplog, a file log, a queue, JSON or custom handlers
+        closed = getattr(stream, "closed", False)
+    except Exception:
+        return "skip", None  # a stream that cannot even say (a detached wrapper)
+    if closed is True:
+        # Logging would only report the failed write, on stderr, under the handler's lock.
+        return "skip", None
     try:
-        fd = handler.stream.fileno()
+        if not _writes_to_its_fd(stream):
+            return "handle", None
+        fd = stream.fileno()
         mode = os.fstat(fd).st_mode
     except Exception:
-        return None
+        return "handle", None
     if sys.platform == "win32":
-        # os.fstat reports a pipe as a FIFO; a console (and NUL) is a character device.
-        return fd if stat.S_ISFIFO(mode) else None
-    if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
-        return fd
-    if stat.S_ISCHR(mode) and os.isatty(fd):
-        return fd
-    return None
+        # os.fstat reports a pipe as a FIFO. A console (and NUL) is a character device,
+        # written through handle(): its writes wait only while it is paused, or text is
+        # being selected in it, as the program's own output does.
+        return ("direct", fd) if stat.S_ISFIFO(mode) else ("handle", None)
+    if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or (stat.S_ISCHR(mode) and os.isatty(fd)):
+        return "direct", fd
+    return "handle", None  # a file, or a device such as /dev/null
+
+
+def _writes_to_its_fd(stream: Any) -> bool:
+    """Whether everything written to `stream` goes to `stream.fileno()`: true only for the
+    text stream `open()` and Python's own stdout and stderr are, a TextIOWrapper on a
+    BufferedWriter (or, under `python -u`, straight) on a FileIO, checked by exact type.
+    Not for any other stream, such as Jupyter's, whose descriptor is the kernel's own
+    stderr while its writes go to the notebook."""
+    if type(stream) is not io.TextIOWrapper:
+        return False
+    buffer = stream.buffer
+    if type(buffer) is io.BufferedWriter:
+        buffer = buffer.raw
+    return type(buffer) is io.FileIO
+
+
+def _path_may_wait(path: str) -> bool:
+    """Whether opening and writing the file at `path` could wait for a reader: a FIFO, a
+    socket or a terminal (any character device but the null device), on POSIX."""
+    if sys.platform == "win32":
+        return False
+    try:
+        found = os.stat(path)
+    except OSError:
+        return False  # not made yet: opening it makes a file
+    if stat.S_ISFIFO(found.st_mode) or stat.S_ISSOCK(found.st_mode):
+        return True
+    if stat.S_ISCHR(found.st_mode):
+        try:
+            return not os.path.samestat(found, os.stat(os.devnull))
+        except OSError:
+            return True
+    return False
 
 
 def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogRecord) -> None:
     """Write `record` as `handler` would, in one `os.write` on `fd` holding no lock, when
-    the stream can take the whole line now; otherwise drop it. Never truncates."""
+    the stream can take the whole line now; otherwise drop it. Never truncates, and never
+    writes to a descriptor the program made non-blocking, where a write could stop part
+    way. A short write is not retried, since a retry could wait; on a blocking pipe a line
+    of at most 512 bytes is written whole, and only a terminal or socket write cut short
+    by a signal could leave part of it.
+
+    The line goes straight to the descriptor, so on a stream the program buffers (stdout
+    on a pipe, say) it can appear before output the program wrote earlier but has not yet
+    flushed."""
     try:
         passed = handler.filter(record)
         if not passed:
@@ -1056,7 +1103,11 @@ def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogR
             text = text.replace("\n", "\r\n")  # as a text stream writes it there
         encoding = getattr(handler.stream, "encoding", None) or "utf-8"
         data = text.encode(encoding, "backslashreplace")
-        if len(data) <= _MAX_DIRECT_LINE and _can_take(fd, len(data)):
+        if len(data) > _MAX_DIRECT_LINE:
+            return
+        if sys.platform != "win32" and not os.get_blocking(fd):
+            return
+        if _can_take(fd, len(data)):
             os.write(fd, data)
     except Exception:
         return

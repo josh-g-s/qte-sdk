@@ -1112,8 +1112,8 @@ elif scenario == "nearly":
 else:
     if scenario == "room" and sys.platform == "win32":
         report["room"] = [update._pipe_write_quota(2)]
-    # None when the last resort's stream is written through its handle(), as a console is.
-    report["direct_fd"] = update._fd_that_may_wait(logging.lastResort)
+    # How the last resort's stream is written: "handle" for a console.
+    report["route"] = update._route(logging.lastResort)[0]
     update.check_in_background()
     if scenario in ("exit", "race"):
         fill_stderr()
@@ -1388,7 +1388,7 @@ def test_on_windows_a_console_gets_the_warning_through_its_handler(tmp_path: Pat
     assert result.returncode == 0
     said = json.loads(report.read_text(encoding="utf-8"))
     assert said["stderr_is_a_terminal"] is True
-    assert said["direct_fd"] is None
+    assert said["route"] == "handle"
     assert said["check_done"] is True
     # Through the last resort's handle(), which ran its filters and wrote to the console.
     assert said["codes"] == [update.UPDATE_AVAILABLE]

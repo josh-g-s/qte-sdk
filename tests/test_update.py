@@ -2119,6 +2119,89 @@ def test_a_file_handler_that_opens_its_file_when_it_first_writes_gets_the_line(
     assert (tmp_path / "program.log").read_text(encoding="utf-8") == "behind\n"
 
 
+class NotebookStream(io.TextIOBase):
+    """Shaped like Jupyter's OutStream: its descriptor is a pipe (the kernel's own stderr),
+    while what is written to it goes elsewhere (the notebook)."""
+
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+        self.written: list[str] = []
+
+    def fileno(self) -> int:
+        return self.fd
+
+    def write(self, text: str) -> int:
+        self.written.append(text)
+        return len(text)
+
+
+def test_a_stream_whose_descriptor_is_not_where_it_writes_gets_the_line_through_write(
+    pipe: Any, lone: logging.Logger
+):
+    read, stream = pipe
+    notebook = NotebookStream(stream.fileno())
+    lone.addHandler(logging.StreamHandler(notebook))
+    warn_in_a_thread("behind")
+    assert notebook.written == ["behind\n"]
+    assert read_all(read) == b""
+
+
+class Tee:
+    """A stream of a student's own, with no `closed` attribute."""
+
+    def __init__(self) -> None:
+        self.written: list[str] = []
+
+    def write(self, text: str) -> None:
+        self.written.append(text)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_a_stream_with_no_closed_attribute_gets_the_line(lone: logging.Logger):
+    tee = Tee()
+    lone.addHandler(logging.StreamHandler(tee))
+    warn("behind")
+    assert tee.written == ["behind\n"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: a FIFO in the file system")
+def test_a_file_handler_not_yet_opened_on_a_fifo_is_skipped_without_opening_it(
+    tmp_path: Path, lone: logging.Logger
+):
+    # Opening a FIFO that nothing reads waits for a reader; /dev/stderr on a pipe is one.
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    handler = logging.FileHandler(fifo, delay=True)
+    got = Records()
+    lone.addHandler(handler)
+    lone.addHandler(got)
+    try:
+        warn_in_a_thread("behind")
+    finally:
+        # Had it opened the FIFO, a reader lets that open, and logging's at exit, end.
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        time.sleep(0.2)
+        handler.close()
+        os.close(reader)
+    assert handler.stream is None
+    assert [r.getMessage() for r in got.records] == ["behind"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: os.set_blocking on a pipe")
+def test_a_pipe_the_program_made_non_blocking_is_not_written(pipe: Any, lone: logging.Logger):
+    read, stream = pipe
+    lone.addHandler(logging.StreamHandler(stream))
+    os.set_blocking(stream.fileno(), False)
+    try:
+        warn_in_a_thread("behind")
+        assert not os.get_blocking(stream.fileno())
+    finally:
+        os.set_blocking(stream.fileno(), True)
+    assert read_all(read) == b""
+
+
 def test_a_stream_handler_on_a_string_gets_its_formatted_line(lone: logging.Logger):
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
@@ -2245,14 +2328,26 @@ def test_a_line_over_512_bytes_is_dropped_on_a_pipe_not_cut(pipe: Any, lone: log
     assert read_all(read) == b""
 
 
-def test_the_longest_warning_fits_in_one_pipe_write():
-    """A recommended update on Windows with the longest reason, from an archive, as the
-    default handler writes it."""
+@pytest.mark.parametrize(
+    "form",
+    [
+        "%(message)s",  # logging's last resort
+        logging.BASIC_FORMAT,  # logging.basicConfig()
+        "%(asctime)s %(levelname)s %(name)s: %(message)s",
+    ],
+)
+def test_the_longest_warning_fits_in_one_pipe_write(form: str):
+    """A recommended update on Windows with the longest reason, from an archive, with
+    two-digit version numbers, as a handler with each format writes it."""
     why = "w" * update._MAX_WHY
-    release = update._Release((1, 1, 1), True, why, ("win32",))
-    command = update_command("v1.1.1", archive=True)
-    message = update._behind_message("1.1.0", "v1.1.1", command, release)
-    assert len((message + "\r\n").encode()) <= update._MAX_DIRECT_LINE
+    release = update._Release((10, 10, 11), True, why, ("win32",))
+    command = update_command("v10.10.11", archive=True)
+    message = update._behind_message("10.10.10", "v10.10.11", command, release)
+    record = update.logger.makeRecord(
+        update.logger.name, logging.WARNING, __file__, 1, "%s", (message,), None
+    )
+    line = logging.Formatter(form).format(record) + "\r\n"
+    assert len(line.encode()) <= update._MAX_DIRECT_LINE, len(line.encode())
 
 
 @pytest.mark.windows
