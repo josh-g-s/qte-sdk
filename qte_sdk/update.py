@@ -1085,9 +1085,10 @@ def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogR
     """Write `record` as `handler` would, in one `os.write` on `fd` holding no lock, when
     the stream can take the whole line now; otherwise drop it. Never truncates, and never
     writes to a descriptor the program made non-blocking, where a write could stop part
-    way. A short write is not retried, since a retry could wait; on a blocking pipe a line
-    of at most 512 bytes is written whole, and only a terminal or socket write cut short
-    by a signal could leave part of it.
+    way (on Windows, from Python 3.12, which can tell). A short write is not retried,
+    since a retry could wait; on a blocking pipe a line of at most 512 bytes is written
+    whole, and only a terminal or socket write cut short by a signal could leave part of
+    it.
 
     The line goes straight to the descriptor, so on a stream the program buffers (stdout
     on a pipe, say) it can appear before output the program wrote earlier but has not yet
@@ -1105,8 +1106,11 @@ def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogR
         data = text.encode(encoding, "backslashreplace")
         if len(data) > _MAX_DIRECT_LINE:
             return
-        if sys.platform != "win32" and not os.get_blocking(fd):
-            return
+        try:
+            if not os.get_blocking(fd):
+                return
+        except (AttributeError, OSError):
+            pass  # Windows before 3.12 cannot say for a pipe; one made with CreatePipe blocks
         if _can_take(fd, len(data)):
             os.write(fd, data)
     except Exception:

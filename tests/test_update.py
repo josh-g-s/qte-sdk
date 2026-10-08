@@ -2318,6 +2318,15 @@ def test_a_full_pipe_drops_the_line_and_other_handlers_still_get_the_record(
         assert os.get_blocking(stream.fileno())
 
 
+def test_a_line_over_512_bytes_in_utf_8_is_dropped_on_a_pipe(pipe: Any, lone: logging.Logger):
+    read, stream = pipe
+    lone.addHandler(logging.StreamHandler(stream))
+    warn_in_a_thread("\u00e9" * 200)  # 200 characters, 400 bytes, fits
+    assert len(read_all(read)) >= 400
+    warn_in_a_thread("\u00e9" * 300)  # 300 characters, 600 bytes, does not
+    assert read_all(read) == b""
+
+
 def test_a_line_over_512_bytes_is_dropped_on_a_pipe_not_cut(pipe: Any, lone: logging.Logger):
     read, stream = pipe
     lone.addHandler(logging.StreamHandler(stream))
@@ -2336,9 +2345,11 @@ def test_a_line_over_512_bytes_is_dropped_on_a_pipe_not_cut(pipe: Any, lone: log
         "%(asctime)s %(levelname)s %(name)s: %(message)s",
     ],
 )
-def test_the_longest_warning_fits_in_one_pipe_write(form: str):
-    """A recommended update on Windows with the longest reason, from an archive, with
-    two-digit version numbers, as a handler with each format writes it."""
+def test_the_longest_plain_ascii_warning_fits_in_one_pipe_write(form: str):
+    """A recommended update on Windows with the longest reason, in plain ASCII, from an
+    archive, with two-digit version numbers, as a handler with each format writes it. (A
+    reason in other scripts can take more bytes: such a line is dropped, as the next test
+    shows.)"""
     why = "w" * update._MAX_WHY
     release = update._Release((10, 10, 11), True, why, ("win32",))
     command = update_command("v10.10.11", archive=True)
