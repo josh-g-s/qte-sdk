@@ -2088,8 +2088,7 @@ def test_no_stderr_a_replaced_or_a_closed_stream_is_no_error(
     monkeypatch: pytest.MonkeyPatch, lone: logging.Logger
 ):
     monkeypatch.setattr(logging, "raiseExceptions", False)
-    # The default last resort, which writes to whatever sys.stderr is when it writes.
-    monkeypatch.setattr(logging, "lastResort", logging._StderrHandler(logging.WARNING))
+    # logging's own last resort writes to whatever sys.stderr is when it writes.
     monkeypatch.setattr(sys, "stderr", None)
     warn()
     replaced = io.StringIO()
@@ -2167,12 +2166,23 @@ def read_all(fd: int) -> bytes:
     """What the pipe holds, without waiting (its write end still open)."""
     data = b""
     if sys.platform == "win32":
+        import ctypes
         import msvcrt
-        from ctypes import byref, windll, wintypes
+        from ctypes import wintypes
 
+        peek = ctypes.WinDLL("kernel32").PeekNamedPipe
+        peek.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.c_void_p,
+        ]
+        peek.restype = wintypes.BOOL
         available = wintypes.DWORD()
         handle = msvcrt.get_osfhandle(fd)
-        while windll.kernel32.PeekNamedPipe(handle, None, 0, None, byref(available), None):
+        while peek(handle, None, 0, None, ctypes.byref(available), None):
             if not available.value:
                 break
             data += os.read(fd, available.value)
