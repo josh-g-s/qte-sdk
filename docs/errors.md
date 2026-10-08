@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.2
+**Version:** 0.3
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays and updates. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
