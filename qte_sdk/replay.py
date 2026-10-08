@@ -230,15 +230,16 @@ def _out_of_order(
     instrument is the caller's text, so it is withheld if it holds the token."""
     channel = CHANNELS[stream.rank]
     where = channel if channel == "session_state" else f"{channel} of {stream.instrument}"
+    where = f"{where} on {session_date}"
+    what = f"a message at {moment} follows one at {stream.last}"
     secret = getattr(client, "_secret", None)
     fields = _errors.withheld(
-        lambda shown: secret is not None and _holds_token(shown, secret),
-        where=f"{where} on {session_date}",
-        what=f"a message at {moment} follows one at {stream.last}",
+        lambda shown: secret is not None and _holds_token(shown, secret), where=where, what=what
     )
-    return ReplayOutOfOrder(
-        f"the {fields['where']} goes back in time: {fields['what']}", fields=fields
-    )
+    # The arguments keep the text as given, unless it was withheld.
+    if fields["where"] == _errors.WITHHELD:
+        where = _errors.WITHHELD
+    return ReplayOutOfOrder(f"the {where} goes back in time: {what}", fields=fields)
 
 
 def _time_of(item: HistoryItem) -> int | None:

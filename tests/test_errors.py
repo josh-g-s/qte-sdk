@@ -15,6 +15,7 @@ import warnings
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from fake_exchange import serve_local
@@ -1135,13 +1136,16 @@ def test_a_field_with_a_line_or_paragraph_separator_still_gives_one_line():
     assert len(message.splitlines()) == 1
 
 
-def test_a_token_in_the_address_stays_out_of_a_client_s_repr():
-    token = synthetic_token()
-    client = HistoryClient(f"https://history.example.test/{token}", token)
-    session = ReconnectingSession(f"wss://exchange.example.test/ws?token={token}", token)
+@pytest.mark.parametrize("encoded", [False, True], ids=["as-is", "percent-encoded"])
+def test_a_token_in_the_address_stays_out_of_a_client_s_repr(encoded):
+    token = synthetic_token() + "/+=" + synthetic_token()
+    in_url = quote(token, safe="") if encoded else token
+    client = HistoryClient(f"https://history.example.test/{in_url}", token)
+    session = ReconnectingSession(f"wss://exchange.example.test/ws?token={in_url}", token)
     for shown_as in (repr(client), repr(session)):
         assert errors.WITHHELD in shown_as
         assert_no_form_of(token, shown_as)
+        assert in_url not in shown_as
     assert repr(HistoryClient("https://history.example.test", token)) == (
         "HistoryClient('https://history.example.test')"
     )
@@ -1152,3 +1156,14 @@ def test_a_malformed_token_error_leaves_an_address_holding_it_out_of_the_traceba
     error = raised(lambda: HistoryClient(f"https://history.example.test/{token}", token + "\n"))
     assert "QTE-TOKEN-MALFORMED: " in error
     assert_no_form_of(token, error)
+
+
+async def test_reconnect_and_replay_errors_keep_their_arguments_as_given():
+    session = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    with pytest.raises(NotConnected) as caught:
+        await session.send("new\norder", Auth())
+    assert caught.value.args == ("no session is up, so new\norder was not sent",)
+    assert "new order was not sent" in str(caught.value)
+    error = replay._out_of_order(None, DAY, replay._Stream(None, 0, "AAA\nBBB"), 5)
+    assert error.args[0].startswith(f"the book of AAA\nBBB on {DAY} goes back in time: ")
+    assert f"the book of AAA BBB on {DAY} goes back in time: " in str(error)

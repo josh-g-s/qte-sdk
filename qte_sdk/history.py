@@ -115,7 +115,7 @@ from qte_sdk.contract import codec
 from qte_sdk.contract.registry import INBOUND
 from qte_sdk.errors import QteError, flatten, plain
 from qte_sdk.market_data import MarketData
-from qte_sdk.session import _holds_token, _redact, _Secret, resolve_token
+from qte_sdk.session import _holds_token, _redact, _Secret, _url_holds_token, resolve_token
 
 __all__ = [
     "DEFAULT_MAX_RESUMES",
@@ -443,7 +443,7 @@ class HistoryClient:
         # A mistake can put the token in the address, and a traceback that shows locals
         # shows this.
         url = getattr(self, "url", None)
-        if url is not None and _holds_token(url, self._secret):
+        if url is not None and _url_holds_token(url, self._secret):
             url = _errors.WITHHELD
         return f"HistoryClient({url!r})"
 

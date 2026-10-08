@@ -33,6 +33,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
@@ -1242,6 +1243,11 @@ def _scan_for_token(value: object, secret: _Secret) -> bool:
             # Something that cannot even be looked at is taken to hold the token.
             return True
     return False
+
+
+def _url_holds_token(url: str, secret: _Secret) -> bool:
+    """Whether the address `url` holds the token, as written or percent-encoded."""
+    return _holds_token(url, secret) or _holds_token(unquote(url), secret)
 
 
 def _redact(text: str, secret: _Secret) -> str:

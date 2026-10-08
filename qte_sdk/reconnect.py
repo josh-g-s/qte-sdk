@@ -186,6 +186,7 @@ from qte_sdk.session import (
     _open_session,
     _Reports,
     _Secret,
+    _url_holds_token,
     _wait_out,
     _without_token,
     resolve_token,
@@ -380,7 +381,7 @@ class ReconnectingSession:
         # A mistake can put the token in the address, and a traceback that shows locals
         # shows this.
         url = self.url
-        if _holds_token(url, self._secret):
+        if _url_holds_token(url, self._secret):
             url = _errors.WITHHELD
         return f"ReconnectingSession({url!r}, {state})"
 
@@ -473,10 +474,14 @@ class ReconnectingSession:
         session = self._session
         if session is None or not self._up:
             del payload  # it may be `auth`, so it stays out of the traceback
-            # The type is the caller's text: withheld if it holds the token.
+            # The type is the caller's text: withheld if it holds the token, in the arguments
+            # too, which otherwise keep it as given.
             fields = _errors.withheld(lambda shown: _holds_token(shown, self._secret), type=type_)
+            if fields["type"] == _errors.WITHHELD:
+                type_ = _errors.WITHHELD
+            failure = NotConnected(f"no session is up, so {type_} was not sent", fields=fields)
             del type_
-            raise NotConnected(f"no session is up, so {fields['type']} was not sent", fields=fields)
+            raise failure
         if isinstance(payload, Subscribe):
             self._instruments.update(dict.fromkeys(payload.instruments))
         elif isinstance(payload, Unsubscribe):
