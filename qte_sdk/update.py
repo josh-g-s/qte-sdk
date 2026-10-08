@@ -58,10 +58,14 @@ in the background, at most once a day on each computer and once in each program.
 in a daemon thread, so it never delays, holds up the end of, or fails a session, and it
 never raises or prints. When the installed SDK is behind a release, it logs that one line
 at WARNING through the `qte_sdk.update` logger, with the code on the record as `code`, and
-it is silent when the SDK is current, when it cannot tell, and when the network fails. It
-sends the same requests as the command, and nothing more. The day is counted from a
-file holding the time of the last check, written just before the check starts, so a failed
-check is not retried until the next day: `qte-sdk/update-check` in your cache folder
+it is silent when the SDK is current, when it cannot tell, and when the network fails. The
+warning is logged from the check's own thread, never on the session's event loop: if stderr
+cannot take the write (a full pipe that nothing reads), that thread waits, and the program
+may wait for it at exit, but the check never holds up the session. (The program's own
+writes to stderr, and its own logging through the same handler, would wait too.) It sends
+the same requests as the command, and nothing more. The day is counted from a file holding
+the time of the last check, written just before the check starts, so a failed check is not
+retried until the next day: `qte-sdk/update-check` in your cache folder
 (`%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` or
 `~/.cache` elsewhere). While a program reads and writes it, it holds
 `update-check.lock` beside it, so two programs started together do not both check. When
@@ -881,7 +885,14 @@ def check_in_background() -> threading.Thread | None:
     `CHECK_INTERVAL` on this computer, and logs `UpdateCheck.message` at WARNING through
     this module's logger only when the installed SDK is behind a release. Returns the
     thread, or None when none was started. Never raises, and does nothing else in the
-    calling thread, so it never delays the caller."""
+    calling thread, so it never delays the caller.
+
+    The warning is logged from the check's own thread, never on the session's event loop,
+    where a write that cannot complete would stop the session. If stderr cannot take the
+    write (a full pipe that nothing reads), the check's thread waits, holding the logging
+    handler's lock, and the program may wait for it at exit, in `logging.shutdown()`; the
+    check never holds up the session. The program's own writes to stderr, and its own
+    logging through that handler, would wait too, as they would without the check."""
     global _automatic_done
     try:
         with _automatic_lock:
@@ -936,7 +947,9 @@ def _claim_the_day() -> bool:
     except FileExistsError:
         # Another program is deciding. A lock left by one that stopped part way is removed
         # once it is old, for the next program, or dated in the future, as one left before
-        # the clock was set back is.
+        # the clock was set back is. Two programs can both find it old, and the second can
+        # then remove a fresh lock a third has just taken. That race is accepted: its only
+        # effect is that more than one program may check GitHub that day.
         try:
             if abs(time.time() - lock.stat().st_mtime) > _STALE_LOCK:
                 lock.unlink()
