@@ -28,6 +28,8 @@ dev = [
     "pytest-asyncio>=1.0",
     "ruff>=0.6",
     "build>=1.2",
+    # tests/test_agents_doc.py builds the wheel and sdist with --no-isolation, offline.
+    "hatchling>=1.27",
 ]
 codegen = [
     "grpcio-tools==1.80.0",

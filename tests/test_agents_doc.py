@@ -113,12 +113,15 @@ def test_main_takes_no_arguments(capsys):
 def dist(tmp_path_factory):
     """A wheel and an sdist built from this source tree, as `python -m build` builds them."""
     out = tmp_path_factory.mktemp("dist")
-    subprocess.run(
-        [sys.executable, "-m", "build", "--sdist", "--wheel", "--outdir", str(out), str(ROOT)],
-        check=True,
+    # --no-isolation uses the hatchling the dev extra installs, so no network is needed.
+    command = [sys.executable, "-m", "build", "--no-isolation", "--sdist", "--wheel"]
+    result = subprocess.run(
+        command + ["--outdir", str(out), str(ROOT)],
         capture_output=True,
+        text=True,
         timeout=600,
     )
+    assert result.returncode == 0, result.stdout + result.stderr
     [wheel] = out.glob("*.whl")
     [sdist] = out.glob("*.tar.gz")
     return wheel, sdist
@@ -143,13 +146,14 @@ def test_the_wheel_prints_it_from_an_install(dist, tmp_path, zipped):
     # Install the wheel's files alone (no network), then run the command from them.
     wheel, _ = dist
     target = tmp_path / "site"
-    subprocess.run(
+    installed = subprocess.run(
         [sys.executable, "-m", "pip", "install", "--no-deps", "--no-index"]
         + ["--target", str(target), str(wheel)],
-        check=True,
         capture_output=True,
+        text=True,
         timeout=300,
     )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
     path = target
     if zipped:
         path = tmp_path / "site.zip"

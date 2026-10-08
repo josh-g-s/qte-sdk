@@ -2,7 +2,7 @@
 
 **Version:** 1.23
 
-This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after any install, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. You can also copy it into your own project so your agent follows it there.
+This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of any release after 1.1.1, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With 1.1.1 or earlier, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
 ## What this is
 
@@ -20,7 +20,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 
 ## Updates
 
-- At the start of work, run `python -m qte_sdk.update`. It exits 0 when the SDK is the latest release. It exits 1 when a newer release is out, and prints a line starting `QTE-UPDATE-AVAILABLE` with the command that updates, and says when the update is a recommended one, and why: tell the person, show them the command, and when the update is recommended, suggest they run it soon. Exit 1 here is news, not a failure, so carry on with the work. It exits 2 when it cannot tell, such as with no network or for an editable install of a local copy: say so and carry on.
+- At the start of work, run `python -m qte_sdk.update`. It exits 0 when the SDK is the latest release. It exits 1 when a newer release is out, and prints a line starting `QTE-UPDATE-AVAILABLE` with the command that updates, and says when the update is a recommended one, and why: tell the person, show them the command, and when the update is recommended, suggest they run it soon. Exit 1 here is news, not a failure, so carry on with the work. It exits 2 when it cannot tell, such as with no network: say so and carry on. An install it cannot trace to the repository, such as an editable install of a local copy, gets 1 when its version is behind the latest release and 2 otherwise.
 - Do not wait for the automatic check to tell you. On Windows its warning is skipped when stderr is a pipe whose reader waits with a large read, which is how many coding-agent tools read a program's output, so you may never see it. Running `python -m qte_sdk.update` yourself is the reliable way to learn of an update there.
 - The automatic check: `open_session`, and a `ReconnectingSession` on its first connect, also run that check in the background, at most once a day on the computer. It never delays or fails the session, sends nothing about the person beyond the SDK's version, and only logs the `QTE-UPDATE-AVAILABLE` line at WARNING (logger `qte_sdk.update`) when the SDK is behind. It never delays the program's exit (with the standard stream handlers, and unless a Windows console is paused or selecting text, which holds the program's own output too; a stderr wrapped by colorama, rich or a tee gets the same check, and can then wait only in a rare race, or when it writes a partial line of the program's own that it held back): when stderr is a pipe or terminal that cannot take the line, such as a full pipe, the line is skipped there that day. `QTE_UPDATE_CHECK=0` in the environment turns it off; leave it on unless the person asks.
 
