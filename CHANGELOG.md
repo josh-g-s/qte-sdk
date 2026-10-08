@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.14
+**Version:** 0.15
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -13,6 +13,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - On Windows, cancelling a `HistoryClient` fetch, for example with `asyncio.timeout`, now ends it at once, as the `qte_sdk.history` docs say, unless it is still looking up the service's address or opening the connection, which cannot be woken on any system. Before, a fetch cancelled while it waited on the service kept its worker thread and connection until `timeout` ran out (30 seconds by default), which could hold up the program's exit; and one cancelled while it read the data also froze the program's event loop, and so everything else the program was doing, for that long. The client now waits on the service in a way the cancel ends at once on every system. CI runs the history tests on Windows too.
 - CI runs the Windows token-file and console checks against the real Windows API, on a `windows-latest` runner. No change to the SDK itself.
 - A `.gitattributes` keeps the vendored `proto/` and `conformance/` files byte for byte on every clone, so their hash checks and `scripts/generate_contract.py` work on a Windows clone with git's default `core.autocrlf`. No change to the SDK itself.
+- `scripts/vendor_contract.py` and `scripts/generate_contract.py` write LF on every system, and `.gitattributes` checks the generated `qte_sdk/contract/v1` out with LF, so vendoring or regenerating the contract on Windows leaves the tree unchanged. `scripts/generate_contract.py` also runs on Windows now: it gave protoc the proto files' paths with backslashes there, which protoc could not find. CI's Windows job regenerates the contract code to prove it. No change to the SDK itself.
 
 ## 1.1.0
 

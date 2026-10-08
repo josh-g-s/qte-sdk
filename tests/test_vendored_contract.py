@@ -1,8 +1,13 @@
+import dataclasses
 import hashlib
+import importlib.util
 import re
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = tomllib.loads((ROOT / "proto" / "upstream.toml").read_text())
@@ -83,3 +88,30 @@ def test_conformance_manifest_pins_a_full_commit():
 def test_conformance_tree_holds_only_the_approved_files():
     vendored = {p.relative_to(CONFORMANCE_DIR).as_posix() for p in CONFORMANCE_DIR.rglob("*")}
     assert vendored == {"upstream.toml"} | CONFORMANCE_APPROVED
+
+
+def load_vendor_script() -> Any:
+    path = ROOT / "scripts" / "vendor_contract.py"
+    spec = importlib.util.spec_from_file_location("vendor_contract", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+vendor = load_vendor_script()
+
+
+@pytest.mark.parametrize(
+    "target", vendor.TARGETS, ids=[t.manifest.relative_to(ROOT).as_posix() for t in vendor.TARGETS]
+)
+def test_write_manifest_reproduces_the_committed_manifest_with_lf(target, tmp_path):
+    # The manifests are checked out byte for byte (-text), so rewriting one from its own
+    # values must give the same bytes on every OS, Windows included: LF, never CRLF.
+    committed = target.manifest.read_bytes()
+    values = tomllib.loads(committed.decode())
+    out = dataclasses.replace(target, manifest=tmp_path / "upstream.toml")
+    vendor.write_manifest(out, values["repo"], values["commit"], values["path"], values["blobs"])
+    written = out.manifest.read_bytes()
+    assert b"\r" not in written
+    assert written == committed
