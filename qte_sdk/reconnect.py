@@ -320,6 +320,9 @@ class ReconnectingSession:
 
     Raises `MissingToken` or `MissingURL` here, before any connection, if there is no token
     or no address.
+
+    Its first connection starts the SDK's update check in the background, as `open_session`
+    does (see `qte_sdk.update`); a reconnect does not start it again.
     """
 
     def __init__(

@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.16
+**Version:** 0.17
 
 ## Requirements
 
@@ -70,7 +70,7 @@ pytest -m windows
 
 A release is a `vX.Y.Z` tag on a merge commit on `main`, whose number matches `__version__` in `qte_sdk/__init__.py`, with an entry in `CHANGELOG.md`. To make one:
 
-1. In a pull request, set `__version__` to the new number and, in `CHANGELOG.md`, rename the "Unreleased" heading to the number (`## 1.0.1`) and start a new empty "Unreleased" section above it.
+1. In a pull request, set `__version__` to the new number and, in `CHANGELOG.md`, rename the "Unreleased" heading to the number (`## 1.0.1`) and start a new empty "Unreleased" section above it. Give the release an entry in `releases.json` (a test checks there is one for `__version__`): `recommended` is true, with a one-sentence `why` and the `platforms` it matters on (`sys.platform` names, empty for all), when everyone on an older release should take it, for a serious fix say. The update check reads the file from `main` and uses an entry only once its release is tagged, so an entry merged before its tag is safe, and marking an earlier release recommended later takes effect at once.
 2. Merge it.
 3. On the merge commit, check the tag before you make it:
 

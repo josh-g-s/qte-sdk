@@ -6,6 +6,8 @@ import logging
 import os
 import secrets
 import sys
+import threading
+import time
 import traceback
 from collections.abc import Iterator
 from pathlib import Path
@@ -23,6 +25,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
 import qte_sdk.session
+from qte_sdk import update
 from qte_sdk.connection import (
     TERM_CHANGE_CLOSE_CODE,
     Connection,
@@ -825,3 +828,62 @@ async def test_auth_that_cannot_be_sent_withholds_a_token_it_quotes_escaped(spec
     with pytest.raises(qte_sdk.session.AuthNotSent) as caught:
         await qte_sdk.session._send_auth(Refusing(), qte_sdk.session._Secret(token))  # type: ignore[arg-type]
     assert_no_form_of(token, shown(caught.value))
+
+
+# The automatic update check
+
+
+async def test_opening_a_session_starts_the_update_check_without_waiting_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The check is on, as outside the tests, and GitHub never answers.
+    monkeypatch.delenv(update.UPDATE_CHECK_ENV_VAR, raising=False)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hanging(request: object, timeout: float) -> None:
+        entered.set()
+        release.wait(30)
+        raise TimeoutError
+
+    monkeypatch.setattr(update, "_open", hanging)
+    # A git install of the repository, whatever installed the SDK under test.
+    monkeypatch.setattr(update, "_installed", lambda version: update._Install("1" * 40))
+    started: list[threading.Thread | None] = []
+    real_start = update.check_in_background
+    monkeypatch.setattr(
+        update, "check_in_background", lambda: started.append(real_start()) or started[-1]
+    )
+    try:
+        server = Server(ack())
+        async with serve_local(server) as url:
+            began = time.monotonic()
+            async with await open_session(url, synthetic_token()) as session:
+                took = time.monotonic() - began
+                assert session.info.team == "team-a"
+            # A second session in the same program starts no second check.
+            async with await open_session(url, synthetic_token()):
+                pass
+        [thread] = started[:1]
+        assert started[1:] == [None]
+        assert thread is not None and thread.daemon
+        # The check reached the network while the session opened, and the session did not
+        # wait for it: the network holds it for 30 s.
+        assert await asyncio.to_thread(entered.wait, 10)
+        assert took < 4
+    finally:
+        release.set()
+
+
+async def test_the_update_check_is_off_in_the_tests(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(update, "_open", lambda *args: pytest.fail("the network was used"))
+    started: list[threading.Thread | None] = []
+    real_start = update.check_in_background
+    monkeypatch.setattr(
+        update, "check_in_background", lambda: started.append(real_start()) or started[-1]
+    )
+    server = Server(ack())
+    async with serve_local(server) as url:
+        async with await open_session(url, synthetic_token()):
+            pass
+    assert started == [None]

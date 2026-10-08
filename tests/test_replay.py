@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from test_history import DAY, FakeHistory, line, serve_history, synthetic_token
 
-from qte_sdk import history, replay
+from qte_sdk import history, replay, update
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.history import HistoryClient, HistoryInterrupted, HistoryUnavailable
 from qte_sdk.market_data import Book, Mark, SessionState, Trades
@@ -467,3 +467,14 @@ async def test_a_session_date_is_asked_for_as_yyyy_mm_dd(day):
     items = await replayed(fake, day, ["AAA"], ["book"])
     assert [label(item) for item in items] == [(1000, "book", "AAA")]
     assert requested(fake) == [f"/v1/history/{DAY}/AAA/book"]
+
+
+async def test_a_replay_never_starts_the_update_check(monkeypatch: pytest.MonkeyPatch):
+    # The check is on, as outside the tests: only opening a session starts it.
+    monkeypatch.delenv(update.UPDATE_CHECK_ENV_VAR, raising=False)
+    started: list[object] = []
+    monkeypatch.setattr(update, "check_in_background", lambda: started.append(1))
+    monkeypatch.setattr(update, "_check_and_log", lambda: started.append(2))
+    fake = a_session(synthetic_token())
+    assert await replayed(fake, DAY, ["AAA", "BBB"])
+    assert started == []
