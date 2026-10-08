@@ -409,6 +409,7 @@ class HistoryClient:
         del token
         if not (self._secret.value.isascii() and self._secret.value.isprintable()):
             # Checked here, since the HTTP library's own error would quote the header.
+            del url  # it could hold the token too, so it stays out of the traceback
             raise TokenMalformed(
                 "the token has a character an HTTP header cannot carry, such as a newline "
                 "or a non-ASCII character; check how it was copied",
@@ -439,7 +440,12 @@ class HistoryClient:
         self._ssl_context = ssl_context
 
     def __repr__(self) -> str:
-        return f"HistoryClient({getattr(self, 'url', None)!r})"
+        # A mistake can put the token in the address, and a traceback that shows locals
+        # shows this.
+        url = getattr(self, "url", None)
+        if url is not None and _holds_token(url, self._secret):
+            url = _errors.WITHHELD
+        return f"HistoryClient({url!r})"
 
     def fetch(
         self, session_date: date | str, instrument: str, channel: str
@@ -1340,11 +1346,9 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
         # characters with it (a fragment, say from an echoed header) is withheld, as sent
         # or as the error's message shows it, in one line.
         if isinstance(body.get("status"), str):
-            status = _screened(_redact(body["status"], secret), secret)
+            status = _server_text(body["status"], secret)
         if isinstance(body.get("message"), str):
-            message = _screened(_redact(body["message"], secret), secret)
-            if message is not None and _screened(flatten(message), secret) is None:
-                message = None
+            message = _server_text(body["message"], secret)
     cls, meaning = _ERRORS.get(reply.status, (HistoryError, "unexpected response"))
     text = f"{meaning} (HTTP {reply.status})" + (f": {message}" if message else "")
     details: dict[str, Any] = {"http_status": reply.status, "status": status, "message": message}
@@ -1358,6 +1362,16 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
     # token in any form.
     error.fields = _errors.withheld(lambda shown: _holds_token(shown, secret), **error.fields)
     return error
+
+
+def _server_text(text: str, secret: _Secret) -> str | None:
+    """The service's `text` with any echo of the token redacted, or None if it still
+    shares a run of characters with the token, as sent or flattened to one line (which
+    drops the control and format characters that could split a run)."""
+    screened = _screened(_redact(text, secret), secret)
+    if screened is None or _screened(flatten(screened), secret) is None:
+        return None
+    return screened
 
 
 def _sanitised(error: BaseException, secret: _Secret) -> BaseException:

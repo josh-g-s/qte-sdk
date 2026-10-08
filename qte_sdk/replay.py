@@ -51,7 +51,9 @@ and so on (see `qte_sdk.history`). A stream whose times go back, one message ear
 than the one before it, raises `ReplayOutOfOrder` (a `ValueError`, code
 `QTE-REPLAY-OUT-OF-ORDER`) naming the stream and both times, after the items before it,
 since the replay cannot merge it in order. The other downloads are closed when any of
-these is raised. docs/errors.md says what each code means and how to fix it.
+these is raised. docs/errors.md says what each code means and how to fix it. An error
+leaves the replay without the traceback it gathered inside it, whose frames hold the
+messages read, as one from `fetch` does.
 
 Stopping. Use the replay inside `aclosing`, as above: leaving the block, by `break`, an
 error or the end of the session, closes every download.
@@ -75,7 +77,7 @@ from datetime import date
 from qte_sdk import errors as _errors
 from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, SessionState, Trades
 from qte_sdk.errors import QteError
-from qte_sdk.history import HistoryClient, HistoryItem, _date_text
+from qte_sdk.history import HistoryClient, HistoryItem, _date_text, _Guarded
 from qte_sdk.session import _holds_token
 
 __all__ = ["CHANNELS", "ReplayOutOfOrder", "replay"]
@@ -141,7 +143,9 @@ def replay(
         for instrument in (sorted(set(names)) if channel in _PER_INSTRUMENT else [""])
     ]
     # _date_text refuses a datetime, which is also a date.
-    return _replay(client, _date_text(session_date), streams, speed)
+    # Errors leave without the traceback gathered inside the replay, whose frames hold the
+    # messages it read and the instruments asked for.
+    return _Guarded(_replay(client, _date_text(session_date), streams, speed))
 
 
 class ReplayOutOfOrder(QteError, ValueError):

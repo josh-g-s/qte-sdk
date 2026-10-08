@@ -861,14 +861,8 @@ async def replay_out_of_order(token: str, ctx: Context) -> str:
             try:
                 await collect(items)
             except replay.ReplayOutOfOrder as error:
-                if instrument == "AAA":
-                    parts.append(shown(error))
-                else:
-                    # The message only: the replay's own frames hold the messages it read,
-                    # which name the instrument the caller asked for.
-                    assert errors.WITHHELD in str(error)
-                    parts.extend((str(error), repr(error), repr(vars(error))))
-    assert len(parts) == 4
+                parts.append(shown(error))
+    assert len(parts) == 2 and errors.WITHHELD in parts[1]
     return "\n".join(parts)
 
 
@@ -1098,15 +1092,17 @@ def test_check_interrupted_while_printing_keeps_the_token_out_of_its_locals(
 # History, replay and reconnect
 
 
-@pytest.mark.parametrize("between", ["​", "\x01"], ids=["zero-width", "control"])
+@pytest.mark.parametrize("between", ["\u200b", "\x01"], ids=["zero-width", "control"])
 async def test_a_history_message_that_flattens_into_the_token_is_withheld(between):
     token = synthetic_token()
-    # No run of the token as sent, but all of it once the message is flattened.
-    fake = FakeHistory(token, error_message=between.join(token))
+    # No run of the token as sent, but all of it once the text is flattened.
+    split = between.join(token)
+    body = json.dumps({"status": split, "message": split}).encode()
+    fake = FakeHistory(token, raw_error_body=body)
     with serve_history(fake) as url:
         with pytest.raises(HistoryUnavailable) as caught:
             await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
-    assert caught.value.message is None
+    assert caught.value.message is None and caught.value.status is None
     assert str(caught.value).startswith(
         "QTE-HISTORY-UNAVAILABLE: the data is unavailable and will never exist (HTTP 404). "
     )
@@ -1131,3 +1127,28 @@ def test_a_history_error_keeps_its_arguments_and_attributes():
         "QTE-HISTORY-UNEXPECTED-STATUS: unexpected response (HTTP 418): line one line two. "
     )
     assert HistoryError("failed").code == errors.HISTORY_REQUEST_FAILED
+
+
+def test_a_field_with_a_line_or_paragraph_separator_still_gives_one_line():
+    assert errors.one_line("a\u2028b\u2029c\x85d") == "a b c d"
+    message = render(errors.CONNECT_NO_SESSION, type="new\u2028order")
+    assert len(message.splitlines()) == 1
+
+
+def test_a_token_in_the_address_stays_out_of_a_client_s_repr():
+    token = synthetic_token()
+    client = HistoryClient(f"https://history.example.test/{token}", token)
+    session = ReconnectingSession(f"wss://exchange.example.test/ws?token={token}", token)
+    for shown_as in (repr(client), repr(session)):
+        assert errors.WITHHELD in shown_as
+        assert_no_form_of(token, shown_as)
+    assert repr(HistoryClient("https://history.example.test", token)) == (
+        "HistoryClient('https://history.example.test')"
+    )
+
+
+def test_a_malformed_token_error_leaves_an_address_holding_it_out_of_the_traceback():
+    token = synthetic_token()
+    error = raised(lambda: HistoryClient(f"https://history.example.test/{token}", token + "\n"))
+    assert "QTE-TOKEN-MALFORMED: " in error
+    assert_no_form_of(token, error)

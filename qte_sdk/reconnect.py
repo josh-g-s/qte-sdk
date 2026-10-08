@@ -377,7 +377,12 @@ class ReconnectingSession:
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "connected" if self._up else "not connected"
-        return f"ReconnectingSession({self.url!r}, {state})"
+        # A mistake can put the token in the address, and a traceback that shows locals
+        # shows this.
+        url = self.url
+        if _holds_token(url, self._secret):
+            url = _errors.WITHHELD
+        return f"ReconnectingSession({url!r}, {state})"
 
     @property
     def connected(self) -> bool:

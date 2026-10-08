@@ -541,10 +541,14 @@ def flatten(text: object) -> str:
     return " ".join(flat.split())
 
 
+# Control characters, and the line and paragraph separators: each would break a line.
+_BREAKS = frozenset({"Cc", "Zl", "Zp"})
+
+
 def one_line(text: str) -> str:
-    """`text` with each line break, tab or other control character made a space: how a
-    message shows a field such as a path."""
-    return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text)
+    """`text` with each line break, tab or other control character, and each line or
+    paragraph separator, made a space: how a message shows a field such as a path."""
+    return "".join(" " if unicodedata.category(c) in _BREAKS else c for c in text)
 
 
 # What a field is shown as when `withhold` says it holds the token.
