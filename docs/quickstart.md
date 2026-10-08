@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.49
+**Version:** 0.50
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
