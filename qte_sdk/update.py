@@ -63,8 +63,10 @@ warning is written from the check's own thread, never on the session's event loo
 the standard stream handlers it never holds up the session or the program's exit: when
 stderr is a pipe or terminal that cannot take the whole line at that moment (a full pipe
 that nothing reads, say), or the line is over 512 bytes, it is not written there, and the
-next day's check says it again. On Windows, a pipe that cannot take the line is also
-skipped, not waited on. Handlers the program configures (a log file, pytest's caplog, a
+next day's check says it again. On Windows, a pipe that cannot take the line, by the room
+it reports, is also skipped, not waited on; a pipe whose reader is already waiting for
+output can report none, so there the line may be skipped although it would have fit.
+Handlers the program configures (a log file, pytest's caplog, a
 JSON formatter) still receive it, with its `code`; a handler the SDK cannot see into, such
 as a custom emit or a queue listener, writes as it always has. It sends the same requests
 as the command, and nothing more. The day is counted from a file holding
@@ -897,7 +899,8 @@ def check_in_background() -> threading.Thread | None:
     where a write that cannot complete would stop the session, and with the standard
     stream handlers it never holds up the program's exit either: a stream handler on a
     pipe, socket or terminal gets the line in one write holding no lock, and only when the
-    stream can take it whole at once (on Windows, when the pipe reports the room for it);
+    stream can take it whole at once (on Windows, when the pipe reports the room for it,
+    which a pipe whose reader is already waiting may not);
     otherwise, and for a line over 512 bytes, the line is dropped there, and the next
     day's check says it again. Every other handler gets the record, with its `code`, as
     logging would give it; one the SDK cannot see into, such as a custom emit or a queue
@@ -956,7 +959,12 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
     handler's formatted line in one `os.write` on its file descriptor, holding no lock, and
     only when it can take the whole line now; otherwise the line is dropped there. It runs
     in the check's own thread, never touches an event loop, and never changes whether a
-    file descriptor blocks."""
+    file descriptor blocks.
+
+    Another writer can still fill the pipe between the check and the write. The write then
+    waits in this thread, holding no Python lock, which never delays the exit; on Windows,
+    the C runtime's lock on that descriptor is held meanwhile, so the program's own later
+    writes to it wait too, as they would for the full pipe anyway."""
     if logger.disabled or not logger.isEnabledFor(level):
         return
     try:
@@ -985,8 +993,8 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
     for handler in handlers:
         if record.levelno < handler.level:
             continue
-        if isinstance(handler, logging.StreamHandler) and handler.stream is None:
-            continue  # no stderr at all, as under pythonw
+        if _no_stream(handler):
+            continue
         fd = _fd_that_may_wait(handler)
         if fd is None:
             handler.handle(record)
@@ -994,6 +1002,16 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
             direct.append((handler, fd))
     for handler, fd in direct:
         _write_or_drop(handler, fd, record)
+
+
+def _no_stream(handler: logging.Handler) -> bool:
+    """Whether `handler` is a stream handler with nowhere to write: no stderr at all (as
+    under pythonw), or a closed stream, for which logging would only report the failed
+    write, on stderr, holding the handler's lock. A `FileHandler` with no stream yet
+    (`delay=True`) opens its file when it first writes, so it has somewhere to write."""
+    if not isinstance(handler, logging.StreamHandler) or isinstance(handler, logging.FileHandler):
+        return False
+    return handler.stream is None or getattr(handler.stream, "closed", False) is True
 
 
 def _fd_that_may_wait(handler: logging.Handler) -> int | None:
@@ -1055,7 +1073,9 @@ def _can_take(fd: int, size: int) -> bool:
 def _pipe_write_quota(fd: int) -> int | None:
     """How many bytes the Windows pipe behind `fd` takes now without waiting: its
     `WriteQuotaAvailable`, from `NtQueryInformationFile(FilePipeLocalInformation)`
-    (documented in the Windows Driver Kit). None when it cannot be read."""
+    (documented in the Windows Driver Kit). None when it cannot be read. A read waiting
+    on the pipe takes its size off this, so it can be less than the pipe would take: the
+    caller then drops a line it could have written, never writes one that waits."""
     try:
         import ctypes
         import msvcrt

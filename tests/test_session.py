@@ -986,6 +986,8 @@ from qte_sdk import update
 from qte_sdk.session import open_session
 
 cache, scenario = sys.argv[1], sys.argv[2]
+# Where to write the report too, for a child whose stdout is a console the test cannot read.
+report_file = sys.argv[3] if len(sys.argv) > 3 else None
 report = {}
 codes = []
 ready = threading.Event()
@@ -1108,6 +1110,8 @@ if scenario == "open":
 elif scenario == "nearly":
     asyncio.run(nearly_full())
 else:
+    if scenario == "room" and sys.platform == "win32":
+        report["room"] = [update._pipe_write_quota(2)]
     update.check_in_background()
     if scenario in ("exit", "race"):
         fill_stderr()
@@ -1117,6 +1121,9 @@ else:
 report["codes"] = codes
 if sys.platform != "win32":
     report["blocking"] = os.get_blocking(2)
+report["stderr_is_a_terminal"] = os.isatty(2)
+if report_file:
+    Path(report_file).write_text(json.dumps(report), encoding="utf-8")
 print("report " + json.dumps(report), flush=True)
 """
 WARNING_LINE = "QTE-UPDATE-AVAILABLE: qte-sdk "
@@ -1322,10 +1329,62 @@ ROOMY = {
 @pytest.mark.parametrize("stderr", ROOMY)
 def test_stderr_that_can_take_the_warning_gets_it_once(tmp_path: Path, stderr: str):
     if stderr == "a terminal" and sys.platform == "win32":
-        pytest.skip("no pseudo-terminal on Windows; tests/test_windows_real.py has the console")
+        pytest.skip("no pseudo-terminal on Windows: see the console test below")
+    if stderr == "a pipe read throughout" and sys.platform == "win32":
+        pytest.skip("on Windows such a pipe reports no room: see the windows test below")
     child = ROOMY[stderr](tmp_path, "room")
     assert child.exit_seconds < 10
     assert child.report["check_done"] is True
     warnings = [line for line in child.stderr.splitlines() if "QTE-UPDATE-AVAILABLE" in line]
     assert len(warnings) == 1, child.stderr
     assert warnings[0].strip().startswith(WARNING_LINE)
+
+
+@pytest.mark.windows
+def test_on_windows_a_pipe_whose_reader_is_waiting_reports_no_room_so_the_line_is_skipped(
+    tmp_path: Path,
+):
+    """A read waiting on a Windows pipe takes its size off the room the pipe reports to its
+    writer, and the reader here (a Python program reading all of it) asks for more than the
+    pipe holds. So the SDK cannot tell that the line would fit, and skips it rather than
+    risk a write that waits. The quickstart says so."""
+    child = read_live(tmp_path, "room")
+    [room] = child.report["room"]
+    assert room is not None and room < len(WARNING_LINE), room
+    assert child.exit_seconds < 10
+    assert child.report["check_done"] is True
+    assert WARNING_LINE not in child.stderr
+    assert child.report["codes"] == [update.UPDATE_AVAILABLE]
+
+
+@pytest.mark.windows
+def test_on_windows_a_console_gets_the_warning_through_its_handler(tmp_path: Path):
+    """A console is written as logging writes it (its writes do not wait). The child runs
+    in a console of its own, so it writes its report to a file: capturing its output would
+    redirect its handles away from the console."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(NO_NETWORK), str(TESTS), env.get("PYTHONPATH")])
+    )
+    report = tmp_path / "report.json"
+    startup = subprocess.STARTUPINFO(
+        dwFlags=subprocess.STARTF_USESHOWWINDOW,
+        wShowWindow=0,
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", UPDATE_CHILD, str(tmp_path / "cache"), "room", str(report)],
+            env=env,
+            cwd=tmp_path,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            startupinfo=startup,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("the program in its own console was still running after 30 s")
+    assert result.returncode == 0
+    said = json.loads(report.read_text(encoding="utf-8"))
+    assert said["stderr_is_a_terminal"] is True
+    assert said["check_done"] is True
+    # Through the last resort's handle(), which ran its filters and wrote to the console.
+    assert said["codes"] == [update.UPDATE_AVAILABLE]

@@ -2099,7 +2099,23 @@ def test_no_stderr_a_replaced_or_a_closed_stream_is_no_error(
     closed = open(os.devnull, "w")  # noqa: SIM115
     closed.close()
     lone.addHandler(logging.StreamHandler(closed))
+    # Skipped: logging would report the failed write on stderr, holding the handler's lock.
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    monkeypatch.setattr(sys, "stderr", replaced)
     warn()
+    assert replaced.getvalue() == "replaced\n"
+
+
+def test_a_file_handler_that_opens_its_file_when_it_first_writes_gets_the_line(
+    tmp_path: Path, lone: logging.Logger
+):
+    handler = logging.FileHandler(tmp_path / "program.log", encoding="utf-8", delay=True)
+    lone.addHandler(handler)
+    try:
+        warn("behind")
+    finally:
+        handler.close()
+    assert (tmp_path / "program.log").read_text(encoding="utf-8") == "behind\n"
 
 
 def test_a_stream_handler_on_a_string_gets_its_formatted_line(lone: logging.Logger):
