@@ -962,9 +962,10 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
     file descriptor blocks.
 
     Another writer can still fill the pipe between the check and the write. The write then
-    waits in this thread, holding no Python lock, which never delays the exit; on Windows,
-    the C runtime's lock on that descriptor is held meanwhile, so the program's own later
-    writes to it wait too, as they would for the full pipe anyway."""
+    waits in this thread, holding no Python lock; on Windows, the C runtime's lock on that
+    descriptor is held meanwhile, so the program's own later writes to it, and a flush of
+    what it left in `sys.stderr` at exit, wait too, as they would for the full pipe
+    anyway. A program that writes nothing more to stderr exits as usual."""
     if logger.disabled or not logger.isEnabledFor(level):
         return
     try:
@@ -1009,9 +1010,14 @@ def _no_stream(handler: logging.Handler) -> bool:
     under pythonw), or a closed stream, for which logging would only report the failed
     write, on stderr, holding the handler's lock. A `FileHandler` with no stream yet
     (`delay=True`) opens its file when it first writes, so it has somewhere to write."""
-    if not isinstance(handler, logging.StreamHandler) or isinstance(handler, logging.FileHandler):
+    if not isinstance(handler, logging.StreamHandler):
         return False
-    return handler.stream is None or getattr(handler.stream, "closed", False) is True
+    if handler.stream is None:
+        return not isinstance(handler, logging.FileHandler)
+    try:
+        return handler.stream.closed is True
+    except Exception:  # a stream that cannot even say so (a detached wrapper): unusable
+        return True
 
 
 def _fd_that_may_wait(handler: logging.Handler) -> int | None:
@@ -1075,7 +1081,7 @@ def _pipe_write_quota(fd: int) -> int | None:
     `WriteQuotaAvailable`, from `NtQueryInformationFile(FilePipeLocalInformation)`
     (documented in the Windows Driver Kit). None when it cannot be read. A read waiting
     on the pipe takes its size off this, so it can be less than the pipe would take: the
-    caller then drops a line it could have written, never writes one that waits. Nothing
+    caller then drops a line it could have written rather than one the pipe has no room for. Nothing
     else the write end reports tells the two apart: measured on CI's Windows runner, its
     `ReadDataAvailable` is always 0, and a full 4 KiB pipe and an empty one with an 8 KiB
     read waiting report the same fields, `WriteQuotaAvailable` 0 in both."""

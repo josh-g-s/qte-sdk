@@ -2085,7 +2085,7 @@ def test_the_last_resort_writes_only_when_no_handler_is_found(
 
 
 def test_no_stderr_a_replaced_or_a_closed_stream_is_no_error(
-    monkeypatch: pytest.MonkeyPatch, lone: logging.Logger
+    monkeypatch: pytest.MonkeyPatch, lone: logging.Logger, tmp_path: Path
 ):
     monkeypatch.setattr(logging, "raiseExceptions", False)
     # logging's own last resort writes to whatever sys.stderr is when it writes.
@@ -2098,6 +2098,8 @@ def test_no_stderr_a_replaced_or_a_closed_stream_is_no_error(
     closed = open(os.devnull, "w")  # noqa: SIM115
     closed.close()
     lone.addHandler(logging.StreamHandler(closed))
+    lone.addHandler(logging.FileHandler(tmp_path / "closed.log", encoding="utf-8"))
+    lone.handlers[-1].stream.close()
     # Skipped: logging would report the failed write on stderr, holding the handler's lock.
     monkeypatch.setattr(logging, "raiseExceptions", True)
     monkeypatch.setattr(sys, "stderr", replaced)
