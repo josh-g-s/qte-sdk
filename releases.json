@@ -1,0 +1,32 @@
+[
+  {
+    "version": "1.0.0",
+    "recommended": false,
+    "why": "the first release",
+    "platforms": []
+  },
+  {
+    "version": "1.0.1",
+    "recommended": false,
+    "why": "the update check reads an install from a release zip, and Windows finds time zones",
+    "platforms": []
+  },
+  {
+    "version": "1.0.2",
+    "recommended": false,
+    "why": "on Windows, the SDK warns when other users may read or change a file that holds the token",
+    "platforms": []
+  },
+  {
+    "version": "1.1.0",
+    "recommended": false,
+    "why": "the SDK reads the exchange's contract 11 and sends Fundamentals tickets",
+    "platforms": []
+  },
+  {
+    "version": "1.1.1",
+    "recommended": true,
+    "why": "on Windows, cancelling a past-data fetch, or an asyncio.timeout running out on one, could freeze the program for up to the fetch's timeout; 1.1.1 ends it at once",
+    "platforms": ["win32"]
+  }
+]

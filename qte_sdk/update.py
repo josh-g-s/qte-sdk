@@ -11,11 +11,20 @@ one of three results, with its exit status:
                         install that follows `main` (installed with git and no `@revision`,
                         or with `@main`), it also says whether `main` has newer commits,
                         with the command that takes them.
-    behind          1   a newer release is out. It prints the command that updates.
+    behind          1   a newer release is out. It prints the command that updates, and
+                        whether the update is recommended, and why.
     can't tell      2   the install is not one pip made from the repository on GitHub (a
                         local or editable copy, a wheel, another repository) and is not
                         behind a release, its install record cannot be read, no release is
                         tagged yet, or the repository could not be reached.
+
+Behind a release, the result is one line with the code `QTE-UPDATE-AVAILABLE`:
+
+    QTE-UPDATE-AVAILABLE: qte-sdk 1.1.0 is behind 1.1.1, a recommended update on Windows:
+    <why>. Update with <command>.
+
+and, for an update that is not recommended, the same without the part from "a recommended
+update" to the reason.
 
 An install from a release archive of the repository, such as
 `pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.0.1.zip`, which needs
@@ -23,13 +32,48 @@ no git, is current or behind like any other. So is one from an archive of a bran
 `main.zip`, though the check cannot say whether that branch has moved since.
 
 `check_for_update()` returns the same result as an `UpdateCheck`, so a program can log it
-when it starts. Nothing here runs when `qte_sdk` is imported: only that function and this
-command use the network.
+when it starts. Nothing here runs when `qte_sdk` is imported.
+
+Recommended updates
+
+`releases.json`, at the root of the repository's `main` branch, lists each release with
+whether it is a recommended update, why, in one sentence, and the platforms it is
+recommended on (`sys.platform` names, such as `win32`; none for all). Only when the
+installed SDK is behind a release does the check read it, from
+`https://raw.githubusercontent.com/josh-g-s/qte-sdk/main/releases.json`, with what is left
+of the same timeout, at most 64 KiB, and no redirect. The update is recommended when a
+release above the installed version, up to the latest release tag, is marked recommended
+for this platform; the reason given is that of the highest such release. The file only adds
+that: whether the SDK is behind, and the latest release, still come from the release tags,
+so an entry for a release not yet tagged is ignored, and when the file cannot be read, or
+does not hold a list of entries in that form, the check says what it said before. An entry
+that is not in that form is ignored, and keys it does not know are too. The reason is shown
+as plain text, on one line, without control or formatting characters, and at most 300
+characters long.
+
+The automatic check
+
+`open_session`, and a `ReconnectingSession` when it first connects, also start the check
+in the background, at most once a day on each computer and once in each program. It runs
+in a daemon thread, so it never delays, holds up the end of, or fails a session, and it
+never raises or prints. When the installed SDK is behind a release, it logs that one line
+at WARNING through the `qte_sdk.update` logger, with the code on the record as `code`, and
+it is silent when the SDK is current, when it cannot tell, and when the network fails. It
+sends the same requests as the command, and nothing more. The day is counted from a
+file holding the time of the last check, written just before the check starts, so a failed
+check is not retried until the next day: `qte-sdk/update-check` in your cache folder
+(`%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` or
+`~/.cache` elsewhere). While a program reads and writes it, it holds
+`update-check.lock` beside it, so two programs started together do not both check. When
+the file cannot be written, the check does not run. A program
+that calls `check_for_update()` itself is not checked again automatically. Set
+`QTE_UPDATE_CHECK=0` in the environment to turn it off. Replays and past market data
+(`qte_sdk.replay`, `qte_sdk.history`) never start it, and the SDK's own tests turn it off.
 
 The install comes from the record pip keeps of where it installed the SDK from
 (`direct_url.json`, PEP 610). The repository's tags and `main` come from git's own list of
 references, read over HTTPS the way `git ls-remote` reads it, so neither `git` nor the
-GitHub API is needed. The request carries no information about you beyond a
+GitHub API is needed. Neither request carries any information about you beyond a
 `qte-sdk/<version>` user agent. The install is identified before anything is fetched. An
 install the check cannot place is never called current, but it is still compared with the
 latest release, so a version below it is behind. Only when the install record cannot be
@@ -47,12 +91,17 @@ in a new release.
 
 import argparse
 import json
+import logging
+import math
+import os
 import re
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from importlib import metadata
@@ -64,11 +113,16 @@ import qte_sdk
 
 __all__ = [
     "ARCHIVE_URL",
+    "CHECK_INTERVAL",
     "DEFAULT_TIMEOUT",
     "INSTALL_URL",
+    "RELEASES_URL",
+    "UPDATE_AVAILABLE",
+    "UPDATE_CHECK_ENV_VAR",
     "Status",
     "UpdateCheck",
     "check_for_update",
+    "check_in_background",
     "main",
     "update_command",
 ]
@@ -79,6 +133,16 @@ INSTALL_URL = f"git+https://{REPOSITORY}"
 # A release's archive, which pip installs with no git.
 ARCHIVE_URL = f"https://{REPOSITORY}/archive/refs/tags/{{tag}}.zip"
 DEFAULT_TIMEOUT = 5.0
+# The code of the line that says the SDK is behind a release, as a log record's `code`.
+UPDATE_AVAILABLE = "QTE-UPDATE-AVAILABLE"
+# Set to 0 to turn the automatic check off.
+UPDATE_CHECK_ENV_VAR = "QTE_UPDATE_CHECK"
+# The least time between two automatic checks on one computer, in seconds.
+CHECK_INTERVAL = 24 * 60 * 60
+# Which releases are recommended updates, and why: read from main, and only when behind.
+RELEASES_URL = "https://raw.githubusercontent.com/josh-g-s/qte-sdk/main/releases.json"
+
+logger = logging.getLogger(__name__)
 
 # Git's list of references, in the original protocol: no `Git-Protocol` header is sent.
 _REFS_URL = f"https://{REPOSITORY}.git/info/refs?service=git-upload-pack"
@@ -86,6 +150,15 @@ _REFS_TYPE = "application/x-git-upload-pack-advertisement"
 # Far more than the repository's list of references needs, and a bound on what is read.
 _MAX_REFS_SIZE = 1 << 20
 _CHUNK = 1 << 16
+# Far more than releases.json needs, and a bound on what is read.
+_MAX_RELEASES_SIZE = 64 * 1024
+# The longest reason shown, in characters.
+_MAX_WHY = 300
+# A `sys.platform` name in releases.json, such as "win32", "darwin" or "linux".
+_PLATFORM = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_PLATFORM_NAMES = {"win32": "Windows", "darwin": "macOS", "linux": "Linux"}
+# The values of QTE_UPDATE_CHECK that turn the automatic check off.
+_OFF = frozenset({"0", "false", "no", "off"})
 
 # A part of a version: no leading zero, and short enough to be read as a number safely.
 _NUMBER = r"(0|[1-9][0-9]{0,8})"
@@ -117,7 +190,9 @@ class UpdateCheck:
     `main_commit` the commit at the tip of `main`, when the repository was read.
     `main_ahead` is true when the install follows `main` and `main` has newer commits.
     `command` is the command that updates, when there is something to take, and `message`
-    says it all in one line."""
+    says it all in one line. `recommended` is true when the install is behind a release
+    that `releases.json` marks as a recommended update for this platform, and `why` is the
+    reason it gives, as plain text on one line (None when not recommended)."""
 
     status: Status
     installed_version: str
@@ -129,11 +204,18 @@ class UpdateCheck:
     command: str | None
     message: str
     installed_archive: str | None = None
+    recommended: bool = False
+    why: str | None = None
 
     @property
     def exit_code(self) -> int:
         """0 when current, 1 when behind a release, 2 when the check cannot tell."""
         return _EXIT_CODES[self.status]
+
+    @property
+    def code(self) -> str | None:
+        """`UPDATE_AVAILABLE` when behind a release, which `message` starts with; else None."""
+        return UPDATE_AVAILABLE if self.status is Status.BEHIND else None
 
 
 def update_command(
@@ -158,15 +240,20 @@ def check_for_update(timeout: float = DEFAULT_TIMEOUT) -> UpdateCheck:
     """Compare the installed SDK with the repository's latest release. Reads the
     repository over HTTPS, waiting at most `timeout` seconds for it, and only when the
     install came from it. Never raises: when the install or the repository cannot be read,
-    the result is `Status.UNKNOWN`."""
+    the result is `Status.UNKNOWN`. Behind a release, it also reads `releases.json` within
+    what is left of `timeout`, to say whether the update is recommended.
+
+    A program that calls it is not checked again automatically (see `check_in_background`)."""
+    _note_checked()
     version = qte_sdk.__version__
     install = _Install()
+    deadline = time.monotonic() + timeout
     try:
         try:
             install = _installed(version)
         except _Unplaced as unplaced:
-            return _compare_unplaced(version, unplaced, timeout)
-        return _compare(version, install, _parse_refs(_fetch_refs(timeout)))
+            return _compare_unplaced(version, unplaced, timeout, deadline)
+        return _compare(version, install, _parse_refs(_fetch_refs(timeout)), deadline)
     except _CannotTell as reason:
         return _unknown(version, install, str(reason))
     except Exception as error:
@@ -367,7 +454,12 @@ def _archive_revision(url: str) -> str | None:
 
 
 def _fetch_refs(timeout: float) -> bytes:
-    """The repository's list of references, waiting at most `timeout` seconds in all. The
+    """The repository's list of references, waiting at most `timeout` seconds in all."""
+    return _fetch(_read_refs, timeout)
+
+
+def _fetch(read_one: Callable[[float], bytes], timeout: float) -> bytes:
+    """What `read_one(timeout)` reads, waiting at most `timeout` seconds in all. The
     request runs in a background thread, so a slow address lookup or an answer that
     trickles in is not waited for: it is left to end by itself, as the connection's own
     timeout ends it."""
@@ -375,7 +467,7 @@ def _fetch_refs(timeout: float) -> bytes:
 
     def read() -> None:
         try:
-            outcome.append(_read_refs(timeout))
+            outcome.append(read_one(timeout))
         except _CannotTell as reason:
             outcome.append(reason)
         except BaseException as error:
@@ -405,16 +497,10 @@ def _read_refs(timeout: float) -> bytes:
                 raise _CannotTell(f"{REPOSITORY} sent it elsewhere")
             if response.headers.get_content_type() != _REFS_TYPE:
                 raise _CannotTell(f"{REPOSITORY} did not answer as a git repository")
-            data = bytearray()
-            while len(data) <= _MAX_REFS_SIZE:
-                if time.monotonic() > deadline:
-                    raise _CannotTell(f"{REPOSITORY} did not answer within {timeout:g} s")
-                # At most one read from the connection, so the deadline is checked often.
-                chunk = response.read1(_CHUNK)
-                if not chunk:
-                    return bytes(data)
-                data += chunk
-            raise _CannotTell(f"{REPOSITORY} sent a longer list of releases than expected")
+            data = _read_at_most(response, _MAX_REFS_SIZE, deadline, timeout)
+            if data is None:
+                raise _CannotTell(f"{REPOSITORY} sent a longer list of releases than expected")
+            return data
     except _CannotTell:
         raise
     except urllib.error.HTTPError as error:
@@ -428,6 +514,44 @@ def _read_refs(timeout: float) -> bytes:
         # Only the kind: an error's text can name a proxy, with its password.
         failure = f"{REPOSITORY} could not be reached ({type(error).__name__})"
     raise _CannotTell(failure)
+
+
+def _read_at_most(response: Any, limit: int, deadline: float, timeout: float) -> bytes | None:
+    """The body of `response`, or None if it is longer than `limit` bytes. Raises
+    `_CannotTell` once `deadline` has passed."""
+    data = bytearray()
+    while len(data) <= limit:
+        if time.monotonic() > deadline:
+            raise _CannotTell(f"{REPOSITORY} did not answer within {timeout:g} s")
+        # At most one read from the connection, so the deadline is checked often, and never
+        # more than one byte beyond the limit.
+        chunk = response.read1(min(_CHUNK, limit + 1 - len(data)))
+        if not chunk:
+            return bytes(data)
+        data += chunk
+    return None
+
+
+def _read_releases(timeout: float) -> bytes:
+    """`releases.json`, as it is on `main`. Like the list of references, it is read from its
+    own address or not at all, and says nothing about you beyond the SDK's version."""
+    request = urllib.request.Request(
+        RELEASES_URL, headers={"User-Agent": f"qte-sdk/{qte_sdk.__version__}"}
+    )
+    deadline = time.monotonic() + timeout
+    try:
+        with _open(request, timeout) as response:
+            if response.geturl() != RELEASES_URL:
+                raise _CannotTell("releases.json was sent elsewhere")
+            data = _read_at_most(response, _MAX_RELEASES_SIZE, deadline, timeout)
+    except _CannotTell:
+        raise
+    except Exception as error:
+        # Only the kind: an error's text can name a proxy, with its password.
+        raise _CannotTell(f"releases.json could not be read ({type(error).__name__})") from None
+    if data is None:
+        raise _CannotTell("releases.json is longer than expected")
+    return data
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -504,6 +628,111 @@ def _releases(refs: dict[str, str]) -> dict[str, tuple[tuple[int, int, int], str
     return found
 
 
+# Recommended updates
+
+
+class _Release(NamedTuple):
+    """An entry of releases.json that is in the expected form."""
+
+    number: tuple[int, int, int]
+    recommended: bool
+    why: str
+    platforms: tuple[str, ...]
+
+
+def _parse_releases(data: bytes) -> dict[tuple[int, int, int], _Release]:
+    """The entries of releases.json that are in the expected form, by version: a JSON list
+    of objects, each with `version` ("1.1.1"), `recommended` (true or false), `why` (text,
+    not empty when recommended) and `platforms` (a list of `sys.platform` names, empty for
+    all). Keys it does not know are ignored, and so is an entry not in that form, or a
+    version listed twice. Anything else gives no entries."""
+    if len(data) > _MAX_RELEASES_SIZE:
+        return {}
+    try:
+        entries = json.loads(data.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return {}
+    if not isinstance(entries, list):
+        return {}
+    found: dict[tuple[int, int, int], _Release] = {}
+    twice: set[tuple[int, int, int]] = set()
+    for entry in entries:
+        release = _release(entry)
+        if release is None:
+            continue
+        if release.number in found:
+            twice.add(release.number)
+        found[release.number] = release
+    for number in twice:
+        del found[number]
+    return found
+
+
+def _release(entry: object) -> _Release | None:
+    """One entry of releases.json, or None when it is not in the expected form."""
+    if not isinstance(entry, dict):
+        return None
+    version = entry.get("version")
+    recommended = entry.get("recommended")
+    why = entry.get("why")
+    platforms = entry.get("platforms")
+    if not isinstance(version, str) or (match := _VERSION.fullmatch(version)) is None:
+        return None
+    if not isinstance(recommended, bool) or not isinstance(why, str):
+        return None
+    if not isinstance(platforms, list) or not all(
+        isinstance(name, str) and _PLATFORM.fullmatch(name) for name in platforms
+    ):
+        return None
+    why = _plain(why)
+    if recommended and not why:
+        return None
+    number = (int(match[1]), int(match[2]), int(match[3]))
+    return _Release(number, recommended, why, tuple(platforms))
+
+
+def _plain(text: str) -> str:
+    """`text` as it may be shown in a terminal or a chat: one line, with no control or
+    formatting characters (such as an escape or a change of writing direction), no full stop
+    at the end, since one is added, and at most `_MAX_WHY` characters."""
+    text = " ".join(text.split())
+    text = "".join(c for c in text if not unicodedata.category(c).startswith("C"))
+    text = " ".join(text.split()).rstrip(". ")
+    if len(text) > _MAX_WHY:
+        text = text[: _MAX_WHY - 3].rstrip() + "..."
+    return text
+
+
+def _applies_here(release: _Release) -> bool:
+    return not release.platforms or sys.platform in release.platforms
+
+
+def _recommendation(
+    version: str, releases: dict[str, tuple[tuple[int, int, int], str]], deadline: float
+) -> _Release | None:
+    """The highest release above `version`, up to the latest release tag, that releases.json
+    marks as a recommended update for this platform, read within what is left before
+    `deadline`; None for none, or when releases.json cannot be read. Only tagged releases
+    count, so the file can never make the check say more than the tags do."""
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        entries = _parse_releases(_fetch(_read_releases, remaining))
+        installed = _number(version)
+        tagged = {number for number, _ in releases.values()}
+        candidates = [
+            entry
+            for number, entry in entries.items()
+            if entry.recommended and number > installed and number in tagged
+            if _applies_here(entry)
+        ]
+        return max(candidates, key=lambda entry: entry.number, default=None)
+    except Exception:
+        # releases.json only adds to the result: when it cannot be used, the check is as before.
+        return None
+
+
 # The result
 
 
@@ -517,11 +746,37 @@ def _latest(releases: dict[str, tuple[tuple[int, int, int], str]]) -> str | None
     return max(releases, key=lambda tag: releases[tag][0], default=None)
 
 
-def _behind_message(version: str, latest: str, command: str) -> str:
-    return f"qte-sdk {version} is behind the latest release, {latest}: update with {command}"
+def _behind_message(
+    version: str, latest: str, command: str, recommendation: _Release | None
+) -> str:
+    text = f"{UPDATE_AVAILABLE}: qte-sdk {version} is behind {latest.removeprefix('v')}"
+    if recommendation is not None:
+        where = ""
+        if recommendation.platforms:
+            where = f" on {_PLATFORM_NAMES.get(sys.platform, sys.platform)}"
+        text += f", a recommended update{where}: {recommendation.why}"
+    return f"{text}. Update with {command}."
 
 
-def _compare(version: str, install: _Install, refs: dict[str, str]) -> UpdateCheck:
+def _behind(
+    version: str,
+    latest: str,
+    releases: dict[str, tuple[tuple[int, int, int], str]],
+    command: str,
+    deadline: float,
+) -> dict[str, Any]:
+    """The fields of a result behind release `latest`, which `command` takes."""
+    recommendation = _recommendation(version, releases, deadline)
+    return {
+        "status": Status.BEHIND,
+        "command": command,
+        "message": _behind_message(version, latest, command, recommendation),
+        "recommended": recommendation is not None,
+        "why": None if recommendation is None else recommendation.why,
+    }
+
+
+def _compare(version: str, install: _Install, refs: dict[str, str], deadline: float) -> UpdateCheck:
     installed = _number(version)
     commit, revision, archive = install
     releases = _releases(refs)
@@ -563,7 +818,8 @@ def _compare(version: str, install: _Install, refs: dict[str, str]) -> UpdateChe
             command = update_command(latest, archive=True)
         else:
             command = update_command(latest if pinned else None)
-        return result(Status.BEHIND, command, _behind_message(version, latest, command))
+        behind = _behind(version, latest, releases, command, deadline)
+        return replace(result(Status.BEHIND, command, ""), **behind)
     relation = "is" if installed == releases[latest][0] else "is newer than"
     text = f"qte-sdk {version} {relation} the latest release, {latest}"
     if follows_main and main is not None and not main_ahead:
@@ -572,7 +828,9 @@ def _compare(version: str, install: _Install, refs: dict[str, str]) -> UpdateChe
     return result(Status.CURRENT, command, text + newer)
 
 
-def _compare_unplaced(version: str, unplaced: _Unplaced, timeout: float) -> UpdateCheck:
+def _compare_unplaced(
+    version: str, unplaced: _Unplaced, timeout: float, deadline: float
+) -> UpdateCheck:
     """An install the check cannot place is never current, but it can be behind. When the
     repository cannot be read, the install's reason is given: it says more."""
     unknown = _unknown(version, _Install(), str(unplaced))
@@ -586,12 +844,7 @@ def _compare_unplaced(version: str, unplaced: _Unplaced, timeout: float) -> Upda
     if latest is None or _number(version) >= releases[latest][0]:
         return unknown
     command = update_command(latest, archive=True) if unplaced.archive else update_command()
-    return replace(
-        unknown,
-        status=Status.BEHIND,
-        command=command,
-        message=_behind_message(version, latest, command),
-    )
+    return replace(unknown, **_behind(version, latest, releases, command, deadline))
 
 
 def _unknown(version: str, install: _Install, reason: str) -> UpdateCheck:
@@ -607,6 +860,134 @@ def _unknown(version: str, install: _Install, reason: str) -> UpdateCheck:
         message=f"cannot tell whether qte-sdk {version} is current: {reason}",
         installed_archive=install.archive,
     )
+
+
+# The automatic check
+
+_STAMP = "update-check"
+# Held by a program while it decides whether to check, and removed when it is older than
+# `_STALE_LOCK` seconds.
+_LOCK = "update-check.lock"
+_STALE_LOCK = 60.0
+_automatic_lock = threading.Lock()
+# True once this program has started the automatic check, or called check_for_update.
+_automatic_done = False
+
+
+def check_in_background() -> threading.Thread | None:
+    """Start the automatic check in a daemon thread, unless it is turned off
+    (`QTE_UPDATE_CHECK=0`) or this program has already started it or called
+    `check_for_update`; `open_session` calls it. The thread checks at most once in
+    `CHECK_INTERVAL` on this computer, and logs `UpdateCheck.message` at WARNING through
+    this module's logger only when the installed SDK is behind a release. Returns the
+    thread, or None when none was started. Never raises, and does nothing else in the
+    calling thread, so it never delays the caller."""
+    global _automatic_done
+    try:
+        with _automatic_lock:
+            if _automatic_done or not _automatic_wanted():
+                return None
+            _automatic_done = True
+        thread = threading.Thread(
+            target=_check_and_log, name="qte-sdk daily update check", daemon=True
+        )
+        thread.start()
+        return thread
+    except Exception:
+        return None
+
+
+def _note_checked() -> None:
+    global _automatic_done
+    with _automatic_lock:
+        _automatic_done = True
+
+
+def _automatic_wanted() -> bool:
+    return os.environ.get(UPDATE_CHECK_ENV_VAR, "").strip().lower() not in _OFF
+
+
+def _check_and_log() -> None:
+    """The automatic check, in its own thread: silent unless the SDK is behind a release."""
+    try:
+        if not _claim_the_day():
+            return
+        result = check_for_update()
+        if result.status is Status.BEHIND:
+            logger.warning("%s", result.message, extra={"code": UPDATE_AVAILABLE})
+    except BaseException:
+        # Never into the program: a thread's uncaught error would be printed.
+        return
+
+
+def _claim_the_day() -> bool:
+    """Whether the automatic check may run now: true when no check has started on this
+    computer within `CHECK_INTERVAL`, recording now as the time of the last one before
+    saying so. False when the time cannot be recorded, so a check that cannot be counted
+    never runs, and while another program is deciding the same, so two programs started
+    together do not both check."""
+    folder = _cache_dir()
+    if folder is None:
+        return False
+    lock = folder / _LOCK
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        held = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        # Another program is deciding. A lock left by one that stopped part way is removed
+        # once it is old, for the next program, or dated in the future, as one left before
+        # the clock was set back is.
+        try:
+            if abs(time.time() - lock.stat().st_mtime) > _STALE_LOCK:
+                lock.unlink()
+        except OSError:
+            pass
+        return False
+    except OSError:
+        return False
+    try:
+        return _claim_with_the_lock(folder / _STAMP)
+    finally:
+        os.close(held)
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
+def _claim_with_the_lock(stamp: Path) -> bool:
+    now = time.time()
+    try:
+        with open(stamp, "rb") as file:
+            last = float(file.read(64).decode("ascii").strip())
+    except (OSError, ValueError, UnicodeDecodeError):
+        last = math.nan
+    if math.isfinite(last) and 0 <= now - last < CHECK_INTERVAL:
+        return False
+    try:
+        # Rounded down, so the next check never finds it in the future.
+        stamp.write_text(f"{math.floor(now)}\n", encoding="ascii")
+    except OSError:
+        return False
+    return True
+
+
+def _cache_dir() -> Path | None:
+    """This user's cache folder for the SDK: under `%LOCALAPPDATA%` on Windows,
+    `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` (when it is an absolute path) or
+    `~/.cache` elsewhere. None when there is no home folder to put it in."""
+    try:
+        if sys.platform == "win32":
+            local = os.environ.get("LOCALAPPDATA")
+            base = Path(local) if local else Path.home() / "AppData" / "Local"
+        elif sys.platform == "darwin":
+            base = Path.home() / "Library" / "Caches"
+        else:
+            xdg = os.environ.get("XDG_CACHE_HOME")
+            base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".cache"
+    except (RuntimeError, OSError, KeyError):
+        return None
+    return base / "qte-sdk"
 
 
 # The command

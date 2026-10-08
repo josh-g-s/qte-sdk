@@ -12,8 +12,9 @@ reason, then a summary:
 
     sdk-version      whether the installed SDK is the latest release, as
                      `python -m qte_sdk.update` reports it, before anything else and even
-                     with no token. A FAIL when a newer release is out, or when the SDK is
-                     too old to have the check, with the command that updates; a PASS that
+                     with no token. A FAIL when a newer release is out, saying whether it is
+                     a recommended update and why, or when the SDK is too old to have the
+                     check, with the command that updates; a PASS that
                      notes any newer commits on main; a SKIP when it cannot tell (GitHub
                      could not be reached, say, or a local or editable install that is not
                      behind the latest release).
