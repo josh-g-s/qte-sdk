@@ -3,6 +3,7 @@
     python -m qte_sdk.token set            # write QTE_URL and QTE_TOKEN to ./.env
     python -m qte_sdk.token set --file     # write the token alone to ~/.qte/token
     python -m qte_sdk.token check          # say where the SDK would find each
+    python -m qte_sdk.token check --json   # the same, as one JSON document
 
 `set` asks for the exchange address and then the token, which is read without echo. Press
 Enter at the address prompt to keep the address already set, in `QTE_URL` or in `./.env`.
@@ -43,7 +44,9 @@ ignore, or, on Windows, a file others may read, change or replace); and 2 when i
 not tell (git could not say whether it ignores the `.env`, or Windows would not let it
 fully check the file the token is in). Exit 1 is a report: sessions still only warn about
 what `check` warns about. It looks afresh each time, even where the SDK has already warned
-once in the same process, and it never prints a path that holds the token. `set` exits
+once in the same process, and it never prints a path that holds the token. With `--json` it
+prints one JSON document instead, with the same exit status (docs/errors.md gives its keys).
+A `QTE_LOG_FORMAT` other than json or text makes it exit 2 with `QTE-LOG-FORMAT-INVALID`. `set` exits
 with 0 when it saved, 1 when it refused, and 130 if stopped. Either exits with 2, after a
 `usage:` line, if the command line is wrong.
 

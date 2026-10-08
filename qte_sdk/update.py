@@ -2,6 +2,7 @@
 
     python -m qte_sdk.update                 # check, with a 5 s limit on the network
     python -m qte_sdk.update --timeout 10    # allow longer
+    python -m qte_sdk.update --json          # one JSON document (see docs/errors.md)
 
 A release is a `vX.Y.Z` tag in the SDK's repository, github.com/josh-g-s/qte-sdk. The
 check compares the installed `qte_sdk.__version__` with the highest release tag and prints
@@ -62,8 +63,9 @@ it is silent when the SDK is current, when it cannot tell, and when the network 
 warning is written from the check's own thread, never on the session's event loop, and with
 the standard stream handlers it never holds up the session or the program's exit: when
 stderr is a pipe or terminal that cannot take the whole line at that moment (a full pipe
-that nothing reads, say), or the line is over 512 bytes, it is not written there, and the
-next day's check says it again. On Windows, a pipe that cannot take the line, by the room
+that nothing reads, say), it is not written there, and the next day's check says it
+again. A line over 512 bytes is written there without the reason for a recommended update,
+which the command gives, if that fits, and is not written otherwise. On Windows, a pipe that cannot take the line, by the room
 it reports, is also skipped, not waited on; a pipe whose reader is already waiting for
 output can report none, so there the line may be skipped although it would have fit. A
 Windows console that is paused, or in which text is being selected, can hold the line
@@ -913,7 +915,8 @@ def check_in_background() -> threading.Thread | None:
     pipe, socket or terminal gets the line in one write holding no lock, and only when the
     stream can take it whole at once (on Windows, when the pipe reports the room for it,
     which a pipe whose reader is already waiting may not); otherwise, and for a line over
-    512 bytes, the line is dropped there, and the next day's check says it again. Every
+    512 bytes even without the reason for a recommended update, the line is dropped there,
+    and the next day's check says it again. Every
     other handler, a Windows console's included, gets the record, with its `code`, as
     logging would give it; a console that is paused, or in which text is being selected,
     can hold it until it resumes, as it holds the program's own output, and a handler

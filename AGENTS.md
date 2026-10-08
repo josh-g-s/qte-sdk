@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.25
+**Version:** 1.26
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of any release after 1.1.1, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With 1.1.1 or earlier, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
@@ -37,9 +37,15 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 - Codes, `qte_sdk.errors`, `python -m qte_sdk.agents` and the 0, 1, 2 exit codes of `python -m qte_sdk.token check` arrive in the release after 1.1.1. On 1.1.1 or earlier (check with `python -c "import qte_sdk; print(qte_sdk.__version__)"`), none of this section applies and `import qte_sdk.errors` fails: run `python -m qte_sdk.update` first and follow what it prints to update.
 - Every SDK error or warning, about the token, the address, `.env`, the session, the connection, the history service or a replay, starts with a code, such as `QTE-TOKEN-MISSING` or `QTE-HISTORY-PENDING`, and keeps it in its `code` attribute; a log record at WARNING has it as `code` too. The message is one line: `<CODE>: <what happened>. <why it matters>. <next step>.` Follow its next step.
 - Every code is listed, with its cause and fix, in [docs/errors.md](https://github.com/josh-g-s/qte-sdk/blob/main/docs/errors.md): search that page for the code. It also gives the exit codes of `python -m qte_sdk.token check` (0 fine, 1 must fix, 2 could not tell), `python -m qte_sdk.token set`, `python -m qte_sdk.update` and the smoke test.
-- A code names the area it is about after `QTE-`, such as `QTE-TOKEN-`, `QTE-ADDRESS-`, `QTE-DOTENV-`, `QTE-SESSION-`, `QTE-CONNECT-`, `QTE-HISTORY-`, `QTE-REPLAY-` or `QTE-UPDATE-`.
+- A code names the area it is about after `QTE-`, such as `QTE-TOKEN-`, `QTE-ADDRESS-`, `QTE-DOTENV-`, `QTE-SESSION-`, `QTE-CONNECT-`, `QTE-HISTORY-`, `QTE-REPLAY-`, `QTE-UPDATE-` or `QTE-LOG-`.
 - Common ones: `QTE-TOKEN-MISSING` and `QTE-ADDRESS-MISSING` (the person runs `python -m qte_sdk.token set`), `QTE-TOKEN-SHARED` (others can read the `.env`; on macOS and Linux, `chmod 600 .env`), `QTE-DOTENV-NOT-IGNORED` and `QTE-DOTENV-TRACKED` (git could commit the `.env`), `QTE-SESSION-REJECTED` (the exchange refused the session; the fix depends on its `reason_name`) and `QTE-UPDATE-AVAILABLE` (see Updates above).
 - Catch `qte_sdk.errors.QteError` for any SDK exception with a code, and filter on `qte_sdk.errors.QteWarning` for any such warning. Fix the cause; never silence a warning about the token or the `.env`.
+
+## Machine-readable output
+
+- `python -m qte_sdk.token check --json`, `python -m qte_sdk.update --json` and `python examples/smoke_test.py --json` print one JSON document on stdout, and nothing else there, with the same exit status as without `--json`, which the document also gives as `exit_code`. Parse it with `json.loads` rather than reading the text. Each finding has its `code`, `message` and `next_step` as keys of their own. A usage error is still a plain `usage:` line on stderr, with exit 2.
+- `QTE_LOG_FORMAT=json` in the environment makes the SDK's log records one JSON object per line on stderr (`time`, `level`, `logger`, `code`, `message`, `next_step`, `fields`). The commands and examples read it when they start; a program reads it only when it calls `qte_sdk.logs.configure()`, once, at its start (nothing happens on import). Any value but `json` or `text` is `QTE-LOG-FORMAT-INVALID`.
+- Both arrive in the release after 1.1.1, as codes do. No output of the SDK is ever coloured or redrawn with carriage returns, and none ever holds the token. docs/errors.md gives every key under "JSON output".
 
 ## Values the exchange sets
 

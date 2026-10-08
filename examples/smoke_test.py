@@ -47,7 +47,11 @@ reason, then a summary:
                      QTE_HISTORY_URL is set (from the environment only, never .env).
 
 It exits with status 0 when no check failed, 1 when one did, and 2 when it found no token
-or no usable address, and so could not connect. The output never shows the token or any
+or no usable address, and so could not connect (or `QTE_LOG_FORMAT` is neither json nor
+text). With --json it prints one JSON document on stdout instead, once it is done, on
+every exit a stop included, with that status as `exit_code`, each check's status and
+reason, and what it wrote to stderr, where its lines are then JSON too (docs/errors.md
+gives the keys). The output never shows the token or any
 account figure; the one exception is a fill of the test order, whose quantity and price
 it names so you know the position your team then holds. A FAIL caused by an SDK error or
 warning gives its code, such as QTE-TOKEN-MISSING: docs/errors.md says what each means,
