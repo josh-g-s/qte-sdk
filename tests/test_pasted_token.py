@@ -6,7 +6,7 @@ Each place is fed the token in the forms a message could show it: as written,
 percent-encoded, as a repr writes it (a backslash and an n where the text holds a line
 break) and in one line (a tab made a space). Where the SDK has the token at hand it looks
 for it; where it has none (a `Session`'s address, say) it withholds text shaped like a token
-the exchange mints, 32 hex digits."""
+the exchange issues, a run of 32 hex digits."""
 
 import logging
 import os
@@ -23,7 +23,7 @@ from urllib.parse import quote
 import pytest
 from test_fileaccess import Windows
 
-from qte_sdk import errors, history, replay
+from qte_sdk import dotenv, errors, history, replay
 from qte_sdk._fileaccess import BroadAccess, LinkFolder
 from qte_sdk.connection import Connection, SessionInfo
 from qte_sdk.contract.v1.session_pb2 import Auth
@@ -57,8 +57,8 @@ def synthetic_token() -> str:
 
 
 def minted_token() -> str:
-    """A token as the exchange mints one: 16 random bytes as 32 hex digits."""
-    return secrets.token_hex(16)
+    """A token as the exchange issues one: 32 random bytes as 64 hex digits."""
+    return secrets.token_hex(32)
 
 
 @pytest.fixture(autouse=True)
@@ -285,7 +285,7 @@ def test_the_git_warning_withholds_a_dotenv_path_holding_the_token_in_the_enviro
 def test_the_git_warning_withholds_a_dotenv_path_shaped_like_a_minted_token(
     monkeypatch, tmp_path, tracked
 ):
-    # No token is at hand before the .env is read: the shape of one the exchange mints is
+    # No token is at hand before the .env is read: the shape of one the exchange issues is
     # withheld.
     token = minted_token()
     monkeypatch.chdir(folder_named(f"x{token}y", tmp_path))
@@ -525,6 +525,26 @@ def test_a_ctrl_c_while_giving_the_git_warning_shows_the_path_in_no_frame(monkey
     with warnings.catch_warnings():
         warnings.simplefilter("always")
         interrupt_warnings(monkeypatch)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            resolve_url()
+    assert_no_form_of(token, shown(caught.value))
+
+
+@needs_git
+def test_a_ctrl_c_while_logging_the_git_warning_made_an_error_shows_the_path_in_no_frame(
+    monkeypatch, tmp_path
+):
+    token = minted_token()
+    monkeypatch.chdir(folder_named(token, tmp_path))
+    git("init", "-q", ".")
+    Path(".env").write_text("QTE_URL=ws://127.0.0.1:8080/ws\n")
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dotenv._log, "warning", interrupted)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DotenvNotIgnored)
         with pytest.raises(KeyboardInterrupt) as caught:
             resolve_url()
     assert_no_form_of(token, shown(caught.value))

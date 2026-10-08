@@ -348,10 +348,12 @@ def _warn_if_not_ignored(path: Path) -> BaseException | None:
         code=code,
     )
     try:
-        warnings.warn(warning, stacklevel=_caller_level())
-    except Warning:
-        _log.warning("%s", warning, extra={"code": code})
+        try:
+            warnings.warn(warning, stacklevel=_caller_level())
+        except Warning:
+            _log.warning("%s", warning, extra={"code": code})
     except BaseException as error:
+        # Including one raised while logging the warning a filter made an error.
         return _detached(error)
     return None
 
@@ -640,7 +642,7 @@ def _detached(error: BaseException) -> BaseException:
 def withholding(token: str | None = None) -> Callable[[str], bool]:
     """Whether a path or other text a warning names is to be withheld: it holds `token`, if
     given, or the token in the `QTE_TOKEN` environment variable, if set, in any form a
-    message could show it, or is shaped like a token the exchange mints (see
+    message could show it, or is shaped like a token the exchange issues (see
     `errors.token_shaped`), which may be one pasted by mistake that the SDK has not read.
     Each token is held as `qte_sdk.session` holds it, so no repr shows it."""
     # Imported here: qte_sdk.session imports this module.

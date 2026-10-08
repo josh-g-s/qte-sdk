@@ -399,7 +399,7 @@ class Session:
     def __repr__(self) -> str:
         # A mistake can put the token in the address, and a traceback that shows locals
         # shows this. A session has no token to look for, so an address shaped like one
-        # the exchange mints is withheld.
+        # the exchange issues is withheld.
         url = self.connection.url
         if _errors.token_shaped(str(url)):
             url = _errors.WITHHELD
@@ -1279,7 +1279,7 @@ def _text_holds_token(text: str, secret: _Secret) -> bool:
 
 def _url_holds_token(url: str, secret: _Secret) -> bool:
     """Whether the address `url` holds the token, as written, percent-encoded, or as its
-    repr shows it, or holds text shaped like a token the exchange mints (see
+    repr shows it, or holds text shaped like a token the exchange issues (see
     `qte_sdk.errors.token_shaped`), which may be another one pasted by mistake."""
     return _text_holds_token(url, secret) or _errors.token_shaped(url)
 

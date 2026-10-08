@@ -139,7 +139,7 @@ def _checked(
 ) -> tuple[str, list[tuple[int, str]]]:
     """The session date as text and the streams to merge, or the error for arguments the
     replay cannot use. A date or channel it names is withheld if it holds the client's
-    token, or is shaped like a token the exchange mints (see `errors.token_shaped`)."""
+    token, or is shaped like a token the exchange issues (see `errors.token_shaped`)."""
     secret = getattr(client, "_secret", None)
 
     def withhold(text: str) -> bool:

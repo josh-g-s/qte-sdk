@@ -599,9 +599,10 @@ def _shown(value: object, withhold: Callable[[str], bool] | None) -> object:
     return shown
 
 
-# The shape of a token the exchange mints: 16 random bytes written as 32 hex digits
-# (qte-platform console/mint/mint.go), which is also the fewest characters the exchange
-# accepts in a token (console/directors/secret.go). The 8 characters a form of a known
+# The shape of a token the exchange issues: hex digits, at least 32 of them. A credential
+# is 32 random bytes written as 64 hex digits (qte-platform gateway/credential/credential.go),
+# and the gateway refuses a token of fewer than 32 bytes (gateway/ws/config.go,
+# minPresentedTokenLen), so any run of 32 is looked for. The 8 characters a form of a known
 # token must keep (see `qte_sdk.session`) are no shape: with no token to compare, a run of
 # 8 would match ordinary words in every address and path.
 _MINTED_TOKEN = re.compile(r"[0-9A-Fa-f]{32}")
@@ -609,7 +610,7 @@ _MINTED_TOKEN = re.compile(r"[0-9A-Fa-f]{32}")
 
 def token_shaped(text: str) -> bool:
     """Whether `text` holds a run of 32 hex digits, the shape of a token the exchange
-    mints, as written, percent-decoded, flattened (see `flatten`) or as its repr shows it.
+    issues, as written, percent-decoded, flattened (see `flatten`) or as its repr shows it.
     For text that may be a token pasted by mistake where the SDK has no token to look for,
     or holds one but a different one may have been pasted: a token made by hand, not by the
     exchange, is found only where the SDK has it at hand."""
