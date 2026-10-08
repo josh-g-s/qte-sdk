@@ -858,9 +858,12 @@ async def replay_out_of_order(token: str, ctx: Context) -> str:
     with serve_history(fake) as url:
         client = HistoryClient(url, token)
         for instrument in ("AAA", token):
-            items = replay.replay(client, DAY, [instrument], ["book"])
             try:
-                await collect(items)
+                # Read here, not through a helper in another module: before Python 3.12 a
+                # comprehension has a frame of its own, holding the last book yielded,
+                # which names the instrument the caller asked for.
+                async for _ in replay.replay(client, DAY, [instrument], ["book"]):
+                    pass
             except replay.ReplayOutOfOrder as error:
                 parts.append(shown(error))
     assert len(parts) == 2 and errors.WITHHELD in parts[1]
