@@ -2224,6 +2224,28 @@ def test_a_wrapped_pipe_with_room_gets_the_line_through_the_wrapper(
 
 
 @pytest.mark.parametrize("wrapper", WRAPPERS)
+def test_a_wrapped_pipe_runs_the_filters_once_and_measures_what_they_leave(
+    pipe: Any, lone: logging.Logger, wrapper: str
+):
+    read, stream = pipe
+    wrapped = WRAPPERS[wrapper](stream)
+    handler = logging.StreamHandler(wrapped)
+    calls: list[str] = []
+
+    def lengthen(record: logging.LogRecord) -> bool:
+        calls.append(record.getMessage())
+        record.args = (record.args[0] * 100,)  # type: ignore[index]
+        return True
+
+    handler.addFilter(lengthen)
+    lone.addHandler(handler)
+    warn_in_a_thread("behind")  # 600 bytes once the filter has run: dropped
+    assert calls == ["behind"]
+    assert wrapped.written == []
+    assert read_all(read) == b""
+
+
+@pytest.mark.parametrize("wrapper", WRAPPERS)
 def test_a_wrapped_pipe_drops_a_line_over_512_bytes(pipe: Any, lone: logging.Logger, wrapper: str):
     read, stream = pipe
     wrapped = WRAPPERS[wrapper](stream)

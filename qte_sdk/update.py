@@ -73,7 +73,9 @@ handler the SDK cannot see into, such as a custom emit or a queue listener, writ
 always has. A stderr the program has replaced or wrapped (colorama, a rich progress
 display, a tee) gets the same check when its `fileno()` leads to the pipe or terminal, and
 then can wait only if something else fills the pipe in the instant between that check and
-the write; one with no usable `fileno()` writes as it always has. It sends the same
+the write, or if the wrapper writes output of the program's own that it held back (rich
+keeps a partial line until it ends) along with it; one with no usable `fileno()` writes as
+it always has. It sends the same
 requests as the command, and nothing more. The day is
 counted from a file holding the time of the last check, written just before the check
 starts, so a failed check is not retried until the next day: `qte-sdk/update-check` in
@@ -1126,7 +1128,7 @@ def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogR
             return
         if isinstance(passed, logging.LogRecord):
             record = passed
-        data = _encoded_line(handler, record)
+        data = _encoded(handler, handler.format(record) + handler.terminator)
         if len(data) > _MAX_DIRECT_LINE:
             return
         try:
@@ -1141,26 +1143,39 @@ def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogR
 
 
 def _handle_if_ready(handler: logging.StreamHandler, fd: int, record: logging.LogRecord) -> None:
-    """Give `record` to `handler.handle`, so its stream (a wrapper) writes it, only when the
-    line is at most 512 bytes and the pipe, socket or terminal behind `fd` can take it
-    whole now; otherwise drop it, without running the handler's filters. The stream then
-    writes at most that much to `fd`, so its write does not wait, unless another writer
-    fills the pipe between this check and that write: then it waits holding the handler's
-    lock, and the program's exit waits for it too, as with any write to a full pipe."""
+    """Write `record` to `handler`'s stream (a wrapper), as `handle` and `emit` would, only
+    when the line is at most 512 bytes and the pipe, socket or terminal behind `fd` can
+    take it whole now; otherwise drop it. The handler's filters run once, before the line
+    is measured, and the line written is the one measured. The wrapper then passes on at
+    most that much, so its write does not wait, unless another writer fills the pipe
+    between this check and that write, or the wrapper holds back output of the program's
+    own that it writes with the line (rich keeps a partial line until it ends): then the
+    write waits holding the handler's lock, and the exit waits for it, as for any write to
+    a full pipe."""
     try:
-        data = _encoded_line(handler, record)
+        passed = handler.filter(record)
+        if not passed:
+            return
+        if isinstance(passed, logging.LogRecord):
+            record = passed
+        text = handler.format(record) + handler.terminator
+        data = _encoded(handler, text)
         if len(data) > _MAX_DIRECT_LINE or not _can_take(fd, len(data)):
             return
-        handler.handle(record)
+        handler.acquire()
+        try:
+            handler.stream.write(text)
+            handler.flush()
+        finally:
+            handler.release()
     except Exception:
         return
 
 
-def _encoded_line(handler: logging.StreamHandler, record: logging.LogRecord) -> bytes:
-    """The bytes `handler` writes for `record`: its formatted line and terminator, in its
-    stream's encoding (with backslashreplace, as Python's stderr writes it), and with the
-    line ending a text stream writes on Windows."""
-    text = handler.format(record) + handler.terminator
+def _encoded(handler: logging.StreamHandler, text: str) -> bytes:
+    """The bytes `text` becomes on `handler`'s stream's descriptor: in its encoding (with
+    backslashreplace, as Python's stderr writes it), and with the line ending a text
+    stream writes on Windows."""
     if sys.platform == "win32":
         text = text.replace("\n", "\r\n")
     encoding = getattr(handler.stream, "encoding", None) or "utf-8"
