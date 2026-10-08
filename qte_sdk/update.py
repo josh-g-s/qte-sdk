@@ -959,8 +959,11 @@ def _check_and_log() -> None:
 _MAX_DIRECT_LINE = 512
 
 
-def _log_without_waiting(level: int, message: str, code: str) -> None:
-    """Log `message` through `logger`, with `code` on the record, as `logger.log` would,
+def _log_without_waiting(
+    level: int, message: str, code: str, target: logging.Logger | None = None
+) -> None:
+    """Log `message` through `target` (by default this module's `logger`), with `code` on
+    the record, as `logger.log` would,
     except that the write can never hold up the program. Levels, filters, `propagate`,
     every handler and `logging.lastResort` are honoured, from their public attributes, and
     every handler gets the record through `handle` as usual, except a `StreamHandler` whose
@@ -981,23 +984,24 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
     exit, wait behind the line until the pipe is read. A program that writes nothing more
     to stderr exits as usual. A wrapper's write, in that race, waits holding the handler's
     lock, and the exit waits for it, as for any write to a full pipe."""
-    if logger.disabled or not logger.isEnabledFor(level):
+    log = logger if target is None else target
+    if log.disabled or not log.isEnabledFor(level):
         return
     try:
         # The caller's file, line and function, as `logger.log` would record them.
-        path, line, function, stack = logger.findCaller(False, 2)
+        path, line, function, stack = log.findCaller(False, 2)
     except ValueError:
         path, line, function, stack = "(unknown file)", 0, "(unknown function)", None
-    record = logger.makeRecord(
-        logger.name, level, path, line, "%s", (message,), None, function, {"code": code}, stack
+    record = log.makeRecord(
+        log.name, level, path, line, "%s", (message,), None, function, {"code": code}, stack
     )
-    passed = logger.filter(record)
+    passed = log.filter(record)
     if not passed:
         return
     if isinstance(passed, logging.LogRecord):  # a filter may return a new record (3.12+)
         record = passed
     handlers: list[logging.Handler] = []
-    node: logging.Logger | None = logger
+    node: logging.Logger | None = log
     while node is not None:
         handlers.extend(node.handlers)
         node = node.parent if node.propagate else None

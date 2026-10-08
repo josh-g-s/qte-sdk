@@ -1161,3 +1161,32 @@ def test_a_token_on_a_drive_without_access_lists_warns(drive_without_lists, monk
     message = uncoded(caught[0].message)
     assert message.startswith(f"{path} holds your token, and Windows lets Everyone read or ")
     assert_no_token(message)
+
+
+async def test_pacing_holds_the_burst_cap_on_the_real_windows_timers():
+    # Windows' timers and monotonic clock tick about every 15.6 ms, and asyncio may run a
+    # timer up to a tick early: the pacer must check again after each sleep rather than
+    # trust it. 500 sends at a burst cap of 200, measured on the real clock.
+    import time
+
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+    from qte_sdk.pacing import Budget, Pacer
+
+    sent: list[float] = []
+
+    class Wire:
+        async def send(self, type_, payload):
+            sent.append(time.monotonic())
+
+    pacer = Pacer(Budget(sustained_per_minute=1_000_000, burst_per_second=200))
+    sender = pacer.wrap(Wire())
+    for n in range(500):
+        await sender.send("new", NewOrder(request_ref=f"r{n}"))
+    most, start = 0, 0
+    for end, t in enumerate(sent):
+        while sent[start] <= t - 1.0:
+            start += 1
+        most = max(most, end - start + 1)
+    assert most <= 160, most
+    # And it is not stuck: 500 sends at 160 a second take a little over 3 s.
+    assert sent[-1] - sent[0] < 10

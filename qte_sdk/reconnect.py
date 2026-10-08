@@ -149,6 +149,7 @@ from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk import errors as _errors
+from qte_sdk import pacing as _pacing
 from qte_sdk.connection import (
     TERM_CHANGE_CLOSE_CODE,
     Connected,
@@ -171,6 +172,7 @@ from qte_sdk.contract.v1.session_pb2 import (
     Unsubscribe,
 )
 from qte_sdk.errors import QteError
+from qte_sdk.pacing import Pacer
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     DEFAULT_ACK_TIMEOUT,
@@ -318,7 +320,10 @@ class ReconnectingSession:
     them in tests. `ack_timeout` and `connection_options` are passed to `open_session` for
     every connection, so `ack_timeout` bounds each attempt to open one; it also bounds each
     wait for `resume_ack`, and the wait for the calendar. `connection_options` include
-    `liveness_timeout` (see `qte_sdk.connection.Connection`).
+    `liveness_timeout` (see `qte_sdk.connection.Connection`). `pacing`, a
+    `qte_sdk.pacing.Pacer`, paces `new`, `cancel` and `amend` on every session; the same
+    pacer carries over each reconnect, since the exchange's budget windows do not reset
+    when the connection drops, and a resume's replayed reports count toward them.
 
     `calendar` is the session calendar the exchange sent on the current session; see
     `qte_sdk.calendar`. `heartbeats_received`, `last_heartbeat_at` and
@@ -344,8 +349,10 @@ class ReconnectingSession:
         ack_timeout: float | None = DEFAULT_ACK_TIMEOUT,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         rng: Callable[[], float] = random.random,
+        pacing: Pacer | None = None,
         **connection_options: Any,
     ) -> None:
+        self._pacing = _pacing._checked(pacing)
         self._secret = _Secret(resolve_token(token))
         del token
         self.url = resolve_url(url)
@@ -460,6 +467,11 @@ class ReconnectingSession:
         return self._reports.cursor
 
     @property
+    def pacing(self) -> Pacer | None:
+        """The `qte_sdk.pacing.Pacer` pacing every session's orders, or None."""
+        return self._pacing
+
+    @property
     def instruments(self) -> tuple[str, ...]:
         """The instruments subscribed to again on every new session."""
         return tuple(self._instruments)
@@ -469,21 +481,18 @@ class ReconnectingSession:
 
         Raises `NotConnected` while no session is up; nothing is queued or sent later.
         A `subscribe` or `unsubscribe` sent here also changes which instruments a new
-        session subscribes to.
+        session subscribes to. With a pacer, a `new`, `cancel` or `amend` first waits for
+        room in the budget, and raises `NotConnected` if the session dropped meanwhile.
         """
         session = self._session
         if session is None or not self._up:
             del payload  # it may be `auth`, so it stays out of the traceback
-            # The type is the caller's text: withheld if it holds the token, in the arguments
-            # too, which otherwise keep it as given.
-            fields = _errors.withheld(
-                lambda shown: _text_holds_token(shown, self._secret), type=type_
-            )
-            if fields["type"] == _errors.WITHHELD:
-                type_ = _errors.WITHHELD
-            failure = NotConnected(f"no session is up, so {type_} was not sent", fields=fields)
+            failure = self._not_connected(type_)
             del type_
             raise failure
+        if self._pacing is not None and type_ in _pacing.PACED_TYPES:
+            await self._pacing._send(type_, payload, self._send_now)
+            return
         if isinstance(payload, Subscribe):
             self._instruments.update(dict.fromkeys(payload.instruments))
         elif isinstance(payload, Unsubscribe):
@@ -499,6 +508,21 @@ class ReconnectingSession:
         # Not this frame's copy of the message either: it may be `auth`.
         del payload
         raise failure
+
+    async def _send_now(self, type_: str, payload: Message) -> None:
+        """Send a paced order on the session up now, once the pacer has let it go."""
+        session = self._session
+        if session is None or not self._up:
+            raise self._not_connected(type_)
+        await session.connection.send(type_, payload)
+
+    def _not_connected(self, type_: str) -> "NotConnected":
+        # The type is the caller's text: withheld if it holds the token, in the arguments
+        # too, which otherwise keep it as given.
+        fields = _errors.withheld(lambda shown: _text_holds_token(shown, self._secret), type=type_)
+        if fields["type"] == _errors.WITHHELD:
+            type_ = _errors.WITHHELD
+        return NotConnected(f"no session is up, so {type_} was not sent", fields=fields)
 
     def __aiter__(self) -> AsyncIterator[ReconnectEvent]:
         return self.events()
@@ -684,6 +708,7 @@ class ReconnectingSession:
                     self._secret,
                     self._note_close,
                     ack_timeout=self._ack_timeout,
+                    pacing=self._pacing,
                     **self._connection_options,
                 )
             )

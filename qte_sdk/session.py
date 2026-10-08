@@ -39,6 +39,7 @@ from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk import errors as _errors
+from qte_sdk import pacing as _pacing
 from qte_sdk import update as _update
 from qte_sdk.connection import (
     Connection,
@@ -66,6 +67,7 @@ from qte_sdk.contract.v1.session_pb2 import (
 )
 from qte_sdk.dotenv import DOTENV_NAME, read_value, shared_access, warn_shared, withholding
 from qte_sdk.errors import Problem, QteError, flatten, one_line, plain
+from qte_sdk.pacing import Pacer
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
 TOKEN_FILE_ENV_VAR = "QTE_TOKEN_FILE"
@@ -367,11 +369,30 @@ class Session:
     report numbered at or below it again is a duplicate and is dropped. When a number is
     skipped, a `ReportGap` (a `DataUncertain`) is delivered before the report that skipped
     it. `resume` asks the exchange for the reports a team missed.
+
+    `pacing` is the `qte_sdk.pacing.Pacer` that paces this session's `new`, `cancel` and
+    `amend`, or None. Without one, the session logs `QTE-BUDGET-REJECTED` at WARNING, at
+    most once a minute, when it reads a budget reject.
     """
 
-    def __init__(self, connection: Connection, info: SessionInfo, early: list[Event]) -> None:
+    def __init__(
+        self,
+        connection: Connection,
+        info: SessionInfo,
+        early: list[Event],
+        pacing: Pacer | None = None,
+    ) -> None:
         self.connection = connection
         self.info = info
+        self._pacer = pacing
+        # The local time the session was acknowledged and the exchange's time in the ack,
+        # to place a report at its receipt time (see qte_sdk.pacing).
+        if pacing is not None:
+            pacing._session_started()
+            local = pacing._clock()
+        else:
+            local = _pacing._monotonic()
+        self._anchor = (local, info.server_time)
         # Events read from the connection but not yet delivered: those that arrived before
         # the ack, and any that `wait_for_calendar` or `resume` read ahead. They are kept
         # as read in `_unrouted`, and pass through the report cursor (see `_Reports`) into
@@ -404,6 +425,11 @@ class Session:
         if _errors.token_shaped(str(url)):
             url = _errors.WITHHELD
         return f"Session({url!r}, {self.info!r})"
+
+    @property
+    def pacing(self) -> Pacer | None:
+        """The `qte_sdk.pacing.Pacer` pacing this session's orders, or None."""
+        return self._pacer
 
     @property
     def calendar(self) -> Calendar | None:
@@ -717,6 +743,13 @@ class Session:
 
     def _keep(self, event: Event) -> None:
         self._unrouted.append(event)
+        if isinstance(event, Received) and event.type in ("accepted", "reject"):
+            # As soon as it is read, before it is delivered: a budget reject must hold the
+            # next send even while earlier events wait to be delivered.
+            if self._pacer is not None:
+                self._pacer._observe(event, self._anchor)
+            else:
+                _pacing._budget_rejected(event, self._anchor)
         if not isinstance(event, (Received, DecodeFailed, Unknown)):
             return  # not a message, such as a SeqGap: it says nothing of what came next
         after_calendar = self._after_calendar
@@ -738,10 +771,15 @@ class Session:
             self._instrument_table_absent = True
 
     async def send(self, type_: str, payload: Message) -> None:
-        """Send one message on this session's connection, as `Connection.send` does."""
+        """Send one message on this session's connection, as `Connection.send` does. With a
+        pacer, a `new`, `cancel` or `amend` first waits for room in the budget (see
+        `qte_sdk.pacing`)."""
         failure: BaseException
         try:
-            await self.connection.send(type_, payload)
+            if self._pacer is None:
+                await self.connection.send(type_, payload)
+            else:
+                await self._pacer._send(type_, payload, self.connection.send)
         except BaseException as error:
             failure = error
         else:
@@ -940,6 +978,7 @@ async def open_session(
     token: str | None = None,
     *,
     ack_timeout: float | None = DEFAULT_ACK_TIMEOUT,
+    pacing: Pacer | None = None,
     **connection_options: Any,
 ) -> Session:
     """Connect to `url`, authenticate, and wait for the exchange to acknowledge the session.
@@ -965,10 +1004,14 @@ async def open_session(
     connection is closed whenever no session is returned, which can take up to
     `close_timeout` seconds more.
 
+    `pacing`, a `qte_sdk.pacing.Pacer`, paces the session's `new`, `cancel` and `amend`
+    under your team's message budgets; it is off by default (see `qte_sdk.pacing`).
+
     It also starts the SDK's update check in the background, at most once a day, which
     logs a WARNING when a newer release is out and never delays or fails the session; set
     `QTE_UPDATE_CHECK=0` to turn it off (see `qte_sdk.update`).
     """
+    _pacing._checked(pacing)
     # A mistake can put the token in the address: held so that no repr shows it, and passed
     # on without this frame keeping it as text, whatever is raised here.
     address = None if url is None else _Secret(url)
@@ -980,6 +1023,7 @@ async def open_session(
         secret,
         None,
         ack_timeout=ack_timeout,
+        pacing=pacing,
         **connection_options,
     )
 
@@ -991,6 +1035,7 @@ async def _open_session(
     /,
     *,
     ack_timeout: float | None,
+    pacing: Pacer | None = None,
     **connection_options: Any,
 ) -> Session:
     """`open_session`, for a resolved address and token. `on_close`, if not None, is called
@@ -1036,7 +1081,7 @@ async def _open_session(
         if safe is None and not interrupted:
             raise
     else:
-        return Session(conn, SessionInfo.from_ack(ack), early)
+        return Session(conn, SessionInfo.from_ack(ack), early, pacing)
     # Raised outside the handler, so the original error, which may mention the token, is
     # not chained to it.
     if interrupted:

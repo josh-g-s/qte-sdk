@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.25
+**Version:** 1.26
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of any release after 1.1.1, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With 1.1.1 or earlier, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
@@ -37,7 +37,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 - Codes, `qte_sdk.errors`, `python -m qte_sdk.agents` and the 0, 1, 2 exit codes of `python -m qte_sdk.token check` arrive in the release after 1.1.1. On 1.1.1 or earlier (check with `python -c "import qte_sdk; print(qte_sdk.__version__)"`), none of this section applies and `import qte_sdk.errors` fails: run `python -m qte_sdk.update` first and follow what it prints to update.
 - Every SDK error or warning, about the token, the address, `.env`, the session, the connection, the history service or a replay, starts with a code, such as `QTE-TOKEN-MISSING` or `QTE-HISTORY-PENDING`, and keeps it in its `code` attribute; a log record at WARNING has it as `code` too. The message is one line: `<CODE>: <what happened>. <why it matters>. <next step>.` Follow its next step.
 - Every code is listed, with its cause and fix, in [docs/errors.md](https://github.com/josh-g-s/qte-sdk/blob/main/docs/errors.md): search that page for the code. It also gives the exit codes of `python -m qte_sdk.token check` (0 fine, 1 must fix, 2 could not tell), `python -m qte_sdk.token set`, `python -m qte_sdk.update` and the smoke test.
-- A code names the area it is about after `QTE-`, such as `QTE-TOKEN-`, `QTE-ADDRESS-`, `QTE-DOTENV-`, `QTE-SESSION-`, `QTE-CONNECT-`, `QTE-HISTORY-`, `QTE-REPLAY-` or `QTE-UPDATE-`.
+- A code names the area it is about after `QTE-`, such as `QTE-TOKEN-`, `QTE-ADDRESS-`, `QTE-DOTENV-`, `QTE-SESSION-`, `QTE-CONNECT-`, `QTE-HISTORY-`, `QTE-REPLAY-`, `QTE-UPDATE-`, `QTE-PACING-` or `QTE-BUDGET-`.
 - Common ones: `QTE-TOKEN-MISSING` and `QTE-ADDRESS-MISSING` (the person runs `python -m qte_sdk.token set`), `QTE-TOKEN-SHARED` (others can read the `.env`; on macOS and Linux, `chmod 600 .env`), `QTE-DOTENV-NOT-IGNORED` and `QTE-DOTENV-TRACKED` (git could commit the `.env`), `QTE-SESSION-REJECTED` (the exchange refused the session; the fix depends on its `reason_name`) and `QTE-UPDATE-AVAILABLE` (see Updates above).
 - Catch `qte_sdk.errors.QteError` for any SDK exception with a code, and filter on `qte_sdk.errors.QteWarning` for any such warning. Fix the cause; never silence a warning about the token or the `.env`.
 
@@ -49,7 +49,7 @@ Never build these into code as constants. They are set by the exchange and can c
 - the minimum time an order must rest before it may be cancelled or amended;
 - the price collar;
 - each instrument's tick and lot size, its sector for the Fundamentals sector limit, and which instruments your team may trade. Read them from the instruments table the exchange sends after the calendar (`session.wait_for_instrument_table()`, then `qte_sdk.instruments`), and never hard-code the list of instruments;
-- your team's message budgets;
+- your team's message budgets. Pass the values your team was given to `qte_sdk.pacing.Budget`, never invented numbers;
 - the heartbeat interval, and how long the exchange waits before it drops a silent connection (the SDK's `liveness_timeout` is a client-side setting, not one of these);
 - trading days, holidays and hours. Read them from the calendar the exchange sends after you authenticate (`session.wait_for_calendar()`, then `qte_sdk.calendar.next_open` and `next_close`).
 
@@ -63,6 +63,7 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 - Prices are whole numbers of micro-dollars (`199_970_000` is $199.97). Convert with `qte_sdk.units` (`to_micros`, `to_decimal`) and never use `float` for a price.
 - An option contract's instrument id is its OCC symbol without spaces, such as `SPY240119C00470000`. Build and read it with `qte_sdk.options` (`option_symbol`, `parse_option_symbol`, `is_option_symbol`) rather than slicing strings. An option order's size is in contracts, never shares, and its prices are per share. Read an option book's `trading_state` with `qte_sdk.options.trading_state`, which treats a state it does not know as suspended, and keep the latest Greeks per contract with `qte_sdk.options.LatestGreeks`. Take a first option contract to subscribe to from the instruments table (`qte_sdk.options.listed_contracts`), never by guessing a symbol. Convert Greeks with `greek_to_decimal` and `vol_to_decimal`, never `float`.
 - A Fundamentals pod sends no orders: it sends its Execution desk tickets with `qte_sdk.tickets` (`send_ticket`, `send_ticket_cancel`, `send_ticket_urgency`), reads the answers with `is_ticket_event`, and keeps each ticket's newest state with `LatestTickets`. There is no ticket amend: cancel, then send a new ticket naming the old one in `replaces_ticket_id`. A ticket stops only when a `ticket_state` says so, never on a `ticket_reject`, and on every connection the exchange resends each ticket's whole state, which replaces what you held.
+- Message budgets count every new, cancel and amend your team sends, rejected ones too, per team across all its connections, including orders placed for your team on the web Trade page; mass cancel never counts. After a budget reject (codes 1500 to 1502, and `QTE-BUDGET-REJECTED` in the log), stop sending new, cancel and amend until the window has passed (a full minute, before restarting the bot too); do not retry. Pace with headroom: `open_session(pacing=Pacer(budget))` or `ReconnectingSession(..., pacing=...)` from `qte_sdk.pacing`, with the values your team was given (a dated table is under "Your message budgets" in [Developing your algo](https://github.com/josh-g-s/qte-sdk/blob/main/docs/developing-your-algo.md)). Bots that share a team split its budget. A `QTE-PACING-REJECTED` warning that says a budget "looks like at most" a number means the values passed are too high: tell the person.
 - Send with the functions in `qte_sdk.orders` (`send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`) and the generated message types in `qte_sdk.contract.v1`. Do not build JSON by hand, and do not edit the generated files or the `.proto` files.
 
 ## Market data

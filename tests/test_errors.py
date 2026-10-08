@@ -60,6 +60,7 @@ from qte_sdk.history import (
     MissingHistoryURL,
     TokenMalformed,
 )
+from qte_sdk.pacing import PacingDraining, PacingLimit
 from qte_sdk.reconnect import NotConnected, ReconnectingSession
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
@@ -82,7 +83,7 @@ from qte_sdk.session import (
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs" / "errors.md"
 CODE_SHAPE = re.compile(
-    r"^QTE-(TOKEN|ADDRESS|DOTENV|SESSION|CONNECT|HISTORY|REPLAY|UPDATE)(-[A-Z0-9]+)+$"
+    r"^QTE-(TOKEN|ADDRESS|DOTENV|SESSION|CONNECT|HISTORY|REPLAY|UPDATE|PACING|BUDGET)(-[A-Z0-9]+)+$"
 )
 CODE_IN_TEXT = re.compile(r"QTE-[A-Z0-9]+(?:-[A-Z0-9]+)+")
 URL = "ws://127.0.0.1:8080/ws"
@@ -269,6 +270,8 @@ def test_server_text_is_flattened_to_one_line():
         (HistoryCorrupt("wrong digest"), HistoryError),
         (replay.ReplayOutOfOrder("went back"), ValueError),
         (NotConnected("no session"), RuntimeError),
+        (PacingLimit("new", "burst", 0.5), RuntimeError),
+        (PacingDraining("cancel", "sustained", 59.0), PacingLimit),
     ],
 )
 def test_coded_errors_keep_their_bases(error: BaseException, base: type):
@@ -882,6 +885,94 @@ async def connect_no_session(token: str, ctx: Context) -> str:
     return "\n".join(parts)
 
 
+def pacing_parts() -> tuple[Any, Any, Any]:
+    from qte_sdk import pacing
+    from qte_sdk.connection import Received
+    from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+    from qte_sdk.contract.v1.order_events_pb2 import Reject
+
+    def budget_reject(reason: int) -> Received:
+        return Received("reject", Reject(request_ref="r", reason_code=reason), None)
+
+    return pacing, budget_reject, ReasonCodes
+
+
+def caught_warnings(ctx: Context) -> list[str]:
+    from qte_sdk import pacing
+
+    caught: list[str] = []
+    ctx.monkeypatch.setattr(pacing, "_emit", lambda message, code: caught.append(message))
+    ctx.monkeypatch.setattr(pacing, "_budget_warned_at", None)
+    return caught
+
+
+async def pacing_limit(token: str, ctx: Context) -> str:
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+    from qte_sdk.pacing import Budget, Pacer
+
+    class Wire:
+        async def send(self, type_: str, payload: object) -> None:
+            pass
+
+    pacer = Pacer(Budget(sustained_per_minute=1, burst_per_second=10), on_limit="raise")
+    sender = pacer.wrap(Wire())
+    await sender.send("new", NewOrder(request_ref="a"))
+    return await raised_async(lambda: sender.send("new", NewOrder(request_ref="b")))
+
+
+async def pacing_draining(token: str, ctx: Context) -> str:
+    from qte_sdk.contract.v1.order_entry_pb2 import CancelOrder
+    from qte_sdk.pacing import Budget, Pacer
+
+    pacing, budget_reject, reasons = pacing_parts()
+    caught_warnings(ctx)
+    pacer = Pacer(Budget(sustained_per_minute=10, burst_per_second=10), on_limit="raise")
+    pacer.observe(budget_reject(reasons.MESSAGE_BUDGET_EXCEEDED))
+    sender = pacer.wrap(ReconnectingSession("ws://127.0.0.1:9", token))
+    return await raised_async(lambda: sender.send("cancel", CancelOrder(request_ref="c")))
+
+
+def pacing_rejected(token: str, ctx: Context) -> str:
+    from qte_sdk.pacing import Budget, Pacer
+
+    pacing, budget_reject, reasons = pacing_parts()
+    caught = caught_warnings(ctx)
+    Pacer(Budget(sustained_per_minute=10, burst_per_second=10)).observe(
+        budget_reject(reasons.BURST_CAP_EXCEEDED)
+    )
+    return "\n".join(caught)
+
+
+async def pacing_holding(token: str, ctx: Context) -> str:
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+    from qte_sdk.pacing import Budget, Pacer
+
+    caught = caught_warnings(ctx)
+    now = [0.0]
+
+    async def sleep(delay: float) -> None:
+        now[0] += delay
+
+    class Wire:
+        async def send(self, type_: str, payload: object) -> None:
+            pass
+
+    pacer = Pacer(
+        Budget(sustained_per_minute=1, burst_per_second=10), clock=lambda: now[0], sleep=sleep
+    )
+    sender = pacer.wrap(Wire())
+    await sender.send("new", NewOrder(request_ref="a"))
+    await sender.send("new", NewOrder(request_ref="b"))
+    return "\n".join(caught)
+
+
+def budget_rejected(token: str, ctx: Context) -> str:
+    pacing, budget_reject, reasons = pacing_parts()
+    caught = caught_warnings(ctx)
+    pacing._budget_rejected(budget_reject(reasons.NEW_ORDER_CAP_EXCEEDED), None)
+    return "\n".join(caught)
+
+
 CASES: dict[str, Case] = {
     errors.TOKEN_MISSING: token_missing,
     errors.TOKEN_FILE_UNREADABLE: token_file_unreadable,
@@ -929,6 +1020,11 @@ CASES: dict[str, Case] = {
     errors.HISTORY_REQUEST_FAILED: history_request_failed,
     errors.REPLAY_OUT_OF_ORDER: replay_out_of_order,
     errors.UPDATE_AVAILABLE: update_available,
+    errors.PACING_LIMIT: pacing_limit,
+    errors.PACING_DRAINING: pacing_draining,
+    errors.PACING_REJECTED: pacing_rejected,
+    errors.PACING_HOLDING: pacing_holding,
+    errors.BUDGET_REJECTED: budget_rejected,
 }
 
 

@@ -89,6 +89,12 @@ HISTORY_REQUEST_FAILED = "QTE-HISTORY-REQUEST-FAILED"
 REPLAY_OUT_OF_ORDER = "QTE-REPLAY-OUT-OF-ORDER"
 # UPDATE: the same value as `qte_sdk.update.UPDATE_AVAILABLE`.
 UPDATE_AVAILABLE = "QTE-UPDATE-AVAILABLE"
+# PACING and BUDGET: the message budgets, with and without a `qte_sdk.pacing.Pacer`.
+PACING_LIMIT = "QTE-PACING-LIMIT"
+PACING_DRAINING = "QTE-PACING-DRAINING"
+PACING_REJECTED = "QTE-PACING-REJECTED"
+PACING_HOLDING = "QTE-PACING-HOLDING"
+BUDGET_REJECTED = "QTE-BUDGET-REJECTED"
 
 
 class Entry(NamedTuple):
@@ -454,6 +460,54 @@ CODES: dict[str, Entry] = {
         "Update with {command}",
         "A newer release of qte-sdk is out",
         "Run the command python -m qte_sdk.update prints",
+    ),
+    PACING_LIMIT: Entry(
+        "the {kind} budget has no room for this {type} message for {seconds} s, so it was not sent",
+        "The exchange counts rejected messages too, so sending it now could lock your team "
+        "out for longer",
+        'Send it again after retry_after seconds, or create the Pacer with on_limit="wait" '
+        "to wait instead",
+        'A Pacer with on_limit="raise", or one whose wait would pass max_wait, found a '
+        "budget window full",
+        "Send it again after retry_after seconds",
+    ),
+    PACING_DRAINING: Entry(
+        "paced messages are held for {seconds} s more after a {kind} budget reject, so this "
+        "{type} message was not sent",
+        "The exchange counts rejected messages too, so sending before its window has passed "
+        "keeps your team locked out",
+        "Send it again after retry_after seconds; send_mass_cancel is never held",
+        "The exchange rejected a message for a budget (1500 to 1502), and the Pacer is "
+        "waiting for that window to pass",
+        "Wait retry_after seconds; if it keeps happening, check the Budget values",
+    ),
+    PACING_REJECTED: Entry(
+        "the exchange rejected a message for your team's {kind} budget ({reason}), so the "
+        "pacer holds {type} for {seconds} s",
+        "{why}",
+        "Check the Budget values you passed against your team's, and split them between "
+        "bots that share a team",
+        "With a Pacer, the exchange rejected a message with code 1500, 1501 or 1502",
+        "Check the Budget values against your team's",
+    ),
+    PACING_HOLDING: Entry(
+        "the pacer is holding {type} for {seconds} s on the {kind} budget",
+        "Each send waits its turn and nothing is lost, but nothing paced is sent meanwhile",
+        'Send less often, check the Budget values, or pass max_wait or on_limit="raise" '
+        "to be told instead of waiting",
+        'A Pacer with on_limit="wait" will wait over 1 s for room in a budget window',
+        "Send less often, or check the Budget values",
+    ),
+    BUDGET_REJECTED: Entry(
+        "the exchange rejected a message for your team's message budget ({reason})",
+        "Rejected messages count toward the window too, so each message sent now keeps your "
+        "team locked out for longer",
+        "Stop sending new, cancel and amend for a full minute, and wait that minute before "
+        "restarting your bot too; then pace them with open_session(pacing=Pacer(budget)) "
+        "from qte_sdk.pacing",
+        "Without a Pacer, the exchange rejected a message with code 1500, 1501 or 1502 "
+        "(logged at most once a minute)",
+        "Wait a full minute, then pace with qte_sdk.pacing.Pacer",
     ),
 }
 
