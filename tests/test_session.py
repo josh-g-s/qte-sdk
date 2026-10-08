@@ -4,6 +4,7 @@ import dataclasses
 import json
 import logging
 import os
+import queue
 import secrets
 import subprocess
 import sys
@@ -22,7 +23,7 @@ from fake_exchange import (
     silent_server,
     wait_until,
 )
-from test_update import MAIN, Repository, ThreadRecorder, refs_with
+from test_update import MAIN, Repository, refs_with
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
 
@@ -901,7 +902,18 @@ def behind_a_newer_release(monkeypatch: pytest.MonkeyPatch) -> Repository:
     return repository
 
 
-async def test_the_update_checks_warning_is_logged_on_the_sessions_event_loop(
+class ThreadRecorder(logging.Handler):
+    """Records each record it handles with the thread that logged it."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.records: list[tuple[logging.LogRecord, threading.Thread]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append((record, threading.current_thread()))
+
+
+async def test_the_update_checks_warning_is_logged_from_its_own_thread_not_the_loop(
     monkeypatch: pytest.MonkeyPatch,
 ):
     repository = behind_a_newer_release(monkeypatch)
@@ -919,8 +931,7 @@ async def test_the_update_checks_warning_is_logged_on_the_sessions_event_loop(
                 pass
         [thread] = started
         assert thread is not None
-        # The warning was handed to the loop before the thread ended, so it is logged first.
-        assert await asyncio.to_thread(thread.join, 10) is None
+        await asyncio.to_thread(thread.join, 10)
         assert not thread.is_alive()
     finally:
         update.logger.removeHandler(emitted)
@@ -929,45 +940,28 @@ async def test_the_update_checks_warning_is_logged_on_the_sessions_event_loop(
     assert record.levelno == logging.WARNING
     assert record.code == update.UPDATE_AVAILABLE
     assert record.getMessage().startswith("QTE-UPDATE-AVAILABLE: qte-sdk ")
-    # Logged on the loop's thread, never by the check's own.
-    assert on is threading.current_thread()
-    assert on is not thread
+    # Logged by the check's thread: a write there that cannot complete never stops the loop.
+    assert on is thread
+    assert on is not threading.current_thread()
 
 
 TESTS = Path(__file__).resolve().parent
 NO_NETWORK = TESTS / "no_network"
-# A program that opens a session, with the update check on, finds the SDK behind a release,
-# closes the session once the check has ended and exits. With `blocking`, a write to stderr
-# from any thread but the main one never returns, as a write to a full pipe that nothing
-# reads never does; the main thread's writes go through.
-STDERR_CHILD = """
+# A program whose stderr is a pipe that nothing reads until it is done. A helper thread fills
+# the pipe, whatever its size (about 4 KiB on Windows, 64 KiB elsewhere), and stays blocked
+# in its write; only then does GitHub answer that the SDK is behind, so the check's warning
+# has to wait behind it. A timer on the session's loop prints a tick to stdout every 100 ms
+# throughout. Once the check's thread is seen stuck in its warning, the program waits for 10
+# more ticks, closes the session, prints "done", and waits for the parent to read stderr.
+# Nothing in the main thread writes to stderr.
+FULL_STDERR_CHILD = """
 import asyncio
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
-
-class Blocked:
-    def __init__(self, stream):
-        self._stream = stream
-
-    def write(self, text):
-        if threading.current_thread() is not threading.main_thread():
-            threading.Event().wait()
-        return self._stream.write(text)
-
-    def flush(self):
-        if threading.current_thread() is not threading.main_thread():
-            threading.Event().wait()
-        return self._stream.flush()
-
-    def __getattr__(self, name):
-        return getattr(self._stream, name)
-
-
-if sys.argv[1] == "blocking":
-    sys.stderr = Blocked(sys.stderr)
 # tests/no_network/sitecustomize.py turned the check off; it is on outside the tests.
 os.environ["QTE_UPDATE_CHECK"] = "1"
 
@@ -978,51 +972,147 @@ from test_update import MAIN, Repository, refs_with
 from qte_sdk import update
 from qte_sdk.session import open_session
 
-update._cache_dir = lambda: Path(sys.argv[2])
+written = [0]
+filling = threading.Event()
+
+
+def fill():
+    filling.set()
+    for _ in range(1024):
+        sys.stderr.write("x" * 1023 + "\\n")
+        written[0] += 1
+
+
+def filled():
+    # The filler has stopped making progress: the pipe is full and nothing reads it.
+    filling.wait()
+    last, still = -1, 0
+    while still < 3:
+        time.sleep(0.1)
+        still = still + 1 if written[0] == last else 0
+        last = written[0]
+    return written[0] < 1024
+
+
+github = Repository(refs_with(("v999.0.0", MAIN)))
+
+
+def answer_behind_once_stderr_is_full(request, timeout):
+    if not filled():
+        raise RuntimeError("stderr never filled up")
+    return github(request, timeout)
+
+
+update._cache_dir = lambda: Path(sys.argv[1])
 update._installed = lambda version: update._Install("1" * 40)
-update._open = Repository(refs_with(("v999.0.0", MAIN)))
+update._open = answer_behind_once_stderr_is_full
+checked = threading.Event()
+real_check = update.check_for_update
+
+
+def check_and_say(timeout=update.DEFAULT_TIMEOUT):
+    try:
+        return real_check(timeout)
+    finally:
+        checked.set()
+
+
+update.check_for_update = check_and_say
 started = []
 real_start = update.check_in_background
 update.check_in_background = lambda: started.append(real_start()) or started[-1]
 
 
+async def tick(count):
+    while True:
+        await asyncio.sleep(0.1)
+        count[0] += 1
+        print(f"tick {count[0]}", flush=True)
+
+
 async def main():
+    filler = threading.Thread(target=fill, daemon=True)
     async with serve_local(Server(ack())) as url:
         async with await open_session(url, synthetic_token()):
-            pass
-    [thread] = started
-    await asyncio.to_thread(thread.join, 10)
+            count = [0]
+            ticker = asyncio.create_task(tick(count))
+            filler.start()
+            [thread] = started
+            while not checked.is_set():
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.5)
+            if not thread.is_alive():
+                print("not stuck", flush=True)
+                return
+            print("stuck", flush=True)
+            seen = count[0]
+            while count[0] < seen + 10:
+                await asyncio.sleep(0.05)
+            ticker.cancel()
+    print("done", flush=True)
+    # The parent reads stderr now; both threads then finish their writes.
+    await asyncio.to_thread(filler.join, 20)
+    await asyncio.to_thread(thread.join, 20)
+    print("exiting", flush=True)
 
 
 asyncio.run(main())
-print("exiting", flush=True)
 """
 
 
-@pytest.mark.parametrize("stderr", ["blocking", "open"])
-def test_a_program_whose_stderr_blocks_exits_after_the_update_check_warns(
-    tmp_path: Path, stderr: str
-):
-    # The warning is logged on the session's loop, in the main thread, so the check's thread
-    # never holds a logging handler's lock in a write that blocks, and the exit, which waits
-    # for that lock, is never held up. The warning still reaches stderr.
+def test_a_full_stderr_pipe_never_stops_the_sessions_loop(tmp_path: Path):
     env = {k: v for k, v in os.environ.items() if not k.startswith("QTE_")}
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(NO_NETWORK), str(TESTS), env.get("PYTHONPATH")])
     )
+    child = subprocess.Popen(
+        [sys.executable, "-c", FULL_STDERR_CHILD, str(tmp_path / "cache")],
+        env=env,
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def read_stdout() -> None:
+        assert child.stdout is not None
+        for line in child.stdout:
+            lines.put(line.rstrip("\n"))
+        lines.put(None)
+
+    reader = threading.Thread(target=read_stdout, daemon=True)
+    reader.start()
+    seen: list[str | None] = []
+
+    def until(wanted: str, within: float) -> None:
+        deadline = time.monotonic() + within
+        while wanted not in seen:
+            try:
+                seen.append(lines.get(timeout=max(0.0, deadline - time.monotonic())))
+            except queue.Empty:
+                pytest.fail(f"no {wanted!r} within {within:g} s; stdout so far: {seen}")
+            if seen[-1] is None:
+                pytest.fail(f"stdout ended before {wanted!r}: {seen}")
+
     try:
-        done = subprocess.run(
-            [sys.executable, "-c", STDERR_CHILD, stderr, str(tmp_path / "cache")],
-            env=env,
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired as stuck:
-        # Its stdout shows how far it got: "exiting" means it hung at exit.
-        pytest.fail(f"the program did not exit within 30 s; its stdout: {stuck.stdout!r}")
-    assert done.returncode == 0, done.stderr
-    assert done.stdout == "exiting\n"
-    assert "QTE-UPDATE-AVAILABLE: qte-sdk " in done.stderr
-    assert (tmp_path / "cache" / "update-check").exists()
+        # Stderr stays unread until the child says it is done.
+        until("stuck", 30)
+        until("done", 10)
+        after = seen[seen.index("stuck") + 1 : seen.index("done")]
+        # The loop kept running while the check's thread was stuck in its warning.
+        assert len([line for line in after if line and line.startswith("tick ")]) >= 10
+        # Now stderr is read, the stuck writes finish and the child exits.
+        errors: list[str] = []
+        drain = threading.Thread(target=lambda: errors.append(child.stderr.read()), daemon=True)
+        drain.start()
+        until("exiting", 20)
+        assert child.wait(20) == 0
+        drain.join(20)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    reader.join(10)
+    [err] = errors
+    assert "QTE-UPDATE-AVAILABLE: qte-sdk " in err

@@ -1183,7 +1183,7 @@ async def test_the_update_check_starts_on_the_first_connect_only(
     # The check is on, as outside the tests; what it would do is recorded instead.
     monkeypatch.delenv(update.UPDATE_CHECK_ENV_VAR, raising=False)
     checked: list[str] = []
-    monkeypatch.setattr(update, "_check_and_log", lambda loop: checked.append("checked"))
+    monkeypatch.setattr(update, "_check_and_log", lambda: checked.append("checked"))
     calls: list[int] = []
     real_start = update.check_in_background
 

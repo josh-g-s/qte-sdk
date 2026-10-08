@@ -474,7 +474,7 @@ async def test_a_replay_never_starts_the_update_check(monkeypatch: pytest.Monkey
     monkeypatch.delenv(update.UPDATE_CHECK_ENV_VAR, raising=False)
     started: list[object] = []
     monkeypatch.setattr(update, "check_in_background", lambda: started.append(1))
-    monkeypatch.setattr(update, "_check_and_log", lambda loop: started.append(2))
+    monkeypatch.setattr(update, "_check_and_log", lambda: started.append(2))
     fake = a_session(synthetic_token())
     assert await replayed(fake, DAY, ["AAA", "BBB"])
     assert started == []
