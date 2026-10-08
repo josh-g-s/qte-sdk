@@ -1167,3 +1167,12 @@ async def test_a_reject_read_while_its_write_is_in_progress_counts_the_sends_bef
     sim.at(1.55, lambda: pacer.observe(reject(BURST, "slow")))
     await send_one(pacer.wrap(wire), "new", "slow")
     assert pacer.limits["burst"] == 7
+
+
+async def test_report_numbers_that_start_again_in_a_new_term_still_count():
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    for receipt in (1.0, 3600.0):  # report 1 of one term, then of the next
+        event = accepted("r", receipt=receipt)
+        pacer.observe(Received(event.type, event.message, None, report_seq=1))
+    assert len(pacer._sustained.stamps) == 2

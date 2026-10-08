@@ -592,17 +592,18 @@ class Pacer:
         stamp = _exchange_stamp(message.receipt_time, anchor, now)
         kind = _REQUEST_TYPES.get(request_type) if request_type is not None else None
         # The same report reaches every connection of the team, and a resume can replay
-        # it: a report's number names it, and one without (a reject sent at receipt, to one
-        # connection only) is named by what it says.
+        # it: a report's number names it, with its receipt time, since numbers start again
+        # each term; one without (a reject sent at receipt, to one connection only) is named
+        # by what it says.
         if event.report_seq is not None:
-            key: tuple[object, ...] = ("report", event.report_seq)
+            key: tuple[object, ...] = ("report", event.report_seq, message.receipt_time)
         else:
             reason_code = message.reason_code if isinstance(message, Reject) else None
             key = (event.type, ref, request_type, reason_code, message.receipt_time)
+        self._forget(now)
         if key in self._seen:
             return
         self._seen[key] = now
-        self._forget(now)
         mine = None
         if ref and (kind is not None or request_type is None):
             mine = self._claim(ref, kind)
