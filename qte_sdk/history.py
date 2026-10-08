@@ -53,6 +53,10 @@ stream, the manifest's `sha256` of each range entry) and raises
 the identity `ETag` the service sends is refused before any message, since it could be
 neither checked nor resumed.
 
+Every error this module raises has a code, such as `QTE-HISTORY-PENDING`, in its `code`
+attribute and at the start of its message: docs/errors.md says what each means and how to
+fix it. A network error, such as `TimeoutError`, keeps its own type and has none.
+
 Cancelling a fetch, for example with `asyncio.timeout`, ends it at once, on Windows as on
 macOS and Linux. The request and each read of the response run in a worker thread, and
 the cancel wakes that thread wherever it waits on the service: in the TLS handshake,
@@ -105,11 +109,13 @@ from datetime import date, datetime
 from typing import Any, TypeVar, cast
 from urllib.parse import quote, urlsplit
 
+from qte_sdk import errors as _errors
 from qte_sdk.connection import DecodeFailed, Unknown, _decode_error
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import INBOUND
+from qte_sdk.errors import QteError, flatten, plain
 from qte_sdk.market_data import MarketData
-from qte_sdk.session import _holds_token, _redact, _Secret, resolve_token
+from qte_sdk.session import _holds_token, _redact, _Secret, _url_holds_token, resolve_token
 
 __all__ = [
     "DEFAULT_MAX_RESUMES",
@@ -117,6 +123,7 @@ __all__ = [
     "DEFAULT_MAX_WAIT",
     "DEFAULT_TIMEOUT",
     "HISTORY_URL_ENV_VAR",
+    "HistoryAddressInvalid",
     "HistoryChanged",
     "HistoryClient",
     "HistoryCorrupt",
@@ -134,6 +141,7 @@ __all__ = [
     "Manifest",
     "ManifestEntry",
     "MissingHistoryURL",
+    "TokenMalformed",
 ]
 
 HISTORY_URL_ENV_VAR = "QTE_HISTORY_URL"
@@ -162,17 +170,44 @@ HistoryItem = MarketData | Unknown | DecodeFailed
 of a type it does not (`Unknown`), or a line that could not be decoded (`DecodeFailed`)."""
 
 
-class MissingHistoryURL(ValueError):
-    """No address was given and the `QTE_HISTORY_URL` environment variable is unset or empty."""
+class MissingHistoryURL(QteError, ValueError):
+    """No address was given and the `QTE_HISTORY_URL` environment variable is unset or
+    empty. Code `QTE-HISTORY-ADDRESS-MISSING`."""
+
+    code = _errors.HISTORY_ADDRESS_MISSING
 
 
-class HistoryError(Exception):
+class HistoryAddressInvalid(QteError, ValueError):
+    """The history service's address is not one the client will send the token to: not an
+    `https://` URL (`http://` only to this machine), or one with credentials, a query, a
+    fragment or a port that is not a number. The message never shows the address, which a
+    mistake could have filled with the token. Code `QTE-HISTORY-ADDRESS-INVALID`."""
+
+    code = _errors.HISTORY_ADDRESS_INVALID
+
+
+class TokenMalformed(QteError, ValueError):
+    """The token has a character no token has, one an HTTP header cannot carry, such as a
+    newline or a letter outside ASCII. The message never shows the token. Code
+    `QTE-TOKEN-MALFORMED`."""
+
+    code = _errors.TOKEN_MALFORMED
+
+
+class HistoryError(QteError, Exception):
     """A history request failed.
 
     `http_status` is the HTTP status of the response, if one arrived. `status` is the
     service's own status token (for example `unavailable`) and `message` its explanation,
     when the response carried them.
+
+    Each subclass has its own code, such as `QTE-HISTORY-UNAVAILABLE`. A `HistoryError`
+    itself has `QTE-HISTORY-BAD-RESPONSE` for a response the service would not send,
+    `QTE-HISTORY-UNEXPECTED-STATUS` for an HTTP status this SDK does not know, and
+    otherwise `QTE-HISTORY-REQUEST-FAILED`.
     """
+
+    code = _errors.HISTORY_REQUEST_FAILED
 
     def __init__(
         self,
@@ -181,8 +216,9 @@ class HistoryError(Exception):
         http_status: int | None = None,
         status: str | None = None,
         message: str | None = None,
+        code: str | None = None,
     ) -> None:
-        super().__init__(text)
+        super().__init__(text, code=code, fields={"what": plain(text)})
         self.http_status = http_status
         self.status = status
         self.message = message
@@ -190,27 +226,38 @@ class HistoryError(Exception):
 
 class HistoryUnavailable(HistoryError):
     """The data will never exist: a date before the service's coverage, a day with no
-    session, or an instrument or channel the service does not know. Do not retry."""
+    session, or an instrument or channel the service does not know. Do not retry. Code
+    `QTE-HISTORY-UNAVAILABLE`."""
+
+    code = _errors.HISTORY_UNAVAILABLE
 
 
 class HistoryNotImplemented(HistoryError):
     """The service does not serve this endpoint yet. It is not a statement that the data
     will never exist (that is `HistoryUnavailable`): ask again after a later release of
-    the service."""
+    the service. Code `QTE-HISTORY-NOT-IMPLEMENTED`."""
+
+    code = _errors.HISTORY_NOT_IMPLEMENTED
 
 
 class HistoryNotClosed(HistoryError):
     """The session has not closed yet: it is running now, or it lies in the future.
     Nothing is served for a session before its close, and nothing is being built for it
-    yet, so the client does not wait. Ask again after the session's close."""
+    yet, so the client does not wait. Ask again after the session's close. Code
+    `QTE-HISTORY-NOT-CLOSED`."""
+
+    code = _errors.HISTORY_NOT_CLOSED
 
 
 class HistoryPending(HistoryError):
     """The session has closed but its data is not ready yet, and waiting for it would have
-    gone past `max_wait` or `max_retries`. It will become ready: ask again later.
+    gone past `max_wait` or `max_retries`. It will become ready: ask again later. Code
+    `QTE-HISTORY-PENDING`.
 
     `retry_after` is the service's suggested wait in seconds, or None if it gave none.
     """
+
+    code = _errors.HISTORY_PENDING
 
     def __init__(self, text: str, *, retry_after: float | None, **details: Any) -> None:
         super().__init__(text, **details)
@@ -219,7 +266,10 @@ class HistoryPending(HistoryError):
 
 class HistoryRateLimited(HistoryError):
     """Too many requests for this token, and waiting would have gone past `max_wait` or
-    `max_retries`. `retry_after` is the service's suggested wait in seconds, or None."""
+    `max_retries`. `retry_after` is the service's suggested wait in seconds, or None. Code
+    `QTE-HISTORY-RATE-LIMITED`."""
+
+    code = _errors.HISTORY_RATE_LIMITED
 
     def __init__(self, text: str, *, retry_after: float | None, **details: Any) -> None:
         super().__init__(text, **details)
@@ -227,23 +277,31 @@ class HistoryRateLimited(HistoryError):
 
 
 class HistoryUnauthenticated(HistoryError):
-    """The token is missing or not recognised."""
+    """The token is missing or not recognised. Code `QTE-HISTORY-UNAUTHENTICATED`."""
+
+    code = _errors.HISTORY_UNAUTHENTICATED
 
 
 class HistoryForbidden(HistoryError):
-    """The token may not read this data."""
+    """The token may not read this data. Code `QTE-HISTORY-FORBIDDEN`."""
+
+    code = _errors.HISTORY_FORBIDDEN
 
 
 class HistoryRequestRejected(HistoryError):
     """The request is wrong on its face, for example a date that does not parse, `to_date`
     before `from_date`, or a range larger than the service allows. Retrying the same
-    request fails the same way."""
+    request fails the same way. Code `QTE-HISTORY-REQUEST-REJECTED`."""
+
+    code = _errors.HISTORY_REQUEST_REJECTED
 
 
 class HistoryInterrupted(HistoryError):
     """The connection dropped during a download and could not be resumed. The messages
     yielded before it are incomplete, and were not checked against the stated digest.
-    `bytes_received` counts what arrived."""
+    `bytes_received` counts what arrived. Code `QTE-HISTORY-INTERRUPTED`."""
+
+    code = _errors.HISTORY_INTERRUPTED
 
     def __init__(self, text: str, *, bytes_received: int) -> None:
         super().__init__(text)
@@ -254,12 +312,16 @@ class HistoryChanged(HistoryError):
     """A dropped download could not be resumed where it stopped, because the service now
     serves different data for the same request (for `fetch_range`, typically an entry that
     was pending has become ready). What was already yielded cannot be continued: start
-    the download again."""
+    the download again. Code `QTE-HISTORY-CHANGED`."""
+
+    code = _errors.HISTORY_CHANGED
 
 
 class HistoryCorrupt(HistoryError):
     """What arrived does not match the length or SHA-256 digest the service stated for it,
-    so the messages already yielded may be wrong."""
+    so the messages already yielded may be wrong. Code `QTE-HISTORY-CORRUPT`."""
+
+    code = _errors.HISTORY_CORRUPT
 
 
 @dataclass(frozen=True)
@@ -326,6 +388,10 @@ class HistoryClient:
     `max_resumes` bounds how many times one download resumes after its connection drops.
     `ssl_context` replaces the default certificate checks, for example to trust a test
     certificate authority.
+
+    Raises `TokenMalformed` for a token an HTTP header cannot carry, and
+    `HistoryAddressInvalid` for an address it will not send the token to; both are
+    `ValueError`s, and neither message shows the token or the address.
     """
 
     def __init__(
@@ -343,18 +409,30 @@ class HistoryClient:
         del token
         if not (self._secret.value.isascii() and self._secret.value.isprintable()):
             # Checked here, since the HTTP library's own error would quote the header.
-            raise ValueError(
+            del url  # it could hold the token too, so it stays out of the traceback
+            raise TokenMalformed(
                 "the token has a character an HTTP header cannot carry, such as a newline "
-                "or a non-ASCII character; check how it was copied"
+                "or a non-ASCII character; check how it was copied",
+                fields={},
             )
         if url is None:
             url = os.environ.get(HISTORY_URL_ENV_VAR)
         if not url:
             raise MissingHistoryURL(
-                f"no history service address: pass url= or set {HISTORY_URL_ENV_VAR}"
+                f"no history service address: pass url= or set {HISTORY_URL_ENV_VAR}",
+                fields={},
             )
+        failure: HistoryAddressInvalid | None = None
+        try:
+            parsed = _parse_url(url)
+        except HistoryAddressInvalid as error:
+            # Without _parse_url's frame, whose locals hold the address.
+            failure = _stripped(error)
+        if failure is not None:
+            del url  # a mistake can put the token in it, so it stays out of the traceback
+            raise failure
         self.url = url
-        self._https, self._host, self._port, self._prefix = _parse_url(url)
+        self._https, self._host, self._port, self._prefix = parsed
         self.timeout = timeout
         self.max_wait = max_wait
         self.max_retries = max_retries
@@ -362,7 +440,12 @@ class HistoryClient:
         self._ssl_context = ssl_context
 
     def __repr__(self) -> str:
-        return f"HistoryClient({getattr(self, 'url', None)!r})"
+        # A mistake can put the token in the address, and a traceback that shows locals
+        # shows this.
+        url = getattr(self, "url", None)
+        if url is not None and _url_holds_token(url, self._secret):
+            url = _errors.WITHHELD
+        return f"HistoryClient({url!r})"
 
     def fetch(
         self, session_date: date | str, instrument: str, channel: str
@@ -508,6 +591,7 @@ class HistoryClient:
                     raise HistoryError(
                         "the response is not uncompressed NDJSON as the history service sends",
                         http_status=200,
+                        code=_errors.HISTORY_BAD_RESPONSE,
                     )
                 if reply.etag is None:
                     # Without it the data can be neither checked nor resumed.
@@ -515,6 +599,7 @@ class HistoryClient:
                     raise HistoryError(
                         "the response carries no identity ETag as the history service sends",
                         http_status=200,
+                        code=_errors.HISTORY_BAD_RESPONSE,
                     )
                 return reply
             reply.close()
@@ -560,6 +645,7 @@ class HistoryClient:
                 raise HistoryError(
                     "the response is not uncompressed NDJSON as the history service sends",
                     http_status=200,
+                    code=_errors.HISTORY_BAD_RESPONSE,
                 )
             if total is not None and reply.complete_length not in (None, total):
                 reply.close()
@@ -576,6 +662,7 @@ class HistoryClient:
             raise HistoryError(
                 "the resumed response is not a well-formed slice of uncompressed NDJSON",
                 http_status=206,
+                code=_errors.HISTORY_BAD_RESPONSE,
             )
         changed = total is not None and reply.complete_length != total
         if changed or (reply.has_etag and reply.etag != etag):
@@ -589,6 +676,7 @@ class HistoryClient:
             raise HistoryError(
                 "the resumed response does not continue from where the download stopped",
                 http_status=206,
+                code=_errors.HISTORY_BAD_RESPONSE,
             )
         return reply, 0
 
@@ -1119,7 +1207,9 @@ class _FramedProgress(_Progress):
     def finish(self, total: int | None) -> list[Any]:
         items = super().finish(total)
         if self._manifest is None:
-            raise HistoryError("the range response has no manifest")
+            raise HistoryError(
+                "the range response has no manifest", code=_errors.HISTORY_BAD_RESPONSE
+            )
         expected = max((stop for _, stop, _, _ in self._slices), default=self._start)
         if self.received != expected:
             raise HistoryCorrupt(
@@ -1139,7 +1229,8 @@ def _parse_manifest(line: bytes, retry_after: float | None) -> Manifest:
         entries = tuple(_manifest_entry(raw) for raw in data["manifest"])
     except (ValueError, TypeError, KeyError, RecursionError) as error:
         failure = HistoryError(
-            f"the range response's manifest could not be read ({type(error).__name__})"
+            f"the range response's manifest could not be read ({type(error).__name__})",
+            code=_errors.HISTORY_BAD_RESPONSE,
         )
     else:
         return Manifest(entries, retry_after)
@@ -1252,17 +1343,35 @@ def _error_for(reply: _Reply, secret: _Secret) -> HistoryError:
         body = None
     if isinstance(body, dict):
         # Server text: an echoed token is redacted, and text that still shares a run of
-        # characters with it (a fragment, say from an echoed header) is withheld.
+        # characters with it (a fragment, say from an echoed header) is withheld, as sent
+        # or as the error's message shows it, in one line.
         if isinstance(body.get("status"), str):
-            status = _screened(_redact(body["status"], secret), secret)
+            status = _server_text(body["status"], secret)
         if isinstance(body.get("message"), str):
-            message = _screened(_redact(body["message"], secret), secret)
+            message = _server_text(body["message"], secret)
     cls, meaning = _ERRORS.get(reply.status, (HistoryError, "unexpected response"))
     text = f"{meaning} (HTTP {reply.status})" + (f": {message}" if message else "")
     details: dict[str, Any] = {"http_status": reply.status, "status": status, "message": message}
     if cls is HistoryPending or cls is HistoryRateLimited:
-        return cls(text, retry_after=reply.retry_after, **details)
-    return cls(text, **details)
+        error: HistoryError = cls(text, retry_after=reply.retry_after, **details)
+    elif cls is HistoryError:
+        error = cls(text, code=_errors.HISTORY_UNEXPECTED_STATUS, **details)
+    else:
+        error = cls(text, **details)
+    # The message shows the service's text flattened: withheld if, so shown, it holds the
+    # token in any form.
+    error.fields = _errors.withheld(lambda shown: _holds_token(shown, secret), **error.fields)
+    return error
+
+
+def _server_text(text: str, secret: _Secret) -> str | None:
+    """The service's `text` with any echo of the token redacted, or None if it still
+    shares a run of characters with the token, as sent or flattened to one line (which
+    drops the control and format characters that could split a run)."""
+    screened = _screened(_redact(text, secret), secret)
+    if screened is None or _screened(flatten(screened), secret) is None:
+        return None
+    return screened
 
 
 def _sanitised(error: BaseException, secret: _Secret) -> BaseException:
@@ -1285,20 +1394,48 @@ def _sanitised(error: BaseException, secret: _Secret) -> BaseException:
     return error
 
 
+def _address_invalid(text: str, problem: str) -> HistoryAddressInvalid:
+    return HistoryAddressInvalid(text, fields={"problem": problem})
+
+
 def _parse_url(url: str) -> tuple[bool, str, int, str]:
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+        given_port = parts.port
+    except ValueError:
+        well_formed = False
+    else:
+        well_formed = True
+    if not well_formed:
+        # Raised outside the handler, so the parser's error, which can quote the address,
+        # is not chained to it.
+        raise _address_invalid(
+            "the history service address is not a well-formed URL",
+            "is not a well-formed URL, or has a port that is not a number from 0 to 65535",
+        )
     if parts.scheme not in ("https", "http") or not parts.hostname:
-        raise ValueError("the history service address must be an https:// URL")
+        raise _address_invalid(
+            "the history service address must be an https:// URL", "is not an https:// URL"
+        )
     if parts.username is not None or parts.password is not None:
-        raise ValueError("put no credentials in the history service address")
+        raise _address_invalid(
+            "put no credentials in the history service address", "holds credentials"
+        )
     if parts.query or parts.fragment:
-        raise ValueError("the history service address takes no query or fragment")
+        raise _address_invalid(
+            "the history service address takes no query or fragment",
+            "has a query or a fragment",
+        )
     if parts.scheme == "http" and not _is_loopback(parts.hostname):
-        raise ValueError("the history service address must be https:// (http:// is local only)")
+        raise _address_invalid(
+            "the history service address must be https:// (http:// is local only)",
+            "is a plain http:// address for another computer, which only a test server on "
+            "this computer may use",
+        )
     https = parts.scheme == "https"
     # Always a port: given none, http.client would split an IPv6 host such as "::1" at
     # its last colon into a host and a port.
-    port = parts.port if parts.port is not None else (443 if https else 80)
+    port = given_port if given_port is not None else (443 if https else 80)
     return https, parts.hostname, port, parts.path.rstrip("/")
 
 

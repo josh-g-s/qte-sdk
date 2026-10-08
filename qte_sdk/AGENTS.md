@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.23
+**Version:** 1.24
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of any release after 1.1.1, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With 1.1.1 or earlier, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
@@ -34,9 +34,9 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 
 ## Message codes
 
-- An SDK error or warning with a code starts with it, such as `QTE-TOKEN-MISSING`, and keeps it in its `code` attribute; a log record at WARNING has it as `code` too. The message is one line: `<CODE>: <what happened>. <why it matters>. <next step>.` Follow its next step.
+- Every SDK error or warning, about the token, the address, `.env`, the session, the connection, the history service or a replay, starts with a code, such as `QTE-TOKEN-MISSING` or `QTE-HISTORY-PENDING`, and keeps it in its `code` attribute; a log record at WARNING has it as `code` too. The message is one line: `<CODE>: <what happened>. <why it matters>. <next step>.` Follow its next step.
 - Every code is listed, with its cause and fix, in [docs/errors.md](https://github.com/josh-g-s/qte-sdk/blob/main/docs/errors.md): search that page for the code. It also gives the exit codes of `python -m qte_sdk.token check` (0 fine, 1 must fix, 2 could not tell), `python -m qte_sdk.token set`, `python -m qte_sdk.update` and the smoke test.
-- A code names the area it is about after `QTE-`, such as `QTE-TOKEN-`, `QTE-ADDRESS-`, `QTE-DOTENV-`, `QTE-SESSION-`, `QTE-CONNECT-` or `QTE-UPDATE-`.
+- A code names the area it is about after `QTE-`, such as `QTE-TOKEN-`, `QTE-ADDRESS-`, `QTE-DOTENV-`, `QTE-SESSION-`, `QTE-CONNECT-`, `QTE-HISTORY-`, `QTE-REPLAY-` or `QTE-UPDATE-`.
 - Common ones: `QTE-TOKEN-MISSING` and `QTE-ADDRESS-MISSING` (the person runs `python -m qte_sdk.token set`), `QTE-TOKEN-SHARED` (others can read the `.env`; on macOS and Linux, `chmod 600 .env`), `QTE-DOTENV-NOT-IGNORED` and `QTE-DOTENV-TRACKED` (git could commit the `.env`), `QTE-SESSION-REJECTED` (the exchange refused the session; the fix depends on its `reason_name`) and `QTE-UPDATE-AVAILABLE` (see Updates above).
 - Catch `qte_sdk.errors.QteError` for any SDK exception with a code, and filter on `qte_sdk.errors.QteWarning` for any such warning. Fix the cause; never silence a warning about the token or the `.env`.
 
