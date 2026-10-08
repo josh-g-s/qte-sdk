@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from typing import Any
 import pytest
 
 import qte_sdk
-from qte_sdk import update
+from qte_sdk import errors, logs, update
 from qte_sdk.update import Status, check_for_update, update_command
 
 VERSION = qte_sdk.__version__
@@ -2617,3 +2618,297 @@ def test_the_daily_record_and_its_lock_work_on_real_windows(
     new_program(monkeypatch)
     run_in_background()
     assert len(repository.requests) == 1
+
+
+# JSON (#180): the record's next step, the 512-byte line, and `--json`
+
+
+def test_the_automatic_warning_carries_its_next_step_and_no_fields(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path, caplog: pytest.LogCaptureFixture
+):
+    behind_a_release(monkeypatch)
+    caplog.set_level(logging.DEBUG)
+    run_in_background()
+    [record] = update_records(caplog)
+    assert record.next_step == f"Update with {COMMAND}"
+    assert record.fields == {}
+    line = json.loads(logs.JsonFormatter().format(record))
+    assert line["message"] == f"qte-sdk {VERSION} is behind {bumped(VERSION, 2)}."
+    assert f"{line['code']}: {line['message']} {line['next_step']}." == record.getMessage()
+
+
+LONGEST_INSTALLED = "999999999.999999999.999999998"
+LONGEST_LATEST = "v999999999.999999999.999999999"
+
+
+def recommended_result(
+    monkeypatch: pytest.MonkeyPatch,
+    why: str,
+    installed: str = LONGEST_INSTALLED,
+    latest: str = LONGEST_LATEST,
+) -> update.UpdateCheck:
+    """A recommended update on Windows (the longest platform name), from an archive (the
+    longest command), behind `latest`, with the reason `why` as releases.json would give it."""
+    monkeypatch.setitem(update._PLATFORM_NAMES, sys.platform, "Windows")
+    release = update._Release(update._number(latest[1:]), True, update._plain(why), ("win32",))
+    command = update_command(latest, archive=True)
+    return update.UpdateCheck(
+        status=Status.BEHIND,
+        installed_version=installed,
+        installed_commit=None,
+        installed_revision=None,
+        latest_release=latest,
+        main_commit=None,
+        main_ahead=False,
+        command=command,
+        message=update._behind_message(installed, latest, command, release),
+        installed_archive="v1.0.0",
+        recommended=True,
+        why=release.why,
+    )
+
+
+def log_result(result: update.UpdateCheck) -> None:
+    """Log `result` as the automatic check does, in a thread that must end within 5 s."""
+
+    def log() -> None:
+        update._log_without_waiting(
+            logging.WARNING,
+            result.message,
+            update.UPDATE_AVAILABLE,
+            next_step=errors.next_step(update.UPDATE_AVAILABLE, command=result.command),
+            fields={},
+            short=update._short_message(result),
+        )
+
+    thread = threading.Thread(target=log, daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive(), "the warning waited for the pipe"
+
+
+def json_handler(stream: Any) -> logging.Handler:
+    handler = logs._JsonHandler(stream, logging.WARNING)
+    handler.setFormatter(logs.JsonFormatter())
+    return handler
+
+
+def plain_handler(stream: Any, form: str) -> logging.Handler:
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter(form))
+    return handler
+
+
+# 200 characters each (the most a reason keeps): ASCII, Latin, and an emoji, which JSON
+# writes as 12 bytes and UTF-8 as 4.
+WHYS = {"ascii": "w" * 200, "latin": "é" * 200, "emoji": "\U0001f600" * 200}
+HANDLERS = {
+    "json": json_handler,
+    "last-resort": lambda stream: plain_handler(stream, "%(message)s"),
+    "basic-config": lambda stream: plain_handler(stream, logging.BASIC_FORMAT),
+}
+
+
+@pytest.mark.parametrize("why", list(WHYS))
+@pytest.mark.parametrize("kind", list(HANDLERS))
+def test_the_longest_update_line_reaches_a_pipe_in_one_write_of_at_most_512_bytes(
+    monkeypatch: pytest.MonkeyPatch, pipe: Any, lone: logging.Logger, kind: str, why: str
+):
+    read, stream = pipe
+    handler = HANDLERS[kind](stream)
+    lone.addHandler(handler)
+    result = recommended_result(monkeypatch, WHYS[why])
+    full = update._encoded(
+        handler,
+        handler.format(
+            lone.makeRecord(lone.name, logging.WARNING, __file__, 1, "%s", (result.message,), None)
+        )
+        + "\n",
+    )
+    log_result(result)
+    data = read_all(read)
+    newline = b"\r\n" if sys.platform == "win32" else b"\n"
+    assert data.endswith(newline) and data.count(b"\n") == 1, data
+    assert len(data) <= update._MAX_DIRECT_LINE, len(data)
+    text = data.decode()
+    if len(full) > update._MAX_DIRECT_LINE:
+        # Too long whole: the reason is left for the command to give.
+        assert "python -m qte_sdk.update says why" in text
+        assert WHYS[why][:20] not in text
+    else:
+        assert WHYS[why] in json.loads(text)["message"] if kind == "json" else WHYS[why] in text
+    if kind == "json":
+        line = json.loads(text)
+        assert line["code"] == update.UPDATE_AVAILABLE
+        assert line["next_step"] == f"Update with {result.command}"
+        assert line["fields"] == {}
+        assert line["message"].startswith(f"qte-sdk {LONGEST_INSTALLED} is behind ")
+    else:
+        assert f"QTE-UPDATE-AVAILABLE: qte-sdk {LONGEST_INSTALLED} is behind " in text
+        assert text.rstrip().endswith(f"Update with {result.command}.")
+
+
+def test_an_update_line_that_fits_is_written_whole_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch, pipe: Any, lone: logging.Logger
+):
+    read, stream = pipe
+    lone.addHandler(json_handler(stream))
+    log_result(recommended_result(monkeypatch, WHY, installed="1.1.0", latest="v1.1.1"))
+    line = json.loads(read_all(read))
+    assert line["message"] == (
+        f"qte-sdk 1.1.0 is behind 1.1.1, a recommended update on Windows: {WHY}."
+    )
+
+
+def test_a_log_file_gets_the_whole_line_however_long(
+    monkeypatch: pytest.MonkeyPatch, pipe: Any, lone: logging.Logger, tmp_path: Path
+):
+    read, stream = pipe
+    lone.addHandler(json_handler(stream))
+    path = tmp_path / "sdk.log"
+    file_handler = logging.FileHandler(path, encoding="utf-8")
+    file_handler.setFormatter(logs.JsonFormatter())
+    lone.addHandler(file_handler)
+    try:
+        log_result(recommended_result(monkeypatch, WHYS["emoji"]))
+    finally:
+        file_handler.close()
+    assert WHYS["emoji"] in json.loads(path.read_text(encoding="utf-8"))["message"]
+    assert WHYS["emoji"] not in json.loads(read_all(read))["message"]
+
+
+def test_the_short_form_is_none_without_a_reason(monkeypatch: pytest.MonkeyPatch):
+    result = recommended_result(monkeypatch, WHY)
+    assert update._short_message(replace(result, recommended=False, why=None)) is None
+    assert update._short_message(replace(result, message="something else")) is None
+
+
+def run_both(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, list[str], dict]:
+    """The command's status and lines, and its --json document, checking they agree."""
+    status = update.main(argv)
+    lines = capsys.readouterr().out.splitlines()
+    json_status = update.main([*argv, "--json"])
+    out, err = capsys.readouterr()
+    assert json_status == status
+    assert out.count("\n") == 1 and out.isascii()
+    document = json.loads(out)
+    assert list(document)[:3] == ["command", "schema", "exit_code"]
+    assert (document["command"], document["schema"], document["exit_code"]) == (
+        "update",
+        1,
+        status,
+    )
+    assert document["installed"]["description"] == lines[0].removeprefix("installed: ")
+    return status, lines, document
+
+
+def test_the_json_document_says_what_the_text_says_when_behind(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    newer = tag_for(bumped(VERSION, 2))
+    installed(monkeypatch, git_install())
+    answer(monkeypatch, refs_with((newer, MAIN)))
+    status, lines, document = run_both([], capsys)
+    assert status == 1
+    assert document["status"] == "behind" and document["code"] == update.UPDATE_AVAILABLE
+    assert f"{document['code']}: {document['message']} {document['next_step']}." == lines[1]
+    assert document["installed"]["commit"] == INSTALLED[:12]
+    assert document["main_commit"] == MAIN[:12]
+    assert document["update_command"] == COMMAND
+    assert (document["recommended"], document["why"]) == (False, None)
+
+
+def test_the_json_document_when_current_with_newer_commits_on_main(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    installed(monkeypatch, git_install())
+    answer(monkeypatch, refs_with((tag_for(VERSION), INSTALLED)))
+    status, lines, document = run_both([], capsys)
+    assert status == 0
+    assert (document["status"], document["code"], document["main_ahead"]) == (
+        "current",
+        None,
+        True,
+    )
+    assert document["message"] == lines[1]
+    assert document["next_step"] == f"Take main's newer commits with {REINSTALL}"
+
+
+@pytest.mark.parametrize(
+    ("revision", "shown"),
+    [("x\x1b[2Jy", "other"), ("a" * 40, "a" * 12), ("main", "main"), ("v1.0.0", "v1.0.0")],
+)
+def test_the_json_document_shows_a_revision_as_the_text_does(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], revision: str, shown: str
+):
+    installed(monkeypatch, git_install(revision))
+    answer(monkeypatch, refs_with((tag_for(VERSION), INSTALLED)))
+    document = run_both([], capsys)[2]
+    assert document["installed"]["revision"] == shown
+
+
+@pytest.mark.parametrize(
+    "url, archive",
+    [
+        (f"{ARCHIVE}/refs/tags/v1.0.1.zip", "v1.0.1"),
+        (f"{ARCHIVE}/main.zip", "main"),
+        (f"{ARCHIVE}/refs/heads/x%1b%5b2Jy.zip", "other"),
+    ],
+)
+def test_the_json_document_for_an_archive_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], url: str, archive: str
+):
+    newer = tag_for(bumped(VERSION, 2))
+    installed(monkeypatch, archive_install(url))
+    answer(monkeypatch, refs_with((newer, MAIN)))
+    status, _, document = run_both([], capsys)
+    assert status == 1
+    assert document["installed"]["archive"] == archive
+    assert document["update_command"] == archive_command(newer)
+
+
+def test_the_json_document_when_it_cannot_tell(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    installed(monkeypatch, {"url": "file:///home/someone/qte-sdk", "dir_info": {"editable": True}})
+    answer(monkeypatch, refs_with((tag_for(VERSION), MAIN)))
+    status, lines, document = run_both([], capsys)
+    assert status == 2
+    assert (document["status"], document["code"], document["next_step"]) == ("unknown", None, None)
+    assert document["message"] == lines[1]
+    assert "someone" not in json.dumps(document)
+
+
+def test_a_recommended_update_s_json_gives_the_reason(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(sys, "platform", "win32")
+    behind_a_release(
+        monkeypatch,
+        releases=releases_json(entry(bumped(VERSION, 2), why=WHY, platforms=["win32"])),
+    )
+    document = run_both([], capsys)[2]
+    assert (document["recommended"], document["why"]) == (True, WHY)
+    assert document["message"].endswith(f"a recommended update on Windows: {WHY}.")
+
+
+def test_a_usage_error_with_json_is_plain_text_on_stderr(capsys: pytest.CaptureFixture[str]):
+    with pytest.raises(SystemExit) as stopped:
+        update.main(["--json", "--timeout", "0"])
+    assert stopped.value.code == 2
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("usage: python -m qte_sdk.update")
+
+
+def test_a_bad_log_format_exits_2_with_its_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setenv(logs.LOG_FORMAT_ENV_VAR, "yaml")
+    assert update.main([]) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("error: QTE-LOG-FORMAT-INVALID: ")
+    # --json asks for JSON whatever the variable says.
+    installed(monkeypatch, git_install(tag_for(VERSION)))
+    answer(monkeypatch, refs_with((tag_for(VERSION), INSTALLED)))
+    assert update.main(["--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["exit_code"] == 0
