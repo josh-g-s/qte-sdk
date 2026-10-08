@@ -49,7 +49,9 @@ reason, then a summary:
 It exits with status 0 when no check failed, 1 when one did, and 2 when it found no token
 or no usable address, and so could not connect. The output never shows the token or any
 account figure; the one exception is a fill of the test order, whose quantity and price
-it names so you know the position your team then holds.
+it names so you know the position your team then holds. A FAIL that quotes an SDK error
+or warning starts with its code, such as QTE-TOKEN-MISSING: docs/errors.md says what each
+means, and lists these exit codes beside those of the SDK's own commands.
 
 The test order. With --place-test-order --strat-id ID --tick DOLLARS, and only while the
 market session is OPEN and no exchange outage is in force, it places one limit buy of one
@@ -563,8 +565,8 @@ def check_setup(report: Report) -> tuple[str | None, list[str]]:
             if shape is None:
                 report.add(PASS, "address", where)
             else:
-                problems.append(f"QTE_URL cannot be used: {shape}")
-                report.add(FAIL, "address", f"{where}, but {shape}")
+                problems.append(f"QTE-ADDRESS-INVALID: QTE_URL cannot be used: {shape}")
+                report.add(FAIL, "address", f"{where}, but QTE-ADDRESS-INVALID: {shape}")
     for warning in caught:
         if issubclass(warning.category, DotenvNotIgnored):
             report.add(FAIL, "dotenv", str(warning.message))
@@ -1690,7 +1692,10 @@ async def run_checks(url: str, args: argparse.Namespace, report: Report) -> None
     except SessionRejected as error:
         failure = f"the exchange refused the session: {error.reason_name}"
     except Exception as error:
-        failure = f"could not connect ({type(error).__name__})"
+        # An SDK error's code says what to do (see docs/errors.md); its text is not shown.
+        code = getattr(error, "code", None)
+        coded = f", {code}" if isinstance(code, str) and code.startswith("QTE-") else ""
+        failure = f"could not connect ({type(error).__name__}{coded})"
     if failure is not None:
         report.add(FAIL, "connect", failure)
         skip_after_connect(report, "not connected")

@@ -297,7 +297,10 @@ async def test_a_bad_token_file_raises_missing_token_without_its_contents(
     error = caught.value
     assert error.__cause__ is None and error.__context__ is None
     assert error.__suppress_context__ is False
-    assert vars(error) == {}
+    # Only the code and the fields of its message, which hold no file contents.
+    assert set(vars(error)) <= {"code", "fields"}
+    assert error.code == "QTE-TOKEN-FILE-UNREADABLE"
+    assert_token_absent(token, repr(vars(error)))
     assert_token_absent(token, shown(error))
 
 
@@ -334,7 +337,13 @@ async def test_a_reject_surfaces_its_reason_code_and_closes_the_connection():
     assert type(error) is SessionRejected
     assert error.reason_code == ReasonCodes.NOT_AUTHENTICATED
     assert error.detail == "unknown credentials"
-    assert str(error) == "NOT_AUTHENTICATED: unknown credentials"
+    assert error.args == ("NOT_AUTHENTICATED: unknown credentials",)
+    assert error.code == "QTE-SESSION-REJECTED"
+    assert str(error).startswith(
+        "QTE-SESSION-REJECTED: the exchange refused the session "
+        "(NOT_AUTHENTICATED: unknown credentials). "
+    )
+    assert "python -m qte_sdk.token check" in str(error)
     assert token not in str(error) and token not in repr(error)
 
 
@@ -381,7 +390,10 @@ async def test_an_abnormal_close_before_the_ack_is_an_error(code: int, reason: s
     async with serve_local(handler) as url:
         with pytest.raises(SessionNotAcknowledged) as caught:
             await open_session(url, synthetic_token())
-    assert str(caught.value) == f"the connection closed before session_ack{shown}"
+    assert caught.value.args == (f"the connection closed before session_ack{shown}",)
+    assert str(caught.value).startswith(
+        f"QTE-SESSION-NOT-ACKNOWLEDGED: the connection closed before session_ack{shown}. "
+    )
     assert caught.value.close_code == code
 
 

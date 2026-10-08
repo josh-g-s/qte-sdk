@@ -74,7 +74,8 @@ def assert_token_absent(token: str, text: str) -> None:
 
 def assert_clean(error: BaseException, token: str) -> None:
     assert error.__cause__ is None and error.__context__ is None
-    assert vars(error) == {}
+    # Only the code and the fields of its message, which hold no file contents.
+    assert set(vars(error)) <= {"code", "fields"}
     assert_token_absent(token, shown(error))
 
 
@@ -262,15 +263,15 @@ def test_other_names_are_not_read_whatever_their_syntax():
 @pytest.mark.parametrize("value", ["", "''", '""', " # nothing"])
 def test_an_empty_value_counts_as_unset(value: str):
     write_dotenv(f"QTE_TOKEN={value}\nQTE_URL={value}\n")
-    with pytest.raises(MissingToken, match="pass token="):
+    with pytest.raises(MissingToken, match="^QTE-TOKEN-MISSING: no token was found in token="):
         resolve_token()
-    with pytest.raises(MissingURL, match="pass url="):
+    with pytest.raises(MissingURL, match="^QTE-ADDRESS-MISSING: no exchange address was found"):
         resolve_url()
 
 
 def test_a_commented_out_token_is_not_read():
     write_dotenv(f"# QTE_TOKEN={synthetic_token()}\n")
-    with pytest.raises(MissingToken, match="pass token="):
+    with pytest.raises(MissingToken, match="^QTE-TOKEN-MISSING: "):
         resolve_token()
 
 

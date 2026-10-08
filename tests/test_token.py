@@ -598,7 +598,9 @@ def test_set_file_refuses_a_gitignore_destination(capsys):
     assert run(["set", "--file", ".gitignore"]) == 1
     assert run(["set", "--file", "sub/.GitIgnore"]) == 1
     assert not Path(".gitignore").exists()
-    assert capsys.readouterr().err.count("cannot go in a .gitignore file") == 2
+    err = capsys.readouterr().err
+    assert err.count("error: QTE-TOKEN-SET-PATH: ") == 2
+    assert err.count("is a .gitignore file, which cannot hold the token") == 2
 
 
 @needs_git
@@ -830,7 +832,8 @@ def test_set_on_windows_warns_about_an_open_folder(windows, capsys):
         assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
     out, err = capsys.readouterr()
     assert (
-        f".\nWarning: {dotenv()} holds your token, and other users can replace it: "
+        f".\nWarning: QTE-TOKEN-SHARED: {dotenv()} holds your token, and other users can "
+        "replace it: "
         f"NT AUTHORITY\\Authenticated Users may add or remove files in {Path.cwd()}, so"
     ) in out
     assert f'run `icacls "{Path.cwd()}"` and `icacls "{dotenv()}"`' in out
@@ -846,7 +849,8 @@ def test_set_file_on_windows_warns_about_another_owner(windows, tmp_path, capsys
     out, err = capsys.readouterr()
     real = path.parent.resolve() / path.name
     assert (
-        f"Warning: {real} holds your token, and it is owned by another account, which can "
+        f"Warning: QTE-TOKEN-SHARED: {real} holds your token, and it is owned by another "
+        "account, which can "
         "change who may open it, so other people who use this computer could read your token "
         "or replace your token."
     ) in out
@@ -861,7 +865,9 @@ def test_set_file_on_windows_reports_access_and_prints_windows_commands(windows,
     assert run(["set", "--file", str(path)], ask_secret=answers(token)) == 0
     out, err = capsys.readouterr()
     real = path.parent.resolve() / path.name
-    assert f"Warning: {real} holds your token, and Windows lets Everyone read it" in out
+    assert (
+        f"Warning: QTE-TOKEN-SHARED: {real} holds your token, and Windows lets Everyone read it"
+    ) in out
     quoted = "'" + str(real).replace("'", "''") + "'"
     assert f"$env:QTE_TOKEN_FILE = {quoted}" in out
     assert f"[Environment]::SetEnvironmentVariable('QTE_TOKEN_FILE', {quoted}, 'User')" in out
@@ -915,9 +921,10 @@ def test_check_on_windows_warns_about_a_shared_dotenv(windows, capsys):
     token = synthetic_token()
     dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
     dotenv().chmod(0o600)
-    assert run(["check"]) == 0
+    assert run(["check"]) == 1  # a report, not a refusal: sessions still only warn
     out, err = capsys.readouterr()
     assert out.count("warning:") == 1
+    assert "warning: QTE-TOKEN-SHARED: " in out
     assert "BUILTIN\\Users" in out and "icacls" in out
     assert "none of Everyone" not in out
     assert_token_absent(token, out + err)
@@ -930,9 +937,10 @@ def test_check_on_windows_warns_about_a_dotenv_others_can_change_the_address_in(
     token = synthetic_token()
     monkeypatch.setenv(TOKEN_ENV_VAR, token)
     dotenv().write_text(f"QTE_URL={URL}\n")
-    assert run(["check"]) == 0
+    assert run(["check"]) == 1
     out, err = capsys.readouterr()
     assert out.count("warning:") == 1
+    assert "warning: QTE-ADDRESS-SHARED: " in out
     assert "sets QTE_URL, the exchange address" in out
     assert_token_absent(token, out + err)
 
@@ -956,11 +964,12 @@ def test_check_on_windows_warns_about_a_private_dotenv_in_an_open_folder(windows
     token = synthetic_token()
     dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
     dotenv().chmod(0o600)
-    assert run(["check"]) == 0
+    assert run(["check"]) == 1
     out, err = capsys.readouterr()
     assert out.count("warning:") == 1
     assert (
-        f"warning: {dotenv()} holds your token, and other users can replace it: "
+        f"warning: QTE-TOKEN-SHARED: {dotenv()} holds your token, and other users can "
+        "replace it: "
         f"NT AUTHORITY\\Authenticated Users may add or remove files in {Path.cwd()}, so"
     ) in out
     assert f'`icacls "{Path.cwd()}"` and `icacls "{dotenv()}"`' in out
@@ -977,21 +986,27 @@ def test_check_on_windows_warns_about_a_token_file_owned_by_another_account(
     path.write_text(token)
     monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
     monkeypatch.setenv(URL_ENV_VAR, URL)
-    assert run(["check"]) == 0
+    assert run(["check"]) == 1
     out, err = capsys.readouterr()
     assert out.count("warning:") == 1
-    assert f"warning: {path} holds your token, and it is owned by another account" in out
+    assert (
+        f"warning: QTE-TOKEN-SHARED: {path} holds your token, and it is owned by another account"
+    ) in out
     assert "none of Everyone" not in out
     assert_token_absent(token, out + err)
 
 
-def test_check_on_windows_says_nothing_extra_when_it_cannot_tell(windows, capsys):
+def test_check_on_windows_says_it_could_not_tell_when_it_cannot_read_the_list(windows, capsys):
     windows(None)
     dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
     dotenv().chmod(0o600)
-    assert run(["check"]) == 0
+    assert run(["check"]) == 2
     out = capsys.readouterr().out
-    assert "warning:" not in out and "no group" not in out
+    assert out.count("warning:") == 1 and "no group" not in out
+    assert (
+        f"warning: QTE-TOKEN-UNCHECKED: the access list of {dotenv()}, which holds your token, "
+        "could not be fully checked."
+    ) in out
 
 
 # A list Windows will not show the check, or that it cannot parse, and a folder another
@@ -1008,8 +1023,10 @@ def test_set_on_windows_warns_when_the_folders_list_is_not_shown(windows, capsys
     assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
     out, err = capsys.readouterr()
     assert (
-        f".\nWarning: {dotenv()} holds your token, but it could not be fully checked: "
-        f"{NOT_SHOWN} add or remove files in {Path.cwd()}. Delete it and make it again "
+        f".\nWarning: QTE-TOKEN-UNCHECKED: {dotenv()} holds your token, but it could not be "
+        "fully checked: "
+        f"{NOT_SHOWN} add or remove files in {Path.cwd()}. A later release will refuse such a "
+        "file. Delete it and make it again "
         "yourself, in a folder under your user profile (%USERPROFILE%)"
     ) in out
     assert "None of Everyone" not in out
@@ -1024,7 +1041,8 @@ def test_set_file_on_windows_warns_when_the_files_list_is_not_parsed(windows, tm
     out, err = capsys.readouterr()
     real = path.parent.resolve() / path.name
     assert (
-        f"Warning: {real} holds your token, but it could not be fully checked: the access "
+        f"Warning: QTE-TOKEN-UNCHECKED: {real} holds your token, but it could not be fully "
+        "checked: the access "
         f"list of {real} is in a form this check cannot read."
     ) in out
     assert_token_absent(token, out + err)
@@ -1036,7 +1054,8 @@ def test_set_on_windows_warns_about_a_folder_another_account_owns(windows, capsy
     assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
     out, err = capsys.readouterr()
     assert (
-        f".\nWarning: {dotenv()} holds your token, and {Path.cwd()} is owned by another "
+        f".\nWarning: QTE-TOKEN-SHARED: {dotenv()} holds your token, and {Path.cwd()} is "
+        "owned by another "
         "account, which can change who may add or remove files in it, so other people who "
         "use this computer could change QTE_URL in it"
     ) in out
@@ -1076,11 +1095,12 @@ def test_check_on_windows_warns_when_a_list_is_not_seen(
         path.write_text(token)
         monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(path))
         monkeypatch.setenv(URL_ENV_VAR, URL)
-    assert run(["check"]) == 0
+    assert run(["check"]) == 2  # it could not tell
     out, err = capsys.readouterr()
     assert out.count("warning:") == 1
     assert (
-        f"warning: {path} holds your token, but it could not be fully checked: {said(path)}."
+        f"warning: QTE-TOKEN-UNCHECKED: {path} holds your token, but it could not be fully "
+        f"checked: {said(path)}."
     ) in out
     assert "none of Everyone" not in out
     assert_token_absent(token, out + err)
@@ -1091,11 +1111,12 @@ def test_check_on_windows_warns_about_a_folder_another_account_owns(windows, cap
     token = synthetic_token()
     dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
     dotenv().chmod(0o600)
-    assert run(["check"]) == 0
+    assert run(["check"]) == 1
     out, err = capsys.readouterr()
     assert out.count("warning:") == 1
     assert (
-        f"warning: {dotenv()} holds your token, and {Path.cwd()} is owned by another account, "
+        f"warning: QTE-TOKEN-SHARED: {dotenv()} holds your token, and {Path.cwd()} is owned by "
+        "another account, "
         "which can change who may add or remove files in it"
     ) in out
     assert "none of Everyone" not in out

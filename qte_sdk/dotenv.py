@@ -41,18 +41,25 @@ Three safeguards apply:
   cannot read, or its owner cannot be told, the warning says the file could not be fully
   checked, and why. The file is
   still used, though a later release will refuse it. The same check applies to the file
-  named by `QTE_TOKEN_FILE` (see `qte_sdk.session`).
+  named by `QTE_TOKEN_FILE` (see `qte_sdk.session`). The warning's code is
+  `QTE-TOKEN-SHARED` or `QTE-ADDRESS-SHARED`, or `QTE-TOKEN-UNCHECKED` or
+  `QTE-ADDRESS-UNCHECKED` when the only finding is that it could not be fully checked.
 - If the `.env`, or the file it links to, is inside a git working tree and git tracks
   it or does not ignore it, a `DotenvNotIgnored` warning is issued, once per process,
   since the token could be committed. It never stops the SDK: if a warnings filter makes
   it an error, it is logged instead. The check runs `git ls-files` and `git check-ignore`
   when git is on the PATH and is skipped otherwise; git is given only the environment
-  variables it needs, never the token.
+  variables it needs, never the token. Its code is `QTE-DOTENV-TRACKED` when git tracks
+  the file and `QTE-DOTENV-NOT-IGNORED` otherwise.
 
 Nothing here raises for a bad file, logs, or returns any of the file's text other than the
-one value asked for: a problem is described by line number and name only.
+one value asked for: a problem is described by line number and name only. Each warning
+carries its code in `code` and at the start of its message, and a warning logged instead
+carries it as the record's `code`: docs/errors.md says what each code means.
 """
 
+import contextlib
+import contextvars
 import logging
 import os
 import re
@@ -62,10 +69,12 @@ import subprocess
 import sys
 import unicodedata
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from qte_sdk import _fileaccess
+from qte_sdk import errors as _errors
+from qte_sdk.errors import Problem, QteWarning, summary
 
 __all__ = [
     "DOTENV_NAME",
@@ -95,31 +104,58 @@ _GIT_ENV = frozenset(
 _log = logging.getLogger(__name__)
 _git_checked: set[str] = set()  # the .env files already checked, so each warns once
 _shared_warned: set[str] = set()  # the token files already warned about on Windows
+# True while `python -m qte_sdk.token check` runs: it looks at each file afresh, whatever was
+# warned about before in this process, and leaves that record alone. A context variable, so
+# it holds only for the thread or task that set it.
+_afresh: contextvars.ContextVar[bool] = contextvars.ContextVar("qte_sdk_afresh", default=False)
 
 
-class DotenvNotIgnored(UserWarning):
-    """The `.env` the SDK read is inside a git working tree and git does not ignore it."""
+@contextlib.contextmanager
+def checking_afresh() -> Iterator[None]:
+    """Within this, the git and Windows checks run, and warn, for every file each time,
+    as if nothing had been checked before in this process; and what they find is not
+    recorded, so the SDK still warns once later as it otherwise would."""
+    reset = _afresh.set(True)
+    try:
+        yield
+    finally:
+        _afresh.reset(reset)
 
 
-class FileShared(UserWarning):
+class DotenvNotIgnored(QteWarning):
+    """The `.env` the SDK read is inside a git working tree and git does not ignore it
+    (code `QTE-DOTENV-NOT-IGNORED`), or tracks it (`QTE-DOTENV-TRACKED`)."""
+
+    code = _errors.DOTENV_NOT_IGNORED
+
+
+class FileShared(QteWarning):
     """On Windows, a broad group of users, such as Everyone or Users, may read, change or
     replace a file the SDK reads its setup from, or another account owns it or a folder it
     is in or reached through; or it could not be fully checked, since a link on the way to
     it could not be followed or an access list could not be seen. Catch this to handle both
     kinds below."""
 
+    code = _errors.TOKEN_SHARED
+
 
 class TokenFileShared(FileShared):
     """On Windows, a broad group of users may read, change or replace the `.env`, or the
     file named by `QTE_TOKEN_FILE`, that holds the token, or another account owns it or a
-    folder it is in, or it could not be fully checked."""
+    folder it is in (code `QTE-TOKEN-SHARED`), or it could not be fully checked
+    (`QTE-TOKEN-UNCHECKED`)."""
+
+    code = _errors.TOKEN_SHARED
 
 
 class AddressFileShared(FileShared):
     """On Windows, a broad group of users may change or replace a `.env` that sets
     `QTE_URL` but holds no token, or another account owns it or a folder it is in, or it
     could not be fully checked. Whoever changes the address could capture a token kept
-    elsewhere."""
+    elsewhere. Code `QTE-ADDRESS-SHARED`, or `QTE-ADDRESS-UNCHECKED` when it could only not
+    be fully checked."""
+
+    code = _errors.ADDRESS_SHARED
 
 
 def dotenv_path() -> Path:
@@ -174,12 +210,19 @@ def _parse(text: str, name: str) -> tuple[str | None, str | None]:
             continue
         value, problem = _parse_value(assignment[1])
         if problem is not None:
-            problem = f"line {number}: {name} {problem}"
+            problem = Problem(
+                f"line {number}: {name} {problem}",
+                _errors.DOTENV_INVALID,
+                line=number,
+                name=name,
+                problem=problem,
+            )
     return value, problem
 
 
 def read_value(name: str) -> tuple[str | None, str | None]:
-    """The value of `name` in `./.env`, and None; or None and what is wrong.
+    """The value of `name` in `./.env`, and None; or None and what is wrong, as an
+    `errors.Problem`, which is text that carries the code of the message to raise.
 
     (None, None) if there is no `./.env` or it does not assign `name`, or assigns it an
     empty value. On POSIX, a file that assigns `QTE_TOKEN` and that other users can read is
@@ -202,7 +245,7 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     except FileNotFoundError:
         return None, None
     except OSError as error:
-        return None, f"cannot be read ({error.strerror or type(error).__name__})"
+        return None, _unreadable(f"cannot be read ({error.strerror or type(error).__name__})", name)
     problem = None
     data = b""
     try:
@@ -217,21 +260,22 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     except OSError as error:
         problem = f"cannot be read ({error.strerror or type(error).__name__})"
     if problem is not None:
-        return None, problem
+        return None, _unreadable(problem, name)
     if len(data) > MAX_DOTENV_SIZE:
-        return None, f"is larger than {MAX_DOTENV_SIZE // 1024} KiB"
+        return None, _unreadable(f"is larger than {MAX_DOTENV_SIZE // 1024} KiB", name)
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = None
     del data
     if text is None:
-        return None, "is not UTF-8 text"
+        return None, _unreadable("is not UTF-8 text", name)
     holds_token = _assigns(text, _TOKEN_NAME)
     if os.name == "posix" and stat.S_IMODE(mode) & 0o044 and holds_token:
-        return None, (
+        return None, Problem(
             f"holds {_TOKEN_NAME} but other users can read it; run `chmod 600 {DOTENV_NAME}` "
-            "so only you can"
+            "so only you can",
+            _errors.TOKEN_SHARED,
         )
     warn = access is not None and (
         (holds_token and access)
@@ -248,6 +292,10 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     if problem is not None:
         return None, problem
     return value or None, None
+
+
+def _unreadable(problem: str, name: str) -> Problem:
+    return Problem(problem, _errors.DOTENV_UNREADABLE, problem=problem, name=name)
 
 
 def _assigns(text: str, name: str) -> bool:
@@ -267,9 +315,11 @@ def _warn_if_not_ignored(path: Path) -> None:
     read, so no frame on the stack holds the token. If a warnings filter turns the warning
     into an error, it is logged instead, since this check must never stop the SDK."""
     key = str(path)
-    if key in _git_checked or not path.exists():
+    afresh = _afresh.get()
+    if (key in _git_checked and not afresh) or not path.exists():
         return
-    _git_checked.add(key)
+    if not afresh:
+        _git_checked.add(key)
     candidates = [path]
     if path.is_symlink():
         candidates.append(path.resolve())
@@ -277,14 +327,15 @@ def _warn_if_not_ignored(path: Path) -> None:
     exposures = [m for m in map(_git_exposure, candidates) if m is not None]
     if not exposures:
         return
-    message = " ".join(exposures) + (
-        " If you did not create this file (in a repository you cloned, say), check the "
-        "exchange address in it before you use it."
+    tracked = any(each == _errors.DOTENV_TRACKED for each, _ in exposures)
+    code = _errors.DOTENV_TRACKED if tracked else _errors.DOTENV_NOT_IGNORED
+    warning = DotenvNotIgnored(
+        " ".join(summary(each, **fields) for each, fields in exposures), code=code
     )
     try:
-        warnings.warn(message, DotenvNotIgnored, stacklevel=_caller_level())
+        warnings.warn(warning, stacklevel=_caller_level())
     except Warning:
-        _log.warning("%s", message)
+        _log.warning("%s", warning, extra={"code": code})
 
 
 def shared_access(path: Path) -> "_fileaccess.BroadAccess | None":
@@ -294,9 +345,22 @@ def shared_access(path: Path) -> "_fileaccess.BroadAccess | None":
     is Windows, the SDK has not already warned about `path` in this process, and the access
     list can be read; None otherwise. Takes only the path, so call it before the file is
     read."""
-    if not _fileaccess.on_windows() or os.path.abspath(path) in _shared_warned:
+    if not _fileaccess.on_windows():
+        return None
+    if os.path.abspath(path) in _shared_warned and not _afresh.get():
         return None
     return _fileaccess.broad_access(path)
+
+
+def shared_code(access: "_fileaccess.BroadAccess", *, holds_token: bool = True) -> str:
+    """The code for what `shared_message` says: `QTE-TOKEN-SHARED` or `QTE-ADDRESS-SHARED`
+    if a broad group may read (a file that holds the token), change or replace the file, or
+    another account owns it or a folder looked at; `QTE-TOKEN-UNCHECKED` or
+    `QTE-ADDRESS-UNCHECKED` if it could only not be fully checked."""
+    found = access.changeable or (holds_token and bool(access.read))
+    if holds_token:
+        return _errors.TOKEN_SHARED if found else _errors.TOKEN_UNCHECKED
+    return _errors.ADDRESS_SHARED if found else _errors.ADDRESS_UNCHECKED
 
 
 def shared_message(
@@ -309,10 +373,11 @@ def shared_message(
     """What to tell the person when broad groups of users may read, change or replace
     `path`, or another account owns it or a folder looked at, or it could not be fully
     checked. `path` holds the token if `holds_token`, and is a `.env` that can set the
-    exchange address if `sets_address`. Names only the path, and when it is reached through
-    links, the links and the file they lead to; their folders; and the groups; and, if a
-    link on the way could not be followed or a list could not be seen, why. Resolves no
-    path: where the lists were read is taken from `access`."""
+    exchange address if `sets_address`. The text has no code: see `shared_code`. Names
+    only the path, and when it is reached through links, the links and the file they lead
+    to; their folders; and the groups; and, if a link on the way could not be followed or a
+    list could not be seen, why. Resolves no path: where the lists were read is taken from
+    `access`."""
     changers = list(access.write)
     readers = [group for group in access.read if group not in changers] if holds_token else []
     replacers = list(access.folder or ())
@@ -442,9 +507,11 @@ def shared_message(
         said = f"{name} {what}, but {unchecked}."
     holders = [holder.path for holder in link_folders]
     folders = "folders" if holders else "folder"
+    # The SDK still uses such a file (see the module's docstring), so this says why it
+    # matters before the fix and the command that ends the message.
     return (
-        f"{said} {fix} To see who can open the {folders} and the file, "
-        f"{_icacls(folder, file, holders)}. A later release will refuse such a file."
+        f"{said} A later release will refuse such a file. {fix} To see who can open the "
+        f"{folders} and the file, {_icacls(folder, file, holders)}."
     )
 
 
@@ -500,16 +567,19 @@ def warn_shared(
     token; the warning is then given again next time. None otherwise."""
     key = None
     try:
-        key = os.path.abspath(path)
-        if key in _shared_warned:
-            return None
-        _shared_warned.add(key)
+        if not _afresh.get():
+            key = os.path.abspath(path)
+            if key in _shared_warned:
+                return None
+            _shared_warned.add(key)
         message = shared_message(path, access, holds_token=holds_token, sets_address=sets_address)
+        code = shared_code(access, holds_token=holds_token)
+        category = TokenFileShared if holds_token else AddressFileShared
+        warning = category(message, code=code)
         try:
-            category = TokenFileShared if holds_token else AddressFileShared
-            warnings.warn(message, category, stacklevel=_caller_level())
+            warnings.warn(warning, stacklevel=_caller_level())
         except Warning:
-            _log.warning("%s", message)
+            _log.warning("%s", warning, extra={"code": code})
     except Exception:
         pass
     except BaseException as error:
@@ -548,22 +618,16 @@ def _caller_level() -> int:
     return level
 
 
-def _git_exposure(path: Path) -> str | None:
-    """What could let git commit `path`, as advice for the person, or None if nothing
-    could or git cannot tell."""
+def _git_exposure(path: Path) -> tuple[str, dict[str, object]] | None:
+    """What could let git commit `path`, as the code and fields of its message, or None if
+    nothing could or git cannot tell."""
     if not is_inside_git_work_tree(path.parent):
         return None
     if is_tracked_by_git(path):
-        return (
-            f"git tracks {path}, so your token in it would be committed. Adding it to "
-            f".gitignore does not stop that: run `git rm --cached {path.name}` in "
-            f"{path.parent}, add {path.name} to .gitignore and commit."
-        )
+        command = f"`git rm --cached {path.name}` in {path.parent}"
+        return _errors.DOTENV_TRACKED, {"path": path, "name": path.name, "command": command}
     if is_ignored_by_git(path) is False:
-        return (
-            f"{path} is inside a git working tree and git does not ignore it, so it could "
-            f"be committed with your token. Add {path.name} to .gitignore."
-        )
+        return _errors.DOTENV_NOT_IGNORED, {"path": path, "name": path.name}
     return None
 
 
