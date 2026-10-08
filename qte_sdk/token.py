@@ -68,6 +68,7 @@ from pathlib import Path
 from qte_sdk import _fileaccess
 from qte_sdk import dotenv as dotenv_module
 from qte_sdk import errors as _errors
+from qte_sdk import logs as _logs
 from qte_sdk.dotenv import (
     DOTENV_NAME,
     MAX_DOTENV_SIZE,
@@ -132,7 +133,7 @@ def main(
         interactive = _has_terminal
     try:
         if args.command == "check":
-            return _check()
+            return _check(json_output=args.json)
         if not interactive():
             raise _Refused(_errors.TOKEN_NO_TERMINAL)
         if args.file is not None:
@@ -173,10 +174,15 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=f"store only the token, in PATH (default {DEFAULT_TOKEN_FILE})",
     )
-    commands.add_parser(
+    check = commands.add_parser(
         "check",
         help="say where the SDK would take the token and the address from",
         description="Say where the SDK would take the token and the address from.",
+    )
+    check.add_argument(
+        "--json",
+        action="store_true",
+        help="print the result as one JSON document (see docs/errors.md)",
     )
     return parser
 
@@ -669,21 +675,37 @@ _COULD_NOT_TELL = frozenset(
 )
 
 
-def _check() -> int:
-    """Print where the token and the address come from, and each finding with its code.
-    Returns 1 if a finding must be fixed, else 2 if one could not be settled, else 0.
+def _check(json_output: bool = False) -> int:
+    """Print where the token and the address come from, and each finding with its code, or
+    with `json_output` one JSON document that says the same (see docs/errors.md). Returns
+    1 if a finding must be fixed, else 2 if one could not be settled, else 0; 2 too, with
+    the reason on stderr, when `QTE_LOG_FORMAT` is neither json nor text.
 
     The SDK gives its git and Windows warnings once per process for each file; `check`
     looks afresh each time it runs, whatever was read or checked before it in the same
     process, and records nothing, so a session still warns (see
     `dotenv.checking_afresh`)."""
-    with dotenv_module.checking_afresh():
-        return _check_afresh()
+    try:
+        with _logs._for_command(json_output), dotenv_module.checking_afresh():
+            return _check_afresh(json_output)
+    except _logs.LogFormatInvalid as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
 
-def _check_afresh() -> int:
+def _check_afresh(json_output: bool = False) -> int:
     findings: list[str] = []
     lines: list[str] = []
+    # What --json prints, made as the lines are: every text in it is redacted as it is
+    # added, and every path withheld as for the lines.
+    token_part: dict[str, object] = {"found": False, "source": None, "path": None, "note": None}
+    address_part: dict[str, object] = {
+        "found": False,
+        "source": None,
+        "path": None,
+        "valid": None,
+    }
+    found: list[dict[str, object]] = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DotenvNotIgnored)
         warnings.simplefilter("always", FileShared)
@@ -703,15 +725,34 @@ def _check_afresh() -> int:
             # Redacted as soon as it is written, so no local holds a copy that is not.
             lines.append(redacted(line))
 
+        def finding(code: str, text: str, next_step: str) -> None:
+            # A finding as --json gives it, redacted as it is made, like the lines.
+            found.append(
+                {
+                    "code": code,
+                    "kind": "cannot-tell" if code in _COULD_NOT_TELL else "fix",
+                    "message": redacted(_logs.message_of(text, code, next_step)),
+                    "next_step": redacted(next_step),
+                }
+            )
+
         unchecked = []
         if problem is not None:
             findings.append(problem.code)
-            say(f"token:   none usable. {_missing_token(problem)}")
+            missing = str(_missing_token(problem))
+            say(f"token:   none usable. {missing}")
+            finding(problem.code, missing, _next_step(problem.code, withhold, problem.fields))
         else:
             assert token_from is not None
             where = _describe(token_from, withhold)
             note, not_read = _access_note(token_from)
             say(f"token:   {where}{note}")
+            token_part.update(
+                found=True,
+                source=token_from,
+                path=_source_path(token_from, withhold),
+                note=redacted(note.removeprefix("; ")) or None,
+            )
             if not_read:
                 unchecked.append((_errors.TOKEN_UNCHECKED, where))
         try:
@@ -719,59 +760,125 @@ def _check_afresh() -> int:
         except MissingURL as error:
             findings.append(error.code)
             say(f"address: none. {error}")
+            finding(error.code, str(error), _next_step(error.code, withhold, error.fields))
         else:
             # The address itself is not shown: a mistake could have put the token there.
             where = _describe(source, withhold)
             shaped = url.startswith(("ws://", "wss://"))
             del url  # a mistake could have put the token in it
+            address_part.update(
+                found=True, source=source, path=_source_path(source, withhold), valid=shaped
+            )
             if shaped:
                 say(f"address: set, from {where}")
             else:
                 findings.append(_errors.ADDRESS_INVALID)
-                invalid = render(
-                    _errors.ADDRESS_INVALID,
-                    withhold=withhold,
-                    source=where,
-                    problem="does not start with ws:// or wss://",
-                )
+                fields = {"source": where, "problem": "does not start with ws:// or wss://"}
+                invalid = render(_errors.ADDRESS_INVALID, withhold=withhold, **fields)
                 say(f"address: set, from {where}; {invalid}")
+                finding(
+                    _errors.ADDRESS_INVALID,
+                    invalid,
+                    _errors.next_step(_errors.ADDRESS_INVALID, withhold=withhold, **fields),
+                )
             if source == DOTENV_NAME and token_from != DOTENV_NAME and _dotenv_list_unread():
                 unchecked.append((_errors.ADDRESS_UNCHECKED, where))
     # The SDK's warnings name paths, and were written without the token: each is redacted,
     # and the warnings let go of, before anything else is done.
     warned = [
-        (getattr(w.message, "code", None) or _errors.TOKEN_SHARED, redacted(str(w.message)))
+        (
+            getattr(w.message, "code", None) or _errors.TOKEN_SHARED,
+            redacted(str(w.message)),
+            redacted(_warning_step(w.message)),
+        )
         for w in caught
         if issubclass(w.category, (DotenvNotIgnored, FileShared))
     ]
     git_warned = any(issubclass(w.category, DotenvNotIgnored) for w in caught)
     caught.clear()
     shown: set[str] = set()
-    for code, message in warned:
+    for code, message, next_step in warned:
         findings.append(code)
         if message not in shown:
             shown.add(message)
             say(f"warning: {message}")
+            finding(code, message, next_step)
     for code, where in unchecked:
         findings.append(code)
-        say(f"warning: {render(code, withhold=withhold, path=where)}")
+        message = render(code, withhold=withhold, path=where)
+        say(f"warning: {message}")
+        finding(code, message, _errors.next_step(code, withhold=withhold, path=where))
     if not git_warned and _git_unknown():
         findings.append(_errors.DOTENV_GIT_UNKNOWN)
-        say(
-            "warning: "
-            + render(
-                _errors.DOTENV_GIT_UNKNOWN,
-                withhold=withhold,
-                path=dotenv_path(),
-                name=DOTENV_NAME,
+        fields = {"path": dotenv_path(), "name": DOTENV_NAME}
+        message = render(_errors.DOTENV_GIT_UNKNOWN, withhold=withhold, **fields)
+        say(f"warning: {message}")
+        finding(
+            _errors.DOTENV_GIT_UNKNOWN,
+            message,
+            _errors.next_step(_errors.DOTENV_GIT_UNKNOWN, withhold=withhold, **fields),
+        )
+    if any(code not in _COULD_NOT_TELL for code in findings):
+        status = 1
+    else:
+        status = 2 if findings else 0
+    document = ""
+    if json_output:
+        document = redacted(
+            _logs.dumps(
+                {
+                    "command": "token check",
+                    "schema": 1,
+                    "exit_code": status,
+                    "result": _RESULTS[status],
+                    "token": token_part,
+                    "address": address_part,
+                    "findings": found,
+                }
             )
         )
     secret = None  # let go of the token; `withhold` and `redacted` read this name too
-    for line in lines:
-        print(line)
-    if any(code not in _COULD_NOT_TELL for code in findings):
-        return 1
-    return 2 if findings else 0
+    if json_output:
+        print(document)
+    else:
+        for line in lines:
+            print(line)
+    return status
+
+
+# What --json gives as `result`, for each exit status.
+_RESULTS = {0: "ok", 1: "fix", 2: "cannot-tell"}
+
+
+def _next_step(
+    code: str, withhold: Callable[[str], bool], fields: dict[str, object] | None
+) -> str:
+    """The next step of an error or problem that carries its code's fields."""
+    return _errors.next_step(code, withhold=withhold, **(fields or {}))
+
+
+def _warning_step(warning: Warning) -> str:
+    """The next step of an SDK warning: from its fields when it has them, else its code's
+    fix. Its message was made without the token, and is redacted all the same."""
+    code = getattr(warning, "code", None) or _errors.TOKEN_SHARED
+    fields = getattr(warning, "fields", None)
+    if isinstance(fields, dict):
+        return _errors.next_step(code, withhold=dotenv_module.withholding(), **fields)
+    return _errors.next_step(code)
+
+
+def _source_path(source: str, withhold: Callable[[str], bool]) -> str | None:
+    """The path of the file a value comes from, as --json gives it: None for an
+    environment variable, `errors.WITHHELD` for a path that holds the token."""
+    if source == DOTENV_NAME:
+        path = str(dotenv_path())
+    elif source == TOKEN_FILE_ENV_VAR:
+        path = os.environ[TOKEN_FILE_ENV_VAR]
+    else:
+        return None
+    if withhold(path) or withhold(one_line(path)):
+        return _errors.WITHHELD
+    return path
 
 
 def _git_unknown() -> bool:

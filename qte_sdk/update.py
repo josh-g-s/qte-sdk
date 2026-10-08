@@ -108,6 +108,7 @@ in a new release.
 """
 
 import argparse
+import copy
 import io
 import json
 import logging
@@ -131,6 +132,8 @@ from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 import qte_sdk
+from qte_sdk import errors as _errors
+from qte_sdk import logs as _logs
 
 __all__ = [
     "ARCHIVE_URL",
@@ -948,10 +951,29 @@ def _check_and_log() -> None:
             return
         result = check_for_update()
         if result.status is Status.BEHIND:
-            _log_without_waiting(logging.WARNING, result.message, UPDATE_AVAILABLE)
+            _log_without_waiting(
+                logging.WARNING,
+                result.message,
+                UPDATE_AVAILABLE,
+                next_step=_errors.next_step(UPDATE_AVAILABLE, command=result.command),
+                fields={},
+                short=_short_message(result),
+            )
     except BaseException:
         # Never into the program: a thread's uncaught error would be printed.
         return
+
+
+def _short_message(result: UpdateCheck) -> str | None:
+    """`result.message` without the reason a recommended update gives, which says where to
+    read it instead: for a line too long to write to a pipe whole. None when the message
+    gives no reason, or does not have the form `_behind_message` gives it."""
+    if not result.recommended or not result.why:
+        return None
+    head, found, command = result.message.rpartition(f": {result.why}. Update with ")
+    if not found:
+        return None
+    return f"{head}; python -m qte_sdk.update says why. Update with {command}"
 
 
 # The longest line written straight to a pipe, socket or terminal, in bytes: POSIX's least
@@ -959,8 +981,17 @@ def _check_and_log() -> None:
 _MAX_DIRECT_LINE = 512
 
 
-def _log_without_waiting(level: int, message: str, code: str) -> None:
-    """Log `message` through `logger`, with `code` on the record, as `logger.log` would,
+def _log_without_waiting(
+    level: int,
+    message: str,
+    code: str,
+    *,
+    next_step: str | None = None,
+    fields: dict[str, Any] | None = None,
+    short: str | None = None,
+) -> None:
+    """Log `message` through `logger`, with `code` on the record (and `next_step` and
+    `fields`, when given, for a JSON formatter: see `qte_sdk.logs`), as `logger.log` would,
     except that the write can never hold up the program. Levels, filters, `propagate`,
     every handler and `logging.lastResort` are honoured, from their public attributes, and
     every handler gets the record through `handle` as usual, except a `StreamHandler` whose
@@ -968,7 +999,8 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
     would wait holding the handler's lock (and the stream's), and `logging.shutdown()` at
     exit, and every later write to it, would wait for that. Such a stream gets the line
     only when the pipe, socket or terminal can take it whole now (see `_route`); otherwise
-    it is dropped there. Python's own stderr, and any stream `open()` makes, gets it in one
+    it is dropped there, unless `short`, the same message made shorter, gives a line that
+    fits: it is written instead, there only. Python's own stderr, and any stream `open()` makes, gets it in one
     `os.write` on its file descriptor, holding no lock; a stream that wraps one (colorama's,
     rich's, a tee, Jupyter's) gets it through `handle`, so the wrapper writes it. It runs in
     the check's own thread, never touches an event loop, and never changes whether a file
@@ -988,8 +1020,13 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
         path, line, function, stack = logger.findCaller(False, 2)
     except ValueError:
         path, line, function, stack = "(unknown file)", 0, "(unknown function)", None
+    extra: dict[str, Any] = {"code": code}
+    if next_step is not None:
+        extra["next_step"] = next_step
+    if fields is not None:
+        extra["fields"] = fields
     record = logger.makeRecord(
-        logger.name, level, path, line, "%s", (message,), None, function, {"code": code}, stack
+        logger.name, level, path, line, "%s", (message,), None, function, extra, stack
     )
     passed = logger.filter(record)
     if not passed:
@@ -1016,9 +1053,9 @@ def _log_without_waiting(level: int, message: str, code: str) -> None:
             later.append((route, handler, fd))
     for route, handler, fd in later:
         if route == "direct":
-            _write_or_drop(handler, fd, record)
+            _write_or_drop(handler, fd, record, short)
         else:
-            _handle_if_ready(handler, fd, record)
+            _handle_if_ready(handler, fd, record, short)
 
 
 def _route(handler: logging.Handler) -> tuple[str, int | None]:
@@ -1110,9 +1147,16 @@ def _path_may_wait(path: str) -> bool:
     return False
 
 
-def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogRecord) -> None:
+def _write_or_drop(
+    handler: logging.StreamHandler,
+    fd: int,
+    record: logging.LogRecord,
+    short: str | None = None,
+) -> None:
     """Write `record` as `handler` would, in one `os.write` on `fd` holding no lock, when
-    the stream can take the whole line now; otherwise drop it. Never truncates, and never
+    the stream can take the whole line now; otherwise drop it. A line over 512 bytes is
+    written with the message `short` instead, if given and that fits (see `_line`). Never
+    truncates, and never
     writes to a descriptor the program made non-blocking, where a write could stop part
     way (on Windows, from Python 3.12, which can tell). A short write is not retried,
     since a retry could wait; on a blocking pipe a line of at most 512 bytes is written
@@ -1128,7 +1172,7 @@ def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogR
             return
         if isinstance(passed, logging.LogRecord):
             record = passed
-        data = _encoded(handler, handler.format(record) + handler.terminator)
+        _, data = _line(handler, record, short)
         if len(data) > _MAX_DIRECT_LINE:
             return
         try:
@@ -1142,9 +1186,15 @@ def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogR
         return
 
 
-def _handle_if_ready(handler: logging.StreamHandler, fd: int, record: logging.LogRecord) -> None:
+def _handle_if_ready(
+    handler: logging.StreamHandler,
+    fd: int,
+    record: logging.LogRecord,
+    short: str | None = None,
+) -> None:
     """Write `record` to `handler`'s stream (a wrapper), as `handle` and `emit` would, only
-    when the line is at most 512 bytes and the pipe, socket or terminal behind `fd` can
+    when the line (made with `short`, as `_write_or_drop` does, if it is too long) is at
+    most 512 bytes and the pipe, socket or terminal behind `fd` can
     take it whole now; otherwise drop it. The handler's filters run once, before the line
     is measured, and the line written is the one measured. The wrapper then passes on at
     most that much, so its write does not wait, unless another writer fills the pipe
@@ -1159,8 +1209,7 @@ def _handle_if_ready(handler: logging.StreamHandler, fd: int, record: logging.Lo
             return
         if isinstance(passed, logging.LogRecord):
             record = passed
-        text = handler.format(record) + handler.terminator
-        data = _encoded(handler, text)
+        text, data = _line(handler, record, short)
         if len(data) > _MAX_DIRECT_LINE or not _can_take(fd, len(data)):
             return
         handler.acquire()
@@ -1171,6 +1220,22 @@ def _handle_if_ready(handler: logging.StreamHandler, fd: int, record: logging.Lo
             handler.release()
     except Exception:
         return
+
+
+def _line(
+    handler: logging.StreamHandler, record: logging.LogRecord, short: str | None
+) -> tuple[str, bytes]:
+    """The line `handler` writes for `record`, as text and as the bytes it becomes. When
+    those are over 512 bytes and `short` is given, the line for a copy of the record with
+    the message `short` instead, its code, next step and fields unchanged."""
+    text = handler.format(record) + handler.terminator
+    data = _encoded(handler, text)
+    if len(data) > _MAX_DIRECT_LINE and short is not None:
+        shorter = copy.copy(record)
+        shorter.msg, shorter.args = "%s", (short,)
+        text = handler.format(shorter) + handler.terminator
+        data = _encoded(handler, text)
+    return text, data
 
 
 def _encoded(handler: logging.StreamHandler, text: str) -> bytes:
@@ -1349,10 +1414,23 @@ def main(argv: list[str] | None = None) -> int:
         metavar="SECONDS",
         help=f"how long to wait for GitHub (default {DEFAULT_TIMEOUT:g})",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print the result as one JSON document (see docs/errors.md)",
+    )
     args = parser.parse_args(argv)
-    result = check_for_update(args.timeout)
-    print(f"installed: {_describe_install(result)}")
-    print(result.message)
+    try:
+        with _logs._for_command(args.json):
+            result = check_for_update(args.timeout)
+            if args.json:
+                print(_logs.dumps(_document(result)))
+            else:
+                print(f"installed: {_describe_install(result)}")
+                print(result.message)
+    except _logs.LogFormatInvalid as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     return result.exit_code
 
 
@@ -1364,6 +1442,51 @@ def _seconds(text: str) -> float:
     if not 0 < value <= 60:
         raise argparse.ArgumentTypeError("give a number of seconds above 0 and at most 60")
     return value
+
+
+def _document(result: UpdateCheck) -> dict[str, Any]:
+    """The result as `--json` prints it. Commits are cut to 12 hex digits, as the text shows
+    them, and a revision or archive that is not a release tag, a commit or main is "other",
+    as the text does not name it."""
+    if result.status is Status.BEHIND and result.command is not None:
+        next_step: str | None = _errors.next_step(UPDATE_AVAILABLE, command=result.command)
+    elif result.command is not None:
+        next_step = f"Take main's newer commits with {result.command}"
+    else:
+        next_step = None
+    revision = result.installed_revision
+    if revision is not None and not (
+        revision == "main"
+        or _RELEASE_TAG.fullmatch(revision)
+        or re.fullmatch(r"[0-9a-f]{7,64}", revision)
+    ):
+        revision = "other"
+    archive = result.installed_archive
+    if archive is not None and archive != "main" and not _RELEASE_TAG.fullmatch(archive):
+        archive = "other"
+    commit = result.installed_commit
+    return {
+        "command": "update",
+        "schema": 1,
+        "exit_code": result.exit_code,
+        "status": str(result.status),
+        "code": result.code,
+        "message": _logs.message_of(result.message, result.code, next_step),
+        "next_step": next_step,
+        "installed": {
+            "version": result.installed_version,
+            "description": _describe_install(result),
+            "commit": None if commit is None else commit[:12],
+            "revision": None if revision is None else revision[:12],
+            "archive": archive,
+        },
+        "latest_release": result.latest_release,
+        "main_commit": None if result.main_commit is None else result.main_commit[:12],
+        "main_ahead": result.main_ahead,
+        "update_command": result.command,
+        "recommended": result.recommended,
+        "why": result.why,
+    }
 
 
 def _describe_install(result: UpdateCheck) -> str:
