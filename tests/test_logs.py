@@ -544,3 +544,104 @@ def test_the_smoke_test_s_json_says_a_ctrl_c_before_it_connects(
     assert json_handlers() == [] and smoke.JSON_REPORT == []
     smoke.say("plain")
     assert capsys.readouterr().err == "plain\n"
+
+
+# Found in review (#202): a token that is a JSON word or key, a token in a record of any
+# logger under qte_sdk, and the order of handlers a command puts back
+
+
+DOCUMENT_KEYS = ["command", "schema", "exit_code", "result", "token", "address", "findings"]
+
+
+@pytest.mark.parametrize("token", ["null", "true", "false", "result", "token", "found", "fix"])
+@pytest.mark.parametrize("url", ["wss://exchange.example/ws", "https://exchange.example/ws"])
+def test_a_token_that_is_a_json_word_or_key_leaves_the_document_whole(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], token: str, url: str
+):
+    monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    monkeypatch.setenv(URL_ENV_VAR, url)
+    status = token_command.main(["check", "--json"])
+    document = json.loads(capsys.readouterr().out)
+    assert list(document) == DOCUMENT_KEYS
+    assert list(document["token"]) == ["found", "source", "path", "note"]
+    assert list(document["address"]) == ["found", "source", "path", "valid"]
+    assert document["exit_code"] == status == (0 if url.startswith("wss") else 1)
+    assert document["result"] == ("ok" if status == 0 else "fix")
+    assert document["token"]["found"] is True and document["token"]["source"] == "QTE_TOKEN"
+    for finding in document["findings"]:
+        assert list(finding) == ["code", "kind", "message", "next_step"]
+        assert finding["code"] == errors.ADDRESS_INVALID and finding["kind"] == "fix"
+
+
+def test_a_record_holding_the_token_in_its_arguments_or_fields_is_withheld(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from test_pasted_token import minted_token
+
+    for token in (minted_token(), synthetic_token()):
+        monkeypatch.setenv(TOKEN_ENV_VAR, token)
+        stream = io.StringIO()
+        logs.configure("json", stream=stream)
+        logging.getLogger("qte_sdk.history").warning(
+            "fetched %s",
+            f"/v1/history/{token}/book",
+            extra={
+                "next_step": f"Try {token} again",
+                "fields": {"path": Path("/x") / token, "nested": [f"a {token!r}"], "n": 3},
+            },
+        )
+        line = stream.getvalue()
+        parsed = json.loads(line)
+        assert parsed["message"] == errors.WITHHELD
+        assert parsed["next_step"] == errors.WITHHELD
+        assert parsed["fields"] == {"path": errors.WITHHELD, "nested": [errors.WITHHELD], "n": 3}
+        assert_no_form_of(token, line)
+    # With no token set, the shape of a minted one is withheld all the same.
+    monkeypatch.delenv(TOKEN_ENV_VAR)
+    shaped = json.loads(log_line(message=f"x {minted_token()} y"))
+    assert shaped["message"] == errors.WITHHELD
+    assert json.loads(log_line(message="an ordinary line"))["message"] == "an ordinary line"
+
+
+def test_a_history_debug_line_withholds_a_target_holding_the_token():
+    from qte_sdk.history import HistoryClient
+
+    token = synthetic_token()
+    client = HistoryClient("https://history.example.test", token)
+    assert client._logged(client._target("2026-10-05", token, "book")) == errors.WITHHELD
+    assert client._logged(client._target("2026-10-05", "a" * 32, "book")) == errors.WITHHELD
+    ordinary = client._target("2026-10-05", "AAPL", "book")
+    assert client._logged(ordinary) == ordinary
+
+
+def test_configured_puts_the_handlers_back_in_their_order():
+    sdk = logging.getLogger("qte_sdk")
+    first, last = logs._JsonHandler(None, logging.WARNING), logs._JsonHandler(None, logging.ERROR)
+    middle = logging.NullHandler()
+    sdk.addHandler(first)
+    sdk.addHandler(middle)
+    sdk.addHandler(last)
+    added = logging.NullHandler()
+    try:
+        with logs.configured("json", capture_warnings=True) as handler:
+            assert json_handlers() == [handler]
+            sdk.addHandler(added)
+        assert sdk.handlers[-4:] == [first, middle, last, added]
+    finally:
+        for each in (first, middle, last, added):
+            sdk.removeHandler(each)
+
+
+def test_the_smoke_test_never_withholds_its_own_words_or_keys(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv(TOKEN_ENV_VAR, "pass")
+    smoke = load_smoke_test()
+    report = smoke.Report(json_output=True)
+    report.add(smoke.PASS, "token", "found in the QTE_TOKEN environment variable (not shown)")
+    report.add(smoke.FAIL, "market:pass", "bypass")
+    document = json.loads(report.document(1))
+    assert [(c["name"], c["status"], c["message"]) for c in document["checks"]] == [
+        ("token", "pass", "found in the QTE_TOKEN environment variable (not shown)"),
+        (errors.WITHHELD, "fail", errors.WITHHELD),
+    ]

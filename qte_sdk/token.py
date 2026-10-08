@@ -758,7 +758,7 @@ def _check_afresh(json_output: bool = False) -> int:
             token_part.update(
                 found=True,
                 source=token_from,
-                path=_source_path(token_from, withhold),
+                path=_redacted_path(_source_path(token_from, withhold), redacted),
                 note=redacted(note.removeprefix("; ")) or None,
             )
             if not_read:
@@ -775,7 +775,10 @@ def _check_afresh(json_output: bool = False) -> int:
             shaped = url.startswith(("ws://", "wss://"))
             del url  # a mistake could have put the token in it
             address_part.update(
-                found=True, source=source, path=_source_path(source, withhold), valid=shaped
+                found=True,
+                source=source,
+                path=_redacted_path(_source_path(source, withhold), redacted),
+                valid=shaped,
             )
             if shaped:
                 say(f"address: set, from {where}")
@@ -833,18 +836,19 @@ def _check_afresh(json_output: bool = False) -> int:
         status = 2 if findings else 0
     document = ""
     if json_output:
-        document = redacted(
-            _logs.dumps(
-                {
-                    "command": "token check",
-                    "schema": 1,
-                    "exit_code": status,
-                    "result": _RESULTS[status],
-                    "token": token_part,
-                    "address": address_part,
-                    "findings": found,
-                }
-            )
+        # Every text value was redacted as it was added, and every path withheld; the keys
+        # and the other values are the command's own. The JSON text itself is never
+        # redacted: a token such as "null" or "result" would break it.
+        document = _logs.dumps(
+            {
+                "command": "token check",
+                "schema": 1,
+                "exit_code": status,
+                "result": _RESULTS[status],
+                "token": token_part,
+                "address": address_part,
+                "findings": found,
+            }
         )
     secret = None  # let go of the token; `withhold` and `redacted` read this name too
     if json_output:
@@ -872,6 +876,10 @@ def _warning_step(warning: Warning) -> str:
     if isinstance(fields, dict):
         return _errors.next_step(code, withhold=dotenv_module.withholding(), **fields)
     return _errors.next_step(code)
+
+
+def _redacted_path(path: str | None, redacted: Callable[[str], str]) -> str | None:
+    return None if path is None else redacted(path)
 
 
 def _source_path(source: str, withhold: Callable[[str], bool]) -> str | None:

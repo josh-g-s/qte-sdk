@@ -25,7 +25,10 @@ the record names, such as a path (`{}` for none). A record logged with an except
 has `exception`, the exception's type name only, since its text could hold anything. The
 plain-text form of a coded record is `<code>: <message> <next_step>.`. Every line is
 ASCII (any other character is escaped as JSON escapes it), so it reads the same through a
-Windows pipe in any code page, and never holds the token.
+Windows pipe in any code page. It never holds the token: the SDK's own records are made
+without it, and any text in a line that holds the token in `QTE_TOKEN`, as written or
+escaped, or the shape of a token the exchange issues (32 hex digits in a row), is given as
+`qte_sdk.errors.WITHHELD` instead, a record of your own program's included.
 
 `configure()` adds one handler, to the `qte_sdk` logger, writing to stderr (or `stream`).
 It changes nothing else: not the root logger, not levels, and `propagate` stays on, so a
@@ -142,27 +145,29 @@ def configured(
     use it, so a program that calls a command's `main` keeps its own setup. Raises
     `LogFormatInvalid` as `configure` does, changing nothing."""
     logger = logging.getLogger(_SDK_LOGGER)
-    handlers = [h for h in logger.handlers if isinstance(h, _JsonHandler)]
+    before = list(logger.handlers)
     showwarning, shown_before = warnings.showwarning, _shown_before
     handler = configure(format, stream=stream, level=level, capture_warnings=capture_warnings)
     try:
         yield handler
     finally:
-        _restore(logger, handlers, showwarning, shown_before)
+        _restore(logger, before, showwarning, shown_before)
 
 
 def _restore(
     logger: logging.Logger,
-    handlers: list[logging.Handler],
+    before: list[logging.Handler],
     showwarning: Callable[..., Any],
     shown_before: Callable[..., Any] | None,
 ) -> None:
+    """The handlers as they were in `before`, in their order (JSON handlers included, any
+    other handler removed meanwhile left out), then any other handler added meanwhile; and
+    the capture of warnings as it was."""
     global _shown_before
-    for handler in list(logger.handlers):
-        if isinstance(handler, _JsonHandler):
-            logger.removeHandler(handler)
-    for handler in handlers:
-        logger.addHandler(handler)
+    now = list(logger.handlers)
+    kept = [h for h in before if isinstance(h, _JsonHandler) or h in now]
+    added = [h for h in now if h not in before and not isinstance(h, _JsonHandler)]
+    logger.handlers = kept + added  # one assignment: a record sees one list or the other
     warnings.showwarning, _shown_before = showwarning, shown_before
 
 
@@ -214,14 +219,22 @@ class JsonFormatter(logging.Formatter):
         if not isinstance(next_step, str):
             next_step = _fix(code)
         fields = getattr(record, "fields", None)
+        fields = {str(k): v for k, v in fields.items()} if isinstance(fields, dict) else {}
+        # Any text that holds the token in QTE_TOKEN, or the shape of a token the exchange
+        # issues, is withheld whole, as the SDK's own messages withhold such a field.
+        withhold = _withholding()
+        try:
+            fields = _withheld(fields, withhold)
+        except RecursionError:  # fields that hold themselves
+            fields = {}
         line: dict[str, Any] = {
             "time": _utc(record),
             "level": record.levelname,
             "logger": record.name,
             "code": code,
-            "message": message_of(text, code, next_step),
-            "next_step": next_step,
-            "fields": {str(k): v for k, v in fields.items()} if isinstance(fields, dict) else {},
+            "message": _withheld(message_of(text, code, next_step), withhold),
+            "next_step": _withheld(next_step, withhold),
+            "fields": fields,
         }
         if record.exc_info and record.exc_info[0] is not None:
             line["exception"] = record.exc_info[0].__name__
@@ -230,6 +243,31 @@ class JsonFormatter(logging.Formatter):
         except (TypeError, ValueError):  # fields that cannot be written, such as a cycle
             line["fields"] = {}
             return dumps(line)
+
+
+def _withholding() -> Callable[[str], bool]:
+    # Imported here: qte_sdk.dotenv is not needed until a line is written.
+    from qte_sdk.dotenv import withholding
+
+    return withholding()
+
+
+def _withheld(value: Any, withhold: Callable[[str], bool]) -> Any:
+    """`value` with each text in it that `withhold` says yes to (as written, or as str()
+    writes it) replaced by `qte_sdk.errors.WITHHELD`; keys are kept."""
+    if isinstance(value, str):
+        return _errors.WITHHELD if withhold(value) else value
+    if isinstance(value, dict):
+        return {key: _withheld(item, withhold) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_withheld(item, withhold) for item in value]
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    try:
+        text = str(value)
+    except Exception:
+        return _errors.WITHHELD
+    return _errors.WITHHELD if withhold(text) else text
 
 
 def dumps(value: object) -> str:

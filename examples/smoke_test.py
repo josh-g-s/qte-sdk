@@ -469,6 +469,9 @@ class Report:
         """Everything the run found, as one line of JSON, with the exit status it ends with.
         Any text in it that holds the token, or the shape of one, is withheld whole: the
         token from wherever the SDK would take it, .env included."""
+        # Only the texts that can hold what was read or typed are swept; the keys and the
+        # script's own words (a status, a code, a signal's name) never are.
+        withhold = token_withholding()
         document = {
             "command": "smoke_test",
             "schema": 1,
@@ -480,18 +483,18 @@ class Report:
             },
             "checks": [
                 {
-                    "name": name,
+                    "name": swept(name, withhold),
                     "status": status.lower(),
                     "code": first_code(reason),
-                    "message": reason,
+                    "message": swept(reason, withhold),
                 }
                 for status, name, reason in self.checks
             ],
-            "problems": self.problems,
-            "warnings": self.notes,
+            "problems": swept(self.problems, withhold),
+            "warnings": swept(self.notes, withhold),
             "stopped_by": stopped_by,
         }
-        return to_json(swept(document, token_withholding()))
+        return to_json(document)
 
 
 def to_json(value: object) -> str:

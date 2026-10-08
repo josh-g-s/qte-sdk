@@ -36,7 +36,7 @@ With `--json`, each command exits with the same status, which the document gives
 
 ## JSON output
 
-For coding agents and scripts. Every JSON line and document is one physical line of compact JSON in ASCII alone (any other character is escaped, so it reads the same through a Windows pipe in any code page), with its keys always present and in the order below (`null` when not known). None ever holds your token: a text or path that holds it is given as `(withheld: it holds the token)`. A message never starts with its code: the code is its own key, and the next step, without its full stop, is too, so the plain-text line is `<code>: <message> <next_step>.`
+For coding agents and scripts. Every JSON line and document is one physical line of compact JSON in ASCII alone (any other character is escaped, so it reads the same through a Windows pipe in any code page), with its keys always present and in the order below (`null` when not known). None ever holds your token: a text or path that holds it is given as `(withheld: it holds the token)`. In a log line, that is any text holding the token in `QTE_TOKEN`, or 32 hex digits in a row, the shape of the exchange's tokens, whatever logged it. A message never starts with its code: the code is its own key, and the next step, without its full stop, is too, so the plain-text line is `<code>: <message> <next_step>.`
 
 Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) with `QTE_LOG_FORMAT=json`, or `configure("json")`, writes each SDK log record to stderr as one JSON object per line:
 
