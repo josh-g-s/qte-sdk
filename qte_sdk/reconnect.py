@@ -355,7 +355,6 @@ class ReconnectingSession:
     ) -> None:
         self._secret = _Secret(resolve_token(token))
         del token
-        self._pacing = _pacing._checked(pacing)
         self.url = resolve_url(url)
         self.resting = resting
         self.backoff = backoff
@@ -383,6 +382,8 @@ class ReconnectingSession:
         # Set when the exchange closed the current attempt's connection for a term change,
         # which an attempt checks even when a cancellation hides the error that said so.
         self._term_change_seen = False
+        # Checked last, once every attribute its repr reads is set.
+        self._pacing = _pacing._checked(pacing)
 
     def __repr__(self) -> str:
         state = "closed" if self._closed else "connected" if self._up else "not connected"
@@ -494,7 +495,9 @@ class ReconnectingSession:
         if self._pacing is not None and type_ in _pacing.PACED_TYPES:
             # Sent only on this session: an order queued before a disconnect is never sent
             # on the next one, which knows nothing of what it was based on.
-            await self._pacing._send(type_, payload, functools.partial(self._send_on, session))
+            write = functools.partial(self._send_on, session)
+            if not await self._pacing._send(type_, payload, write):
+                raise self._not_connected(type_)
             return
         if isinstance(payload, Subscribe):
             self._instruments.update(dict.fromkeys(payload.instruments))
@@ -512,12 +515,13 @@ class ReconnectingSession:
         del payload
         raise failure
 
-    async def _send_on(self, session: Session, type_: str, payload: Message) -> None:
+    async def _send_on(self, session: Session, type_: str, payload: Message) -> bool:
         """Send a paced order, once the pacer has let it go, on `session` if it is still the
-        one up."""
+        one up. Returns False, sending nothing, if it is not, for the pacer not to count it."""
         if self._session is not session or not self._up:
-            raise self._not_connected(type_)
+            return False
         await session.connection.send(type_, payload)
+        return True
 
     def _not_connected(self, type_: str) -> "NotConnected":
         # The type is the caller's text: withheld if it holds the token, in the arguments

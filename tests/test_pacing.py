@@ -974,8 +974,20 @@ async def test_a_new_held_after_its_turn_never_holds_up_a_cancel():
     # other connections' news fill the new-order window.
     sim.at(0.1, lambda: [pacer.observe(accepted(f"f{n}")) for n in range(96)])
     await asyncio.gather(send_one(sender, "new", "n"), send_one(sender, "cancel", "late"))
-    assert [ref for _, _, ref in wire.sent[-2:]] == ["n", "late"]
-    assert wire.sent[-1][0] < 1
+    # The new goes back to wait for the new-order window, and the cancel goes meanwhile.
+    assert [ref for _, _, ref in wire.sent[-2:]] == ["late", "n"]
+    assert wire.sent[-2][0] < 1 and wire.sent[-1][0] >= 60
+
+
+async def test_a_new_waiting_its_turn_obeys_a_new_order_reject_that_arrives_meanwhile(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    wire = Wire(sim)
+    sender = pacer.wrap(wire)
+    await blast(sender, 40, "cancel", "c")
+    sim.at(0.1, lambda: pacer.observe(reject(NEW_ORDERS, "elsewhere")))
+    await send_one(sender, "new", "n")
+    assert wire.sent[-1][0] == pytest.approx(0.1 + 60.0 + GUARD)
 
 
 async def test_an_order_queued_before_a_disconnect_is_not_sent_on_the_next_session():
@@ -1010,7 +1022,8 @@ def frames_hold(error: BaseException, secret: str) -> list[str]:
     found = []
     summary = traceback.TracebackException.from_exception(error, capture_locals=True)
     for frame_ in summary.stack:
-        if "qte_sdk" in frame_.filename and secret in repr(frame_.locals):
+        in_sdk = os.path.basename(os.path.dirname(frame_.filename)) == "qte_sdk"
+        if in_sdk and secret in repr(frame_.locals):
             found.append(f"{frame_.name}")
     return found
 
@@ -1090,3 +1103,67 @@ def test_a_warning_never_asks_the_logger_on_the_event_loop_thread(monkeypatch):
     for thread in set(threading.enumerate()) - before:
         thread.join(5)
     assert asked and set(asked) == {"qte-sdk pacing warning"}
+
+
+async def test_reports_are_named_by_their_report_number():
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    first, second = accepted("r1", receipt=1.0), accepted("r1", receipt=1.0)
+    first = Received(first.type, first.message, None, report_seq=7)
+    second = Received(second.type, second.message, None, report_seq=8)
+    for event in (first, second, first):
+        pacer.observe(event)
+    assert len(pacer._sustained.stamps) == 2
+
+
+async def test_a_report_of_another_type_never_answers_our_send():
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    await send_one(pacer.wrap(Wire(sim)), "new", "r")
+    mass = Accepted(request_ref="r", request_type=4, receipt_time=5)  # MASS_CANCEL
+    pacer.observe(Received("accepted", mass, None))
+    pacer.observe(accepted("r", "new", receipt=0.01))
+    assert len(pacer._sustained.stamps) == 1
+
+
+async def test_orders_dropped_with_their_session_are_not_counted():
+    from types import SimpleNamespace
+
+    from qte_sdk.reconnect import NotConnected
+
+    sim = Sim()
+    pacer = Pacer(
+        Budget(sustained_per_minute=10, burst_per_second=200), clock=sim.clock, sleep=sim.sleep
+    )
+    wire = Wire(sim)
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token(), pacing=pacer)
+    rs._session, rs._up = SimpleNamespace(connection=wire), True
+    pacer.observe(reject(BURST))  # every send waits a second
+
+    def replaced() -> None:
+        rs._session = SimpleNamespace(connection=wire)
+
+    sim.at(0.5, replaced)
+    results = await asyncio.gather(
+        *(send_one(rs, "cancel", f"c{n}") for n in range(8)), return_exceptions=True
+    )
+    assert all(isinstance(r, NotConnected) for r in results)
+    # Only the rejected message, another connection's, counts.
+    assert wire.sent == [] and len(pacer._sustained.stamps) == 1
+    started = sim.now
+    await send_one(rs, "cancel", "fresh")
+    assert sim.now == started and wire.sent[-1][2] == "fresh"
+
+
+async def test_a_reject_read_while_its_write_is_in_progress_counts_the_sends_before_it():
+    sim = Sim()
+    pacer = Pacer(
+        Budget(sustained_per_minute=10_000, burst_per_second=100), clock=sim.clock, sleep=sim.sleep
+    )
+    sim.now = 1.5
+    wire = Wire(sim)
+    await blast(pacer.wrap(wire), 9, prefix="a")  # all on one clock reading
+    wire.write_time = 0.1
+    sim.at(1.55, lambda: pacer.observe(reject(BURST, "slow")))
+    await send_one(pacer.wrap(wire), "new", "slow")
+    assert pacer.limits["burst"] == 7

@@ -122,7 +122,8 @@ _REQUEST_TYPES = {NEW: "new", CANCEL: "cancel", AMEND: "amend"}
 
 _log = logging.getLogger(__name__)
 
-Write = Callable[[str, Message], Awaitable[None]]
+# A write: it returns False when it did not send the message, for the pacer not to count it.
+Write = Callable[[str, Message], Awaitable[object]]
 
 
 def _count(name: str, value: object) -> int:
@@ -278,6 +279,18 @@ class _Window:
         return bisect_right(stamps, end) - bisect_right(stamps, end - self.length)
 
 
+class _Send:
+    """One send of a pacer's, until a report answers it: its stamp, its type, and whether
+    the stamp is in the windows yet (it is once the write returns)."""
+
+    __slots__ = ("recorded", "stamp", "type")
+
+    def __init__(self, stamp: float, type_: str) -> None:
+        self.stamp = stamp
+        self.type = type_
+        self.recorded = False
+
+
 class Pacer:
     """Paces `new`, `cancel` and `amend` under `budget` (see the module).
 
@@ -359,14 +372,12 @@ class Pacer:
         # a cancel or an amend.
         self._lock = asyncio.Lock()
         self._new_lock = asyncio.Lock()
-        # This pacer's sends that no report has answered yet, by request_ref, each as a
-        # one-item list holding its stamp, oldest first; and all of them in the order sent,
-        # to forget those never answered.
-        self._own: dict[str, deque[list[float]]] = {}
-        self._own_order: deque[tuple[list[float], str]] = deque()
-        # The reports already seen, by (request_ref, type, receipt_time): the same report
-        # reaches every connection of the team, and a resume can replay it.
-        self._seen: OrderedDict[tuple[str, str, int], float] = OrderedDict()
+        # This pacer's sends that no report has answered yet, by request_ref, oldest first;
+        # and all of them in the order sent, to forget those never answered.
+        self._own: dict[str, deque[_Send]] = {}
+        self._own_order: deque[tuple[_Send, str]] = deque()
+        # The reports already seen (see `_observe`), with when.
+        self._seen: OrderedDict[tuple[object, ...], float] = OrderedDict()
         self._last_stamp = -math.inf
         # Since when this pacer has seen everything this program sent: a reject teaches the
         # cap only once it has watched a whole window.
@@ -410,7 +421,9 @@ class Pacer:
         self._watching_since = now
         self._burst.hold(now + self._burst.length, by_reject=False)
 
-    async def _send(self, type_: str, payload: Message, write: Write) -> None:
+    async def _send(self, type_: str, payload: Message, write: Write) -> bool | None:
+        """Pace and send one message through `write`. Returns False when `write` did not
+        send it (see `Write`)."""
         if type_ not in PACED_TYPES:
             # Not paced, and perhaps `auth`, which holds the token: no copy of it stays in
             # this frame when the write fails.
@@ -420,36 +433,58 @@ class Pacer:
             except BaseException as error:
                 failure = error
             else:
-                return
+                return True
             del payload
             raise failure
         ref = getattr(payload, "request_ref", None) or None
         start = self._clock()
-        if type_ == "new":
-            async with self._new_lock:
+        if type_ != "new":
+            return await self._send_in_turn(type_, payload, write, ref, start, None)
+        async with self._new_lock:
+            while True:
                 await self._wait_for_room((self._new_order,), type_, start)
-                await self._send_in_turn(type_, payload, write, ref, start)
-        else:
-            await self._send_in_turn(type_, payload, write, ref, start)
+                sent = await self._send_in_turn(type_, payload, write, ref, start, self._new_order)
+                if sent is not None:
+                    return sent
 
     async def _send_in_turn(
-        self, type_: str, payload: Message, write: Write, ref: str | None, start: float
-    ) -> None:
+        self,
+        type_: str,
+        payload: Message,
+        write: Write,
+        ref: str | None,
+        start: float,
+        again: _Window | None,
+    ) -> bool | None:
+        """Wait for the shared windows, then write. Returns whether the message was
+        written (False when `write` returned False, as for a session that dropped), or None
+        when `again`, the new-order window, filled meanwhile: it is waited for without
+        holding up every cancel and amend behind this `new`."""
         async with self._lock:
-            # The new-order window is not checked again here: a `new` waiting for it would
-            # hold up every cancel and amend.
             await self._wait_for_room(self._shared, type_, start)
-            entry = None if ref is None else self._sent(ref)
+            if again is not None and again.wait(self._clock())[0] > _EPSILON:
+                return None
+            # Before the write, so a report read while it is in progress is known as ours.
+            # No two sends share a stamp, so a reject can be placed among them.
+            entry = None if ref is None else self._sent(ref, type_, self._next_stamp())
+            written = True
             try:
-                await write(type_, payload)
+                written = await write(type_, payload) is not False
             finally:
-                # Stamped when the write returns, or fails: it may have been sent. No two
-                # sends share a stamp, so a reject can be placed among them.
-                stamp = max(self._clock(), math.nextafter(self._last_stamp, math.inf))
-                self._last_stamp = stamp
-                if entry is not None:
-                    entry[0] = stamp
-                self._record(type_, stamp)
+                # Stamped when the write returns, or fails: it may have been sent.
+                if written:
+                    stamp = self._next_stamp()
+                    self._record(type_, stamp)
+                    if entry is not None:
+                        entry.stamp, entry.recorded = stamp, True
+                elif entry is not None and ref is not None:
+                    self._unsend(ref, entry)
+            return written
+
+    def _next_stamp(self) -> float:
+        stamp = max(self._clock(), math.nextafter(self._last_stamp, math.inf))
+        self._last_stamp = stamp
+        return stamp
 
     def _windows(self, type_: str) -> tuple[_Window, ...]:
         if type_ == "new":
@@ -493,23 +528,33 @@ class Pacer:
         for window in self._windows(type_):
             window.add(stamp)
 
-    def _sent(self, ref: str) -> list[float]:
+    def _sent(self, ref: str, type_: str, stamp: float) -> "_Send":
         """Note a send of this pacer's, before its write, so a report that answers it is not
-        counted again. Returns its entry, whose stamp the write's end sets."""
-        now = self._clock()
-        entry = [now]
+        counted again. Returns its entry, which the write's end stamps."""
+        entry = _Send(stamp, type_)
         self._own.setdefault(ref, deque()).append(entry)
         self._own_order.append((entry, ref))
-        self._forget(now)
+        self._forget(stamp)
         return entry
 
-    def _claim(self, ref: str) -> list[float] | None:
-        """The oldest send of this pacer's with `ref` that no report has answered, now
-        answered, or None if there is none."""
+    def _unsend(self, ref: str, entry: "_Send") -> None:
+        """Forget a send that was never written."""
+        waiting = self._own.get(ref)
+        if waiting and entry in waiting:
+            waiting.remove(entry)
+            if not waiting:
+                del self._own[ref]
+
+    def _claim(self, ref: str, kind: str | None) -> "_Send | None":
+        """The oldest send of this pacer's with `ref`, of type `kind` (any, if None), that
+        no report has answered, now answered; or None if there is none."""
         waiting = self._own.get(ref)
         if not waiting:
             return None
-        entry = waiting.popleft()
+        entry = next((e for e in waiting if kind is None or e.type == kind), None)
+        if entry is None:
+            return None
+        waiting.remove(entry)
         if not waiting:
             del self._own[ref]
         return entry
@@ -519,13 +564,9 @@ class Pacer:
         later is counted as another connection's, which only makes the pacer more careful."""
         horizon = now - 2 * self.budget.sustained_window - self.guard
         order = self._own_order
-        while order and order[0][0][0] < horizon:
+        while order and order[0][0].stamp < horizon:
             entry, ref = order.popleft()
-            waiting = self._own.get(ref)
-            if waiting and waiting[0] is entry:
-                waiting.popleft()
-                if not waiting:
-                    del self._own[ref]
+            self._unsend(ref, entry)
         seen = self._seen
         while seen:
             first = next(iter(seen))
@@ -549,14 +590,22 @@ class Pacer:
             return
         now = self._clock()
         stamp = _exchange_stamp(message.receipt_time, anchor, now)
+        kind = _REQUEST_TYPES.get(request_type) if request_type is not None else None
+        # The same report reaches every connection of the team, and a resume can replay
+        # it: a report's number names it, and one without (a reject sent at receipt, to one
+        # connection only) is named by what it says.
+        if event.report_seq is not None:
+            key: tuple[object, ...] = ("report", event.report_seq)
+        else:
+            reason_code = message.reason_code if isinstance(message, Reject) else None
+            key = (event.type, ref, request_type, reason_code, message.receipt_time)
+        if key in self._seen:
+            return
+        self._seen[key] = now
+        self._forget(now)
         mine = None
-        if ref:
-            key = (ref, event.type, message.receipt_time)
-            if key in self._seen:
-                return  # the same report, on another connection or replayed
-            self._seen[key] = now
-            self._forget(now)
-            mine = self._claim(ref)
+        if ref and (kind is not None or request_type is None):
+            mine = self._claim(ref, kind)
         if reason is not None:
             window = self._by_name[reason]
             # A reject older than its window (a replay, say) says nothing about now.
@@ -564,7 +613,6 @@ class Pacer:
                 self._on_budget_reject(window, message.reason_code, now, mine)
         if mine is not None:
             return  # this pacer's own message, counted when it was sent
-        kind = _REQUEST_TYPES.get(request_type) if request_type is not None else None
         if kind is None or not self.count_foreign:
             return
         if stamp + self._sustained.length + self.guard <= now:
@@ -574,14 +622,18 @@ class Pacer:
                 window.add(stamp)
 
     def _on_budget_reject(
-        self, window: _Window, reason_code: int, now: float, mine: list[float] | None
+        self, window: _Window, reason_code: int, now: float, mine: "_Send | None"
     ) -> None:
         fresh = not (window.held_by_reject and window.held_until > now)
         learned = None
         # The exchange held at least the cap in its window when the rejected message
         # arrived: counted up to that message's own stamp when it is this pacer's, and up
         # to now otherwise (later sends, still in flight, would count too).
-        end, itself = (mine[0], 1) if mine is not None else (now, 0)
+        if mine is None:
+            end, itself = now, 0
+        else:
+            # A reject read while its write was still in progress: not yet in the log.
+            end, itself = mine.stamp, (1 if mine.recorded else 0)
         within = window.count_within(end)
         if within is not None and end - self._watching_since >= window.length:
             count = within - itself
