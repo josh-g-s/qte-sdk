@@ -2055,6 +2055,44 @@ def test_a_warning_ready_after_the_loop_has_closed_is_dropped(
     assert capsys.readouterr() == ("", "")
 
 
+@pytest.mark.parametrize("error", [ValueError, asyncio.CancelledError, SystemExit])
+def test_a_logging_handler_that_raises_does_not_reach_the_loop(
+    monkeypatch: pytest.MonkeyPatch, error: type[BaseException]
+):
+    class Raising(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise error("from the handler")
+
+    handler = Raising()
+    update.logger.addHandler(handler)
+    caught: list[object] = []
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(lambda loop, context: caught.append(context))
+    try:
+        loop.call_soon(update._emit, "QTE-UPDATE-AVAILABLE: behind")
+        loop.run_until_complete(asyncio.sleep(0.01))
+    finally:
+        loop.close()
+        update.logger.removeHandler(handler)
+    assert caught == []
+
+
+def test_an_interrupt_while_the_warning_is_logged_is_the_programs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Interrupted(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise KeyboardInterrupt
+
+    handler = Interrupted()
+    update.logger.addHandler(handler)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            update._emit("QTE-UPDATE-AVAILABLE: behind")
+    finally:
+        update.logger.removeHandler(handler)
+
+
 def test_a_thread_that_cannot_start_is_no_error(monkeypatch: pytest.MonkeyPatch, automatic: Path):
     def refuse(self: threading.Thread) -> None:
         raise RuntimeError("can't start new thread")

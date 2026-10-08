@@ -60,7 +60,8 @@ never raises or prints. When the installed SDK is behind a release, it logs that
 at WARNING through the `qte_sdk.update` logger, with the code on the record as `code`, and
 it is silent when the SDK is current, when it cannot tell, and when the network fails. The
 warning is logged on the session's event loop, not in the check's thread, so that thread
-never writes to stderr; a warning ready after the loop has closed is dropped. It
+never writes to stderr and a full stderr pipe cannot block it; a warning ready after the
+loop has closed is dropped. It
 sends the same requests as the command, and nothing more. The day is counted from a
 file holding the time of the last check, written just before the check starts, so a failed
 check is not retried until the next day: `qte-sdk/update-check` in your cache folder
@@ -889,9 +890,9 @@ def check_in_background() -> threading.Thread | None:
     Only the network and the cache folder are used in the thread. The warning is logged on
     the event loop running when this is called: `open_session` and `ReconnectingSession`
     always call it inside one, so the warning is logged on the loop's thread and the
-    check's own thread never takes a logging handler's lock or writes to stderr. Were it
-    to, a full stderr pipe would block it while it held that lock, and the program would
-    hang at exit, waiting for the lock. Called outside a running loop, the thread logs the
+    check's own thread never logs it or writes to stderr. Were it to, a full stderr pipe
+    would block that thread while it held the logging handler's lock, and the program
+    would hang at exit, waiting for the lock. Called outside a running loop, the thread logs the
     warning itself. A warning ready after the loop has closed is dropped: the program is
     ending, and the next day's check says it again."""
     global _automatic_done
@@ -949,11 +950,14 @@ def _check_and_log(loop: asyncio.AbstractEventLoop | None = None) -> None:
 
 
 def _emit(message: str) -> None:
-    """Log the line that says the SDK is behind a release. Never raises, so it never
-    reaches the event loop's own error handling."""
+    """Log the line that says the SDK is behind a release. Nothing a logging handler raises
+    reaches the event loop or stops it, other than an interrupt (Ctrl+C) that arrives
+    while it runs, which is the program's own."""
     try:
         logger.warning("%s", message, extra={"code": UPDATE_AVAILABLE})
-    except Exception:
+    except KeyboardInterrupt:
+        raise
+    except BaseException:
         pass
 
 
