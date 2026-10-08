@@ -2146,6 +2146,93 @@ def test_a_stream_whose_descriptor_is_not_where_it_writes_gets_the_line_through_
     assert read_all(read) == b""
 
 
+class ColoramaLike:
+    """Shaped like colorama's StreamWrapper: a plain object that strips colour codes from
+    what is written and passes it on to the stream it wraps, to which everything else
+    (fileno, closed, encoding, flush) is delegated."""
+
+    def __init__(self, wrapped: Any) -> None:
+        self._wrapped = wrapped
+        self.written: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
+
+    def write(self, text: str) -> None:
+        self.written.append(text)
+        self._wrapped.write(text.replace("\x1b[0m", ""))
+
+
+class FileProxyLike(io.TextIOBase):
+    """Shaped like rich's FileProxy, which stands in for stderr while a progress bar runs:
+    it keeps what is written until a line ends, then writes the line to the stream it
+    wraps; its fileno is that stream's."""
+
+    def __init__(self, wrapped: Any) -> None:
+        super().__init__()
+        self._wrapped = wrapped
+        self._pending = ""
+        self.written: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.written.append(text)
+        self._pending += text
+        if "\n" in self._pending:
+            lines, _, self._pending = self._pending.rpartition("\n")
+            self._wrapped.write(lines + "\n")
+            self._wrapped.flush()
+        return len(text)
+
+    def fileno(self) -> int:
+        return self._wrapped.fileno()
+
+
+WRAPPERS = {"colorama-like": ColoramaLike, "FileProxy-like": FileProxyLike}
+
+
+@pytest.mark.parametrize("wrapper", WRAPPERS)
+def test_a_wrapped_full_pipe_drops_the_line_without_calling_the_wrapper(
+    pipe: Any, lone: logging.Logger, wrapper: str
+):
+    read, stream = pipe
+    wrapped = WRAPPERS[wrapper](stream)
+    got = Records()
+    lone.addHandler(logging.StreamHandler(wrapped))
+    lone.addHandler(got)
+    fill(stream.fileno())
+    try:
+        warn_in_a_thread("behind")
+    finally:
+        drained = read_all(read)  # lets a write that waited end, should this regress
+    assert b"behind" not in drained
+    assert wrapped.written == []
+    [record] = got.records
+    assert record.code == update.UPDATE_AVAILABLE
+
+
+@pytest.mark.parametrize("wrapper", WRAPPERS)
+def test_a_wrapped_pipe_with_room_gets_the_line_through_the_wrapper(
+    pipe: Any, lone: logging.Logger, wrapper: str
+):
+    read, stream = pipe
+    wrapped = WRAPPERS[wrapper](stream)
+    lone.addHandler(logging.StreamHandler(wrapped))
+    warn_in_a_thread("behind")
+    assert wrapped.written == ["behind\n"]
+    newline = b"\r\n" if sys.platform == "win32" else b"\n"
+    assert read_all(read) == b"behind" + newline
+
+
+@pytest.mark.parametrize("wrapper", WRAPPERS)
+def test_a_wrapped_pipe_drops_a_line_over_512_bytes(pipe: Any, lone: logging.Logger, wrapper: str):
+    read, stream = pipe
+    wrapped = WRAPPERS[wrapper](stream)
+    lone.addHandler(logging.StreamHandler(wrapped))
+    warn_in_a_thread("y" * 600)
+    assert wrapped.written == []
+    assert read_all(read) == b""
+
+
 class Tee:
     """A stream of a student's own, with no `closed` attribute."""
 

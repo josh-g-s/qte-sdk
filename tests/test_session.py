@@ -970,6 +970,8 @@ NO_NETWORK = TESTS / "no_network"
 # open      stderr is full while a session is open and a timer ticks on its loop
 # nearly    (Windows) stderr has 100 bytes of room left; the main thread writes a short
 #           line to it while a timer ticks on the loop
+# wrapped   as exit, with sys.stderr wrapped as colorama wraps it
+# proxied   as exit, with sys.stderr replaced as rich's progress display replaces it
 # room      stderr is left as it is
 # long      stderr is left as it is, and logging is set up to write lines over 512 bytes
 #
@@ -979,6 +981,7 @@ NO_NETWORK = TESTS / "no_network"
 # Elsewhere, a thread writes until it makes no progress, and stays blocked in that write.
 UPDATE_CHILD = """
 import asyncio
+import io
 import json
 import logging
 import os
@@ -1108,6 +1111,39 @@ async def nearly_full():
     report["check_done"] = await asyncio.to_thread(check_done)
 
 
+class ColoramaLike:
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    def write(self, text):
+        self._wrapped.write(text.replace(chr(27) + "[0m", ""))
+
+
+class FileProxyLike(io.TextIOBase):
+    def __init__(self, wrapped):
+        super().__init__()
+        self._wrapped = wrapped
+        self._pending = ""
+
+    def write(self, text):
+        self._pending += text
+        if chr(10) in self._pending:
+            lines, _, self._pending = self._pending.rpartition(chr(10))
+            self._wrapped.write(lines + chr(10))
+            self._wrapped.flush()
+        return len(text)
+
+    def fileno(self):
+        return self._wrapped.fileno()
+
+
+if scenario == "wrapped":
+    sys.stderr = ColoramaLike(sys.stderr)
+if scenario == "proxied":
+    sys.stderr = FileProxyLike(sys.stderr)
 if scenario == "race":
     update._can_take = lambda fd, size: True
 if scenario in ("race", "long"):
@@ -1127,7 +1163,7 @@ else:
     # How the last resort's stream is written: "handle" for a console.
     report["route"] = update._route(logging.lastResort)[0]
     update.check_in_background()
-    if scenario in ("exit", "race"):
+    if scenario in ("exit", "race", "wrapped", "proxied"):
         fill_stderr()
     ready.set()
     answered.wait(20)
@@ -1254,6 +1290,16 @@ def test_a_full_stderr_pipe_never_stops_the_sessions_loop_or_its_exit(tmp_path: 
     # The loop kept running after GitHub answered, and the program exited at once, with
     # nothing reading stderr.
     assert ticks_after(child.stdout, "answered") >= 10
+    assert child.exit_seconds < 10
+    assert WARNING_LINE not in child.stderr
+    assert child.report["check_done"] is True
+
+
+@pytest.mark.parametrize("scenario", ["wrapped", "proxied"])
+def test_a_wrapped_full_stderr_pipe_holds_up_neither_the_check_nor_the_exit(
+    tmp_path: Path, scenario: str
+):
+    child = unread_pipe(tmp_path, scenario)
     assert child.exit_seconds < 10
     assert WARNING_LINE not in child.stderr
     assert child.report["check_done"] is True
