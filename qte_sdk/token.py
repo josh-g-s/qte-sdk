@@ -813,14 +813,15 @@ def _check_afresh(json_output: bool = False) -> int:
         finding(code, message, _errors.next_step(code, withhold=withhold, path=where))
     if not git_warned and _git_unknown():
         findings.append(_errors.DOTENV_GIT_UNKNOWN)
-        fields = {"path": dotenv_path(), "name": DOTENV_NAME}
-        message = render(_errors.DOTENV_GIT_UNKNOWN, withhold=withhold, **fields)
-        say(f"warning: {message}")
-        finding(
-            _errors.DOTENV_GIT_UNKNOWN,
-            message,
-            _errors.next_step(_errors.DOTENV_GIT_UNKNOWN, withhold=withhold, **fields),
+        # The path is passed straight in, never kept: it can hold the token.
+        message = render(
+            _errors.DOTENV_GIT_UNKNOWN, withhold=withhold, path=dotenv_path(), name=DOTENV_NAME
         )
+        say(f"warning: {message}")
+        next_step = _errors.next_step(
+            _errors.DOTENV_GIT_UNKNOWN, withhold=withhold, path=dotenv_path(), name=DOTENV_NAME
+        )
+        finding(_errors.DOTENV_GIT_UNKNOWN, message, next_step)
     if any(code not in _COULD_NOT_TELL for code in findings):
         status = 1
     else:
@@ -853,9 +854,7 @@ def _check_afresh(json_output: bool = False) -> int:
 _RESULTS = {0: "ok", 1: "fix", 2: "cannot-tell"}
 
 
-def _next_step(
-    code: str, withhold: Callable[[str], bool], fields: dict[str, object] | None
-) -> str:
+def _next_step(code: str, withhold: Callable[[str], bool], fields: dict[str, object] | None) -> str:
     """The next step of an error or problem that carries its code's fields."""
     return _errors.next_step(code, withhold=withhold, **(fields or {}))
 

@@ -458,7 +458,7 @@ CODES: dict[str, Entry] = {
         "Run the command python -m qte_sdk.update prints",
     ),
     LOG_FORMAT_INVALID: Entry(
-        "the log format {source} gives is neither json nor text",
+        "the log format given in {source} is neither json nor text",
         "The SDK does not guess a format, so the logging setup was left as it was",
         "Use json or text, in QTE_LOG_FORMAT or as the format given to configure(), or unset "
         "QTE_LOG_FORMAT for plain text",
@@ -596,9 +596,7 @@ def summary(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fi
         return f"{cause.rstrip('.')}. See {code} in docs/errors.md."
 
 
-def next_step(
-    code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any
-) -> str:
+def next_step(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any) -> str:
     """The next-step part of `code`'s message, as `summary` shows it but without its full
     stop: what a JSON log line or command document gives as `next_step`. Never raises: if a
     field is missing, the code's fix (which holds no field) is given instead, and for an

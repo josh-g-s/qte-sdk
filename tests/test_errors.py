@@ -82,7 +82,7 @@ from qte_sdk.session import (
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs" / "errors.md"
 CODE_SHAPE = re.compile(
-    r"^QTE-(TOKEN|ADDRESS|DOTENV|SESSION|CONNECT|HISTORY|REPLAY|UPDATE)(-[A-Z0-9]+)+$"
+    r"^QTE-(TOKEN|ADDRESS|DOTENV|SESSION|CONNECT|HISTORY|REPLAY|UPDATE|LOG)(-[A-Z0-9]+)+$"
 )
 CODE_IN_TEXT = re.compile(r"QTE-[A-Z0-9]+(?:-[A-Z0-9]+)+")
 URL = "ws://127.0.0.1:8080/ws"
@@ -848,6 +848,16 @@ async def history_request_failed(token: str, ctx: Context) -> str:
         return await raised_async(lambda: collect(client.fetch(DAY, "TEST", "book")))
 
 
+def log_format_invalid(token: str, ctx: Context) -> str:
+    # A token pasted as the format, in the environment and as the argument: never shown.
+    from qte_sdk import logs
+
+    ctx.monkeypatch.setenv(logs.LOG_FORMAT_ENV_VAR, token)
+    parts = [raised(logs.configure), raised(lambda: logs.configure(token))]
+    parts.append(ctx.cli(["check"]))
+    return "\n".join(parts)
+
+
 async def replay_out_of_order(token: str, ctx: Context) -> str:
     back = book_at(1000, "AAA") + book_at(2000, "AAA") + book_at(1500, "AAA")
     named = book_at(1000, token) + book_at(500, token)  # an instrument named with the token
@@ -929,6 +939,7 @@ CASES: dict[str, Case] = {
     errors.HISTORY_REQUEST_FAILED: history_request_failed,
     errors.REPLAY_OUT_OF_ORDER: replay_out_of_order,
     errors.UPDATE_AVAILABLE: update_available,
+    errors.LOG_FORMAT_INVALID: log_format_invalid,
 }
 
 

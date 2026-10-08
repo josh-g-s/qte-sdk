@@ -1,8 +1,8 @@
 # Warning and error codes
 
-**Version:** 0.4
+**Version:** 0.5
 
-Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays and updates. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
+Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates and the log format. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
 ## How to read a message
 
@@ -31,6 +31,24 @@ The last line of a traceback is the class name and then this message. The code i
 | `python examples/smoke_test.py` | No check failed | A check failed, or the SDK is too old to check itself | No token or no usable address, so it could not connect. Also a usage error | 130 on Ctrl+C; 128 plus the signal's number on SIGTERM or SIGHUP |
 
 `token check` exiting 1 is a report, not a refusal: a session still only warns about a tracked `.env` or, on Windows, a shared file, and still uses it. Exit 2 with a `usage:` line on stderr is a mistake on the command line, for every command here. `token check` looks afresh each time it runs, so `token.main(["check"])` gives the same answer when a program calls it twice, or after opening a session; it never prints a path that holds the token. Before this release `token check` exited 0 even when it printed a warning.
+
+With `--json`, each command exits with the same status, which the document gives as `exit_code` (see [JSON output](#json-output)). Each command also exits 2, with `error: QTE-LOG-FORMAT-INVALID: ...` on stderr and nothing on stdout, when `QTE_LOG_FORMAT` is neither `json` nor `text` (and `--json` is not given).
+
+## JSON output
+
+For coding agents and scripts. Every JSON line and document is one physical line of compact JSON in ASCII alone (any other character is escaped, so it reads the same through a Windows pipe in any code page), with its keys always present and in the order below (`null` when not known). None ever holds your token: a text or path that holds it is given as `(withheld: it holds the token)`. A message never starts with its code: the code is its own key, and the next step, without its full stop, is too, so the plain-text line is `<code>: <message> <next_step>.`
+
+Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) with `QTE_LOG_FORMAT=json`, or `configure("json")`, writes each SDK log record to stderr as one JSON object per line:
+
+    {"time":"2026-10-08T12:34:56.789Z","level":"WARNING","logger":"qte_sdk.update","code":"QTE-UPDATE-AVAILABLE","message":"qte-sdk 1.1.0 is behind 1.1.1.","next_step":"Update with pip install --upgrade \"git+https://github.com/josh-g-s/qte-sdk\"","fields":{}}
+
+`time` is UTC to the millisecond; `level` the record's level name; `logger` the logger's name; `code` the code or `null`; `message` what happened and why; `next_step` the next step or `null`; `fields` any values the record names, such as a path (`{}` for none). A record logged with an exception also has `exception`, its type name only. With `capture_warnings=True` (the commands set it), SDK warnings are logged the same way, through the `qte_sdk.warnings` logger, with `fields` `{"category": "<warning class>"}`. The automatic update check's line gives the reason for a recommended update in `message`; if the line would be over 512 bytes, it says to run `python -m qte_sdk.update` for the reason instead, so that it can be written to a pipe whole.
+
+`--json` documents. `python -m qte_sdk.token check --json`, `python -m qte_sdk.update --json` and `python examples/smoke_test.py --json` print one JSON document on stdout, and nothing else there. Each starts with `command` (`"token check"`, `"update"` or `"smoke_test"`), `schema` (1) and `exit_code` (the exit status, as in the table above). A usage error is still a plain `usage:` line on stderr, with exit 2 and nothing on stdout.
+
+- `token check`: `result` (`"ok"`, `"fix"` or `"cannot-tell"`, for exit 0, 1 and 2); `token` {`found`, `source` (`"QTE_TOKEN"`, `"QTE_TOKEN_FILE"`, `".env"` or `null`), `path` (the file's path, or `null` for an environment variable), `note` (on Windows, what the access check found)}; `address` {`found`, `source` (`"QTE_URL"`, `".env"` or `null`), `path`, `valid` (whether it starts with `ws://` or `wss://`)}; `findings`, a list of {`code`, `kind` (`"fix"` or `"cannot-tell"`), `message`, `next_step`}.
+- `update`: `status` (`"current"`, `"behind"` or `"unknown"`), `code` (`QTE-UPDATE-AVAILABLE` when behind, else `null`), `message`, `next_step`; `installed` {`version`, `description` (as the text's `installed:` line), `commit` (12 hex digits), `revision` (`"main"`, a release tag, a commit cut to 12 hex digits, `"other"` or `null`), `archive` (a release tag, `"main"`, `"other"` or `null`)}; `latest_release`; `main_commit` (12 hex digits); `main_ahead`; `update_command` (the command that updates, or `null`); `recommended`; `why`.
+- `smoke_test`: `summary` {`passed`, `failed`, `skipped`}; `checks`, a list of {`name`, `status` (`"pass"`, `"fail"` or `"skip"`), `code` (the first code its message names, or `null`), `message` (as the text line gives it)}; `problems` (why it could not connect, for exit 2); `warnings` (the notes it wrote to stderr: a fill of the test order, a level where it may still rest, an interruption); `stopped_by` (`null`, `"SIGINT"`, `"SIGTERM"` or `"SIGHUP"`). The document comes at the end, on every exit, a stop by Ctrl+C or a signal included. With `--json`, what it writes to stderr is JSON lines too: SDK log records, and its own notes as log lines with `"logger":"smoke_test"`.
 
 ## TOKEN
 
@@ -339,6 +357,14 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 - Raised as: the message of `python -m qte_sdk.update` and of `check_for_update()` (`UpdateCheck.code`), and a WARNING from the `qte_sdk.update` logger when the automatic check finds a newer release. That warning is written from the check's own thread and, with the standard stream handlers, never holds up the session or the program's exit (a stderr wrapped by colorama, rich or a tee gets the same check, and can then wait only in a rare race, or when it writes a partial line of the program's own that it held back): on a stderr pipe or terminal that cannot take the whole line at once (a full pipe that nothing reads, say), it is skipped that day, and the next day's check says it again; see "The automatic check" in the quickstart. `python -m qte_sdk.update` exits 1.
 - Cause: A newer release of qte-sdk is out; the message says whether it is a recommended update, and why.
 - Fix: Run the command the message gives.
+
+## LOG
+
+### QTE-LOG-FORMAT-INVALID
+
+- Raised as: `qte_sdk.logs.LogFormatInvalid`, a `ValueError`, from `qte_sdk.logs.configure()`; the SDK's commands and `examples/smoke_test.py` print it on stderr and exit 2. The value is not shown.
+- Cause: `QTE_LOG_FORMAT`, or the format passed to `configure()`, is not `json` or `text` (case and surrounding spaces do not matter; unset or empty means text).
+- Fix: Set `QTE_LOG_FORMAT` to `json` or `text`, or unset it.
 
 ## Retired codes
 

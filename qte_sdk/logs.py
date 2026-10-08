@@ -106,7 +106,12 @@ def configure(
     documentation). "text" removes that handler and stops the capture, if either was set,
     and returns None: records are then written as before `configure` was first called.
     Each call replaces what an earlier one set, so calling it twice leaves one handler."""
-    chosen = _chosen(format)
+    chosen, source = _chosen(format)
+    # Let go of the value before anything is raised: a mistake could have put the token
+    # there, and a traceback that shows locals would show it.
+    del format
+    if chosen is None:
+        raise LogFormatInvalid(fields={"source": source})
     logger = logging.getLogger(_SDK_LOGGER)
     for handler in list(logger.handlers):
         if isinstance(handler, _JsonHandler):
@@ -153,7 +158,9 @@ def _restore(
     warnings.showwarning, _shown_before = showwarning, shown_before
 
 
-def _chosen(format: str | None) -> str:
+def _chosen(format: str | None) -> tuple[str | None, str]:
+    """The format asked for, "json" or "text", or None for any other value; and where it
+    came from. Never raises, so no traceback has a frame that holds the value."""
     if format is None:
         value: object = os.environ.get(LOG_FORMAT_ENV_VAR, "")
         source = LOG_FORMAT_ENV_VAR
@@ -162,10 +169,8 @@ def _chosen(format: str | None) -> str:
         source = "the format argument of configure()"
     chosen = value.strip().casefold() if isinstance(value, str) else None
     if chosen == "" and format is None:
-        return "text"
-    if chosen not in FORMATS:
-        raise LogFormatInvalid(fields={"source": source})
-    return chosen
+        return "text", source
+    return (chosen if chosen in FORMATS else None), source
 
 
 class _JsonHandler(logging.StreamHandler):

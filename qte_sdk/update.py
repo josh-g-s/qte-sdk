@@ -1000,11 +1000,11 @@ def _log_without_waiting(
     exit, and every later write to it, would wait for that. Such a stream gets the line
     only when the pipe, socket or terminal can take it whole now (see `_route`); otherwise
     it is dropped there, unless `short`, the same message made shorter, gives a line that
-    fits: it is written instead, there only. Python's own stderr, and any stream `open()` makes, gets it in one
-    `os.write` on its file descriptor, holding no lock; a stream that wraps one (colorama's,
-    rich's, a tee, Jupyter's) gets it through `handle`, so the wrapper writes it. It runs in
-    the check's own thread, never touches an event loop, and never changes whether a file
-    descriptor blocks.
+    fits: it is written instead, there only. Python's own stderr, and any stream `open()`
+    makes, gets it in one `os.write` on its file descriptor, holding no lock; a stream
+    that wraps one (colorama's, rich's, a tee, Jupyter's) gets it through `handle`, so the
+    wrapper writes it. It runs in the check's own thread, never touches an event loop, and
+    never changes whether a file descriptor blocks.
 
     Another writer can still fill the pipe between the check and the write. A direct write
     then waits in this thread, holding no Python lock. On Windows, the C runtime's lock on
