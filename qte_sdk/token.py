@@ -42,8 +42,10 @@ an address that does not start with ws:// or wss://, a `.env` git tracks or does
 ignore, or, on Windows, a file others may read, change or replace); and 2 when it could
 not tell (git could not say whether it ignores the `.env`, or Windows would not let it
 fully check the file the token is in). Exit 1 is a report: sessions still only warn about
-what `check` warns about. `set` exits with 0 when it saved, 1 when it refused, and 130 if
-stopped. Either exits with 2, after a `usage:` line, if the command line is wrong.
+what `check` warns about. It looks afresh each time, even where the SDK has already warned
+once in the same process, and it never prints a path that holds the token. `set` exits
+with 0 when it saved, 1 when it refused, and 130 if stopped. Either exits with 2, after a
+`usage:` line, if the command line is wrong.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
@@ -64,6 +66,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from qte_sdk import _fileaccess
+from qte_sdk import dotenv as dotenv_module
 from qte_sdk import errors as _errors
 from qte_sdk.dotenv import (
     DOTENV_NAME,
@@ -81,7 +84,7 @@ from qte_sdk.dotenv import (
     shared_message,
     tracked_ignoring_case,
 )
-from qte_sdk.errors import render
+from qte_sdk.errors import one_line, render
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     TOKEN_FILE_ENV_VAR,
@@ -668,24 +671,46 @@ _COULD_NOT_TELL = frozenset(
 
 def _check() -> int:
     """Print where the token and the address come from, and each finding with its code.
-    Returns 1 if a finding must be fixed, else 2 if one could not be settled, else 0."""
+    Returns 1 if a finding must be fixed, else 2 if one could not be settled, else 0.
+
+    The SDK gives its git and Windows warnings once per process for each file; `check`
+    looks afresh each time it runs, whatever was read or checked before it in the same
+    process, and leaves that record as it found it, so a session still warns."""
+    git_checked = set(dotenv_module._git_checked)
+    shared_warned = set(dotenv_module._shared_warned)
+    dotenv_module._git_checked.clear()
+    dotenv_module._shared_warned.clear()
+    try:
+        return _check_afresh()
+    finally:
+        dotenv_module._git_checked.clear()
+        dotenv_module._git_checked.update(git_checked)
+        dotenv_module._shared_warned.clear()
+        dotenv_module._shared_warned.update(shared_warned)
+
+
+def _check_afresh() -> int:
     findings: list[str] = []
     lines: list[str] = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DotenvNotIgnored)
         warnings.simplefilter("always", FileShared)
         token, token_from, problem = _find_token(None)
-        # Kept only to withhold any form of the token from what is printed, such as a
-        # QTE_TOKEN_FILE path that a mistaken setting made the token itself.
+        # Kept only to withhold every form of the token from what is printed, such as a
+        # path that holds it (a QTE_TOKEN_FILE set to the token, say).
         secret = None if token is None else _Secret(token)
         del token
+
+        def withhold(text: str) -> bool:
+            return secret is not None and _holds_token(text, secret)
+
         unchecked = []
         if problem is not None:
             findings.append(problem.code)
             lines.append(f"token:   none usable. {_missing_token(problem)}")
         else:
             assert token_from is not None
-            where = _describe(token_from, secret)
+            where = _describe(token_from, withhold)
             note, not_read = _access_note(token_from)
             lines.append(f"token:   {where}{note}")
             if not_read:
@@ -697,13 +722,14 @@ def _check() -> int:
             lines.append(f"address: none. {error}")
         else:
             # The address itself is not shown: a mistake could have put the token there.
-            where = _describe(source, None)
+            where = _describe(source, withhold)
             if url.startswith(("ws://", "wss://")):
                 lines.append(f"address: set, from {where}")
             else:
                 findings.append(_errors.ADDRESS_INVALID)
                 invalid = render(
                     _errors.ADDRESS_INVALID,
+                    withhold=withhold,
                     source=where,
                     problem="does not start with ws:// or wss://",
                 )
@@ -720,14 +746,18 @@ def _check() -> int:
                 lines.append(f"warning: {message}")
     for code, where in unchecked:
         findings.append(code)
-        lines.append(f"warning: {render(code, path=where)}")
+        lines.append(f"warning: {render(code, withhold=withhold, path=where)}")
     if not any(issubclass(w.category, DotenvNotIgnored) for w in caught) and _git_unknown():
         findings.append(_errors.DOTENV_GIT_UNKNOWN)
         path = dotenv_path()
-        lines.append(f"warning: {render(_errors.DOTENV_GIT_UNKNOWN, path=path, name=path.name)}")
+        git_unknown = render(
+            _errors.DOTENV_GIT_UNKNOWN, withhold=withhold, path=path, name=path.name
+        )
+        lines.append(f"warning: {git_unknown}")
     for line in lines:
+        # A second guard: the SDK's warnings name paths, and were written without the token.
         print(line if secret is None else _redact(line, secret))
-    del secret
+    secret = None  # let go of the token; `withhold` reads this name too
     if any(code not in _COULD_NOT_TELL for code in findings):
         return 1
     return 2 if findings else 0
@@ -811,16 +841,19 @@ def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:
     return f"{text} ({note})"
 
 
-def _describe(source: str, secret: _Secret | None) -> str:
-    """Where a value comes from, as `check` shows it. The path in `QTE_TOKEN_FILE` is
-    withheld if it holds any form of the token `secret`, as when it was set to the token."""
+def _describe(source: str, withhold: Callable[[str], bool]) -> str:
+    """Where a value comes from, as `check` shows it. A path is withheld if `withhold` says
+    it holds the token, as when `QTE_TOKEN_FILE` was set to the token by mistake."""
     if source == DOTENV_NAME:
-        return f"{dotenv_path()}"
+        path = str(dotenv_path())
+        if withhold(path) or withhold(one_line(path)):
+            return f"./{DOTENV_NAME} (path withheld: it holds the token)"
+        return one_line(path)
     if source == TOKEN_FILE_ENV_VAR:
         path = os.environ[TOKEN_FILE_ENV_VAR]
-        if secret is not None and _holds_token(path, secret):
+        if withhold(path) or withhold(one_line(path)):
             return f"the file named by {TOKEN_FILE_ENV_VAR} (path withheld: it holds the token)"
-        return f"the file named by {TOKEN_FILE_ENV_VAR} ({path})"
+        return f"the file named by {TOKEN_FILE_ENV_VAR} ({one_line(path)})"
     return f"the {source} environment variable"
 
 

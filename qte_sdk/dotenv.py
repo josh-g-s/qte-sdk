@@ -485,9 +485,11 @@ def shared_message(
         said = f"{name} {what}, but {unchecked}."
     holders = [holder.path for holder in link_folders]
     folders = "folders" if holders else "folder"
+    # The SDK still uses such a file (see the module's docstring), so this says why it
+    # matters before the fix and the command that ends the message.
     return (
-        f"{said} {fix} To see who can open the {folders} and the file, "
-        f"{_icacls(folder, file, holders)}."
+        f"{said} A later release will refuse such a file. {fix} To see who can open the "
+        f"{folders} and the file, {_icacls(folder, file, holders)}."
     )
 
 

@@ -21,6 +21,7 @@ every module can import it.
 import os
 import string
 import unicodedata
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 __all__ = [
@@ -368,12 +369,28 @@ def plain(text: object) -> str:
     """`text` as it may be shown in one line of a message: no line breaks, no control or
     formatting characters, no full stop at the end, and at most 300 characters. Used for
     text from the exchange or the system, such as a rejection's detail."""
-    flat = " ".join(str(text).split())
-    flat = "".join(c for c in flat if not unicodedata.category(c).startswith("C"))
-    flat = " ".join(flat.split()).rstrip(". ")
+    flat = flatten(text).rstrip(". ")
     if len(flat) > _MAX_FIELD:
         flat = flat[: _MAX_FIELD - 3].rstrip() + "..."
     return flat
+
+
+def flatten(text: object) -> str:
+    """`text` with each run of whitespace made one space and every control or formatting
+    character removed: how `plain` shows it, before it is cut short."""
+    flat = " ".join(str(text).split())
+    flat = "".join(c for c in flat if not unicodedata.category(c).startswith("C"))
+    return " ".join(flat.split())
+
+
+def one_line(text: str) -> str:
+    """`text` with each line break, tab or other control character made a space: how a
+    message shows a field such as a path."""
+    return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text)
+
+
+# What a field is shown as when `withhold` says it holds the token.
+WITHHELD = "(withheld: it holds the token)"
 
 
 def template_fields(code: str) -> set[str]:
@@ -387,14 +404,16 @@ def template_fields(code: str) -> set[str]:
     }
 
 
-def summary(code: str, /, **fields: Any) -> str:
+def summary(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any) -> str:
     """`code`'s message without the code: `<what>. <why>. <next step>.` Never raises: if a
     field is missing, or the code is unknown, the code's cause, or a fixed sentence, is
-    given instead, since a `__str__` that raises prints only `<exception str() failed>`."""
+    given instead, since a `__str__` that raises prints only `<exception str() failed>`.
+
+    `withhold`, if given, is asked about each text field, as given and as the message would
+    show it; a field it says yes to (one that holds the token, say) is shown as `WITHHELD`."""
     try:
         entry = CODES[code]
-        # One line, whatever a field holds: a path, say, may hold a line break.
-        fields = {name: _one_line(value) for name, value in fields.items()}
+        fields = {name: _shown(value, withhold) for name, value in fields.items()}
         parts = [part.format(**fields) for part in (entry.what, entry.why, entry.next_step)]
         parts = [part.strip().rstrip(".") for part in parts]
         return " ".join(f"{part}." for part in parts if part)
@@ -404,17 +423,22 @@ def summary(code: str, /, **fields: Any) -> str:
         return f"{cause.rstrip('.')}. See {code} in docs/errors.md."
 
 
-def _one_line(value: object) -> object:
-    """`value`, if text, with each line break or other control character made a space."""
+def _shown(value: object, withhold: Callable[[str], bool] | None) -> object:
+    """A field as the message shows it: text in one line, whatever it holds (a path may
+    hold a line break), or `WITHHELD` if `withhold` says so of it in either form."""
     if not isinstance(value, str | os.PathLike):
         return value
     text = str(value)
-    return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text)
+    shown = one_line(text)
+    if withhold is not None and (withhold(text) or withhold(shown)):
+        return WITHHELD
+    return shown
 
 
-def render(code: str, /, **fields: Any) -> str:
-    """The message for `code` with `fields` filled in: `<CODE>: <what>. <why>. <next>.`"""
-    return f"{code}: {summary(code, **fields)}"
+def render(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any) -> str:
+    """The message for `code` with `fields` filled in: `<CODE>: <what>. <why>. <next>.`
+    `withhold` is as for `summary`."""
+    return f"{code}: {summary(code, withhold=withhold, **fields)}"
 
 
 class Problem(str):

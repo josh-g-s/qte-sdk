@@ -30,7 +30,7 @@ The last line of a traceback is the class name and then this message. The code i
 | `python -m qte_sdk.update` | The SDK is the latest release | A newer release is out (`QTE-UPDATE-AVAILABLE`) | It cannot tell whether the SDK is current. Also a usage error or a bad `--timeout` | |
 | `python examples/smoke_test.py` | No check failed | A check failed, or the SDK is too old to check itself | No token or no usable address, so it could not connect. Also a usage error | 130 on Ctrl+C; 128 plus the signal's number on SIGTERM or SIGHUP |
 
-`token check` exiting 1 is a report, not a refusal: a session still only warns about a tracked `.env` or, on Windows, a shared file, and still uses it. Exit 2 with a `usage:` line on stderr is a mistake on the command line, for every command here. Before this release `token check` exited 0 even when it printed a warning.
+`token check` exiting 1 is a report, not a refusal: a session still only warns about a tracked `.env` or, on Windows, a shared file, and still uses it. Exit 2 with a `usage:` line on stderr is a mistake on the command line, for every command here. `token check` looks afresh each time it runs, so `token.main(["check"])` gives the same answer when a program calls it twice, or after opening a session; it never prints a path that holds the token. Before this release `token check` exited 0 even when it printed a warning.
 
 ## TOKEN
 

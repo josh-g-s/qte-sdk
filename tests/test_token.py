@@ -1025,7 +1025,8 @@ def test_set_on_windows_warns_when_the_folders_list_is_not_shown(windows, capsys
     assert (
         f".\nWarning: QTE-TOKEN-UNCHECKED: {dotenv()} holds your token, but it could not be "
         "fully checked: "
-        f"{NOT_SHOWN} add or remove files in {Path.cwd()}. Delete it and make it again "
+        f"{NOT_SHOWN} add or remove files in {Path.cwd()}. A later release will refuse such a "
+        "file. Delete it and make it again "
         "yourself, in a folder under your user profile (%USERPROFILE%)"
     ) in out
     assert "None of Everyone" not in out

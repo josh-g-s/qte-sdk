@@ -970,7 +970,8 @@ def test_a_folder_that_holds_a_link_and_whose_list_is_not_shown_warns(
         message = uncoded(caught[0].message)
         assert message.startswith(
             f"{link}, a link to {real(target)}, holds your token, but it could not be fully "
-            f"checked: {NOT_SHOWN} add or remove files in {real(holder)}. Keep the file "
+            f"checked: {NOT_SHOWN} add or remove files in {real(holder)}. A later release will "
+            "refuse such a file. Keep the file "
             "itself, not a link to it,"
         ), message
         assert_no_token(message)

@@ -64,7 +64,7 @@ from qte_sdk.contract.v1.session_pb2 import (
     SessionAck,
 )
 from qte_sdk.dotenv import DOTENV_NAME, read_value, shared_access, warn_shared
-from qte_sdk.errors import Problem, QteError, plain
+from qte_sdk.errors import Problem, QteError, flatten, one_line, plain
 
 TOKEN_ENV_VAR = "QTE_TOKEN"
 TOKEN_FILE_ENV_VAR = "QTE_TOKEN_FILE"
@@ -1122,8 +1122,10 @@ def _detached(error: BaseException) -> BaseException:
 
 def _token_forms(secret: _Secret) -> tuple[_Secret, ...]:
     """The token as written, and as the usual escapes write it: Python's repr of it as text
-    or bytes (with a quote escaped or not) and JSON. Those escape a backslash, newline or
-    tab, so text that holds an escaped copy does not hold the token as written. Longest
+    or bytes (with a quote escaped or not) and JSON, and as a coded message shows text: in
+    one line, each control character a space, or flattened (see `qte_sdk.errors`). Those
+    change a backslash, newline, tab or escape character, so text that holds such a copy
+    does not hold the token as written. Longest
     first, so a redaction replaces a whole escaped copy rather than part of it. Raises no
     error of its own, even for a token that is not valid Unicode, such as one read from an
     environment variable holding bytes that are not UTF-8.
@@ -1153,6 +1155,9 @@ def _make_token_forms(secret: _Secret) -> tuple[_Secret, ...]:
         secret.value.encode("unicode_escape").decode("ascii"),
         repr(raw)[2:-1],
         repr(raw + b"'\"")[2:-4],
+        # As a coded message shows text: a field in one line, and server text flattened.
+        one_line(secret.value),
+        flatten(secret.value),
     }
     texts.discard("")
     return tuple(map(_Secret, sorted(texts, key=len, reverse=True)))

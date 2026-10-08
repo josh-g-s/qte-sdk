@@ -512,7 +512,7 @@ def test_a_shared_dotenv_warns_once_naming_the_groups_and_the_fix(windows):
     assert f"{AUTHENTICATED} read or change it, and {USERS} read it" in message
     assert "read your token or change QTE_URL in it" in message
     assert "%USERPROFILE%" in message and "icacls" in message
-    assert "A later release" not in message  # said in docs/errors.md instead
+    assert "A later release will refuse such a file." in message
     assert_token_absent(token, message)
     # The warning points at the caller, not at the SDK.
     assert shared[0].filename == __file__
@@ -769,7 +769,8 @@ def test_a_private_dotenv_in_an_open_folder_warns_about_the_folder_only(windows)
         f"{path} holds your token, and other users can replace it: {AUTHENTICATED} may add "
         f"or remove files in {path.parent}, so other people who use this computer could "
         "change QTE_URL in it to a server of their own, which would capture your token when "
-        "you next connect. Move it into a folder under your user profile (%USERPROFILE%), "
+        "you next connect. A later release will refuse such a file. "
+        "Move it into a folder under your user profile (%USERPROFILE%), "
         "which is private by default, or remove that group's access."
     )
     assert "Windows lets" not in message and USERS not in message
@@ -978,7 +979,8 @@ UNSEEN = "Windows would not let this check see who may open"
             f"{AT} holds your token, and {FOLDER} is owned by another account, which can "
             "change who may add or remove files in it, so other people who use this computer "
             "could change QTE_URL in it to a server of their own, which would capture your "
-            "token when you next connect. Move it into a folder under your user profile "
+            "token when you next connect. A later release will refuse such a file. "
+            "Move it into a folder under your user profile "
             "(%USERPROFILE%), which is private by default. To see",
             "private by default. To see",
         ),
@@ -996,7 +998,8 @@ UNSEEN = "Windows would not let this check see who may open"
         (
             replace(access([], [], [], None), unseen=(f"{UNSEEN} {AT}",)),
             {},
-            f"{AT} holds your token, but it could not be fully checked: {UNSEEN} {AT}. Delete "
+            f"{AT} holds your token, but it could not be fully checked: {UNSEEN} {AT}. "
+            "A later release will refuse such a file. Delete "
             "it and make it again yourself",
             "Delete it and make it again yourself",
         ),
@@ -1450,7 +1453,8 @@ def test_a_token_file_reached_through_a_linked_folder_names_the_link(
         f"{alias / 'token'}, which leads to {target} through the link {alias}, holds your "
         f"token, and other users can replace it: {AUTHENTICATED} may add or remove files in "
         f"{tmp_path / 'open'}, which holds the link {alias}, so other people who use this "
-        "computer could replace your token. Move the file it leads to, and the link, into a "
+        "computer could replace your token. A later release will refuse such a file. "
+        "Move the file it leads to, and the link, into a "
         "folder under your user profile"
     )
     assert_token_absent(token, message)
@@ -1816,7 +1820,8 @@ def test_a_link_that_cannot_be_followed_warns_on_its_own(
     assert caught[0].message.code == "QTE-TOKEN-UNCHECKED"
     assert (
         f"holds your token, but it could not be fully checked: {reason}; a link on the way "
-        "could not be followed, so check where it leads. Keep the file itself, not a link to "
+        "could not be followed, so check where it leads. A later release will refuse such a "
+        "file. Keep the file itself, not a link to "
         "it, in a folder under your user profile (%USERPROFILE%), which is private by default."
     ) in message
     assert "other people" not in message
@@ -2120,6 +2125,7 @@ UNSEEN_CASES = {
         {"sddl": DENIED, "folder_sddl": PROFILE_FOLDER},
         lambda path: (
             f"holds your token, but it could not be fully checked: {not_shown(path)}. "
+            "A later release will refuse such a file. "
             "Delete it and make it again yourself, in a folder under your user profile"
         ),
     ),

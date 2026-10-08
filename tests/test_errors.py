@@ -4,6 +4,7 @@ entries in docs/errors.md, the codes in the source, and that no message shows th
 import ast
 import asyncio
 import importlib
+import json
 import os
 import pkgutil
 import re
@@ -18,7 +19,7 @@ from typing import Any
 import pytest
 from fake_exchange import serve_local
 from test_resume import Scripted, heartbeat, resume_reject
-from test_session import Server, ack, assert_no_form_of, escaping, session_reject, synthetic_token
+from test_session import Server, ack, assert_no_form_of, session_reject, synthetic_token
 from test_token import PRIVATE_FILE, SECOND_DRIVE, answers, windows  # noqa: F401
 from websockets.asyncio.server import serve
 
@@ -44,6 +45,8 @@ from qte_sdk.session import (
     ResumeRejected,
     SessionNotAcknowledged,
     SessionTimeout,
+    _holds_token,
+    _Secret,
     open_session,
     resolve_token,
     resolve_url,
@@ -373,22 +376,78 @@ def test_check_withholds_a_token_file_path_that_holds_the_token(monkeypatch, cap
 # The token never appears: every template, then every code end to end
 
 
-@escaping
-def test_no_template_shows_the_token(monkeypatch, special):
+# Characters a mistaken paste can put in a token: each changes how the token is written
+# once escaped, put in one line or flattened, and the withholding must catch every form.
+SPECIAL = pytest.mark.parametrize(
+    "special",
+    ["\\", "\n", "\t", "\x01", "\x1b", "\x7f", " "],
+    ids=["backslash", "newline", "tab", "control", "escape", "delete", "space"],
+)
+
+
+def token_bearing(token: str) -> list[str]:
+    """Values a field could be given that hold the token in some form."""
+    return [
+        token,
+        f"/home/student/{token}/algo/.env",
+        f"bad token {token} here",
+        repr(token),
+        json.dumps(token),
+        token.encode("unicode_escape").decode("ascii"),
+        errors.one_line(token),
+        errors.flatten(token),
+    ]
+
+
+@SPECIAL
+def test_no_template_shows_a_token_given_in_any_field(special):
     token = synthetic_token() + special + synthetic_token()
+    secret = _Secret(token)
+
+    def withhold(text: str) -> bool:
+        return _holds_token(text, secret)
+
+    rendered = 0
+    for code in CODES:
+        for field in errors.template_fields(code):
+            for value in token_bearing(token):
+                fields = {**FIELD_VALUES, field: value}
+                text = render(code, withhold=withhold, **fields)
+                assert errors.WITHHELD in text, (code, field)
+                assert_no_form_of(token, text)
+                rendered += 1
+    assert rendered > len(CODES)
+
+
+@SPECIAL
+def test_check_withholds_a_token_that_a_path_holds_in_any_form(
+    windows,  # noqa: F811
+    monkeypatch,
+    capsys,
+    tmp_path,
+    special,
+):
+    if os.name == "nt" and special not in (" ", "\\"):
+        pytest.skip("Windows allows no control character in a file name")
+    if os.name == "nt":
+        pytest.skip("a backslash separates folders on Windows")
+    token = synthetic_token() + special + synthetic_token()
+    folder = tmp_path / token
+    folder.mkdir()
+    monkeypatch.chdir(folder)
+    (folder / ".git").mkdir()
+    monkeypatch.setattr(dotenv, "is_tracked_by_git", lambda path: False)
+    monkeypatch.setattr(dotenv, "is_ignored_by_git", lambda path: False)
     monkeypatch.setenv(TOKEN_ENV_VAR, token)
-    private_dotenv(f"QTE_TOKEN='{token}'\n")
-    texts = [render(code, **FIELD_VALUES) for code in CODES]
-    texts += [
-        render(errors.SESSION_REJECTED, **{**FIELD_VALUES, "step": step})
-        for step in errors.SESSION_REJECTED_STEPS.values()
-    ]
-    texts += [
-        render(errors.CONNECT_HANDSHAKE_FAILED, **{**FIELD_VALUES, "why": why, "step": step})
-        for why, step in errors.HANDSHAKE_STEPS.values()
-    ]
-    for text in texts:
-        assert_no_form_of(token, text)
+    private_dotenv(f"QTE_URL={URL}\n")
+    windows(None)  # so check renders the .env's path in a finding of its own too
+    status, out = check(capsys)
+    assert status == 1
+    assert "warning: QTE-DOTENV-NOT-IGNORED: " in out
+    assert "warning: QTE-ADDRESS-UNCHECKED: " in out
+    assert "path withheld: it holds the token" in out
+    assert_no_form_of(token, out)
+    assert errors.one_line(token) not in out and errors.flatten(token) not in out
 
 
 Case = Callable[[str, Any], Awaitable[str] | str]
@@ -754,3 +813,21 @@ def test_a_warning_takes_any_arguments_as_before():
 def test_a_field_with_a_line_break_still_gives_one_line():
     message = render(errors.DOTENV_NOT_IGNORED, path="/home/a\nb/.env", name=".env")
     assert "\n" not in message and "/home/a b/.env" in message
+
+
+def test_check_gives_the_same_answer_however_often_it_runs(monkeypatch, capsys):
+    (Path.cwd() / ".git").mkdir()
+    monkeypatch.setattr(dotenv, "is_tracked_by_git", lambda path: False)
+    monkeypatch.setattr(dotenv, "is_ignored_by_git", lambda path: False)
+    private_dotenv(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    with warnings.catch_warnings(record=True) as before:
+        warnings.simplefilter("always")
+        resolve_url()  # the SDK warns once per process for each .env
+    assert [w.category for w in before] == [DotenvNotIgnored]
+    assert check(capsys)[0] == 1
+    assert check(capsys)[0] == 1
+    # check leaves the record as it found it: no second warning in this process.
+    with warnings.catch_warnings(record=True) as after:
+        warnings.simplefilter("always")
+        resolve_url()
+    assert after == []
