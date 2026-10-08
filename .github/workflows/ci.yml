@@ -41,18 +41,19 @@ jobs:
   windows:
     # The Windows token-file and console checks (tests marked `windows`) read real access
     # lists, owners and consoles, so they run only here. The rest of the suite runs too; the
-    # few tests that cannot run on Windows skip themselves and say why. See "Windows" in
-    # docs/development.md.
+    # few tests that cannot run on Windows skip themselves and say why. The contract code is
+    # regenerated as well. See "Windows" in docs/development.md.
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       # Checked out with the runner's default core.autocrlf: .gitattributes keeps the
-      # vendored contract's bytes exact, and the tests hash them.
+      # vendored contract's bytes exact, and the tests hash them, and checks the generated
+      # contract code out with LF, which the last step checks.
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,codegen]"
       - name: Run the tests marked windows
         run: pytest -m windows --junitxml=windows-tests.xml
       # Every test in tests/test_windows_real.py, marked or not, and every test marked
@@ -64,6 +65,21 @@ jobs:
       - name: Run the rest of the suite
         if: success() || failure()
         run: pytest -m "not windows"
+      # scripts/generate_contract.py must write LF here too, so a regeneration on Windows
+      # leaves the committed code unchanged. git diff ignores CRLF in a file .gitattributes
+      # marks as text, so `git ls-files --eol` checks the bytes as well, before and after.
+      - name: Regenerate the contract code and fail if it changes or is not LF
+        if: success() || failure()
+        shell: bash
+        run: |
+          git ls-files --eol qte_sdk/contract/v1
+          test -z "$(git ls-files --eol qte_sdk/contract/v1 | grep -v '^i/lf *w/lf ')"
+          python scripts/generate_contract.py
+          git ls-files --eol qte_sdk/contract/v1
+          test -z "$(git ls-files --eol qte_sdk/contract/v1 | grep -v '^i/lf *w/lf ')"
+          git status --porcelain qte_sdk/contract
+          git diff --exit-code qte_sdk/contract
+          test -z "$(git status --porcelain qte_sdk/contract)"
 
   test-websockets-floor:
     runs-on: ubuntu-latest
