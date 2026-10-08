@@ -956,6 +956,7 @@ NO_NETWORK = TESTS / "no_network"
 # Nothing in the main thread writes to stderr.
 FULL_STDERR_CHILD = """
 import asyncio
+import logging
 import os
 import sys
 import threading
@@ -1018,6 +1019,10 @@ def check_and_say(timeout=update.DEFAULT_TIMEOUT):
 
 
 update.check_for_update = check_and_say
+# Set when the warning is about to be written: the default handler's filters run just
+# before it takes its lock and writes.
+warning = threading.Event()
+logging.lastResort.addFilter(lambda record: warning.set() or True)
 started = []
 real_start = update.check_in_background
 update.check_in_background = lambda: started.append(real_start()) or started[-1]
@@ -1038,7 +1043,7 @@ async def main():
             ticker = asyncio.create_task(tick(count))
             filler.start()
             [thread] = started
-            while not checked.is_set():
+            while not (checked.is_set() and warning.is_set()):
                 await asyncio.sleep(0.05)
             await asyncio.sleep(0.5)
             if not thread.is_alive():
@@ -1049,6 +1054,10 @@ async def main():
             while count[0] < seen + 10:
                 await asyncio.sleep(0.05)
             ticker.cancel()
+            # The warning is still being written: only the parent reading stderr ends it.
+            if not thread.is_alive():
+                print("not stuck", flush=True)
+                return
     print("done", flush=True)
     # The parent reads stderr now; both threads then finish their writes.
     await asyncio.to_thread(filler.join, 20)
@@ -1073,17 +1082,21 @@ def test_a_full_stderr_pipe_never_stops_the_sessions_loop(tmp_path: Path):
         stderr=subprocess.PIPE,
         text=True,
     )
+    assert child.stdout is not None and child.stderr is not None
+    stdout, stderr = child.stdout, child.stderr
     lines: queue.Queue[str | None] = queue.Queue()
 
     def read_stdout() -> None:
-        assert child.stdout is not None
-        for line in child.stdout:
-            lines.put(line.rstrip("\n"))
+        try:
+            for line in stdout:
+                lines.put(line.rstrip("\n"))
+        except (OSError, ValueError):
+            pass
         lines.put(None)
 
     reader = threading.Thread(target=read_stdout, daemon=True)
-    reader.start()
     seen: list[str | None] = []
+    errors: list[str] = []
 
     def until(wanted: str, within: float) -> None:
         deadline = time.monotonic() + within
@@ -1096,6 +1109,7 @@ def test_a_full_stderr_pipe_never_stops_the_sessions_loop(tmp_path: Path):
                 pytest.fail(f"stdout ended before {wanted!r}: {seen}")
 
     try:
+        reader.start()
         # Stderr stays unread until the child says it is done.
         until("stuck", 30)
         until("done", 10)
@@ -1103,8 +1117,7 @@ def test_a_full_stderr_pipe_never_stops_the_sessions_loop(tmp_path: Path):
         # The loop kept running while the check's thread was stuck in its warning.
         assert len([line for line in after if line and line.startswith("tick ")]) >= 10
         # Now stderr is read, the stuck writes finish and the child exits.
-        errors: list[str] = []
-        drain = threading.Thread(target=lambda: errors.append(child.stderr.read()), daemon=True)
+        drain = threading.Thread(target=lambda: errors.append(stderr.read()), daemon=True)
         drain.start()
         until("exiting", 20)
         assert child.wait(20) == 0
@@ -1112,7 +1125,9 @@ def test_a_full_stderr_pipe_never_stops_the_sessions_loop(tmp_path: Path):
     finally:
         if child.poll() is None:
             child.kill()
-            child.wait()
-    reader.join(10)
+            child.wait(20)
+        reader.join(10)
+        stdout.close()
+        stderr.close()
     [err] = errors
     assert "QTE-UPDATE-AVAILABLE: qte-sdk " in err
