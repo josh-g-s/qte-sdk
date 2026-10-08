@@ -4,12 +4,14 @@ repository is answered by a canned list, and any other is an error."""
 
 import email.message
 import http.server
+import io
 import json
 import logging
 import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1982,6 +1984,265 @@ def test_a_thread_that_cannot_start_is_no_error(monkeypatch: pytest.MonkeyPatch,
 
     monkeypatch.setattr(threading.Thread, "start", refuse)
     assert update.check_in_background() is None
+
+
+# How the automatic check's warning is written: never in a way that can wait
+
+
+@pytest.fixture
+def lone(monkeypatch: pytest.MonkeyPatch) -> logging.Logger:
+    """A logger in place of the update logger, with no parent (so no root) and no handlers,
+    which pytest's own log capture does not reach."""
+    logger = logging.Logger(update.logger.name)
+    monkeypatch.setattr(update, "logger", logger)
+    return logger
+
+
+class Records(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def warn(message: str = "QTE-UPDATE-AVAILABLE: behind") -> None:
+    update._log_without_waiting(logging.WARNING, message, update.UPDATE_AVAILABLE)
+
+
+def test_the_automatic_warning_is_recorded_as_logger_warning_would_record_it(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path, caplog: pytest.LogCaptureFixture
+):
+    behind_a_release(monkeypatch)
+    caplog.set_level(logging.DEBUG)
+    run_in_background()
+    [record] = update_records(caplog)
+    assert record.code == update.UPDATE_AVAILABLE
+    assert record.funcName == "_check_and_log"
+    assert Path(record.pathname).resolve() == Path(update.__file__).resolve()
+    assert record.exc_info is None and record.stack_info is None
+
+
+def test_the_warning_honours_levels_filters_and_disabled(
+    monkeypatch: pytest.MonkeyPatch, lone: logging.Logger
+):
+    got = Records()
+    lone.addHandler(got)
+    lone.setLevel(logging.ERROR)
+    warn()
+    # A fresh logger: a logger outside logging's registry keeps what it found enabled.
+    lone = logging.Logger(lone.name)
+    lone.addHandler(got)
+    monkeypatch.setattr(update, "logger", lone)
+    lone.disabled = True
+    warn()
+    lone.disabled = False
+    got.setLevel(logging.ERROR)
+    warn()
+    got.setLevel(logging.NOTSET)
+    lone.addFilter(lambda record: False)
+    warn()
+    assert got.records == []
+    lone.filters.clear()
+    warn("said")
+    [record] = got.records
+    assert (record.getMessage(), record.code, record.levelno) == (
+        "said",
+        update.UPDATE_AVAILABLE,
+        logging.WARNING,
+    )
+
+
+def test_the_warning_reaches_parent_handlers_unless_propagate_is_off(
+    monkeypatch: pytest.MonkeyPatch, lone: logging.Logger
+):
+    parent = logging.Logger("qte_sdk")
+    got = Records()
+    parent.addHandler(got)
+    lone.parent = parent
+    warn("up")
+    lone.propagate = False
+    monkeypatch.setattr(logging, "lastResort", None)
+    warn("not up")
+    assert [r.getMessage() for r in got.records] == ["up"]
+
+
+def test_the_last_resort_writes_only_when_no_handler_is_found(
+    monkeypatch: pytest.MonkeyPatch, lone: logging.Logger
+):
+    last = io.StringIO()
+    monkeypatch.setattr(logging, "lastResort", logging.StreamHandler(last))
+    warn("to the last resort")
+    assert last.getvalue() == "to the last resort\n"
+    # Any handler at all, even one whose level the record is below, is found.
+    lone.addHandler(logging.NullHandler(logging.CRITICAL))
+    warn("not to the last resort")
+    assert last.getvalue() == "to the last resort\n"
+    lone.handlers.clear()
+    monkeypatch.setattr(logging, "lastResort", None)
+    warn("nowhere")
+
+
+def test_no_stderr_a_replaced_or_a_closed_stream_is_no_error(
+    monkeypatch: pytest.MonkeyPatch, lone: logging.Logger
+):
+    monkeypatch.setattr(logging, "raiseExceptions", False)
+    # The default last resort, which writes to whatever sys.stderr is when it writes.
+    monkeypatch.setattr(logging, "lastResort", logging._StderrHandler(logging.WARNING))
+    monkeypatch.setattr(sys, "stderr", None)
+    warn()
+    replaced = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", replaced)
+    warn("replaced")
+    assert replaced.getvalue() == "replaced\n"
+    closed = open(os.devnull, "w")  # noqa: SIM115
+    closed.close()
+    lone.addHandler(logging.StreamHandler(closed))
+    warn()
+
+
+def test_a_stream_handler_on_a_string_gets_its_formatted_line(lone: logging.Logger):
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(code)s %(message)s"))
+    lone.addHandler(handler)
+    warn("behind")
+    assert stream.getvalue() == "WARNING QTE-UPDATE-AVAILABLE behind\n"
+
+
+@pytest.fixture
+def pipe() -> Any:
+    """A pipe: its read end, and a text stream on its write end, as stderr would be."""
+    read, write = os.pipe()
+    stream = open(write, "w", encoding="utf-8")  # noqa: SIM115
+    try:
+        yield read, stream
+    finally:
+        stream.close()
+        os.close(read)
+
+
+def fill(fd: int) -> None:
+    """Fill the pipe whose write end is `fd`, without ever waiting: on Windows, with as
+    many bytes as it says it takes; elsewhere, writing until it takes no more."""
+    if sys.platform == "win32":
+        room = update._pipe_write_quota(fd)
+        assert room is not None and room > 0
+        os.write(fd, b"x" * room)
+        assert update._pipe_write_quota(fd) == 0
+        return
+    os.set_blocking(fd, False)
+    try:
+        while True:
+            os.write(fd, b"x" * 1024)
+    except BlockingIOError:
+        pass
+    try:
+        while True:
+            os.write(fd, b"x")
+    except BlockingIOError:
+        pass
+    finally:
+        os.set_blocking(fd, True)
+
+
+def read_all(fd: int) -> bytes:
+    """What the pipe holds, without waiting (its write end still open)."""
+    data = b""
+    if sys.platform == "win32":
+        import msvcrt
+        from ctypes import byref, windll, wintypes
+
+        available = wintypes.DWORD()
+        handle = msvcrt.get_osfhandle(fd)
+        while windll.kernel32.PeekNamedPipe(handle, None, 0, None, byref(available), None):
+            if not available.value:
+                break
+            data += os.read(fd, available.value)
+        return data
+    os.set_blocking(fd, False)
+    try:
+        while True:
+            data += os.read(fd, 65536)
+    except BlockingIOError:
+        return data
+    finally:
+        os.set_blocking(fd, True)
+
+
+def warn_in_a_thread(message: str = "QTE-UPDATE-AVAILABLE: behind") -> None:
+    """`warn`, in a daemon thread that must end within 5 s: a write that waits fails the
+    test rather than hanging it."""
+    thread = threading.Thread(target=warn, args=(message,), daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive(), "the warning waited for the pipe"
+
+
+def test_a_pipe_with_room_gets_the_line(pipe: Any, lone: logging.Logger):
+    read, stream = pipe
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(code)s %(message)s"))
+    lone.addHandler(handler)
+    warn_in_a_thread("behind")
+    newline = b"\r\n" if sys.platform == "win32" else b"\n"
+    assert read_all(read) == b"QTE-UPDATE-AVAILABLE behind" + newline
+
+
+def test_a_full_pipe_drops_the_line_and_other_handlers_still_get_the_record(
+    pipe: Any, lone: logging.Logger
+):
+    read, stream = pipe
+    got = Records()
+    # The pipe's handler first: the others still get the record.
+    lone.addHandler(logging.StreamHandler(stream))
+    lone.addHandler(got)
+    fill(stream.fileno())
+    warn_in_a_thread("behind")
+    assert b"behind" not in read_all(read)
+    [record] = got.records
+    assert record.code == update.UPDATE_AVAILABLE
+    if sys.platform != "win32":
+        assert os.get_blocking(stream.fileno())
+
+
+def test_a_line_over_512_bytes_is_dropped_on_a_pipe_not_cut(pipe: Any, lone: logging.Logger):
+    read, stream = pipe
+    lone.addHandler(logging.StreamHandler(stream))
+    newline = 2 if sys.platform == "win32" else 1
+    warn_in_a_thread("x" * (512 - newline))
+    assert read_all(read) == b"x" * (512 - newline) + b"\r\n"[-newline:]
+    warn_in_a_thread("y" * (513 - newline))
+    assert read_all(read) == b""
+
+
+def test_the_longest_warning_fits_in_one_pipe_write():
+    """A recommended update on Windows with the longest reason, from an archive, as the
+    default handler writes it."""
+    why = "w" * update._MAX_WHY
+    release = update._Release((1, 1, 1), True, why, ("win32",))
+    command = update_command("v1.1.1", archive=True)
+    message = update._behind_message("1.1.0", "v1.1.1", command, release)
+    assert len((message + "\r\n").encode()) <= update._MAX_DIRECT_LINE
+
+
+@pytest.mark.windows
+def test_the_windows_pipe_probe_reads_the_room_left():
+    read, write = os.pipe()
+    try:
+        room = update._pipe_write_quota(write)
+        assert room is not None and room >= update._MAX_DIRECT_LINE
+        os.write(write, b"x" * 100)
+        assert update._pipe_write_quota(write) == room - 100
+        os.read(read, 100)
+        assert update._pipe_write_quota(write) == room
+    finally:
+        os.close(read)
+        os.close(write)
+    with tempfile.TemporaryFile() as file:
+        assert update._pipe_write_quota(file.fileno()) is None
+    assert update._pipe_write_quota(-1) is None
 
 
 # The cache folder

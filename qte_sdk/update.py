@@ -59,11 +59,15 @@ in a daemon thread, so it never delays, holds up the end of, or fails a session,
 never raises or prints. When the installed SDK is behind a release, it logs that one line
 at WARNING through the `qte_sdk.update` logger, with the code on the record as `code`, and
 it is silent when the SDK is current, when it cannot tell, and when the network fails. The
-warning is logged from the check's own thread, never on the session's event loop: if stderr
-cannot take the write (a full pipe that nothing reads), that thread waits, and the program
-may wait for it at exit, but the check never holds up the session. (The program's own
-writes to stderr, and its own logging through the same handler, would wait too.) It sends
-the same requests as the command, and nothing more. The day is counted from a file holding
+warning is written from the check's own thread, never on the session's event loop, and with
+the standard stream handlers it never holds up the session or the program's exit: when
+stderr is a pipe or terminal that cannot take the whole line at that moment (a full pipe
+that nothing reads, say), or the line is over 512 bytes, it is not written there, and the
+next day's check says it again. On Windows, a pipe that cannot take the line is also
+skipped, not waited on. Handlers the program configures (a log file, pytest's caplog, a
+JSON formatter) still receive it, with its `code`; a handler the SDK cannot see into, such
+as a custom emit or a queue listener, writes as it always has. It sends the same requests
+as the command, and nothing more. The day is counted from a file holding
 the time of the last check, written just before the check starts, so a failed check is not
 retried until the next day: `qte-sdk/update-check` in your cache folder
 (`%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS, and `$XDG_CACHE_HOME` or
@@ -99,6 +103,8 @@ import logging
 import math
 import os
 import re
+import select
+import stat
 import sys
 import threading
 import time
@@ -887,12 +893,15 @@ def check_in_background() -> threading.Thread | None:
     thread, or None when none was started. Never raises, and does nothing else in the
     calling thread, so it never delays the caller.
 
-    The warning is logged from the check's own thread, never on the session's event loop,
-    where a write that cannot complete would stop the session. If stderr cannot take the
-    write (a full pipe that nothing reads), the check's thread waits, holding the logging
-    handler's lock, and the program may wait for it at exit, in `logging.shutdown()`; the
-    check never holds up the session. The program's own writes to stderr, and its own
-    logging through that handler, would wait too, as they would without the check."""
+    The warning is written from the check's own thread, never on the session's event loop,
+    where a write that cannot complete would stop the session, and with the standard
+    stream handlers it never holds up the program's exit either: a stream handler on a
+    pipe, socket or terminal gets the line in one write holding no lock, and only when the
+    stream can take it whole at once (on Windows, when the pipe reports the room for it);
+    otherwise, and for a line over 512 bytes, the line is dropped there, and the next
+    day's check says it again. Every other handler gets the record, with its `code`, as
+    logging would give it; one the SDK cannot see into, such as a custom emit or a queue
+    listener, writes as it always has. See `_log_without_waiting`."""
     global _automatic_done
     try:
         with _automatic_lock:
@@ -925,10 +934,181 @@ def _check_and_log() -> None:
             return
         result = check_for_update()
         if result.status is Status.BEHIND:
-            logger.warning("%s", result.message, extra={"code": UPDATE_AVAILABLE})
+            _log_without_waiting(logging.WARNING, result.message, UPDATE_AVAILABLE)
     except BaseException:
         # Never into the program: a thread's uncaught error would be printed.
         return
+
+
+# The longest line written straight to a pipe, socket or terminal, in bytes: POSIX's least
+# PIPE_BUF, and macOS's. A pipe that is ready takes a line this long whole, at once.
+_MAX_DIRECT_LINE = 512
+
+
+def _log_without_waiting(level: int, message: str, code: str) -> None:
+    """Log `message` through `logger`, with `code` on the record, as `logger.log` would,
+    except that the write can never hold up the program. Levels, filters, `propagate`,
+    every handler and `logging.lastResort` are honoured, from their public attributes, and
+    every handler gets the record through `handle` as usual, except a `StreamHandler` whose
+    stream is a pipe, socket or terminal: whatever wrote to such a stream, while it is full,
+    would wait holding the handler's lock (and the stream's), and `logging.shutdown()` at
+    exit, and every later write to it, would wait for that. Such a stream gets the
+    handler's formatted line in one `os.write` on its file descriptor, holding no lock, and
+    only when it can take the whole line now; otherwise the line is dropped there. It runs
+    in the check's own thread, never touches an event loop, and never changes whether a
+    file descriptor blocks."""
+    if logger.disabled or not logger.isEnabledFor(level):
+        return
+    try:
+        # The caller's file, line and function, as `logger.log` would record them.
+        path, line, function, stack = logger.findCaller(False, 2)
+    except ValueError:
+        path, line, function, stack = "(unknown file)", 0, "(unknown function)", None
+    record = logger.makeRecord(
+        logger.name, level, path, line, "%s", (message,), None, function, {"code": code}, stack
+    )
+    passed = logger.filter(record)
+    if not passed:
+        return
+    if isinstance(passed, logging.LogRecord):  # a filter may return a new record (3.12+)
+        record = passed
+    handlers: list[logging.Handler] = []
+    node: logging.Logger | None = logger
+    while node is not None:
+        handlers.extend(node.handlers)
+        node = node.parent if node.propagate else None
+    if not handlers and logging.lastResort is not None:
+        handlers = [logging.lastResort]
+    direct: list[tuple[logging.StreamHandler, int]] = []
+    # Handlers that never wait first, so a direct write that does wait (another writer
+    # filled the pipe after the check) cannot keep the record from a log file or caplog.
+    for handler in handlers:
+        if record.levelno < handler.level:
+            continue
+        if isinstance(handler, logging.StreamHandler) and handler.stream is None:
+            continue  # no stderr at all, as under pythonw
+        fd = _fd_that_may_wait(handler)
+        if fd is None:
+            handler.handle(record)
+        else:
+            direct.append((handler, fd))
+    for handler, fd in direct:
+        _write_or_drop(handler, fd, record)
+
+
+def _fd_that_may_wait(handler: logging.Handler) -> int | None:
+    """The file descriptor of `handler`'s stream when a write to it can wait for a reader:
+    a pipe, a socket or a terminal. None for any other handler, and for a stream that is a
+    file, a device such as /dev/null, a Windows console (whose writes do not wait), or has
+    no usable descriptor (StringIO, closed): `handle` writes those as logging would."""
+    if not isinstance(handler, logging.StreamHandler):
+        return None  # caplog, a file log, a queue, JSON or custom handlers
+    try:
+        fd = handler.stream.fileno()
+        mode = os.fstat(fd).st_mode
+    except Exception:
+        return None
+    if sys.platform == "win32":
+        # os.fstat reports a pipe as a FIFO; a console (and NUL) is a character device.
+        return fd if stat.S_ISFIFO(mode) else None
+    if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
+        return fd
+    if stat.S_ISCHR(mode) and os.isatty(fd):
+        return fd
+    return None
+
+
+def _write_or_drop(handler: logging.StreamHandler, fd: int, record: logging.LogRecord) -> None:
+    """Write `record` as `handler` would, in one `os.write` on `fd` holding no lock, when
+    the stream can take the whole line now; otherwise drop it. Never truncates."""
+    try:
+        passed = handler.filter(record)
+        if not passed:
+            return
+        if isinstance(passed, logging.LogRecord):
+            record = passed
+        text = handler.format(record) + handler.terminator
+        if sys.platform == "win32":
+            text = text.replace("\n", "\r\n")  # as a text stream writes it there
+        encoding = getattr(handler.stream, "encoding", None) or "utf-8"
+        data = text.encode(encoding, "backslashreplace")
+        if len(data) <= _MAX_DIRECT_LINE and _can_take(fd, len(data)):
+            os.write(fd, data)
+    except Exception:
+        return
+
+
+def _can_take(fd: int, size: int) -> bool:
+    """Whether `fd` can take `size` bytes now (at most `_MAX_DIRECT_LINE`), without waiting.
+    False when it cannot tell."""
+    if sys.platform == "win32":
+        room = _pipe_write_quota(fd)
+        return room is not None and room >= size
+    try:
+        # Writable means at least PIPE_BUF bytes free for a pipe (512 on macOS, a page on
+        # Linux), so a line of at most 512 bytes is written whole without waiting.
+        return bool(select.select([], [fd], [], 0)[1])
+    except (OSError, ValueError):  # ValueError: a descriptor too high for select
+        return False
+
+
+def _pipe_write_quota(fd: int) -> int | None:
+    """How many bytes the Windows pipe behind `fd` takes now without waiting: its
+    `WriteQuotaAvailable`, from `NtQueryInformationFile(FilePipeLocalInformation)`
+    (documented in the Windows Driver Kit). None when it cannot be read."""
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class IoStatusBlock(ctypes.Structure):
+            # IO_STATUS_BLOCK: a union of NTSTATUS Status and PVOID Pointer, then
+            # ULONG_PTR Information; both pointer-sized.
+            _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+
+        class FilePipeLocalInformation(ctypes.Structure):
+            # FILE_PIPE_LOCAL_INFORMATION: ten ULONGs.
+            _fields_ = [
+                (name, wintypes.ULONG)
+                for name in (
+                    "NamedPipeType",
+                    "NamedPipeConfiguration",
+                    "MaximumInstances",
+                    "CurrentInstances",
+                    "InboundQuota",
+                    "ReadDataAvailable",
+                    "OutboundQuota",
+                    "WriteQuotaAvailable",
+                    "NamedPipeState",
+                    "NamedPipeEnd",
+                )
+            ]
+
+        query = ctypes.WinDLL("ntdll").NtQueryInformationFile
+        query.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(IoStatusBlock),
+            ctypes.c_void_p,
+            wintypes.ULONG,
+            ctypes.c_int,  # FILE_INFORMATION_CLASS
+        ]
+        query.restype = ctypes.c_long  # NTSTATUS
+        handle = msvcrt.get_osfhandle(fd)
+        status_block = IoStatusBlock()
+        info = FilePipeLocalInformation()
+        file_pipe_local_information = 24
+        status = query(
+            handle,
+            ctypes.byref(status_block),
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            file_pipe_local_information,
+        )
+        if status != 0:  # anything but STATUS_SUCCESS
+            return None
+        return int(info.WriteQuotaAvailable)
+    except Exception:
+        return None
 
 
 def _claim_the_day() -> bool:
