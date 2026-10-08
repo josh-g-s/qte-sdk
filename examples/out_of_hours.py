@@ -104,6 +104,7 @@ def show_wait(wait: timedelta) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="See the closed market outside a session.")
+    parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     parser.add_argument(
         "--instrument",
         default=os.environ.get("QTE_INSTRUMENT", "AAPL"),

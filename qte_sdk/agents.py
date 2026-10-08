@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m qte_sdk.agents",
         description="Print the guidance for coding agents that ships with qte-sdk (AGENTS.md).",
     )
+    parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     parser.parse_args(argv)
     sys.stdout.write(text())
     sys.stdout.flush()
