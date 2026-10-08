@@ -778,7 +778,8 @@ def _git_unknown() -> bool:
     """Whether the SDK reads the `.env` here, and it, or the file it links to, is in a git
     working tree and git could not say whether it tracks or ignores it (git is not
     installed, say)."""
-    token_elsewhere = os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR)
+    # Only whether each is set: never the token itself, so no traceback's locals can show it.
+    token_elsewhere = bool(os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR))
     if token_elsewhere and os.environ.get(URL_ENV_VAR):
         return False
     path = dotenv_path()
