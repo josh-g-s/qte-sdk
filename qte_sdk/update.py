@@ -65,9 +65,10 @@ the standard stream handlers it never holds up the session or the program's exit
 stderr is a pipe or terminal that cannot take the whole line at that moment (a full pipe
 that nothing reads, say), it is not written there, and the next day's check says it
 again. A line over 512 bytes is written there without the reason for a recommended update,
-which the command gives, if that fits, and is not written otherwise. On Windows, a pipe that cannot take the line, by the room
-it reports, is also skipped, not waited on; a pipe whose reader is already waiting for
-output can report none, so there the line may be skipped although it would have fit. A
+which the command gives, if that fits, and is not written otherwise. On Windows, a pipe
+that cannot take the line, by the room it reports, is also skipped, not waited on; a pipe
+whose reader is already waiting for output can report none, so there the line may be
+skipped although it would have fit. A
 Windows console that is paused, or in which text is being selected, can hold the line
 until it resumes, as it holds the program's own output. Handlers the program configures
 (a log file, pytest's caplog, a JSON formatter) still receive it, with its `code`; a

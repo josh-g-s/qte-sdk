@@ -3674,23 +3674,23 @@ def as_text(document: dict[str, Any]) -> dict[str, tuple[str, str]]:
 async def test_the_smoke_test_s_json_says_what_its_text_says_with_the_same_status(
     setup: str, expected: int
 ):
-    def make() -> tuple[FakeExchange, tuple[str, ...], dict[str, str]]:
+    def make() -> tuple[FakeExchange, tuple[str, ...]]:
         if setup == "refused":
             refusal = {"reason_code": "TEAM_DISABLED", "reason_detail": "x"}
-            return FakeExchange(session_reject=refusal), (), {}
+            return FakeExchange(session_reject=refusal), ()
         exchange = FakeExchange(
             calendar=CALENDAR,
             server_time=SERVER_TIME,
             cross_new_at=99_960_000 if setup == "fill" else None,
         )
         args = ("--instruments", INSTRUMENT, *(TEST_ORDER if setup == "fill" else ()))
-        return exchange, args, {}
+        return exchange, args
 
     token = None if setup == "no-token" else synthetic_token()
-    exchange, args, _ = make()
+    exchange, args = make()
     async with serve_local(exchange) as url:
         code, out, err = await run_example(SMOKE_TEST, url, token, "--seconds", "1", *args)
-    exchange, args, _ = make()
+    exchange, args = make()
     async with serve_local(exchange) as url:
         json_code, json_out, json_err = await run_example(
             SMOKE_TEST, url, token, "--seconds", "1", "--json", *args

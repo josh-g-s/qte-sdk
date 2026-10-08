@@ -46,9 +46,9 @@ fully check the file the token is in). Exit 1 is a report: sessions still only w
 what `check` warns about. It looks afresh each time, even where the SDK has already warned
 once in the same process, and it never prints a path that holds the token. With `--json` it
 prints one JSON document instead, with the same exit status (docs/errors.md gives its keys).
-A `QTE_LOG_FORMAT` other than json or text makes it exit 2 with `QTE-LOG-FORMAT-INVALID`. `set` exits
-with 0 when it saved, 1 when it refused, and 130 if stopped. Either exits with 2, after a
-`usage:` line, if the command line is wrong.
+A `QTE_LOG_FORMAT` other than json or text makes it exit 2 with `QTE-LOG-FORMAT-INVALID`.
+`set` exits with 0 when it saved, 1 when it refused, and 130 if stopped. Either exits with
+2, after a `usage:` line, if the command line is wrong.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
