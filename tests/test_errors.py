@@ -684,3 +684,73 @@ async def test_each_code_end_to_end_shows_its_code_and_never_the_token(
     text = await result if asyncio.iscoroutine(result) else result
     assert f"{code}: " in text, text
     assert_no_form_of(token, text)
+
+
+# Found in review
+
+
+def test_check_says_it_could_not_tell_who_may_change_an_address_only_dotenv(
+    windows,  # noqa: F811
+    monkeypatch,
+    capsys,
+):
+    windows(None)
+    monkeypatch.setenv(TOKEN_ENV_VAR, synthetic_token())
+    private_dotenv(f"QTE_URL={URL}\n")
+    status, out = check(capsys)
+    assert status == 2
+    assert "warning: QTE-ADDRESS-UNCHECKED: " in out
+
+
+def test_check_asks_git_about_the_file_a_dotenv_links_to(monkeypatch, capsys, tmp_path):
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    target = repository / "settings.env"
+    target.write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    target.chmod(0o600)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    (outside / ".env").symlink_to(target)
+    monkeypatch.setattr(dotenv, "_run_git", lambda *args, **kwargs: None)
+    status, out = check(capsys)
+    assert status == 2
+    assert "QTE-DOTENV-GIT-UNKNOWN" in out
+
+
+def test_check_withholds_the_token_from_a_warning_that_names_a_token_file(
+    windows,  # noqa: F811
+    monkeypatch,
+    capsys,
+):
+    windows(SECOND_DRIVE)
+    token = synthetic_token()
+    folder = Path.cwd() / token
+    folder.mkdir()
+    (folder / "token").write_text(token)
+    monkeypatch.setenv(TOKEN_FILE_ENV_VAR, str(folder / "token"))
+    monkeypatch.setenv(URL_ENV_VAR, URL)
+    status, out = check(capsys)
+    assert status == 1
+    assert "warning: QTE-TOKEN-SHARED: " in out
+    assert_no_form_of(token, out)
+
+
+def test_a_session_timeout_survives_pickling():
+    import pickle
+
+    error = pickle.loads(pickle.dumps(SessionTimeout("not acknowledged", seconds=2.0)))
+    assert isinstance(error, TimeoutError) and error.seconds == 2.0
+    assert str(error).startswith(
+        "QTE-SESSION-TIMEOUT: the session was not acknowledged within 2.0 s."
+    )
+
+
+def test_a_warning_takes_any_arguments_as_before():
+    assert TokenFileShared("a", "b").args == ("a", "b")
+    assert DotenvNotIgnored().args == ()
+
+
+def test_a_field_with_a_line_break_still_gives_one_line():
+    message = render(errors.DOTENV_NOT_IGNORED, path="/home/a\nb/.env", name=".env")
+    assert "\n" not in message and "/home/a b/.env" in message

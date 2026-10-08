@@ -130,7 +130,9 @@ class SessionTimeout(QteError, TimeoutError):
 
     code = _errors.SESSION_TIMEOUT
 
-    def __init__(self, message: str, *, seconds: float | None, code: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, seconds: float | None = None, code: str | None = None
+    ) -> None:
         super().__init__(message, code=code, fields={"seconds": seconds})
         self.seconds = seconds
 

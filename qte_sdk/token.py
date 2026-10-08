@@ -90,6 +90,7 @@ from qte_sdk.session import (
     _find_token,
     _holds_token,
     _missing_token,
+    _redact,
     _Secret,
     url_source,
 )
@@ -669,32 +670,36 @@ def _check() -> int:
     """Print where the token and the address come from, and each finding with its code.
     Returns 1 if a finding must be fixed, else 2 if one could not be settled, else 0."""
     findings: list[str] = []
+    lines: list[str] = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DotenvNotIgnored)
         warnings.simplefilter("always", FileShared)
-        token, source, problem = _find_token(None)
+        token, token_from, problem = _find_token(None)
+        # Kept only to withhold any form of the token from what is printed, such as a
+        # QTE_TOKEN_FILE path that a mistaken setting made the token itself.
         secret = None if token is None else _Secret(token)
         del token
-        unchecked = None
+        unchecked = []
         if problem is not None:
             findings.append(problem.code)
-            print(f"token:   none usable. {_missing_token(problem)}")
+            lines.append(f"token:   none usable. {_missing_token(problem)}")
         else:
-            assert source is not None
-            where = _describe(source, secret)
-            note, unchecked = _access_note(source, where)
-            print(f"token:   {where}{note}")
-        del secret
+            assert token_from is not None
+            where = _describe(token_from, secret)
+            note, not_read = _access_note(token_from)
+            lines.append(f"token:   {where}{note}")
+            if not_read:
+                unchecked.append((_errors.TOKEN_UNCHECKED, where))
         try:
             source, url = url_source()
         except MissingURL as error:
             findings.append(error.code)
-            print(f"address: none. {error}")
+            lines.append(f"address: none. {error}")
         else:
             # The address itself is not shown: a mistake could have put the token there.
             where = _describe(source, None)
             if url.startswith(("ws://", "wss://")):
-                print(f"address: set, from {where}")
+                lines.append(f"address: set, from {where}")
             else:
                 findings.append(_errors.ADDRESS_INVALID)
                 invalid = render(
@@ -702,7 +707,9 @@ def _check() -> int:
                     source=where,
                     problem="does not start with ws:// or wss://",
                 )
-                print(f"address: set, from {where}; {invalid}")
+                lines.append(f"address: set, from {where}; {invalid}")
+            if source == DOTENV_NAME and token_from != DOTENV_NAME and _dotenv_list_unread():
+                unchecked.append((_errors.ADDRESS_UNCHECKED, where))
     shown: set[str] = set()
     for warning in caught:
         if issubclass(warning.category, (DotenvNotIgnored, FileShared)):
@@ -710,55 +717,63 @@ def _check() -> int:
             message = str(warning.message)
             if message not in shown:
                 shown.add(message)
-                print(f"warning: {message}")
-    if unchecked is not None:
-        findings.append(_errors.TOKEN_UNCHECKED)
-        print(f"warning: {unchecked}")
+                lines.append(f"warning: {message}")
+    for code, where in unchecked:
+        findings.append(code)
+        lines.append(f"warning: {render(code, path=where)}")
     if not any(issubclass(w.category, DotenvNotIgnored) for w in caught) and _git_unknown():
         findings.append(_errors.DOTENV_GIT_UNKNOWN)
         path = dotenv_path()
-        print(f"warning: {render(_errors.DOTENV_GIT_UNKNOWN, path=path, name=path.name)}")
+        lines.append(f"warning: {render(_errors.DOTENV_GIT_UNKNOWN, path=path, name=path.name)}")
+    for line in lines:
+        print(line if secret is None else _redact(line, secret))
+    del secret
     if any(code not in _COULD_NOT_TELL for code in findings):
         return 1
     return 2 if findings else 0
 
 
 def _git_unknown() -> bool:
-    """Whether the SDK reads the `.env` here, which is in a git working tree, and git could
-    not say whether it tracks or ignores it (git is not installed, say)."""
+    """Whether the SDK reads the `.env` here, and it, or the file it links to, is in a git
+    working tree and git could not say whether it tracks or ignores it (git is not
+    installed, say)."""
     token_elsewhere = os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR)
     if token_elsewhere and os.environ.get(URL_ENV_VAR):
         return False
     path = dotenv_path()
-    if not path.exists() or not is_inside_git_work_tree(path.parent):
+    if not path.exists():
         return False
-    tracked = is_tracked_by_git(path)
-    if tracked is None:
-        return True
-    return not tracked and is_ignored_by_git(path) is None
+    candidates = [path, path.resolve()] if path.is_symlink() else [path]
+    for candidate in candidates:
+        if not is_inside_git_work_tree(candidate.parent):
+            continue
+        tracked = is_tracked_by_git(candidate)
+        if tracked is None or (not tracked and is_ignored_by_git(candidate) is None):
+            return True
+    return False
 
 
-def _access_note(source: str, where: str) -> tuple[str, str | None]:
+def _dotenv_list_unread() -> bool:
+    """Whether, on Windows, the access list of the `.env` cannot be read at all, so the
+    check could not tell who may change the address in it."""
+    return _fileaccess.on_windows() and _fileaccess.broad_access(dotenv_path()) is None
+
+
+def _access_note(source: str) -> tuple[str, bool]:
     """On Windows, a note that no broad group of users can read, change or replace the file
-    the token comes from, when the access lists of the file and its folder say so, and
-    None; or no note and the `QTE-TOKEN-UNCHECKED` message, when its access list cannot be
-    read at all. A file they can, or that another account owns, gets a warning instead.
-    `where` names the file as `check` shows it."""
-    if source == DOTENV_NAME:
-        path = dotenv_path()
-    elif source == TOKEN_FILE_ENV_VAR:
-        path = Path(os.environ[TOKEN_FILE_ENV_VAR])
-    else:
-        return "", None
+    the token comes from, when the access lists of the file and its folder say so; and
+    whether its access list could not be read at all. A file they can, or that another
+    account owns, gets a warning instead."""
+    if source not in (DOTENV_NAME, TOKEN_FILE_ENV_VAR):
+        return "", False
+    path = dotenv_path() if source == DOTENV_NAME else Path(os.environ[TOKEN_FILE_ENV_VAR])
     access = _fileaccess.broad_access(path)
     if access is None:
-        if _fileaccess.on_windows():
-            return "", render(_errors.TOKEN_UNCHECKED, path=where)
-        return "", None
+        return "", _fileaccess.on_windows()
     if not access:
         text = _none_of_the_checked_groups(access)
-        return f"; {text[0].lower()}{text[1:]}", None
-    return "", None
+        return f"; {text[0].lower()}{text[1:]}", False
+    return "", False
 
 
 def _none_of_the_checked_groups(access: _fileaccess.BroadAccess) -> str:

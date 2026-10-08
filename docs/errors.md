@@ -183,7 +183,7 @@ The last line of a traceback is the class name and then this message. The code i
 
 - Raised as: `qte_sdk.session.ResumeRejected`, a `SessionRejected`, from `Session.resume`.
 - Cause: The exchange refused the `resume`. The session goes on, but no report was replayed and no snapshot sent.
-- Fix: Check your resting orders and positions with `send_account_query` before you trade.
+- Fix: Treat the resting orders you track (such as a `RestingOrders` view) as unknown until a later resume completes, and check your positions with `send_account_query` before you trade.
 
 ### QTE-SESSION-RESUME-NOT-ACKNOWLEDGED
 

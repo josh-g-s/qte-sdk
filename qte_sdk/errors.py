@@ -18,6 +18,7 @@ No message ever holds the token. This module imports nothing from the rest of th
 every module can import it.
 """
 
+import os
 import string
 import unicodedata
 from typing import Any, NamedTuple
@@ -253,7 +254,8 @@ CODES: dict[str, Entry] = {
     SESSION_RESUME_REJECTED: Entry(
         "the exchange refused the resume ({reason})",
         "The session goes on, but no report was replayed and no snapshot sent",
-        "Check your resting orders and positions with send_account_query before you trade",
+        "Treat the resting orders you track as unknown until a later resume completes, and "
+        "check your positions with send_account_query before you trade",
         "The exchange answered resume with a reject",
         "Check your orders and positions",
     ),
@@ -391,6 +393,8 @@ def summary(code: str, /, **fields: Any) -> str:
     given instead, since a `__str__` that raises prints only `<exception str() failed>`."""
     try:
         entry = CODES[code]
+        # One line, whatever a field holds: a path, say, may hold a line break.
+        fields = {name: _one_line(value) for name, value in fields.items()}
         parts = [part.format(**fields) for part in (entry.what, entry.why, entry.next_step)]
         parts = [part.strip().rstrip(".") for part in parts]
         return " ".join(f"{part}." for part in parts if part)
@@ -398,6 +402,14 @@ def summary(code: str, /, **fields: Any) -> str:
         entry = CODES.get(code)
         cause = entry.cause if entry is not None else "an error with no registered message"
         return f"{cause.rstrip('.')}. See {code} in docs/errors.md."
+
+
+def _one_line(value: object) -> object:
+    """`value`, if text, with each line break or other control character made a space."""
+    if not isinstance(value, str | os.PathLike):
+        return value
+    text = str(value)
+    return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text)
 
 
 def render(code: str, /, **fields: Any) -> str:
@@ -454,17 +466,17 @@ class QteError(_Coded, Exception):
 
 
 class QteWarning(_Coded, UserWarning):
-    """The base of every SDK warning that has a code. `message` is the text without the
-    code; `code`, if given, replaces the class's default."""
+    """The base of every SDK warning that has a code. Its arguments are as for any warning,
+    the first being the text without the code; `code`, if given, replaces the class's
+    default."""
 
     def __init__(
         self,
-        message: str = "",
-        *,
+        *args: object,
         code: str | None = None,
         fields: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(*args)
         if code is not None:
             self.code = code
         if fields is not None:
