@@ -1,8 +1,8 @@
 # Warning and error codes
 
-**Version:** 0.1
+**Version:** 0.2
 
-The SDK's warnings and errors about the token, the exchange address, the `.env`, the session, the connection and updates have a code, such as `QTE-TOKEN-MISSING`. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. The history service's and replay's errors do not have codes yet.
+Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays and updates. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
 ## How to read a message
 
@@ -18,7 +18,7 @@ The last line of a traceback is the class name and then this message. The code i
 
 - Catch `qte_sdk.errors.QteError` for any SDK exception that has a code, or filter on `qte_sdk.errors.QteWarning` for any such warning. Each exception keeps the base class it had before codes were added (`MissingToken` is still a `ValueError`, `LivenessTimeout` a `TimeoutError`), so an existing `except` clause still catches it.
 - To filter warnings by text, match the code, which is at the start: `warnings.filterwarnings("ignore", message="QTE-DOTENV")`. Filtering by class, such as `DotenvNotIgnored`, works as before.
-- No message ever holds your token. Text from the exchange, such as a rejection's detail, is flattened to one line in the message and kept as sent in the exception's attribute.
+- No message ever holds your token. Text from the exchange or the history service, such as a rejection's detail, is flattened to one line in the message and kept as sent in the exception's attribute (`detail`, or `message` for a history error), and is withheld if it repeats any part of the token. Text you gave, such as an instrument or a message type, is withheld from the message if it holds the token.
 - A code never changes once released. A code no longer used is listed under [Retired codes](#retired-codes) and never reused.
 
 ## Exit codes
@@ -60,8 +60,8 @@ The last line of a traceback is the class name and then this message. The code i
 
 ### QTE-TOKEN-MALFORMED
 
-- Raised as: `token set` refuses the token.
-- Cause: The token typed or pasted has a space, quote or control character, which no token has. It was probably copied wrongly.
+- Raised as: `token set` refuses the token; `qte_sdk.history.TokenMalformed`, a `ValueError`, from `HistoryClient` for a token an HTTP header cannot carry.
+- Cause: The token typed or pasted has a space, quote or control character, which no token has, or (for `HistoryClient`) a newline, a control character or a letter outside ASCII. It was probably copied wrongly. The message never shows the token.
 - Fix: Copy the token again and run `python -m qte_sdk.token set`.
 
 ### QTE-TOKEN-NO-TERMINAL
@@ -217,6 +217,120 @@ The last line of a traceback is the class name and then this message. The code i
 - Raised as: `qte_sdk.connection.LivenessTimeout`, a `TimeoutError`, with `timeout`. A `ReconnectingSession` retries it.
 - Cause: After the first heartbeat, nothing arrived from the exchange for `liveness_timeout` seconds, so the link was presumed dead and dropped. Orders in flight may or may not have reached the exchange.
 - Fix: Reconnect, then check your resting orders and positions.
+
+### QTE-CONNECT-NO-SESSION
+
+- Raised as: `qte_sdk.reconnect.NotConnected`, a `RuntimeError`, from `ReconnectingSession.send`.
+- Cause: No session was up when the message was sent, before the first `Connected` event or after a `Disconnected` one. The message names the message type. Nothing was sent, and nothing is queued to send later.
+- Fix: Wait for the next `Connected` event, then send it again.
+
+## HISTORY
+
+These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session_state` and `fetch_range`, and by a replay, which raises a download's error as `fetch` does. Every error from a response is a `HistoryError`, with `http_status`, and the service's own `status` word and `message` when the response carried them. The message quotes the service's text, flattened to one line. A network failure, such as `TimeoutError` or `ConnectionRefusedError`, keeps its own type and has no code: check your network and `QTE_HISTORY_URL`.
+
+### QTE-HISTORY-ADDRESS-MISSING
+
+- Raised as: `qte_sdk.history.MissingHistoryURL`, a `ValueError`, from `HistoryClient`.
+- Cause: `HistoryClient` was given no `url=`, and `QTE_HISTORY_URL` is unset or empty. It has no default address, and never reads one from `.env`.
+- Fix: Pass `url=`, or set `QTE_HISTORY_URL` in the environment to the `https://` address the course team gave you.
+
+### QTE-HISTORY-ADDRESS-INVALID
+
+- Raised as: `qte_sdk.history.HistoryAddressInvalid`, a `ValueError`, from `HistoryClient`. The smoke test's `history` check fails with it.
+- Cause: The address is not a well-formed `https://` URL, holds credentials, a query or a fragment, has a port that is not a number, or is a plain `http://` address for another computer (only a test server on your own computer may use `http://`). The client will not send your token there. The message never shows the address, since a mistake could have put the token in it.
+- Fix: Set `QTE_HISTORY_URL`, or pass `url=`, to the `https://` address you were given.
+
+### QTE-HISTORY-PENDING
+
+- Raised as: `qte_sdk.history.HistoryPending`, a `HistoryError`, with `retry_after`.
+- Cause: The session has closed but its data is not ready yet (HTTP 202), and waiting longer would have passed `max_wait` or `max_retries`. It will be ready.
+- Fix: Ask again later, after `retry_after` seconds if it is set, or raise `max_wait`.
+
+### QTE-HISTORY-RATE-LIMITED
+
+- Raised as: `qte_sdk.history.HistoryRateLimited`, a `HistoryError`, with `retry_after`.
+- Cause: Too many requests for your team's token (HTTP 429), and waiting longer would have passed `max_wait` or `max_retries`.
+- Fix: Wait `retry_after` seconds before the next request, and make fewer, larger requests, such as one `fetch_range` for several days.
+
+### QTE-HISTORY-UNAVAILABLE
+
+- Raised as: `qte_sdk.history.HistoryUnavailable`, a `HistoryError`.
+- Cause: The data will never exist (HTTP 404): a date before the service's coverage, a day with no session, or an instrument or channel the service does not know. Asking again does not change that.
+- Fix: Check the date against the calendar, and the instrument and channel against the instruments the exchange lists.
+
+### QTE-HISTORY-NOT-CLOSED
+
+- Raised as: `qte_sdk.history.HistoryNotClosed`, a `HistoryError`.
+- Cause: The session is running now, or lies in the future (HTTP 409). Nothing is served for a session before its close, so the client does not wait.
+- Fix: Ask again after the session's close.
+
+### QTE-HISTORY-NOT-IMPLEMENTED
+
+- Raised as: `qte_sdk.history.HistoryNotImplemented`, a `HistoryError`.
+- Cause: The service does not serve this endpoint yet (HTTP 501). Unlike `QTE-HISTORY-UNAVAILABLE`, a later release of the service may.
+- Fix: Use another endpoint, or ask again after the service is updated.
+
+### QTE-HISTORY-REQUEST-REJECTED
+
+- Raised as: `qte_sdk.history.HistoryRequestRejected`, a `HistoryError`.
+- Cause: The service found the request malformed (HTTP 400), such as a date that does not parse, `to_date` before `from_date`, or a range larger than it allows. The same request fails the same way.
+- Fix: Fix the arguments: dates as `YYYY-MM-DD`, `to_date` not before `from_date`, and a range the service allows.
+
+### QTE-HISTORY-UNAUTHENTICATED
+
+- Raised as: `qte_sdk.history.HistoryUnauthenticated`, a `HistoryError`.
+- Cause: The service did not recognise the token (HTTP 401).
+- Fix: Run `python -m qte_sdk.token check`. If the token is found and still refused, ask the Head of Technology for a new one.
+
+### QTE-HISTORY-FORBIDDEN
+
+- Raised as: `qte_sdk.history.HistoryForbidden`, a `HistoryError`.
+- Cause: The token may not read this data (HTTP 403). The service serves only what your team may see.
+- Fix: Ask the course team whether this data is open to your team.
+
+### QTE-HISTORY-INTERRUPTED
+
+- Raised as: `qte_sdk.history.HistoryInterrupted`, a `HistoryError`, with `bytes_received`.
+- Cause: The connection dropped during a download more often than `max_resumes` allows. The messages already yielded are incomplete, and were not checked against the digest the service stated.
+- Fix: Discard them and fetch again, or raise `max_resumes`.
+
+### QTE-HISTORY-CHANGED
+
+- Raised as: `qte_sdk.history.HistoryChanged`, a `HistoryError`.
+- Cause: A dropped download could not be resumed where it stopped, because the service now serves different data for the request (for `fetch_range`, typically an entry that was pending has become ready).
+- Fix: Discard what was yielded and fetch again from the start.
+
+### QTE-HISTORY-CORRUPT
+
+- Raised as: `qte_sdk.history.HistoryCorrupt`, a `HistoryError`, after the messages were yielded.
+- Cause: What arrived does not match the length or the SHA-256 digest the service stated for it, so the messages already yielded may be wrong.
+- Fix: Discard them and fetch again. If it happens again, tell the course team.
+
+### QTE-HISTORY-BAD-RESPONSE
+
+- Raised as: `qte_sdk.history.HistoryError`, before any message or when resuming.
+- Cause: The response is not one the history service sends: not uncompressed NDJSON, without the identity `ETag`, a range response with no manifest or one that cannot be read, or an answer to a resume that is not the rest of the same data. The client can neither check nor resume it.
+- Fix: Check that `QTE_HISTORY_URL` is the history service's address. If it is, tell the course team.
+
+### QTE-HISTORY-UNEXPECTED-STATUS
+
+- Raised as: `qte_sdk.history.HistoryError`, with `http_status`.
+- Cause: The service answered with an HTTP status this SDK does not know, such as a 500 from the service or a proxy.
+- Fix: Try again later. If it happens again, tell the course team the status.
+
+### QTE-HISTORY-REQUEST-FAILED
+
+- Raised as: `qte_sdk.history.HistoryError`; the message names only the kind of error, with its details withheld.
+- Cause: Sending the request or reading the answer failed with an error other than a network error, such as a malformed status line, so no answer the client could use arrived. Its details are withheld, since they can quote the request's headers.
+- Fix: Try again. If it happens again, check your network and `QTE_HISTORY_URL`.
+
+## REPLAY
+
+### QTE-REPLAY-OUT-OF-ORDER
+
+- Raised as: `qte_sdk.replay.ReplayOutOfOrder`, a `ValueError`, from `replay`, after the messages before it.
+- Cause: A downloaded stream holds a message earlier than the one before it. The replay cannot merge it in order, so it stopped and closed every download. The message names the stream, the date and both times.
+- Fix: Replay without that stream, and tell the course team its date and name.
 
 ## UPDATE
 

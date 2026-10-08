@@ -18,13 +18,26 @@ from typing import Any
 
 import pytest
 from fake_exchange import serve_local
+from test_history import (
+    DAY,
+    FakeHistory,
+    Pending,
+    RateLimited,
+    ReflectingStatusLine,
+    book,
+    collect,
+    etag_of,
+    many_books,
+    serve_history,
+)
+from test_replay import book_at
 from test_resume import Scripted, heartbeat, resume_reject
 from test_session import Server, ack, assert_no_form_of, session_reject, synthetic_token
 from test_token import PRIVATE_FILE, SECOND_DRIVE, answers, windows  # noqa: F401
 from websockets.asyncio.server import serve
 
 import qte_sdk
-from qte_sdk import dotenv, errors, update
+from qte_sdk import dotenv, errors, replay, update
 from qte_sdk import token as token_command
 from qte_sdk.connection import (
     ContractVersionMismatch,
@@ -32,8 +45,21 @@ from qte_sdk.connection import (
     LivenessTimeout,
     SessionRejected,
 )
+from qte_sdk.contract.v1.session_pb2 import Auth
 from qte_sdk.dotenv import AddressFileShared, DotenvNotIgnored, TokenFileShared
 from qte_sdk.errors import CODES, RETIRED, QteError, QteWarning, render
+from qte_sdk.history import (
+    HISTORY_URL_ENV_VAR,
+    HistoryAddressInvalid,
+    HistoryClient,
+    HistoryCorrupt,
+    HistoryError,
+    HistoryPending,
+    HistoryUnavailable,
+    MissingHistoryURL,
+    TokenMalformed,
+)
+from qte_sdk.reconnect import NotConnected, ReconnectingSession
 from qte_sdk.session import (
     TOKEN_ENV_VAR,
     TOKEN_FILE_ENV_VAR,
@@ -82,6 +108,7 @@ FIELD_VALUES: dict[str, object] = {
     "status": ", HTTP 401",
     "step": "Ask the Head of Technology about your team's access",
     "strerror": "Permission denied",
+    "type": "new_order",
     "version": "1.1.1",
     "what": "the connection closed before session_ack (close code 1011)",
     "where": "token=, QTE_TOKEN, QTE_TOKEN_FILE or ./.env",
@@ -233,6 +260,14 @@ def test_server_text_is_flattened_to_one_line():
         (ContractVersionMismatch(1001, None), SessionRejected),
         (LivenessTimeout(1.0), TimeoutError),
         (SessionTimeout("not acknowledged", seconds=1.0), TimeoutError),
+        (MissingHistoryURL("no address"), ValueError),
+        (HistoryAddressInvalid("bad address"), ValueError),
+        (TokenMalformed("bad token"), ValueError),
+        (HistoryError("failed"), Exception),
+        (HistoryPending("not ready", retry_after=None), HistoryError),
+        (HistoryCorrupt("wrong digest"), HistoryError),
+        (replay.ReplayOutOfOrder("went back"), ValueError),
+        (NotConnected("no session"), RuntimeError),
     ],
 )
 def test_coded_errors_keep_their_bases(error: BaseException, base: type):
@@ -515,7 +550,8 @@ def token_unchecked(token: str, ctx: Context) -> str:
 
 
 def token_malformed(token: str, ctx: Context) -> str:
-    return ctx.cli(
+    history_client = raised(lambda: HistoryClient("https://history.example.test", token + "\n"))
+    return history_client + ctx.cli(
         ["set"], ask=answers(URL), ask_secret=answers(f"{token} x"), interactive=lambda: True
     )
 
@@ -692,6 +728,162 @@ def update_available(token: str, ctx: Context) -> str:
     return update.check_for_update().message
 
 
+class Answers(FakeHistory):
+    """Answers every request with one HTTP status and an error body."""
+
+    answer_with = 403
+
+    def respond(self, handler) -> None:
+        self.requests.append((handler.path, {}))
+        self.json(handler, self.answer_with, "some_word")
+
+
+# Server text that repeats the token the request presented, over two lines.
+ECHO = "bad token {auth}\nsecond line"
+
+
+async def fetched(fake: FakeHistory, token: str, *args: str, **options: Any) -> str:
+    """What the error from fetching `args` (by default the TEST book) shows."""
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token, **options)
+        return await raised_async(lambda: collect(client.fetch(*(args or (DAY, "TEST", "book")))))
+
+
+def history_address_missing(token: str, ctx: Context) -> str:
+    ctx.monkeypatch.delenv(HISTORY_URL_ENV_VAR, raising=False)
+    return raised(lambda: HistoryClient(token=token))
+
+
+def history_address_invalid(token: str, ctx: Context) -> str:
+    return "\n".join(
+        raised(lambda url=url: HistoryClient(url, token))
+        for url in (
+            f"https://127.0.0.1:{token}/",
+            f"https://user:{token}@history.example.test",
+            f"https://history.example.test/?token={token}",
+            f"http://{token}.example.test",
+            f"{token}://history.example.test",
+            f"https://[{token}]/",
+        )
+    )
+
+
+async def history_pending(token: str, ctx: Context) -> str:
+    key = (DAY, "TEST", "book")
+    fake = FakeHistory(token, {key: book(1)}, pending={key: Pending(1, None)}, error_message=ECHO)
+    return await fetched(fake, token)
+
+
+async def history_rate_limited(token: str, ctx: Context) -> str:
+    return await fetched(RateLimited(token, error_message=ECHO), token, max_retries=0)
+
+
+async def history_unavailable(token: str, ctx: Context) -> str:
+    return await fetched(FakeHistory(token, error_message=ECHO), token)
+
+
+async def history_not_closed(token: str, ctx: Context) -> str:
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)}, open_dates={DAY})
+    fake.error_message = ECHO
+    return await fetched(fake, token)
+
+
+async def history_not_implemented(token: str, ctx: Context) -> str:
+    return await fetched(FakeHistory(token, error_message=ECHO), token, DAY, "TEST", "reports")
+
+
+async def history_request_rejected(token: str, ctx: Context) -> str:
+    return await fetched(
+        FakeHistory(token, error_message=ECHO), token, "not-a-date", "TEST", "book"
+    )
+
+
+async def history_unauthenticated(token: str, ctx: Context) -> str:
+    # The service echoes the token it was given, which is not the one it expects.
+    return await fetched(FakeHistory(synthetic_token(), error_message=ECHO), token)
+
+
+async def history_forbidden(token: str, ctx: Context) -> str:
+    return await fetched(Answers(token, error_message=ECHO), token)
+
+
+async def history_interrupted(token: str, ctx: Context) -> str:
+    path = f"/v1/history/{DAY}/TEST/book"
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): many_books(10)}, drop_after={path: 100})
+    return await fetched(fake, token, max_resumes=0)
+
+
+async def history_changed(token: str, ctx: Context) -> str:
+    key = (DAY, "TEST", "book")
+    path = f"/v1/history/{DAY}/TEST/book"
+    fake = FakeHistory(token, {key: many_books(20)}, drop_after={path: 100})
+    fake.replace_after_drop[key] = many_books(21)
+    return await fetched(fake, token)
+
+
+async def history_corrupt(token: str, ctx: Context) -> str:
+    path = f"/v1/history/{DAY}/TEST/book"
+    wrong = etag_of(b"something else")
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)}, etag_override={path: wrong})
+    return await fetched(fake, token)
+
+
+async def history_bad_response(token: str, ctx: Context) -> str:
+    path = f"/v1/history/{DAY}/TEST/book"
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): book(1)}, etag_override={path: None})
+    return await fetched(fake, token)
+
+
+async def history_unexpected_status(token: str, ctx: Context) -> str:
+    fake = Answers(token, error_message=ECHO)
+    fake.answer_with = 418
+    return await fetched(fake, token)
+
+
+async def history_request_failed(token: str, ctx: Context) -> str:
+    # The service's status line repeats the token.
+    with ReflectingStatusLine() as url:
+        client = HistoryClient(url, token)
+        return await raised_async(lambda: collect(client.fetch(DAY, "TEST", "book")))
+
+
+async def replay_out_of_order(token: str, ctx: Context) -> str:
+    back = book_at(1000, "AAA") + book_at(2000, "AAA") + book_at(1500, "AAA")
+    named = book_at(1000, token) + book_at(500, token)  # an instrument named with the token
+    key = (DAY, token, "book")
+    fake = FakeHistory(token, {(DAY, "AAA", "book"): back, key: named})
+    fake.status_override[key] = "ready"
+    parts = []
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        for instrument in ("AAA", token):
+            items = replay.replay(client, DAY, [instrument], ["book"])
+            try:
+                await collect(items)
+            except replay.ReplayOutOfOrder as error:
+                if instrument == "AAA":
+                    parts.append(shown(error))
+                else:
+                    # The message only: the replay's own frames hold the messages it read,
+                    # which name the instrument the caller asked for.
+                    assert errors.WITHHELD in str(error)
+                    parts.extend((str(error), repr(error), repr(vars(error))))
+    assert len(parts) == 4
+    return "\n".join(parts)
+
+
+async def connect_no_session(token: str, ctx: Context) -> str:
+    session = ReconnectingSession("ws://127.0.0.1:9", token)
+    parts = []
+    for type_ in ("auth", f"bad {token}"):
+        try:
+            await session.send(type_, Auth(token=token))
+        except NotConnected as error:
+            parts.append(shown(error))
+    assert errors.WITHHELD in parts[1]
+    return "\n".join(parts)
+
+
 CASES: dict[str, Case] = {
     errors.TOKEN_MISSING: token_missing,
     errors.TOKEN_FILE_UNREADABLE: token_file_unreadable,
@@ -720,6 +912,24 @@ CASES: dict[str, Case] = {
     errors.SESSION_RESUME_TIMEOUT: session_resume_timeout,
     errors.CONNECT_HANDSHAKE_FAILED: connect_handshake_failed,
     errors.CONNECT_LIVENESS_TIMEOUT: connect_liveness_timeout,
+    errors.CONNECT_NO_SESSION: connect_no_session,
+    errors.HISTORY_ADDRESS_MISSING: history_address_missing,
+    errors.HISTORY_ADDRESS_INVALID: history_address_invalid,
+    errors.HISTORY_PENDING: history_pending,
+    errors.HISTORY_RATE_LIMITED: history_rate_limited,
+    errors.HISTORY_UNAVAILABLE: history_unavailable,
+    errors.HISTORY_NOT_CLOSED: history_not_closed,
+    errors.HISTORY_NOT_IMPLEMENTED: history_not_implemented,
+    errors.HISTORY_REQUEST_REJECTED: history_request_rejected,
+    errors.HISTORY_UNAUTHENTICATED: history_unauthenticated,
+    errors.HISTORY_FORBIDDEN: history_forbidden,
+    errors.HISTORY_INTERRUPTED: history_interrupted,
+    errors.HISTORY_CHANGED: history_changed,
+    errors.HISTORY_CORRUPT: history_corrupt,
+    errors.HISTORY_BAD_RESPONSE: history_bad_response,
+    errors.HISTORY_UNEXPECTED_STATUS: history_unexpected_status,
+    errors.HISTORY_REQUEST_FAILED: history_request_failed,
+    errors.REPLAY_OUT_OF_ORDER: replay_out_of_order,
     errors.UPDATE_AVAILABLE: update_available,
 }
 
@@ -883,3 +1093,41 @@ def test_check_interrupted_while_printing_keeps_the_token_out_of_its_locals(
     with pytest.raises(BrokenPipeError) as caught:
         token_command.main(["check"])
     assert_no_form_of(token, shown(caught.value))
+
+
+# History, replay and reconnect
+
+
+@pytest.mark.parametrize("between", ["​", "\x01"], ids=["zero-width", "control"])
+async def test_a_history_message_that_flattens_into_the_token_is_withheld(between):
+    token = synthetic_token()
+    # No run of the token as sent, but all of it once the message is flattened.
+    fake = FakeHistory(token, error_message=between.join(token))
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryUnavailable) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert caught.value.message is None
+    assert str(caught.value).startswith(
+        "QTE-HISTORY-UNAVAILABLE: the data is unavailable and will never exist (HTTP 404). "
+    )
+    assert_no_form_of(token, shown(caught.value))
+
+
+def test_withheld_replaces_only_the_fields_that_hold_the_token():
+    fields = errors.withheld(lambda text: "secret" in text, a="a\tsecret", b="plain", c=3)
+    assert fields == {"a": errors.WITHHELD, "b": "plain", "c": 3}
+
+
+def test_a_history_error_keeps_its_arguments_and_attributes():
+    error = HistoryError(
+        "unexpected response (HTTP 418): line one\nline two",
+        http_status=418,
+        message="line one\nline two",
+        code=errors.HISTORY_UNEXPECTED_STATUS,
+    )
+    assert error.args == ("unexpected response (HTTP 418): line one\nline two",)
+    assert error.message == "line one\nline two" and error.http_status == 418
+    assert str(error).startswith(
+        "QTE-HISTORY-UNEXPECTED-STATUS: unexpected response (HTTP 418): line one line two. "
+    )
+    assert HistoryError("failed").code == errors.HISTORY_REQUEST_FAILED
