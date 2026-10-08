@@ -1151,7 +1151,8 @@ def _handle_if_ready(handler: logging.StreamHandler, fd: int, record: logging.Lo
     between this check and that write, or the wrapper holds back output of the program's
     own that it writes with the line (rich keeps a partial line until it ends): then the
     write waits holding the handler's lock, and the exit waits for it, as for any write to
-    a full pipe."""
+    a full pipe. As with a direct write, a `StreamHandler` subclass's own `emit` is not
+    called; its filters, formatter and terminator are used."""
     try:
         passed = handler.filter(record)
         if not passed:
