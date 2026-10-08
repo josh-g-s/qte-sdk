@@ -49,9 +49,9 @@ reason, then a summary:
 It exits with status 0 when no check failed, 1 when one did, and 2 when it found no token
 or no usable address, and so could not connect. The output never shows the token or any
 account figure; the one exception is a fill of the test order, whose quantity and price
-it names so you know the position your team then holds. A FAIL that quotes an SDK error
-or warning starts with its code, such as QTE-TOKEN-MISSING: docs/errors.md says what each
-means, and lists these exit codes beside those of the SDK's own commands.
+it names so you know the position your team then holds. A FAIL caused by an SDK error or
+warning gives its code, such as QTE-TOKEN-MISSING: docs/errors.md says what each means,
+and lists these exit codes beside those of the SDK's own commands.
 
 The test order. With --place-test-order --strat-id ID --tick DOLLARS, and only while the
 market session is OPEN and no exchange outage is in force, it places one limit buy of one
@@ -1513,6 +1513,19 @@ async def clean_up(watcher: Watcher, order: ProbeOrder, seconds: float) -> None:
 # History
 
 
+def code_of(error: BaseException) -> str | None:
+    """An SDK error's code, such as QTE-SESSION-REJECTED, or None for an error that has
+    none (or one from an SDK too old to give codes)."""
+    code = getattr(error, "code", None)
+    return code if isinstance(code, str) and code.startswith("QTE-") else None
+
+
+def code_prefix(error: BaseException) -> str:
+    """`<CODE>: ` for an SDK error that has a code, else nothing."""
+    code = code_of(error)
+    return f"{code}: " if code else ""
+
+
 async def first_past_book(
     client: HistoryClient, day: str, instrument: str, seconds: float
 ) -> tuple[str, str]:
@@ -1535,9 +1548,11 @@ async def first_past_book(
     except HistoryNotImplemented:
         return SKIP, f"session {day}: the service does not serve books yet"
     except HistoryError as error:
-        # Its kind and HTTP status only: its text carries the service's own words.
+        # Its kind, HTTP status and code only: its text carries the service's own words.
         status = f", HTTP {error.http_status}" if error.http_status is not None else ""
-        return FAIL, f"session {day}: refused ({type(error).__name__}{status})"
+        code = code_of(error)
+        coded = f", {code}" if code else ""
+        return FAIL, f"session {day}: refused ({type(error).__name__}{status}{coded})"
     except TimeoutError:
         return FAIL, f"session {day}: no answer within {seconds:g} s"
     except Exception as error:
@@ -1580,9 +1595,9 @@ async def check_history(
             "it must be the service's https address (http only on this machine), with no "
             "credentials, query or fragment, and the token printable ASCII"
         )
-        report.add(
-            FAIL, "history", f"cannot use {HISTORY_URL_ENV_VAR} ({type(error).__name__}): {why}"
-        )
+        code = code_of(error)
+        kind = type(error).__name__ + (f", {code}" if code else "")
+        report.add(FAIL, "history", f"cannot use {HISTORY_URL_ENV_VAR} ({kind}): {why}")
         return
     for instrument in instruments:
         status, reason = await first_past_book(
@@ -1684,17 +1699,17 @@ async def run_checks(url: str, args: argparse.Namespace, report: Report) -> None
     # Only the error's kind, or the exchange's reason name, is shown: an error's text can
     # repeat the address (with anything a mistake put in it), and a refusal's free-text
     # detail is the exchange's own words.
+    # An SDK error's code says what to do (see docs/errors.md).
     except ContractVersionMismatch as error:
         failure = (
-            f"the exchange does not serve this SDK's contract version ({error.reason_name}): "
-            "update the SDK"
+            f"{code_prefix(error)}the exchange does not serve this SDK's contract version "
+            f"({error.reason_name}): update the SDK"
         )
     except SessionRejected as error:
-        failure = f"the exchange refused the session: {error.reason_name}"
+        failure = f"{code_prefix(error)}the exchange refused the session: {error.reason_name}"
     except Exception as error:
-        # An SDK error's code says what to do (see docs/errors.md); its text is not shown.
-        code = getattr(error, "code", None)
-        coded = f", {code}" if isinstance(code, str) and code.startswith("QTE-") else ""
+        code = code_of(error)
+        coded = f", {code}" if code else ""
         failure = f"could not connect ({type(error).__name__}{coded})"
     if failure is not None:
         report.add(FAIL, "connect", failure)

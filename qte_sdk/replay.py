@@ -48,9 +48,12 @@ after the items before it: `HistoryUnavailable` for an instrument or channel the
 does not know or a day with no session, `HistoryNotClosed` for a session that has not
 closed, `HistoryPending` if the data is still not ready after the client's `max_wait`,
 and so on (see `qte_sdk.history`). A stream whose times go back, one message earlier
-than the one before it, raises `ReplayOutOfOrder` (a `ValueError`) naming the stream and
-both times, after the items before it, since the replay cannot merge it in order. The
-other downloads are closed when any of these is raised.
+than the one before it, raises `ReplayOutOfOrder` (a `ValueError`, code
+`QTE-REPLAY-OUT-OF-ORDER`) naming the stream and both times, after the items before it,
+since the replay cannot merge it in order. The other downloads are closed when any of
+these is raised. docs/errors.md says what each code means and how to fix it. An error
+leaves the replay without the traceback it gathered inside it, whose frames hold the
+messages read, as one from `fetch` does.
 
 Stopping. Use the replay inside `aclosing`, as above: leaving the block, by `break`, an
 error or the end of the session, closes every download.
@@ -71,8 +74,11 @@ from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from contextlib import AsyncExitStack, aclosing
 from datetime import date
 
+from qte_sdk import errors as _errors
 from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, SessionState, Trades
-from qte_sdk.history import HistoryClient, HistoryItem, _date_text
+from qte_sdk.errors import QteError
+from qte_sdk.history import HistoryClient, HistoryItem, _date_text, _Guarded
+from qte_sdk.session import _text_holds_token
 
 __all__ = ["CHANNELS", "ReplayOutOfOrder", "replay"]
 
@@ -137,13 +143,17 @@ def replay(
         for instrument in (sorted(set(names)) if channel in _PER_INSTRUMENT else [""])
     ]
     # _date_text refuses a datetime, which is also a date.
-    return _replay(client, _date_text(session_date), streams, speed)
+    # Errors leave without the traceback gathered inside the replay, whose frames hold the
+    # messages it read and the instruments asked for.
+    return _Guarded(_replay(client, _date_text(session_date), streams, speed))
 
 
-class ReplayOutOfOrder(ValueError):
+class ReplayOutOfOrder(QteError, ValueError):
     """A downloaded stream went back in time: one of its messages is earlier than the one
     before it. The replay cannot merge such a stream, so it stops and closes every download
-    rather than deliver messages out of order."""
+    rather than deliver messages out of order. Code `QTE-REPLAY-OUT-OF-ORDER`."""
+
+    code = _errors.REPLAY_OUT_OF_ORDER
 
 
 class _Stream:
@@ -185,12 +195,7 @@ async def _replay(
         if moment is None:
             moment = stream.last  # kept just after the message before it in its stream
         elif moment < stream.last:
-            channel = CHANNELS[stream.rank]
-            where = channel if channel == "session_state" else f"{channel} of {stream.instrument}"
-            raise ReplayOutOfOrder(
-                f"the {where} on {session_date} goes back in time: a message at {moment} "
-                f"follows one at {stream.last}"
-            )
+            raise _out_of_order(client, session_date, stream, moment)
         else:
             stream.last = moment
         heapq.heappush(heap, (moment, stream.rank, stream.instrument, next(counter), item, stream))
@@ -216,6 +221,29 @@ async def _replay(
                         await _sleep(wait)
             yield item
             await advance(stream)
+
+
+def _out_of_order(
+    client: HistoryClient, session_date: str, stream: _Stream, moment: int
+) -> ReplayOutOfOrder:
+    """The error for a message at `moment` that follows a later one in `stream`. The
+    instrument is the caller's text, so it is withheld if it holds the token."""
+    channel = CHANNELS[stream.rank]
+    where = channel if channel == "session_state" else f"{channel} of {stream.instrument}"
+    where = f"{where} on {session_date}"
+    what = f"a message at {moment} follows one at {stream.last}"
+    secret = getattr(client, "_secret", None)
+    fields = _errors.withheld(
+        lambda shown: secret is not None and _text_holds_token(shown, secret),
+        where=where,
+        what=what,
+    )
+    # The arguments keep the text as given, unless it was withheld.
+    if fields["where"] == _errors.WITHHELD:
+        where = _errors.WITHHELD
+    if fields["what"] == _errors.WITHHELD:
+        what = _errors.WITHHELD
+    return ReplayOutOfOrder(f"the {where} goes back in time: {what}", fields=fields)
 
 
 def _time_of(item: HistoryItem) -> int | None:

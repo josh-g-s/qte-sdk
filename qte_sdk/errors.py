@@ -65,6 +65,26 @@ SESSION_RESUME_TIMEOUT = "QTE-SESSION-RESUME-TIMEOUT"
 # CONNECT
 CONNECT_HANDSHAKE_FAILED = "QTE-CONNECT-HANDSHAKE-FAILED"
 CONNECT_LIVENESS_TIMEOUT = "QTE-CONNECT-LIVENESS-TIMEOUT"
+CONNECT_NO_SESSION = "QTE-CONNECT-NO-SESSION"
+# HISTORY
+HISTORY_ADDRESS_MISSING = "QTE-HISTORY-ADDRESS-MISSING"
+HISTORY_ADDRESS_INVALID = "QTE-HISTORY-ADDRESS-INVALID"
+HISTORY_PENDING = "QTE-HISTORY-PENDING"
+HISTORY_RATE_LIMITED = "QTE-HISTORY-RATE-LIMITED"
+HISTORY_UNAVAILABLE = "QTE-HISTORY-UNAVAILABLE"
+HISTORY_NOT_CLOSED = "QTE-HISTORY-NOT-CLOSED"
+HISTORY_NOT_IMPLEMENTED = "QTE-HISTORY-NOT-IMPLEMENTED"
+HISTORY_REQUEST_REJECTED = "QTE-HISTORY-REQUEST-REJECTED"
+HISTORY_UNAUTHENTICATED = "QTE-HISTORY-UNAUTHENTICATED"
+HISTORY_FORBIDDEN = "QTE-HISTORY-FORBIDDEN"
+HISTORY_INTERRUPTED = "QTE-HISTORY-INTERRUPTED"
+HISTORY_CHANGED = "QTE-HISTORY-CHANGED"
+HISTORY_CORRUPT = "QTE-HISTORY-CORRUPT"
+HISTORY_BAD_RESPONSE = "QTE-HISTORY-BAD-RESPONSE"
+HISTORY_UNEXPECTED_STATUS = "QTE-HISTORY-UNEXPECTED-STATUS"
+HISTORY_REQUEST_FAILED = "QTE-HISTORY-REQUEST-FAILED"
+# REPLAY
+REPLAY_OUT_OF_ORDER = "QTE-REPLAY-OUT-OF-ORDER"
 # UPDATE: the same value as `qte_sdk.update.UPDATE_AVAILABLE`.
 UPDATE_AVAILABLE = "QTE-UPDATE-AVAILABLE"
 
@@ -117,10 +137,11 @@ CODES: dict[str, Entry] = {
         f"Keep the file in {_PROFILE}",
     ),
     TOKEN_MALFORMED: Entry(
-        "the token has a space, quote or control character, which a token never has",
-        "It was probably copied wrongly, and the exchange would refuse it",
+        "the token has a character no token has, such as a space, a quote, a control "
+        "character or a letter outside ASCII",
+        "It was probably copied wrongly, and would be refused",
         f"Copy it again and run {_TOKEN_SET}",
-        "The token entered holds a character no token has",
+        "The token entered, or the one HistoryClient was given, holds a character no token has",
         "Copy the token again",
     ),
     TOKEN_NO_TERMINAL: Entry(
@@ -289,6 +310,142 @@ CODES: dict[str, Entry] = {
         "Nothing arrived for liveness_timeout seconds after the first heartbeat",
         "Reconnect",
     ),
+    CONNECT_NO_SESSION: Entry(
+        "no session is up, so {type} was not sent",
+        "Nothing is queued to send later",
+        "Wait for the next Connected event, then send it again",
+        "ReconnectingSession.send was called while no session was up",
+        "Send it again after the next Connected event",
+    ),
+    HISTORY_ADDRESS_MISSING: Entry(
+        "no history service address was given",
+        "HistoryClient has no default address, and does not read one from .env",
+        "Pass url=, or set QTE_HISTORY_URL in the environment to the https:// address the "
+        "course team gave you",
+        "HistoryClient was given no url=, and QTE_HISTORY_URL is unset or empty",
+        "Set QTE_HISTORY_URL",
+    ),
+    HISTORY_ADDRESS_INVALID: Entry(
+        "the history service address {problem}",
+        "The client will not send your token there",
+        "Set QTE_HISTORY_URL, or pass url=, to the https:// address the course team gave you",
+        "The address is not an https:// URL (http:// only to this computer), or holds "
+        "credentials, a query, a fragment or a port that is not a number",
+        "Use the https:// address you were given",
+    ),
+    HISTORY_PENDING: Entry(
+        "{what}",
+        "It will be ready, but waiting longer would have passed max_wait or max_retries",
+        "Ask again later, or raise max_wait",
+        "The session has closed but its data is not ready yet (HTTP 202)",
+        "Ask again later",
+    ),
+    HISTORY_RATE_LIMITED: Entry(
+        "{what}",
+        "The service is limiting your team's requests",
+        "Wait as long as retry_after says before the next request, and fetch more per "
+        "request with fetch_range",
+        "Too many requests for this token (HTTP 429), past max_wait or max_retries",
+        "Wait, then make fewer, larger requests",
+    ),
+    HISTORY_UNAVAILABLE: Entry(
+        "{what}",
+        "Asking again will not change that",
+        "Check the date, instrument and channel against the calendar and the instruments "
+        "the exchange lists",
+        "A date before the service's coverage, a day with no session, or an instrument or "
+        "channel the service does not know (HTTP 404)",
+        "Ask for data that exists",
+    ),
+    HISTORY_NOT_CLOSED: Entry(
+        "{what}",
+        "Nothing is served for a session before its close",
+        "Ask again after the session's close",
+        "The session is running now, or lies in the future (HTTP 409)",
+        "Ask again after the close",
+    ),
+    HISTORY_NOT_IMPLEMENTED: Entry(
+        "{what}",
+        "A later release of the service may serve it",
+        "Use another endpoint, or ask again after the service is updated",
+        "The service does not serve this endpoint yet (HTTP 501)",
+        "Use another endpoint",
+    ),
+    HISTORY_REQUEST_REJECTED: Entry(
+        "{what}",
+        "The same request fails the same way",
+        "Fix the arguments: dates as YYYY-MM-DD, to_date not before from_date, and a range "
+        "the service allows",
+        "The service found the request malformed (HTTP 400)",
+        "Fix the arguments",
+    ),
+    HISTORY_UNAUTHENTICATED: Entry(
+        "{what}",
+        "The service uses your team token",
+        f"Run {_TOKEN_CHECK}; if the token is found and still refused, ask the Head of "
+        "Technology for a new one",
+        "The service did not recognise the token (HTTP 401)",
+        f"Run {_TOKEN_CHECK}",
+    ),
+    HISTORY_FORBIDDEN: Entry(
+        "{what}",
+        "The service serves only what your team may see",
+        "Ask the course team whether this data is open to your team",
+        "The token may not read this data (HTTP 403)",
+        "Ask the course team",
+    ),
+    HISTORY_INTERRUPTED: Entry(
+        "{what}",
+        "The messages already yielded are incomplete and were not checked against the digest",
+        "Discard them and fetch again, or raise max_resumes",
+        "The connection dropped during a download more often than max_resumes allows",
+        "Fetch again",
+    ),
+    HISTORY_CHANGED: Entry(
+        "{what}",
+        "What was already yielded cannot be continued",
+        "Discard it and fetch again from the start",
+        "A dropped download could not be resumed, since the service now serves different "
+        "data for the request",
+        "Fetch again from the start",
+    ),
+    HISTORY_CORRUPT: Entry(
+        "{what}",
+        "The messages already yielded may be wrong",
+        "Discard them and fetch again; if it happens again, tell the course team",
+        "What arrived does not match the length or SHA-256 digest the service stated",
+        "Fetch again",
+    ),
+    HISTORY_BAD_RESPONSE: Entry(
+        "{what}",
+        "The client cannot check or resume such a response, so it stopped",
+        "Check that QTE_HISTORY_URL is the history service's address; if it is, tell the "
+        "course team",
+        "The response is not one the history service sends: not uncompressed NDJSON, no "
+        "identity ETag, no readable manifest, or a resume that is not the rest of the data",
+        "Check QTE_HISTORY_URL",
+    ),
+    HISTORY_UNEXPECTED_STATUS: Entry(
+        "{what}",
+        "The client does not know what this status means",
+        "Try again later; if it happens again, tell the course team the status",
+        "The service answered with an HTTP status this SDK does not know",
+        "Try again later",
+    ),
+    HISTORY_REQUEST_FAILED: Entry(
+        "{what}",
+        "The request failed before the service gave an answer the client could use",
+        "Try again; if it happens again, check your network and QTE_HISTORY_URL",
+        "Sending the request or reading the answer failed with an error other than a network error",
+        "Try again",
+    ),
+    REPLAY_OUT_OF_ORDER: Entry(
+        "the {where} goes back in time: {what}",
+        "The replay cannot merge it, so it stopped and closed every download",
+        "Replay without that stream, and tell the course team its date and name",
+        "A downloaded stream holds a message earlier than the one before it",
+        "Replay without that stream",
+    ),
     UPDATE_AVAILABLE: Entry(
         "qte-sdk {version} is behind {latest}",
         "A newer release is out",
@@ -355,6 +512,7 @@ FIELDS = frozenset(
         "status",
         "step",
         "strerror",
+        "type",
         "version",
         "what",
         "where",
@@ -383,10 +541,14 @@ def flatten(text: object) -> str:
     return " ".join(flat.split())
 
 
+# Control characters, and the line and paragraph separators: each would break a line.
+_BREAKS = frozenset({"Cc", "Zl", "Zp"})
+
+
 def one_line(text: str) -> str:
-    """`text` with each line break, tab or other control character made a space: how a
-    message shows a field such as a path."""
-    return "".join(" " if unicodedata.category(c) == "Cc" else c for c in text)
+    """`text` with each line break, tab or other control character, and each line or
+    paragraph separator, made a space: how a message shows a field such as a path."""
+    return "".join(" " if unicodedata.category(c) in _BREAKS else c for c in text)
 
 
 # What a field is shown as when `withhold` says it holds the token.
@@ -433,6 +595,13 @@ def _shown(value: object, withhold: Callable[[str], bool] | None) -> object:
     if withhold is not None and (withhold(text) or withhold(shown)):
         return WITHHELD
     return shown
+
+
+def withheld(withhold: Callable[[str], bool], /, **fields: Any) -> dict[str, Any]:
+    """`fields` as a message shows them, each one `withhold` says yes to, as given or in
+    one line, replaced by `WITHHELD`. For an exception's `fields`, which its message renders
+    later with nothing to ask: the caller holds the token now, and the exception must not."""
+    return {name: _shown(value, withhold) for name, value in fields.items()}
 
 
 def render(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any) -> str:

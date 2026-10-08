@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.22
+**Version:** 1.23
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. You can copy it into your own project so your agent follows it there too.
 
@@ -17,7 +17,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 
 - The SDK takes the team token from `token=` if you pass one, then the `QTE_TOKEN` environment variable, then the file named by `QTE_TOKEN_FILE`, then `QTE_TOKEN` in a `.env` file in the working directory. It takes the exchange address from the `url` you pass, then `QTE_URL`, then `QTE_URL` in `.env`, so `open_session()` needs neither argument.
 - A `.env` is the recommended place for both. The person creates it by running `python -m qte_sdk.token set` themselves (it needs a terminal and reads the token without echo); `python -m qte_sdk.token check` says where the SDK finds each without showing the token. It must be listed in the project's `.gitignore` and readable only by its owner (`chmod 600 .env`). The SDK refuses a `.env` holding the token that others can read (on Windows it warns when others can read or change it, and the fix is to keep the project under `%USERPROFILE%`) and warns when git does not ignore it: fix the cause, never silence the warning or loosen the check.
-- An SDK error or warning about the token, the address, `.env`, the session or the connection starts with a code such as `QTE-TOKEN-MISSING` (also in its `code` attribute); look it up in [docs/errors.md](https://github.com/josh-g-s/qte-sdk/blob/main/docs/errors.md), which gives the fix and the exit codes of `token check` (0 fine, 1 must fix, 2 could not tell), the update check and the smoke test.
+- Every SDK error or warning, about the token, the address, `.env`, the session, the connection, the history service or a replay, starts with a code such as `QTE-TOKEN-MISSING` or `QTE-HISTORY-PENDING` (also in its `code` attribute); look it up in [docs/errors.md](https://github.com/josh-g-s/qte-sdk/blob/main/docs/errors.md), which gives the fix and the exit codes of `token check` (0 fine, 1 must fix, 2 could not tell), the update check and the smoke test.
 - Never write the token into source code, a notebook, a config file that is committed, a test, a log, printed output or a screenshot.
 - An agent must never ask for the token in chat, print it, read or display the contents of `.env` or a token file, or add code that logs it. If you find a token anywhere other than a private, git-ignored `.env` or token file, such as in a tracked file or in output, stop and tell the person to have it replaced.
 - The SDK keeps the token out of its own logs and errors. Do not defeat that, for example by logging request headers or the raw connection.

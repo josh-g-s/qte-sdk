@@ -2660,7 +2660,9 @@ async def test_the_smoke_test_never_repeats_an_unusable_history_address():
     assert code == 1, out + err
     status, reason = found["history"]
     assert status == "FAIL"
-    assert reason.startswith("cannot use QTE_HISTORY_URL (ValueError)")
+    assert reason.startswith(
+        "cannot use QTE_HISTORY_URL (HistoryAddressInvalid, QTE-HISTORY-ADDRESS-INVALID)"
+    )
     assert secret not in out + err
 
 
@@ -3120,11 +3122,14 @@ async def test_the_smoke_test_places_an_order_only_when_asked_in_full(
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
-        ("TEAM_DISABLED", "the exchange refused the session: TEAM_DISABLED"),
+        (
+            "TEAM_DISABLED",
+            "QTE-SESSION-REJECTED: the exchange refused the session: TEAM_DISABLED",
+        ),
         (
             "VERSION_MISMATCH",
-            "the exchange does not serve this SDK's contract version (VERSION_MISMATCH): "
-            "update the SDK",
+            "QTE-SESSION-VERSION-MISMATCH: the exchange does not serve this SDK's contract "
+            "version (VERSION_MISMATCH): update the SDK",
         ),
     ],
 )
@@ -3183,7 +3188,7 @@ async def test_the_smoke_test_shows_a_history_error_by_kind_and_status_only():
     assert code == 1, out + err
     assert found["history:TEST"] == (
         "FAIL",
-        "session 2026-10-02: refused (HistoryUnavailable, HTTP 404)",
+        "session 2026-10-02: refused (HistoryUnavailable, HTTP 404, QTE-HISTORY-UNAVAILABLE)",
     )
     assert words not in out + err
 
