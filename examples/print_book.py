@@ -61,6 +61,7 @@ from qte_sdk.units import to_decimal
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Print the book of one instrument.")
+    parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     parser.add_argument(
         "--instrument",
         default=os.environ.get("QTE_INSTRUMENT", "AAPL"),
