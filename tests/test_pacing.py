@@ -1244,3 +1244,82 @@ async def test_every_reject_on_a_lowered_window_starts_its_clean_minute_again(wa
     sim.now = 64.5 + 60.0 + 2
     await send_one(sender, "new", "c")
     assert pacer.limits["burst"] == 88
+
+
+# Follow-ups (#205)
+
+
+async def lowered_sustained(sim: Sim, pacer: Pacer, sender) -> float:
+    """Watch a minute of quiet cancels, then a reject another connection caused: the
+    sustained limit falls from 960 to 480. Returns the time of the reject."""
+    for n in range(11):
+        await send_one(sender, "cancel", f"q{n}")
+        await sim.sleep(6.0)
+    pacer.observe(reject(SUSTAINED, "elsewhere"))
+    assert pacer.limits["sustained"] == 480
+    return sim.now
+
+
+async def fill_lowered_window(sim: Sim, pacer: Pacer, sender, lowered: float) -> None:
+    """After the drain and the first clean minute (528), wait until 100 s after the reject,
+    then fill the window to 528. Its oldest stamp expires 160 s after the reject, but the
+    next clean minute ends at 120 s, raising the limit to 581."""
+    await sim.sleep(lowered + 100.0 - sim.now)
+    assert pacer.limits["sustained"] == 528
+    await blast(sender, 528, prefix="f")
+    assert sim.now < lowered + 105
+
+
+async def test_a_held_send_goes_when_a_recovery_raise_makes_room(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    wire = Wire(sim)
+    sender = pacer.wrap(wire)
+    lowered = await lowered_sustained(sim, pacer, sender)
+    await fill_lowered_window(sim, pacer, sender, lowered)
+    await send_one(sender, "cancel", "held")
+    assert wire.sent[-1][0] == pytest.approx(lowered + 120.0)
+    assert pacer.limits["sustained"] == 581
+
+
+async def test_retry_after_is_the_recovery_deadline_when_it_comes_first(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    sender = pacer.wrap(Wire(sim))
+    lowered = await lowered_sustained(sim, pacer, sender)
+    await fill_lowered_window(sim, pacer, sender, lowered)
+    pacer.on_limit = "raise"
+    with pytest.raises(PacingLimit) as caught:
+        await send_one(sender, "cancel", "x")
+    assert caught.value.limit == "sustained"
+    assert caught.value.retry_after == pytest.approx(lowered + 120.0 - sim.now)
+    pacer.on_limit, pacer.max_wait = "wait", 1.0
+    with pytest.raises(PacingLimit) as caught:
+        await send_one(sender, "cancel", "y")
+    assert caught.value.retry_after == pytest.approx(lowered + 120.0 - sim.now)
+
+
+async def test_limits_are_up_to_date_after_an_idle_minute(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    await lowered_sustained(sim, pacer, pacer.wrap(Wire(sim)))
+    sim.now += 60.0  # no send at all
+    assert pacer.limits["sustained"] == 528
+
+
+async def test_eight_cuts_recover_within_25_clean_minutes(warned):
+    # The bound: from 960 eight rejects another connection caused halve the sustained
+    # limit to 4. Each clean minute raises it by a tenth, but by at least 24 (a fortieth of
+    # 960), so it is back to 960 after 25 clean minutes (it took 50 at a tenth alone).
+    sim = Sim()
+    pacer = Pacer(ONE_X, count_foreign=False, clock=sim.clock, sleep=sim.sleep)
+    sim.now = 61.0
+    for n in range(8):
+        pacer.observe(reject(SUSTAINED, f"elsewhere{n}"))
+        sim.now += 1.0
+    assert pacer.limits["sustained"] == 4
+    minutes = 0
+    while pacer.limits["sustained"] < 960 and minutes < 100:
+        sim.now += 60.0
+        minutes += 1
+    assert minutes == 25
