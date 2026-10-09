@@ -1095,10 +1095,11 @@ def _through_a_pipe(
     form: str,
     warns: list[Callable[[], None]],
     handler_filter: Callable[[logging.LogRecord], bool] | None = None,
+    logger_filter: Callable[[logging.LogRecord], bool] | None = None,
 ) -> bytes:
     """What the warnings write to a real pipe, on the `qte_sdk.pacing` logger, through a
     JSON handler as `qte_sdk.logs.configure("json")` adds or a plain text one, with
-    `handler_filter` on that handler when given."""
+    `handler_filter` on that handler and `logger_filter` on the logger when given."""
     from test_update import json_handler, plain_handler, read_all
 
     read, write = os.pipe()
@@ -1109,6 +1110,8 @@ def _through_a_pipe(
     logger = logging.getLogger("qte_sdk.pacing")
     monkeypatch.setattr(logger, "propagate", False)
     logger.addHandler(handler)
+    if logger_filter is not None:
+        logger.addFilter(logger_filter)
     before = set(threading.enumerate())
     try:
         for warn in warns:
@@ -1116,6 +1119,8 @@ def _through_a_pipe(
         _join_warnings(before)
         return read_all(read)
     finally:
+        if logger_filter is not None:
+            logger.removeFilter(logger_filter)
         logger.removeHandler(handler)
         stream.close()
         os.close(read)
@@ -1234,6 +1239,22 @@ def test_the_short_form_passes_the_handlers_filters_too(monkeypatch):
         handler_filter=lambda record: "holds that budget" not in record.getMessage(),
     )
     assert data == b""
+
+
+def test_a_logger_filter_that_redacts_fields_is_not_undone_by_the_short_form(monkeypatch):
+    def redact(record: logging.LogRecord) -> bool:
+        record.fields = {key: "REDACTED" for key in getattr(record, "fields", {})}
+        return True
+
+    data = _through_a_pipe(
+        monkeypatch,
+        "json",
+        [_longest_warnings()[errors.PACING_REJECTED]],
+        logger_filter=redact,
+    )
+    line = json.loads(data)
+    assert "holds that budget" in line["message"]  # the short form
+    assert line["fields"] and set(line["fields"].values()) == {"REDACTED"}
 
 
 @pytest.mark.parametrize("form", list(PIPE_FORMS))

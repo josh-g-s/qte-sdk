@@ -1246,7 +1246,8 @@ def _line(
     then kept as the filter made it (and so dropped, being too long). The logger's filters
     are not run again: they passed the record once, and a filter that keeps state (each
     code once, a rate limit) would refuse the copy, losing the line on a pipe or terminal
-    that a file keeps."""
+    that a file keeps. A handler filter that keeps state can still refuse the copy, and
+    the line is then lost on a pipe or terminal; put such a filter on the logger."""
     text = handler.format(record) + handler.terminator
     data = _encoded(handler, text)
     if len(data) <= _MAX_DIRECT_LINE or shortened is None:
@@ -1256,7 +1257,11 @@ def _line(
     shorter = copy.copy(record)
     shorter.msg, shorter.args = "%s", (shortened.short,)
     if shortened.fields is not None:
-        shorter.fields = shortened.fields
+        # Only the shorter form's keys, with the values the logger's filters left on the
+        # record: a filter that redacted a field is not undone.
+        fields = getattr(record, "fields", None)
+        fields = fields if isinstance(fields, dict) else {}
+        shorter.fields = {key: fields[key] for key in shortened.fields if key in fields}
     passed = handler.filter(shorter)
     if not passed:
         return text, data
