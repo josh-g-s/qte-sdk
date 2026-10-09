@@ -555,6 +555,17 @@ async def test_max_wait_counts_the_time_queued_behind_earlier_sends(warned):
     assert caught.value.retry_after == pytest.approx(0.15)
     assert caught.value.retry_after < pacer.max_wait
     assert [ref for _, _, ref in wire.sent] == ["first"]
+    # A send that finds room when its turn comes is sent, however long it queued.
+    sim = Sim()
+    pacer = Pacer(WIDE, max_wait=2.0, clock=sim.clock, sleep=sim.sleep)
+    wire = Wire(sim, write_time=3.0)
+    sender = pacer.wrap(wire)
+    first = asyncio.ensure_future(send_one(sender, "cancel", "first"))
+    await asyncio.sleep(0)
+    await send_one(sender, "cancel", "second")
+    await first
+    assert [ref for _, _, ref in wire.sent] == ["first", "second"]
+    assert wire.started == [0.0, 3.0]
 
 
 # Waits over a second are logged once

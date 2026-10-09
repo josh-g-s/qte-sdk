@@ -186,7 +186,7 @@ class Budget:
 
 class PacingLimit(QteError, RuntimeError):
     """A paced send found no room and was not sent: with `on_limit="raise"`, or when its
-    whole wait, time queued behind earlier sends included, would pass `max_wait`. Code
+    wait for room, counted from the call, would pass `max_wait`. Code
     `QTE-PACING-LIMIT`. `limit` is the window that is full ("burst", "sustained" or
     "new-order"), `retry_after` the seconds until it has room, if nothing else is sent
     meanwhile, and `type` the message type."""
@@ -318,10 +318,11 @@ class Pacer:
     a bot that would rather requote than send late. In raise mode, the second after each
     connect or reconnect, while the burst window is held (see the module), every paced send
     raises `PacingLimit`. Sends are served first come, first served, so a send waits behind
-    those before it too. `max_wait`, if not None, bounds the whole time one send waits,
-    from the call, time queued behind earlier sends included: a send whose wait for room
-    would take it past `max_wait` raises as "raise" does, though that wait alone is
-    shorter.
+    those before it too. `max_wait`, if not None, bounds the whole time a send waits for
+    room, counted from the call, time queued behind earlier sends included: a send whose
+    wait for room would take it past `max_wait` raises as "raise" does, though that wait
+    alone is shorter. A send that finds room when its turn comes is sent, however long it
+    queued.
     `guard` is how long after the exchange's window a stamp still counts (50 ms).
     `count_foreign` counts the team's messages from other connections (see the module).
     `clock` and `sleep` tell the time and wait; replace them in tests.
