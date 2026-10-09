@@ -1,8 +1,8 @@
 # Using qte-sdk
 
-**Version:** 1.26
+**Version:** 1.27
 
-This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of any release after 1.1.1, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With 1.1.1 or earlier, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
+This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of 1.2.0 or later, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With an earlier release, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
 ## What this is
 
@@ -15,7 +15,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 - Install the SDK into a virtual environment in the person's own project folder, with Python 3.11 or later.
 - macOS and Linux: `python3 -m venv .venv`, then `source .venv/bin/activate`, then `pip install "git+https://github.com/josh-g-s/qte-sdk"`.
 - Windows, in PowerShell: `py -m venv .venv`, then `.venv\Scripts\Activate.ps1`, then the same `pip install`. Use `py`, not `python3`: on Windows `python3` is often only a stub that offers the Microsoft Store. In cmd, activate with `.venv\Scripts\activate.bat`. If PowerShell says running scripts is disabled, the person runs `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. Once the virtual environment is active, `python` and `pip` are its own on every system, so the commands in this file work as written.
-- Without git (pip says it cannot find the command `git`): install a release from its zip, `pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.1.1.zip`. (v1.1.1 predates the message codes and `python -m qte_sdk.agents` below; use the newest release's tag.) Later releases have the same address with their own tag, and `python -m qte_sdk.update` prints it. To stay on one release with git, add its tag: `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"`.
+- Without git (pip says it cannot find the command `git`): install a release from its zip, `pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.2.0.zip`. Later releases have the same address with their own tag, and `python -m qte_sdk.update` prints it. To stay on one release with git, add its tag: `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"`.
 - An install brings the `qte_sdk` package only, with no `docs/` or `examples/` folder, so read the docs by the GitHub links in this file. Clone this repository, or unzip that release's source, only to read or run the worked examples in `examples/`; copy that folder into the project folder that holds `.env` and run the examples from there, since `.env` is read only from the working directory.
 
 ## Updates
@@ -34,7 +34,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 
 ## Message codes
 
-- Codes, `qte_sdk.errors`, `python -m qte_sdk.agents` and the 0, 1, 2 exit codes of `python -m qte_sdk.token check` arrive in the release after 1.1.1. On 1.1.1 or earlier (check with `python -c "import qte_sdk; print(qte_sdk.__version__)"`), none of this section applies and `import qte_sdk.errors` fails: run `python -m qte_sdk.update` first and follow what it prints to update.
+- Codes, `qte_sdk.errors`, `python -m qte_sdk.agents` and the 0, 1, 2 exit codes of `python -m qte_sdk.token check` arrive in 1.2.0. On 1.1.1 or earlier (check with `python -c "import qte_sdk; print(qte_sdk.__version__)"`), none of this section applies and `import qte_sdk.errors` fails: run `python -m qte_sdk.update` first and follow what it prints to update.
 - Every SDK error or warning, about the token, the address, `.env`, the session, the connection, the history service or a replay, starts with a code, such as `QTE-TOKEN-MISSING` or `QTE-HISTORY-PENDING`, and keeps it in its `code` attribute; a log record at WARNING has it as `code` too. The message is one line: `<CODE>: <what happened>. <why it matters>. <next step>.` Follow its next step.
 - Every code is listed, with its cause and fix, in [docs/errors.md](https://github.com/josh-g-s/qte-sdk/blob/main/docs/errors.md): search that page for the code. It also gives the exit codes of `python -m qte_sdk.token check` (0 fine, 1 must fix, 2 could not tell), `python -m qte_sdk.token set`, `python -m qte_sdk.update` and the smoke test.
 - A code names the area it is about after `QTE-`, such as `QTE-TOKEN-`, `QTE-ADDRESS-`, `QTE-DOTENV-`, `QTE-SESSION-`, `QTE-CONNECT-`, `QTE-HISTORY-`, `QTE-REPLAY-`, `QTE-UPDATE-` or `QTE-LOG-`.
