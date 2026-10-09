@@ -40,14 +40,20 @@ A `Pacer` keeps your sends under `headroom` (80% by default) of each cap:
 - On a budget reject (1500, 1501 or 1502) it holds that window's sends until the whole
   window has passed (about a second for the burst cap, a minute for the others), and logs
   `QTE-PACING-REJECTED` once per hold. Messages already sent extend the hold. A reject
-  also proves the cap is at most what the pacer counted in that window, so, once the pacer
-  has watched a full window, it lowers that window's limit to `headroom` of the count for
-  the rest of its life, and the warning says so: with wrong values the pacer settles under
-  the real cap after a drain or two instead of being rejected all session. `limits` shows
-  the limits in force.
+  also suggests the cap may be lower than the values passed, so, once the pacer has
+  watched a full window, it lowers that window's limit: to `headroom` of what it counted
+  there, but never by more than half in one reject, since the count can miss another
+  connection's messages. Each sustained window (a minute) with no budget reject on it
+  raises the limit again by a tenth, up to the limit from the values passed. With values
+  that are too high the pacer settles near the real cap, rejected now and then rather than
+  all session; a reject another connection caused costs a few minutes at a lower limit,
+  never the rest of the session. The warning says what it did, and `limits` shows the
+  limits in force.
 - Each session it paces starts with the burst window held for one second, since it cannot
-  see what the team sent just before. The minute windows it cannot see at all, so after a
-  budget reject wait a full minute before restarting your bot.
+  see what the team sent just before. With `on_limit="raise"`, every paced send in that
+  second, after each connect and reconnect, raises `PacingLimit` (with a `retry_after` of
+  at most a second). The minute windows it cannot see at all, so after a budget reject
+  wait a full minute before restarting your bot.
 - With `count_foreign` (the default), the `accepted` reports of messages your team sent on
   other connections, such as another bot or the web Trade page, count too, at their
   receipt time on the exchange. A resume's replayed reports seed the windows the same way,
@@ -106,6 +112,9 @@ DEFAULT_GUARD = 0.05
 HOLDING_WARNING_AFTER = 1.0
 # The burst window is smoothed over this many equal parts.
 _BURST_PARTS = 4
+# After a budget reject lowers a limit, it is raised again by this share of itself for each
+# sustained window with no budget reject on it, up to its full value.
+_RECOVERY_STEP = 0.1
 # Waits this short count as none: float rounding must not leave a sleep that never ends.
 _EPSILON = 1e-6
 
@@ -214,11 +223,13 @@ class _Window:
     __slots__ = (
         "cap",
         "forgotten_before",
+        "full",
         "guard",
         "held_by_reject",
         "held_until",
         "length",
         "limit",
+        "lowered_at",
         "name",
         "stamps",
     )
@@ -229,6 +240,10 @@ class _Window:
         self.guard = guard
         self.cap = cap
         self.limit = limit
+        # The limit from the values passed, and when the limit was last lowered or raised
+        # again after a budget reject.
+        self.full = limit
+        self.lowered_at = -math.inf
         self.stamps: deque[float] = deque()
         self.held_until = -math.inf
         self.held_by_reject = False
@@ -297,7 +312,9 @@ class Pacer:
     `headroom` is the share of each cap to keep under, 0.5 to 0.95 (0.8 by default).
     `on_limit="wait"` (the default) waits for room; `on_limit="raise"` raises
     `PacingLimit` at once, or `PacingDraining` after a budget reject, and sends nothing, for
-    a bot that would rather requote than send late. `max_wait`, if not None, is the longest
+    a bot that would rather requote than send late. In raise mode, the second after each
+    connect or reconnect, while the burst window is held (see the module), every paced send
+    raises `PacingLimit`. `max_wait`, if not None, is the longest
     one send waits for room once its turn comes; a longer wait raises as "raise" does.
     Sends are served first come, first served, so a send waits behind those before it too.
     `guard` is how long after the exchange's window a stamp still counts (50 ms).
@@ -386,6 +403,26 @@ class Pacer:
 
     def __repr__(self) -> str:
         return f"Pacer({self.budget!r}, headroom={self.headroom}, on_limit={self.on_limit!r})"
+
+    def _recover(self, now: float) -> None:
+        """Raise each lowered limit again by a tenth for each whole sustained window with no
+        budget reject on it, up to its full value."""
+        clean = self.budget.sustained_window
+        for window in (self._burst, self._sustained, self._new_order):
+            full, limit = window.full, window.limit
+            if full is None or limit is None or limit >= full:
+                continue
+            steps = math.floor((now - window.lowered_at) / clean)
+            for _ in range(min(steps, 100)):
+                limit = min(full, limit + self._step(limit))
+            if steps > 0:
+                window.limit = limit
+                window.lowered_at += steps * clean
+        self._smooth.limit = self._part(self._burst.limit or 1)
+
+    @staticmethod
+    def _step(limit: int) -> int:
+        return max(1, math.ceil(limit * _RECOVERY_STEP))
 
     def _limit(self, cap: int) -> int:
         return max(1, math.floor(cap * self.headroom))
@@ -505,6 +542,7 @@ class Pacer:
             # Checked again after every sleep: a timer may wake early or late, and a reject
             # or another connection's report may have arrived meanwhile.
             now = self._clock()
+            self._recover(now)
             wait, window, by_reject = self._blocked(windows, now)
             if wait <= _EPSILON:
                 return
@@ -636,25 +674,39 @@ class Pacer:
             # A reject read while its write was still in progress: not yet in the log.
             end, itself = mine.stamp, (1 if mine.recorded else 0)
         within = window.count_within(end)
-        if within is not None and end - self._watching_since >= window.length:
+        self._recover(now)
+        if (
+            within is not None
+            and window.full is not None
+            and window.limit is not None
+            and end - self._watching_since >= window.length
+        ):
+            # The count can miss another connection's messages still in flight, its rejects
+            # and its late reports, so one reject never lowers a limit by more than half;
+            # but never below what the count shows, either. It is raised again by a tenth
+            # after each clean sustained window (see `_recover`).
             count = within - itself
-            inferred = self._limit(count) if count > 0 else None
-            if inferred is not None and (window.limit is None or inferred < window.limit):
-                window.limit = inferred
+            lowered = max(math.ceil(window.limit / 2), self._limit(count) if count > 0 else 1)
+            if lowered < window.limit:
+                window.limit = lowered
                 if window is self._burst:
-                    self._smooth.limit = self._part(inferred)
-                learned = (count, inferred)
+                    self._smooth.limit = self._part(lowered)
+                learned = (count, lowered)
+            if window.limit < window.full:
+                window.lowered_at = now
         hold = window.length + window.guard
         window.hold(now + hold, by_reject=True)
         if not (fresh or learned):
             return
         if learned is not None:
             count, inferred = learned
-            passed = "none" if window.cap is None else str(window.cap)
+            passed = str(window.cap)
             why = (
-                f"Your {window.name} budget looks like at most {count} per "
-                f"{_per(window.length)}, not the {passed} you passed, so the pacer now keeps "
-                f"under {inferred}"
+                f"Your {window.name} budget may be lower than the {passed} you passed (the "
+                f"pacer counted {count} in the window), so it now keeps under {inferred} per "
+                f"{_per(window.length)}, and raises that again by "
+                f"a tenth after each "
+                f"{_per(self.budget.sustained_window)} with no budget reject"
             )
         else:
             why = (

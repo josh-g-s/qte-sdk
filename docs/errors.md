@@ -347,7 +347,7 @@ These are about your team's message budgets. The exchange counts every `new`, `c
 ### QTE-PACING-LIMIT
 
 - Raised as: `qte_sdk.pacing.PacingLimit`, a `RuntimeError`, with `limit` (`burst`, `sustained` or `new-order`), `retry_after` (seconds) and `type`, from a send through a `Pacer`.
-- Cause: The pacer has `on_limit="raise"`, or its wait would pass `max_wait`, and the window named by `limit` had no room for the message. Nothing was sent.
+- Cause: The pacer has `on_limit="raise"`, or its wait would pass `max_wait`, and the window named by `limit` had no room for the message. Nothing was sent. In raise mode this also happens to every paced send in the first second after each connect or reconnect: a session starts with the burst window held for a second, since the pacer cannot see what your team sent just before (`limit` is `burst`, `retry_after` at most a second).
 - Fix: Send it again after `retry_after` seconds, or send less often. A pacer with `on_limit="wait"` (the default) waits instead.
 
 ### QTE-PACING-DRAINING
@@ -359,8 +359,8 @@ These are about your team's message budgets. The exchange counts every `new`, `c
 ### QTE-PACING-REJECTED
 
 - Raised as: a WARNING from the `qte_sdk.pacing` logger, once per hold.
-- Cause: With a `Pacer`, the exchange rejected a message with code 1500, 1501 or 1502. The pacer's count was wrong: another bot or the web Trade page used the budget, network jitter bunched messages, or the `Budget` values are higher than your team's. It holds that window's messages until the window has passed. When the pacer had watched a whole window, the reject also shows the cap is at most what it counted, so it lowers that window's limit for the rest of its life, and the message says "your ... budget looks like at most N".
-- Fix: Check the `Budget` values against your team's (the table in [Developing your algo](developing-your-algo.md#your-message-budgets)), and split them between bots that share a team.
+- Cause: With a `Pacer`, the exchange rejected a message with code 1500, 1501 or 1502. The pacer's count was wrong: another bot or the web Trade page used the budget, network jitter bunched messages, or the `Budget` values are higher than your team's. It holds that window's messages until the window has passed. When the pacer had watched a whole window, it also lowers that window's limit, to 80% (`headroom`) of what it counted there but never by more than half in one reject, and the message says "your ... budget may be lower than the N you passed (the pacer counted M in the window)". Each minute with no budget reject raises the limit again by a tenth, up to the limit from your values, so a reject another bot caused costs a few minutes at a lower limit.
+- Fix: If it says the pacer counted far fewer than you passed and no other bot shares your team, check the `Budget` values against your team's (the table in [Developing your algo](developing-your-algo.md#your-message-budgets)), and split them between bots that share a team.
 
 ### QTE-PACING-HOLDING
 

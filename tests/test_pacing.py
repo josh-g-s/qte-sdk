@@ -92,7 +92,10 @@ class Sim:
         await woken
 
     async def _drive(self) -> None:
-        # The loop's queue of ready callbacks: empty when every task is waiting.
+        # This depends on `loop._ready`, a private attribute of asyncio's event loop (in
+        # CPython 3.11 to 3.14): its queue of ready callbacks, empty when every task is
+        # waiting. If a Python release renames it, this driver must find another way to
+        # tell that the loop is idle.
         loop = asyncio.get_running_loop()
         while self._due:
             await asyncio.sleep(0)
@@ -630,7 +633,12 @@ async def test_a_report_with_no_exchange_time_counts_now_and_never_later():
 # Learning the cap from a reject (wrong values) and the cold start
 
 
-async def test_wrong_values_four_times_the_real_caps_converge_within_two_drains(warned):
+async def test_four_times_the_real_caps_keep_rejects_bounded_over_ten_minutes(warned):
+    # A bot given 4x values against a 1x exchange, sending as fast as it may for ten
+    # minutes. Each reject halves the limit at most, and each clean minute raises it a
+    # tenth, so the pacer settles near the real caps and probes above them now and then.
+    # The bound asserted: at most 12 drains in ten minutes (6 per window), and at most 3% of
+    # the messages sent rejected; in this run the counts are 10 drains and 2.4%.
     sim = Sim()
     exchange = Exchange(1200, 200)
     pacer = Pacer(
@@ -641,7 +649,7 @@ async def test_wrong_values_four_times_the_real_caps_converge_within_two_drains(
     wire = Wire(sim, pacer, exchange)
     sender = pacer.wrap(wire)
     n = 0
-    while sim.now < 300:
+    while sim.now < 600:
         await send_one(sender, "new", f"r{n}")
         n += 1
     sim.run_until(sim.now + 5)
@@ -649,12 +657,50 @@ async def test_wrong_values_four_times_the_real_caps_converge_within_two_drains(
     for code, message in warned:
         if code == errors.PACING_REJECTED:
             drains["burst" if "burst budget" in message else "sustained"] += 1
-    assert 1 <= drains["burst"] <= 2 and 1 <= drains["sustained"] <= 2, drains
-    assert pacer.limits["burst"] < 200 and pacer.limits["sustained"] < 1200
-    last = max(ts for ts, _ in exchange.rejects)
-    assert last < 120, last  # none after the second drain
-    learned = [m for c, m in warned if "looks like at most" in m]
-    assert learned and "not the 800 you passed" in learned[0]
+    assert 1 <= drains["burst"] <= 6 and 1 <= drains["sustained"] <= 6, drains
+    assert len(exchange.rejects) <= 0.03 * len(wire.sent), (len(exchange.rejects), n)
+    # Settled near the real caps, far below the 4x limits of 640 and 3840.
+    assert pacer.limits["burst"] <= 250 and pacer.limits["sustained"] <= 1500
+    lowered = [m for c, m in warned if "may be lower than the 800 you passed" in m]
+    assert lowered and "so it now keeps under 320 per second" in lowered[0]
+
+
+async def test_a_reject_another_connection_caused_lowers_a_limit_by_half_and_it_recovers(
+    warned,
+):
+    # A quiet bot with the right values: one cancel every 6 s. A teammate fills the
+    # sustained window, and the bot's next cancel is rejected.
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    sender = pacer.wrap(Wire(sim))
+    for n in range(20):
+        await send_one(sender, "cancel", f"q{n}")
+        await sim.sleep(6.0)
+    pacer.observe(reject(SUSTAINED, "q19"))
+    assert pacer.limits["sustained"] == 480  # halved, not 0.8 x the 10 it counted
+    for n in range(200):
+        await send_one(sender, "cancel", f"later{n}")
+        await sim.sleep(6.0)
+    # Eight clean minutes later it is back to the full limit.
+    assert pacer.limits["sustained"] == 960
+
+
+async def test_a_burst_reject_after_one_send_of_ours_and_799_of_a_teammate_recovers(warned):
+    sim = Sim()
+    pacer = Pacer(
+        Budget(sustained_per_minute=100_000, burst_per_second=800),
+        clock=sim.clock,
+        sleep=sim.sleep,
+    )
+    sender = pacer.wrap(Wire(sim))
+    sim.now = 5.0
+    await send_one(sender, "new", "ours")
+    pacer.observe(reject(BURST, "ours"))  # the teammate's 799 came first
+    assert pacer.limits["burst"] == 320
+    for n in range(800):
+        await send_one(sender, "new", f"later{n}")
+        await sim.sleep(1.0)
+    assert pacer.limits["burst"] == 640
 
 
 async def test_a_reject_soon_after_a_session_starts_drains_without_learning(warned):
@@ -666,7 +712,7 @@ async def test_a_reject_soon_after_a_session_starts_drains_without_learning(warn
     await blast(pacer.wrap(Wire(sim)), 5)
     pacer.observe(reject(SUSTAINED, "r4"))
     assert pacer.limits == {"burst": 160, "sustained": 960, "new-order": None}
-    assert "looks like" not in warned[0][1]
+    assert "may be lower" not in warned[0][1]
 
 
 async def test_a_session_start_holds_the_burst_window_for_a_second():
@@ -1058,7 +1104,7 @@ async def test_a_wrong_pacing_argument_leaves_no_token_in_the_traceback():
     assert frames_hold(caught.value, token) == []
 
 
-async def test_a_reject_read_late_is_matched_against_the_window_that_held_its_message():
+async def test_a_reject_read_late_is_matched_against_the_window_that_held_its_message(warned):
     sim = Sim()
     pacer = Pacer(
         Budget(sustained_per_minute=10_000, burst_per_second=100), clock=sim.clock, sleep=sim.sleep
@@ -1074,8 +1120,8 @@ async def test_a_reject_read_late_is_matched_against_the_window_that_held_its_me
     await send_one(sender, "new", "after")  # the 8 sent at 1.0 no longer count here
     sim.now = 2.1
     pacer.observe(reject(BURST, "rejected"))
-    # Nine were in the exchange's window ahead of it, so the cap is at most nine.
-    assert pacer.limits["burst"] == 7
+    # Nine were in the exchange's window ahead of it.
+    assert "the pacer counted 9 in the window" in warned[-1][1]
 
 
 async def test_foreign_reports_that_reuse_a_request_ref_each_count():
@@ -1155,7 +1201,7 @@ async def test_orders_dropped_with_their_session_are_not_counted():
     assert sim.now == started and wire.sent[-1][2] == "fresh"
 
 
-async def test_a_reject_read_while_its_write_is_in_progress_counts_the_sends_before_it():
+async def test_a_reject_read_while_its_write_is_in_progress_counts_the_sends_before_it(warned):
     sim = Sim()
     pacer = Pacer(
         Budget(sustained_per_minute=10_000, burst_per_second=100), clock=sim.clock, sleep=sim.sleep
@@ -1166,7 +1212,7 @@ async def test_a_reject_read_while_its_write_is_in_progress_counts_the_sends_bef
     wire.write_time = 0.1
     sim.at(1.55, lambda: pacer.observe(reject(BURST, "slow")))
     await send_one(pacer.wrap(wire), "new", "slow")
-    assert pacer.limits["burst"] == 7
+    assert "the pacer counted 9 in the window" in warned[-1][1]
 
 
 async def test_report_numbers_that_start_again_in_a_new_term_still_count():
