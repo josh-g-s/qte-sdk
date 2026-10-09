@@ -515,6 +515,11 @@ class HistoryClient:
             async for item in items:
                 yield item if isinstance(item, Manifest) else _decode_line(item)
 
+    def _logged(self, target: str) -> str:
+        """`target` as a log line shows it: withheld if it holds the token, in any form, or
+        the shape of one (an instrument pasted by mistake, say)."""
+        return _errors.WITHHELD if _url_holds_token(target, self._secret) else target
+
     def _target(self, *segments: str) -> str:
         return self._prefix + "/v1/history/" + "/".join(quote(s, safe="") for s in segments)
 
@@ -611,7 +616,7 @@ class HistoryClient:
                     raise error
                 _log.debug(
                     "history %s not ready (HTTP %d); asking again in %s s",
-                    target,
+                    self._logged(target),
                     reply.status,
                     wait,
                 )
@@ -755,7 +760,7 @@ class HistoryClient:
             # Kept, since the connection lets go of its socket once a response ends it.
             sock = cast(_WakeableSocket, conn.sock)
             response = conn.getresponse()
-            _log.debug("history GET %s: HTTP %d", target, response.status)
+            _log.debug("history GET %s: HTTP %d", self._logged(target), response.status)
             reply = _Reply(conn, sock, response, self._secret)
             if response.status not in (200, 206):
                 reply.body = response.read(_ERROR_BODY_LIMIT)

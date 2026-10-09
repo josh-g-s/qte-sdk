@@ -814,24 +814,41 @@ def _budget_rejected(event: Event, anchor: tuple[float, int] | None) -> None:
 
 
 def _warn(code: str, **fields: Any) -> None:
-    """Log `code`'s message at WARNING through this module's logger, with `code` on the
-    record. Whether the logger is enabled is asked in the warning's thread too: asking can
-    wait for logging's lock."""
-    _emit(_errors.render(code, **fields), code)
+    """Log `code`'s message at WARNING through this module's logger, with `code`, its next
+    step and `fields` on the record, for a JSON formatter (see `qte_sdk.logs`). Whether the
+    logger is enabled is asked in the warning's thread too: asking can wait for logging's
+    lock."""
+    _emit(
+        _errors.render(code, **fields),
+        code,
+        next_step=_errors.next_step(code, **fields),
+        fields=fields,
+    )
 
 
-def _emit(message: str, code: str) -> None:
+def _emit(
+    message: str,
+    code: str,
+    *,
+    next_step: str | None = None,
+    fields: dict[str, Any] | None = None,
+) -> None:
     """Write the warning from a thread of its own, never the event loop's: a write to a
     full stderr pipe would stop the loop, and with it market data and orders. It is
     dropped there rather than wait (see `qte_sdk.update._log_without_waiting`)."""
     threading.Thread(
-        target=_write, args=(message, code), name="qte-sdk pacing warning", daemon=True
+        target=_write,
+        args=(message, code, next_step, fields),
+        name="qte-sdk pacing warning",
+        daemon=True,
     ).start()
 
 
-def _write(message: str, code: str) -> None:
+def _write(message: str, code: str, next_step: str | None, fields: dict[str, Any] | None) -> None:
     try:
-        _update._log_without_waiting(logging.WARNING, message, code, _log)
+        _update._log_without_waiting(
+            logging.WARNING, message, code, target=_log, next_step=next_step, fields=fields
+        )
     except BaseException:
         # Never into the program: a thread's uncaught error would be printed.
         return

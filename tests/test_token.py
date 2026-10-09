@@ -1,5 +1,8 @@
 """The `python -m qte_sdk.token` helper: set, set --file and check."""
 
+import contextlib
+import io
+import json
 import os
 import secrets
 import shlex
@@ -64,6 +67,15 @@ def run(
     ask_secret: Callable[[str], str] = never,
     interactive: bool = True,
 ) -> int:
+    if argv == ["check"]:
+        # --json must give the same status, in a document that says so.
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            json_status = helper.main(["check", "--json"])
+        document = json.loads(printed.getvalue())
+        assert document["exit_code"] == json_status
+        status = helper.main(argv, ask=ask, ask_secret=ask_secret, interactive=lambda: interactive)
+        assert status == json_status
+        return status
     return helper.main(argv, ask=ask, ask_secret=ask_secret, interactive=lambda: interactive)
 
 

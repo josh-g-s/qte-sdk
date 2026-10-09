@@ -47,7 +47,11 @@ reason, then a summary:
                      QTE_HISTORY_URL is set (from the environment only, never .env).
 
 It exits with status 0 when no check failed, 1 when one did, and 2 when it found no token
-or no usable address, and so could not connect. The output never shows the token or any
+or no usable address, and so could not connect (or `QTE_LOG_FORMAT` is neither json nor
+text). With --json it prints one JSON document on stdout instead, once it is done, on
+every exit a stop included, with that status as `exit_code`, each check's status and
+reason, and what it wrote to stderr, where its lines are then JSON too (docs/errors.md
+gives the keys). The output never shows the token or any
 account figure; the one exception is a fill of the test order, whose quantity and price
 it names so you know the position your team then holds. A FAIL caused by an SDK error or
 warning gives its code, such as QTE-TOKEN-MISSING: docs/errors.md says what each means,
@@ -108,6 +112,7 @@ import argparse
 import asyncio
 import contextlib
 import ipaddress
+import json
 import math
 import os
 import re
@@ -119,7 +124,7 @@ from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
@@ -155,7 +160,9 @@ try:
         FileShared,
         TokenFileShared,
         dotenv_path,
+        withholding,
     )
+    from qte_sdk.errors import CODES, WITHHELD
     from qte_sdk.history import (
         HISTORY_URL_ENV_VAR,
         HistoryClient,
@@ -171,6 +178,7 @@ try:
         instruments_by_id,
         tradable_instruments,
     )
+    from qte_sdk.logs import LogFormatInvalid, configured
     from qte_sdk.market_data import (
         Book,
         DecodeFailed,
@@ -199,6 +207,7 @@ try:
         MissingURL,
         Session,
         open_session,
+        resolve_token,
         token_source,
         url_source,
     )
@@ -207,11 +216,27 @@ try:
 except ImportError as error:
     if __name__ != "__main__" or not (error.name or "").startswith("qte_sdk."):
         raise
-    print(
-        f"FAIL  {'sdk-version':<14}  the installed SDK is older than this script and cannot "
-        'check itself: update it with pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"'
+    _too_old = (
+        "the installed SDK is older than this script and cannot check itself: update it with "
+        'pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"'
     )
-    print("summary: 0 passed, 1 failed, 0 skipped")
+    _typed = sys.argv[1:]
+    if "--json" in (_typed[: _typed.index("--")] if "--" in _typed else _typed):
+        _check = {"name": "sdk-version", "status": "fail", "code": None, "message": _too_old}
+        _document = {
+            "command": "smoke_test",
+            "schema": 1,
+            "exit_code": 1,
+            "summary": {"passed": 0, "failed": 1, "skipped": 0},
+            "checks": [_check],
+            "problems": [],
+            "warnings": [],
+            "stopped_by": None,
+        }
+        print(json.dumps(_document, ensure_ascii=True, separators=(",", ":")))
+    else:
+        print(f"FAIL  {'sdk-version':<14}  {_too_old}")
+        print("summary: 0 passed, 1 failed, 0 skipped")
     sys.exit(1)
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
@@ -373,6 +398,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "print one JSON document on stdout at the end, instead of a line per check "
+            "(see docs/errors.md); what goes to stderr is then JSON lines too"
+        ),
+    )
+    parser.add_argument(
         "--allow-scored",
         action="store_true",
         help=(
@@ -402,23 +435,107 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 class Report:
-    """Prints one line per check and counts the outcomes."""
+    """Prints one line per check and counts the outcomes. With `json_output`, it keeps the
+    checks instead, for the one JSON document `document` makes at the end."""
 
-    def __init__(self) -> None:
+    def __init__(self, json_output: bool = False) -> None:
         self.counts: Counter[str] = Counter()
+        self.json_output = json_output
+        self.checks: list[tuple[str, str, str]] = []
+        # The "cannot connect" lines, and the notes `say` wrote to stderr.
+        self.problems: list[str] = []
+        self.notes: list[str] = []
 
     def add(self, status: str, name: str, reason: str) -> None:
         self.counts[status] += 1
+        if self.json_output:
+            self.checks.append((status, name, reason))
+            return
         print(f"{status}  {name:<{NAME_WIDTH}}  {reason}", flush=True)
 
     def finish(self) -> int:
-        """Print the summary and return the exit status: 1 if any check failed, else 0."""
+        """Print the summary (unless `json_output`) and return the exit status: 1 if any
+        check failed, else 0."""
         failed = self.counts[FAIL]
-        print(
-            f"summary: {self.counts[PASS]} passed, {failed} failed, {self.counts[SKIP]} skipped",
-            flush=True,
-        )
+        if not self.json_output:
+            print(
+                f"summary: {self.counts[PASS]} passed, {failed} failed, "
+                f"{self.counts[SKIP]} skipped",
+                flush=True,
+            )
         return 1 if failed else 0
+
+    def document(self, exit_code: int, stopped_by: str | None = None) -> str:
+        """Everything the run found, as one line of JSON, with the exit status it ends with.
+        Any text in it that holds the token, or the shape of one, is withheld whole: the
+        token from wherever the SDK would take it, .env included."""
+        # Only the texts that can hold what was read or typed are swept; the keys and the
+        # script's own words (a status, a code, a signal's name) never are.
+        withhold = token_withholding()
+        document = {
+            "command": "smoke_test",
+            "schema": 1,
+            "exit_code": exit_code,
+            "summary": {
+                "passed": self.counts[PASS],
+                "failed": self.counts[FAIL],
+                "skipped": self.counts[SKIP],
+            },
+            "checks": [
+                {
+                    "name": swept(name, withhold),
+                    "status": status.lower(),
+                    "code": first_code(reason),
+                    "message": swept(reason, withhold),
+                }
+                for status, name, reason in self.checks
+            ],
+            "problems": swept(self.problems, withhold),
+            "warnings": swept(self.notes, withhold),
+            "stopped_by": stopped_by,
+        }
+        return to_json(document)
+
+
+def to_json(value: object) -> str:
+    """One line of JSON, in ASCII alone, so it reads the same through any pipe."""
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+# An SDK code, such as QTE-TOKEN-MISSING.
+_CODE = re.compile(r"QTE-[A-Z0-9]+(?:-[A-Z0-9]+)+")
+
+
+def first_code(text: str) -> str | None:
+    """The first SDK code `text` names, or None."""
+    return next((code for code in _CODE.findall(text) if code in CODES), None)
+
+
+def token_withholding() -> Callable[[str], bool]:
+    """Whether a text holds the token, from wherever the SDK would take it, or the shape of
+    one. Any warning reading it gives again was already reported."""
+    token = None
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        try:
+            token = resolve_token()
+        except Exception:
+            token = None
+    try:
+        return withholding(token)
+    finally:
+        del token
+
+
+def swept(value: Any, withhold: Callable[[str], bool]) -> Any:
+    """`value` with each text that `withhold` says yes to replaced by WITHHELD."""
+    if isinstance(value, str):
+        return WITHHELD if withhold(value) else value
+    if isinstance(value, list):
+        return [swept(item, withhold) for item in value]
+    if isinstance(value, dict):
+        return {key: swept(item, withhold) for key, item in value.items()}
+    return value
 
 
 def name_of(enum: Any, value: int) -> str:
@@ -1470,10 +1587,29 @@ async def check_test_order(report: Report, watcher: Watcher, args: argparse.Name
             say(order.warning())
 
 
+# With --json, the report whose notes `say` adds to.
+JSON_REPORT: list[Report] = []
+
+
 def say(text: str) -> None:
     """Print a line to stderr, if it can still be written. On a stop path the terminal or
     pipe may be gone (a closed terminal is what SIGHUP means), and a failed write must not
-    stop what follows, above all the cleanup cancel."""
+    stop what follows, above all the cleanup cancel. With --json, the line is a JSON object
+    of the form the SDK's JSON log lines have, and the document lists it too."""
+    if JSON_REPORT:
+        JSON_REPORT[0].notes.append(text)
+        now = datetime.now(UTC)
+        text = to_json(
+            {
+                "time": f"{now:%Y-%m-%dT%H:%M:%S}.{now.microsecond // 1000:03d}Z",
+                "level": "WARNING",
+                "logger": "smoke_test",
+                "code": None,
+                "message": swept(text, token_withholding()),
+                "next_step": None,
+                "fields": {},
+            }
+        )
     with contextlib.suppress(OSError, ValueError):
         print(text, file=sys.stderr, flush=True)
 
@@ -1741,28 +1877,60 @@ async def run_checks(url: str, args: argparse.Namespace, report: Report) -> None
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    report = Report()
-    check_sdk_version(report)
-    url, problems = check_setup(report)
+    try:
+        # SDK log records and warnings as JSON lines with --json, else as QTE_LOG_FORMAT
+        # says, while the checks run; then as they were.
+        with configured("json" if args.json else None, capture_warnings=True):
+            return check_all(args)
+    except LogFormatInvalid as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    finally:
+        JSON_REPORT.clear()
+
+
+def check_all(args: argparse.Namespace) -> int:
+    report = Report(json_output=args.json)
+    if args.json:
+        JSON_REPORT[:] = [report]
+    try:
+        check_sdk_version(report)
+        url, problems = check_setup(report)
+    except KeyboardInterrupt:
+        say("interrupted")
+        return stopped(finished(report, 130, "SIGINT"))
     if problems or url is None:
         reason = "no token or no usable address"
         report.add(SKIP, "connect", reason)
         skip_after_connect(report, "not connected")
         report.finish()
         for problem in problems:
-            print(f"cannot connect: {problem} (see docs/quickstart.md)", file=sys.stderr)
-        return 2
+            if args.json:
+                report.problems.append(problem)
+            else:
+                print(f"cannot connect: {problem} (see docs/quickstart.md)", file=sys.stderr)
+        return finished(report, 2)
     try:
         asyncio.run(run(url, args, report))
     except KeyboardInterrupt:
         say("interrupted")
-        return stopped(130)
+        return stopped(finished(report, 130, "SIGINT"))
     except asyncio.CancelledError:
         # SIGTERM or SIGHUP: see run(). The exit status is 128 plus the signal's number.
         signum = STOPPED_BY[0] if STOPPED_BY else signal.SIGTERM
-        say(f"stopped by {signal.Signals(signum).name}")
-        return stopped(128 + signum)
-    return report.finish()
+        name = signal.Signals(signum).name
+        say(f"stopped by {name}")
+        return stopped(finished(report, 128 + signum, name))
+    return finished(report, report.finish())
+
+
+def finished(report: Report, status: int, stopped_by: str | None = None) -> int:
+    """`status`, once the JSON document that ends with it is printed, with --json. On a stop
+    path stdout may be gone; a failed write does not change the status."""
+    if report.json_output:
+        with contextlib.suppress(OSError, ValueError):
+            print(report.document(status, stopped_by), flush=True)
+    return status
 
 
 def stopped(status: int) -> int:

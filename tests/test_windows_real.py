@@ -29,6 +29,7 @@ is not. Three things differ because of that:
 
 import csv
 import io
+import json
 import os
 import re
 import subprocess
@@ -154,6 +155,18 @@ def write_dotenv(folder: Path, *, token: bool = True) -> Path:
 def assert_no_token(*texts: str) -> None:
     for text in texts:
         assert FAKE_TOKEN not in text
+
+
+def assert_json_check(folder: Path, status: int, code: str) -> None:
+    """`token check --json` in `folder`, through a real Windows pipe (cp1252 on Python
+    3.11): the same status, one ASCII document that names `code`, and no token."""
+    result = run_sdk("qte_sdk.token", "check", "--json", cwd=folder)
+    assert result.returncode == status, result.stdout + result.stderr
+    assert result.stdout.isascii() and result.stdout.count("\n") == 1, result.stdout
+    document = json.loads(result.stdout)
+    assert document["exit_code"] == status
+    assert code in [finding["code"] for finding in document["findings"]], document
+    assert_no_token(result.stdout, result.stderr)
 
 
 def run_sdk(
@@ -331,6 +344,7 @@ def test_token_check_in_a_folder_open_to_users_warns(private_folder, user_sid):
     assert "BUILTIN\\Users may add or remove files in" in result.stdout
     assert "None of Everyone" not in result.stdout
     assert_no_token(result.stdout, result.stderr)
+    assert_json_check(private_folder, 1, "QTE-TOKEN-SHARED")
 
 
 def test_an_address_only_dotenv_in_a_folder_open_to_users_warns(private_folder):
@@ -853,6 +867,7 @@ def test_a_folder_whose_list_is_not_shown_warns_when_the_token_is_read(
         assert result.stdout.count("warning:") == 1, result.stdout + result.stderr
         assert "warning: QTE-TOKEN-UNCHECKED: " in result.stdout, result.stdout
         assert result.returncode == 2, result.stdout + result.stderr  # it could not tell
+        assert_json_check(locked, 2, "QTE-TOKEN-UNCHECKED")
         assert (
             f".env holds your token, but it could not be fully checked: {NOT_SHOWN} add or "
             f"remove files in {folder}."

@@ -1,6 +1,6 @@
 # qte-sdk
 
-> The Python client SDK for the Queen's Tower Exchange (QTE), used by student teams to connect their trading programs to the exchange. A coding agent working with it should first read AGENTS.md, which also ships inside the package: from the release after 1.1.1, `python -m qte_sdk.agents` prints it; on 1.1.1 or earlier, read it on GitHub at https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md and run `python -m qte_sdk.update` to update.
+> The Python client SDK for the Queen's Tower Exchange (QTE), used by student teams to connect their trading programs to the exchange. A coding agent working with it should first read AGENTS.md, which also ships inside the package: from 1.2.0, `python -m qte_sdk.agents` prints it; on 1.1.1 or earlier, read it on GitHub at https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md and run `python -m qte_sdk.update` to update.
 
 Never ask for, print or read the team token, or the `.env` or token file that holds it. At the start of work, run `python -m qte_sdk.update` and tell the person about any `QTE-UPDATE-AVAILABLE` line it prints.
 

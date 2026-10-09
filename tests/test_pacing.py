@@ -231,7 +231,7 @@ def most_in_window(times: list[float], length: float) -> int:
 def warned(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """The pacing warnings logged, as (code, message), caught before their thread."""
     caught: list[tuple[str, str]] = []
-    monkeypatch.setattr(pacing, "_emit", lambda message, code: caught.append((code, message)))
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append((code, message)))
     monkeypatch.setattr(pacing, "_budget_warned_at", None)
     return caught
 
@@ -951,6 +951,56 @@ def test_a_warning_reaches_the_log_from_its_own_thread_with_its_code(caplog, mon
     assert records[0].code == errors.BUDGET_REJECTED
     assert records[0].getMessage().startswith("QTE-BUDGET-REJECTED: ")
     assert records[0].threadName == "qte-sdk pacing warning"
+
+
+def _json_warning(monkeypatch, warn: Callable[[], None]) -> dict:
+    """The JSON line a pacing warning writes through `qte_sdk.logs.configure("json")`."""
+    import io
+
+    from qte_sdk import logs
+
+    stream = io.StringIO()
+    monkeypatch.setattr(logging.getLogger("qte_sdk"), "handlers", [])
+    before = set(threading.enumerate())
+    with logs.configured("json", stream=stream):
+        warn()
+        for thread in set(threading.enumerate()) - before:
+            if thread.name == "qte-sdk pacing warning":
+                thread.join(5)
+    lines = stream.getvalue().splitlines()
+    assert len(lines) == 1
+    return json.loads(lines[0])
+
+
+def test_a_warning_as_a_json_line_splits_its_message_next_step_and_fields(monkeypatch):
+    monkeypatch.setattr(pacing, "_budget_warned_at", None)
+    parsed = _json_warning(monkeypatch, lambda: pacing._budget_rejected(reject(BURST), None))
+    reason = parsed["fields"]["reason"]
+    assert (parsed["logger"], parsed["code"]) == ("qte_sdk.pacing", errors.BUDGET_REJECTED)
+    assert parsed["next_step"] == errors.next_step(errors.BUDGET_REJECTED, reason=reason)
+    assert parsed["message"] + f" {parsed['next_step']}." == errors.summary(
+        errors.BUDGET_REJECTED, reason=reason
+    )
+
+
+def test_a_warning_as_a_json_line_withholds_the_token(monkeypatch):
+    token = synthetic_token()
+    monkeypatch.setenv("QTE_TOKEN", token)
+
+    def warn() -> None:
+        pacing._warn(
+            errors.PACING_REJECTED,
+            kind="burst",
+            reason="r",
+            type="new",
+            seconds=1,
+            why=f"a {token} b",
+        )
+
+    parsed = _json_warning(monkeypatch, warn)
+    assert parsed["fields"]["why"] == errors.WITHHELD
+    assert parsed["message"] == errors.WITHHELD
+    assert token not in json.dumps(parsed)
 
 
 def test_warnings_never_stop_the_event_loop_on_a_full_stderr_pipe(monkeypatch):

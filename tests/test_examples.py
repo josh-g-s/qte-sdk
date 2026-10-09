@@ -2893,7 +2893,7 @@ OLD_SDK_FAIL = (
 )
 
 
-def run_smoke_test_with_sdk(tmp_path: Path, change: Callable[[Path], None]) -> Any:
+def run_smoke_test_with_sdk(tmp_path: Path, change: Callable[[Path], None], *args: str) -> Any:
     """Run the smoke test with a copy of the SDK, changed by `change`, first on the path:
     an SDK older than the script, say."""
     copy = tmp_path / "sdk"
@@ -2906,7 +2906,7 @@ def run_smoke_test_with_sdk(tmp_path: Path, change: Callable[[Path], None]) -> A
     env = example_env()
     env["PYTHONPATH"] = os.pathsep.join([str(copy), env["PYTHONPATH"]])
     return subprocess.run(
-        [sys.executable, str(EXAMPLES_DIR / SMOKE_TEST), "--instruments", INSTRUMENT],
+        [sys.executable, str(EXAMPLES_DIR / SMOKE_TEST), "--instruments", INSTRUMENT, *args],
         env=env,
         capture_output=True,
         text=True,
@@ -3633,3 +3633,164 @@ async def test_the_smoke_test_does_not_trust_a_confirmed_cancel_after_missed_rep
     assert "reports were missed, so it may have been another that took the level" in reason
     assert "WARNING: reports about the test order (BUY 1 TEST @ 99.960000) were missed" in err
     assert exchange.resting == {(INSTRUMENT, "BUY", 100_010_000): ("smoke", 1)}
+
+
+# --json (#180): one document at the end, with the same exit status
+
+
+def smoke_document(out: str, err: str, code: int) -> dict[str, Any]:
+    """The smoke test's --json document: the only thing on stdout, one ASCII line, with the
+    process's exit status; and everything on stderr is a JSON line too."""
+    assert out.count("\n") == 1 and out.isascii(), out + err
+    document = json.loads(out)
+    assert list(document) == [
+        "command",
+        "schema",
+        "exit_code",
+        "summary",
+        "checks",
+        "problems",
+        "warnings",
+        "stopped_by",
+    ]
+    assert (document["command"], document["schema"], document["exit_code"]) == (
+        "smoke_test",
+        1,
+        code,
+    )
+    for line in err.splitlines():
+        assert list(json.loads(line))[:3] == ["time", "level", "logger"], line
+    return document
+
+
+def as_text(document: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    return {c["name"]: (c["status"].upper(), c["message"]) for c in document["checks"]}
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected"),
+    [("session", 0), ("refused", 1), ("no-token", 2), ("fill", 1)],
+)
+async def test_the_smoke_test_s_json_says_what_its_text_says_with_the_same_status(
+    setup: str, expected: int
+):
+    def make() -> tuple[FakeExchange, tuple[str, ...]]:
+        if setup == "refused":
+            refusal = {"reason_code": "TEAM_DISABLED", "reason_detail": "x"}
+            return FakeExchange(session_reject=refusal), ()
+        exchange = FakeExchange(
+            calendar=CALENDAR,
+            server_time=SERVER_TIME,
+            cross_new_at=99_960_000 if setup == "fill" else None,
+        )
+        args = ("--instruments", INSTRUMENT, *(TEST_ORDER if setup == "fill" else ()))
+        return exchange, args
+
+    token = None if setup == "no-token" else synthetic_token()
+    exchange, args = make()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(SMOKE_TEST, url, token, "--seconds", "1", *args)
+    exchange, args = make()
+    async with serve_local(exchange) as url:
+        json_code, json_out, json_err = await run_example(
+            SMOKE_TEST, url, token, "--seconds", "1", "--json", *args
+        )
+    assert code == json_code == expected, out + err + json_out + json_err
+    document = smoke_document(json_out, json_err, code)
+    found = checks(out)
+    shown = as_text(document)
+    assert list(shown) == list(found)
+    for name, (status, message) in found.items():
+        if name not in ("heartbeat", "market:TEST", "feed"):  # timings differ between runs
+            assert shown[name] == (status, message), name
+        else:
+            assert shown[name][0] == status, name
+    passed, failed, skipped = (
+        sum(status == word for status, _ in found.values()) for word in ("PASS", "FAIL", "SKIP")
+    )
+    assert document["summary"] == {"passed": passed, "failed": failed, "skipped": skipped}
+    assert out.splitlines()[-1] == f"summary: {passed} passed, {failed} failed, {skipped} skipped"
+    assert document["stopped_by"] is None
+    if setup == "no-token":
+        assert [p.split(":")[0] for p in document["problems"]] == ["QTE-TOKEN-MISSING"]
+        assert "cannot connect: QTE-TOKEN-MISSING" in err
+        assert document["checks"][1]["code"] == "QTE-TOKEN-MISSING"
+    else:
+        assert document["problems"] == []
+    if setup == "fill":
+        [note] = document["warnings"]
+        assert note.startswith("WARNING: the test order filled: your team bought 1 TEST")
+        assert json.loads(json_err.splitlines()[-1])["logger"] == "smoke_test"
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+@pytest.mark.parametrize(
+    ("signal_name", "code"),
+    [("SIGINT", 130), ("SIGTERM", 128 + 15), ("SIGHUP", 128 + 1)],
+    ids=["ctrl-c", "sigterm", "sighup"],
+)
+async def test_the_smoke_test_s_json_says_what_stopped_it_with_its_status(
+    signal_name: str, code: int
+):
+    confirm = asyncio.Event()
+    exchange = FakeExchange(calendar=CALENDAR, server_time=SERVER_TIME, confirm_cancels=confirm)
+    env = example_env()
+    async with serve_local(exchange) as url:
+        env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(EXAMPLES_DIR / SMOKE_TEST),
+            *("--json", "--instruments", INSTRUMENT, "--seconds", "3", *TEST_ORDER),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            preexec_fn=default_signals,
+        )
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                await until(lambda: exchange.types().count("cancel") == 1)
+                process.send_signal(getattr(signal, signal_name))
+                await until(lambda: exchange.types().count("cancel") == 2)
+                confirm.set()
+                out, err = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    assert process.returncode == code, out.decode() + err.decode()
+    document = smoke_document(out.decode(), err.decode(), code)
+    assert document["stopped_by"] == signal_name
+    assert document["warnings"][0] == (
+        "interrupted: cancelling the test order's level (BUY 1 TEST @ 99.960000) before stopping"
+    )
+    assert exchange.resting == {}
+
+
+@pytest.mark.parametrize("change", [remove_instruments, empty_instruments])
+def test_the_smoke_test_s_json_says_an_sdk_is_too_old_to_check_itself(
+    tmp_path: Path, change: Callable[[Path], None]
+):
+    done = run_smoke_test_with_sdk(tmp_path, change, "--json")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert done.stderr == ""
+    document = smoke_document(done.stdout, done.stderr, 1)
+    assert as_text(document) == {"sdk-version": ("FAIL", OLD_SDK_FAIL)}
+    # After "--", --json is a value, not the option.
+    done = run_smoke_test_with_sdk(tmp_path / "again", change, "--", "--json")
+    assert checks(done.stdout) == {"sdk-version": ("FAIL", OLD_SDK_FAIL)}
+
+
+@pytest.mark.parametrize(
+    "args", [("--json", "--seconds", "0"), ("--json", "--no-such-option"), ("--json", "--tick")]
+)
+async def test_the_smoke_test_s_usage_errors_stay_plain_text_with_json(args: tuple[str, ...]):
+    code, out, err = await run_example(SMOKE_TEST, None, None, *args)
+    assert code == 2
+    assert out == ""
+    assert err.startswith("usage: ")
+
+
+async def test_the_smoke_test_says_a_bad_log_format_with_its_code():
+    code, out, err = await run_example(SMOKE_TEST, None, None, QTE_LOG_FORMAT="jsonl")
+    assert (code, out) == (2, "")
+    assert err.startswith("error: QTE-LOG-FORMAT-INVALID: ")

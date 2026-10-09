@@ -89,6 +89,8 @@ HISTORY_REQUEST_FAILED = "QTE-HISTORY-REQUEST-FAILED"
 REPLAY_OUT_OF_ORDER = "QTE-REPLAY-OUT-OF-ORDER"
 # UPDATE: the same value as `qte_sdk.update.UPDATE_AVAILABLE`.
 UPDATE_AVAILABLE = "QTE-UPDATE-AVAILABLE"
+# LOG
+LOG_FORMAT_INVALID = "QTE-LOG-FORMAT-INVALID"
 # PACING and BUDGET: the message budgets, with and without a `qte_sdk.pacing.Pacer`.
 PACING_LIMIT = "QTE-PACING-LIMIT"
 PACING_DRAINING = "QTE-PACING-DRAINING"
@@ -461,6 +463,14 @@ CODES: dict[str, Entry] = {
         "A newer release of qte-sdk is out",
         "Run the command python -m qte_sdk.update prints",
     ),
+    LOG_FORMAT_INVALID: Entry(
+        "the log format given in {source} is neither json nor text",
+        "The SDK does not guess a format, so the logging setup was left as it was",
+        "Use json or text, in QTE_LOG_FORMAT or as the format given to configure(), or unset "
+        "QTE_LOG_FORMAT for plain text",
+        "QTE_LOG_FORMAT, or the format passed to qte_sdk.logs.configure(), is not json or text",
+        "Set QTE_LOG_FORMAT to json or text, or unset it",
+    ),
     PACING_LIMIT: Entry(
         "the {kind} budget has no room for this {type} message for {seconds} s, so it was not sent",
         "The exchange counts rejected messages too, so sending it now could lock your team "
@@ -631,14 +641,33 @@ def summary(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fi
     show it; a field it says yes to (one that holds the token, say) is shown as `WITHHELD`."""
     try:
         entry = CODES[code]
-        fields = {name: _shown(value, withhold) for name, value in fields.items()}
-        parts = [part.format(**fields) for part in (entry.what, entry.why, entry.next_step)]
-        parts = [part.strip().rstrip(".") for part in parts]
+        shown = {name: _shown(value, withhold) for name, value in fields.items()}
+        parts = [_part(part, shown) for part in (entry.what, entry.why, entry.next_step)]
         return " ".join(f"{part}." for part in parts if part)
     except Exception:
         entry = CODES.get(code)
         cause = entry.cause if entry is not None else "an error with no registered message"
         return f"{cause.rstrip('.')}. See {code} in docs/errors.md."
+
+
+def next_step(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any) -> str:
+    """The next-step part of `code`'s message, as `summary` shows it but without its full
+    stop: what a JSON log line or command document gives as `next_step`. Never raises: if a
+    field is missing, the code's fix (which holds no field) is given instead, and for an
+    unknown code, where to look it up. `withhold` is as for `summary`."""
+    try:
+        shown = {name: _shown(value, withhold) for name, value in fields.items()}
+        return _part(CODES[code].next_step, shown)
+    except Exception:
+        entry = CODES.get(code)
+        if entry is not None:
+            return entry.fix.strip().rstrip(".")
+        return f"See {code} in docs/errors.md"
+
+
+def _part(template: str, fields: dict[str, Any]) -> str:
+    """One part of a message, filled in, without the full stop `summary` adds."""
+    return template.format(**fields).strip().rstrip(".")
 
 
 def _shown(value: object, withhold: Callable[[str], bool] | None) -> object:
