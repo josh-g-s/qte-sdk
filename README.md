@@ -32,10 +32,10 @@ In cmd, activate with `.venv\Scripts\activate.bat` instead. If PowerShell says r
 The `git+https` install needs git. If you do not have it, either install git (on Windows, `winget install Git.Git`, then open a new terminal) or install a release from its zip, which needs no git:
 
 ```sh
-pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.2.0.zip
+pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.3.0.zip
 ```
 
-That is the latest release, v1.2.0, as this is written. The [changelog](CHANGELOG.md) lists each release, and the update check below says when a newer one is out.
+That is the latest release, v1.3.0, as this is written. The [changelog](CHANGELOG.md) lists each release, and the update check below says when a newer one is out.
 
 If you use a coding agent, such as Claude Code or Codex, have it read [AGENTS.md](AGENTS.md) first, the guidance for coding agents. It comes with the SDK from 1.2.0 (and in an install of `main`), where `python -m qte_sdk.agents` prints it. [`llms.txt`](llms.txt) points agents to it too.
 
