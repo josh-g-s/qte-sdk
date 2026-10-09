@@ -1,6 +1,6 @@
 # Developing your algo
 
-**Version:** 0.5
+**Version:** 0.6
 
 This guide is one path from an idea to a program trading on the exchange: explore past market data, run your strategy's loop on a replay of a past session, keep its order logic separate so you can test it, check your setup with the smoke test, then try it on the exchange during a session. Most of it works at any hour, so you can do it while the market is closed.
 
@@ -211,7 +211,7 @@ A replay cannot show you what happens to your orders. Only the exchange can, and
 
 The exchange counts every `new`, `cancel` and `amend` your team sends toward rolling windows: a burst window of one second, a sustained window of one minute and, for Agentic AI, a new-order window of one minute that counts only `new`. They are per team, across all its connections (each bot, and orders placed for your team on the web Trade page), and **rejected messages count too**. A message is rejected with reason code 1501 (burst), 1500 (sustained) or 1502 (new orders) when its window already holds the cap. There is no penalty timer: your team is clear again only once enough of its messages have aged out, so a bot that keeps sending into a full window stays rejected. `mass_cancel` never counts, and neither do heartbeats, `resume`, `account_query`, subscriptions or tickets.
 
-So pace your orders well under the caps, and stop after a budget reject rather than retry. `qte_sdk.pacing` does both, if you give it your team's values:
+So pace your orders well under the caps, and stop after a budget reject rather than retry. `qte_sdk.pacing` (1.3.0 and later; run `python -m qte_sdk.update` if yours is older) does both, if you give it your team's values:
 
 ```python
 from qte_sdk.pacing import Budget, Pacer
