@@ -458,10 +458,9 @@ async def test_the_smoke_test_s_json_never_shows_the_token_from_any_input(
             "--json",
             "--seconds",
             "1",
-            "--instruments",
-            token,
-            "--strat-id",
-            token,
+            # One argument each, so a token that starts with "-" is still read as a value.
+            f"--instruments={token}",
+            f"--strat-id={token}",
             QTE_HISTORY_URL=f"http://127.0.0.1:1/{token}",
         )
     assert_one_document(out, code)
