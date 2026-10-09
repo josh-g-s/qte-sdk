@@ -52,8 +52,10 @@ A `Pacer` keeps your sends under `headroom` (80% by default) of each cap:
 - Each session it paces starts with the burst window held for one second, since it cannot
   see what the team sent just before. With `on_limit="raise"`, every paced send in that
   second, after each connect and reconnect, raises `PacingLimit` (with a `retry_after` of
-  at most a second). The minute windows it cannot see at all, so after a budget reject
-  wait a full minute before restarting your bot.
+  at most a second, unless another window, such as one held after a budget reject, holds
+  it longer, when that window's error and `retry_after` are given). The minute windows it
+  cannot see at all, so after a budget reject wait a full minute before restarting your
+  bot.
 - With `count_foreign` (the default), the `accepted` reports of messages your team sent on
   other connections, such as another bot or the web Trade page, count too, at their
   receipt time on the exchange. A resume's replayed reports seed the windows the same way,
@@ -692,8 +694,10 @@ class Pacer:
                 if window is self._burst:
                     self._smooth.limit = self._part(lowered)
                 learned = (count, lowered)
-            if window.limit < window.full:
-                window.lowered_at = now
+        if window.full is not None and window.limit is not None and window.limit < window.full:
+            # Any budget reject on a lowered window starts its clean minute again, whether or
+            # not this one could be counted.
+            window.lowered_at = now
         hold = window.length + window.guard
         window.hold(now + hold, by_reject=True)
         if not (fresh or learned):

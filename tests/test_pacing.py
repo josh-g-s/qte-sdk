@@ -1222,3 +1222,25 @@ async def test_report_numbers_that_start_again_in_a_new_term_still_count():
         event = accepted("r", receipt=receipt)
         pacer.observe(Received(event.type, event.message, None, report_seq=1))
     assert len(pacer._sustained.stamps) == 2
+
+
+async def test_every_reject_on_a_lowered_window_starts_its_clean_minute_again(warned):
+    sim = Sim()
+    pacer = Pacer(WIDE, clock=sim.clock, sleep=sim.sleep)
+    sender = pacer.wrap(Wire(sim))
+    sim.now = 5.0
+    await blast(sender, 10, prefix="a")
+    pacer.observe(reject(BURST, "a9"))
+    assert pacer.limits["burst"] == 80
+    # A reject of a9's neighbour, read so late that the log no longer holds its window:
+    # it lowers nothing, but the clean minute starts again from it.
+    sim.now = 64.0
+    await send_one(sender, "new", "p")
+    sim.now = 64.5
+    pacer.observe(reject(BURST, "a8"))
+    sim.now = 66.0
+    await send_one(sender, "new", "b")
+    assert pacer.limits["burst"] == 80
+    sim.now = 64.5 + 60.0 + 2
+    await send_one(sender, "new", "c")
+    assert pacer.limits["burst"] == 88

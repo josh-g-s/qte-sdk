@@ -347,7 +347,7 @@ These are about your team's message budgets. The exchange counts every `new`, `c
 ### QTE-PACING-LIMIT
 
 - Raised as: `qte_sdk.pacing.PacingLimit`, a `RuntimeError`, with `limit` (`burst`, `sustained` or `new-order`), `retry_after` (seconds) and `type`, from a send through a `Pacer`.
-- Cause: The pacer has `on_limit="raise"`, or its wait would pass `max_wait`, and the window named by `limit` had no room for the message. Nothing was sent. In raise mode this also happens to every paced send in the first second after each connect or reconnect: a session starts with the burst window held for a second, since the pacer cannot see what your team sent just before (`limit` is `burst`, `retry_after` at most a second).
+- Cause: The pacer has `on_limit="raise"`, or its wait would pass `max_wait`, and the window named by `limit` had no room for the message. Nothing was sent. In raise mode this also happens to every paced send in the first second after each connect or reconnect: a session starts with the burst window held for a second, since the pacer cannot see what your team sent just before (`limit` is `burst` and `retry_after` at most a second, unless another window holds the send longer, as after a budget reject, when that window's `PacingLimit` or `PacingDraining` is raised with its own `retry_after`).
 - Fix: Send it again after `retry_after` seconds, or send less often. A pacer with `on_limit="wait"` (the default) waits instead.
 
 ### QTE-PACING-DRAINING
