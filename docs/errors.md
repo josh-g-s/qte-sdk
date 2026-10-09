@@ -1,8 +1,8 @@
 # Warning and error codes
 
-**Version:** 0.5
+**Version:** 0.7
 
-Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates and the message budgets. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
+Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format and the message budgets. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
 ## How to read a message
 
@@ -31,6 +31,24 @@ The last line of a traceback is the class name and then this message. The code i
 | `python examples/smoke_test.py` | No check failed | A check failed, or the SDK is too old to check itself | No token or no usable address, so it could not connect. Also a usage error | 130 on Ctrl+C; 128 plus the signal's number on SIGTERM or SIGHUP |
 
 `token check` exiting 1 is a report, not a refusal: a session still only warns about a tracked `.env` or, on Windows, a shared file, and still uses it. Exit 2 with a `usage:` line on stderr is a mistake on the command line, for every command here. `token check` looks afresh each time it runs, so `token.main(["check"])` gives the same answer when a program calls it twice, or after opening a session; it never prints a path that holds the token. Before this release `token check` exited 0 even when it printed a warning.
+
+With `--json`, each command exits with the same status, which the document gives as `exit_code` (see [JSON output](#json-output)). Each command also exits 2, with `error: QTE-LOG-FORMAT-INVALID: ...` on stderr and nothing on stdout, when `QTE_LOG_FORMAT` is neither `json` nor `text` (and `--json` is not given).
+
+## JSON output
+
+For coding agents and scripts. Every JSON line and document is one physical line of compact JSON in ASCII alone (any other character is escaped, so it reads the same through a Windows pipe in any code page), with its keys always present and in the order below (`null` when not known). None ever holds your token: a text or path that holds it is given as `(withheld: it holds the token)`. In a log line, that is any text holding the token in `QTE_TOKEN`, or 32 hex digits in a row, the shape of the exchange's tokens, whatever logged it. A message never starts with its code: the code is its own key, and the next step, without its full stop, is too, so the plain-text line is `<code>: <message> <next_step>.`
+
+Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) with `QTE_LOG_FORMAT=json`, or `configure("json")`, writes each SDK log record to stderr as one JSON object per line:
+
+    {"time":"2026-10-08T12:34:56.789Z","level":"WARNING","logger":"qte_sdk.update","code":"QTE-UPDATE-AVAILABLE","message":"qte-sdk 1.1.0 is behind 1.1.1.","next_step":"Update with pip install --upgrade \"git+https://github.com/josh-g-s/qte-sdk\"","fields":{}}
+
+`time` is UTC to the millisecond; `level` the record's level name; `logger` the logger's name; `code` the code or `null`; `message` what happened and why; `next_step` the next step or `null`; `fields` any values the record names, such as a path (`{}` for none). A record logged with an exception also has `exception`, its type name only. With `capture_warnings=True` (the commands set it), SDK warnings are logged the same way, through the `qte_sdk.warnings` logger, with `fields` `{"category": "<warning class>"}`. The automatic update check's line gives the reason for a recommended update in `message`; if the line would be over 512 bytes, it says to run `python -m qte_sdk.update` for the reason instead, so that it can be written to a pipe whole.
+
+`--json` documents. `python -m qte_sdk.token check --json`, `python -m qte_sdk.update --json` and `python examples/smoke_test.py --json` print one JSON document on stdout, and nothing else there. Each starts with `command` (`"token check"`, `"update"` or `"smoke_test"`), `schema` (1) and `exit_code` (the exit status, as in the table above). A usage error is still a plain `usage:` line on stderr, with exit 2 and nothing on stdout.
+
+- `token check`: `result` (`"ok"`, `"fix"` or `"cannot-tell"`, for exit 0, 1 and 2); `token` {`found`, `source` (`"QTE_TOKEN"`, `"QTE_TOKEN_FILE"`, `".env"` or `null`), `path` (the file's path, or `null` for an environment variable), `note` (on Windows, what the access check found)}; `address` {`found`, `source` (`"QTE_URL"`, `".env"` or `null`), `path`, `valid` (whether it starts with `ws://` or `wss://`)}; `findings`, a list of {`code`, `kind` (`"fix"` or `"cannot-tell"`), `message`, `next_step`}.
+- `update`: `status` (`"current"`, `"behind"` or `"unknown"`), `code` (`QTE-UPDATE-AVAILABLE` when behind, else `null`), `message`, `next_step`; `installed` {`version`, `description` (as the text's `installed:` line, with a pinned commit cut to 12 hex digits), `commit` (12 hex digits), `revision` (`"main"`, a release tag, a commit cut to 12 hex digits, `"other"` or `null`), `archive` (a release tag, `"main"`, `"other"` or `null`)}; `latest_release`; `main_commit` (12 hex digits); `main_ahead`; `update_command` (the command that updates, or `null`); `recommended`; `why`.
+- `smoke_test`: `summary` {`passed`, `failed`, `skipped`}; `checks`, a list of {`name`, `status` (`"pass"`, `"fail"` or `"skip"`), `code` (the first code its message names, or `null`), `message` (as the text line gives it)}; `problems` (why it could not connect, for exit 2); `warnings` (the notes it wrote to stderr: a fill of the test order, a level where it may still rest, an interruption); `stopped_by` (`null`, `"SIGINT"`, `"SIGTERM"` or `"SIGHUP"`). The document comes at the end, on every exit, a stop by Ctrl+C or a signal included. With `--json`, what it writes to stderr is JSON lines too: SDK log records, and its own notes as log lines with `"logger":"smoke_test"`.
 
 ## TOKEN
 
@@ -340,20 +358,28 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 - Cause: A newer release of qte-sdk is out; the message says whether it is a recommended update, and why.
 - Fix: Run the command the message gives.
 
+## LOG
+
+### QTE-LOG-FORMAT-INVALID
+
+- Raised as: `qte_sdk.logs.LogFormatInvalid`, a `ValueError`, from `qte_sdk.logs.configure()`; the SDK's commands and `examples/smoke_test.py` print it on stderr and exit 2. The value is not shown.
+- Cause: `QTE_LOG_FORMAT`, or the format passed to `configure()`, is not `json` or `text` (case and surrounding spaces do not matter; unset or empty means text).
+- Fix: Set `QTE_LOG_FORMAT` to `json` or `text`, or unset it.
+
 ## PACING and BUDGET
 
-These are about your team's message budgets. The exchange counts every `new`, `cancel` and `amend` your team sends, rejected ones too, toward rolling windows per team across all its connections, and rejects a message (reason codes 1500 to 1502) when its window is full; `mass_cancel` never counts. The `QTE-PACING-` codes come from a `qte_sdk.pacing.Pacer`, which paces those messages under the values you give it; `QTE-BUDGET-REJECTED` is logged by a session without one. The warnings are logged through the `qte_sdk.pacing` logger, from a thread of their own, never the event loop, and are dropped rather than wait on a stderr pipe that is full.
+These are about your team's message budgets. The exchange counts every `new`, `cancel` and `amend` your team sends, rejected ones too, toward rolling windows per team across all its connections, and rejects a message (reason codes 1500 to 1502) when its window is full; `mass_cancel` never counts. The `QTE-PACING-` codes come from a `qte_sdk.pacing.Pacer`, which paces those messages under the values you give it; `QTE-BUDGET-REJECTED` is logged by a session without one. The warnings are logged through the `qte_sdk.pacing` logger, from a thread of their own, never the event loop, and are dropped rather than wait on a stderr pipe that is full. A pipe, socket or terminal takes a line of at most 512 bytes whole, so a longer one (a reject's JSON line always is) is written there in a short form: the code, what happened, the limit learned if any, and the next step, with only `kind` and `reason` in `fields`. A log file or other handler gets the whole line.
 
 ### QTE-PACING-LIMIT
 
 - Raised as: `qte_sdk.pacing.PacingLimit`, a `RuntimeError`, with `limit` (`burst`, `sustained` or `new-order`), `retry_after` (seconds) and `type`, from a send through a `Pacer`.
-- Cause: The pacer has `on_limit="raise"`, or its wait would pass `max_wait`, and the window named by `limit` had no room for the message. Nothing was sent. In raise mode this also happens to every paced send in the first second after each connect or reconnect: a session starts with the burst window held for a second, since the pacer cannot see what your team sent just before (`limit` is `burst` and `retry_after` at most a second, unless another window holds the send longer, as after a budget reject, when that window's `PacingLimit` or `PacingDraining` is raised with its own `retry_after`).
+- Cause: The pacer has `on_limit="raise"`, or its wait would pass `max_wait`, and the window named by `limit` had no room for the message. `max_wait` bounds the whole time a send waits for room, counted from the call, so time queued behind earlier sends counts toward it, and a send can raise when its own wait for room is shorter than `max_wait`. A send that finds room when its turn comes is sent, however long it queued. Nothing was sent. In raise mode this also happens to every paced send in the first second after each connect or reconnect: a session starts with the burst window held for a second, since the pacer cannot see what your team sent just before (`limit` is `burst` and `retry_after` at most a second, unless another window holds the send longer, as after a budget reject, when that window's `PacingLimit` or `PacingDraining` is raised with its own `retry_after`).
 - Fix: Send it again after `retry_after` seconds, or send less often. A pacer with `on_limit="wait"` (the default) waits instead.
 
 ### QTE-PACING-DRAINING
 
 - Raised as: `qte_sdk.pacing.PacingDraining`, a `PacingLimit`, with the same fields.
-- Cause: The exchange rejected a message for a budget (1500 to 1502), so the pacer holds that window's messages until the whole window has passed (about a second for the burst cap, a minute for the others), and it has `on_limit="raise"` or a `max_wait` shorter than the hold. Rejected messages count toward the window, so sending sooner only keeps the team locked out. Nothing was sent; `send_mass_cancel` is never held.
+- Cause: The exchange rejected a message for a budget (1500 to 1502), so the pacer holds that window's messages until the whole window has passed (about a second for the burst cap, a minute for the others), and it has `on_limit="raise"`, or a `max_wait` the hold would pass (counting the time the send already waited, queued behind earlier sends included). Rejected messages count toward the window, so sending sooner only keeps the team locked out. Nothing was sent; `send_mass_cancel` is never held.
 - Fix: Send it again after `retry_after` seconds. If rejects keep coming, check the `Budget` values against your team's, and split them between bots that share a team.
 
 ### QTE-PACING-REJECTED

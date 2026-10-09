@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
+import qte_sdk.logs
 from qte_sdk.calendar import Calendar, next_session
 from qte_sdk.connection import SessionRejected
 from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
@@ -212,6 +213,8 @@ def fail(message: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # With QTE_LOG_FORMAT=json, the SDK's log records are JSON lines on stderr.
+    qte_sdk.logs.configure()
     try:
         url = resolve_url()  # QTE_URL from the environment, or from ./.env
     except MissingURL as error:
