@@ -38,7 +38,7 @@
   {
     "version": "1.3.0",
     "recommended": true,
-    "why": "from 12 October, rejected messages count toward your team's message budget, so a bot that sends too fast locks itself out; 1.3.0's opt-in pacer keeps a bot under its budget",
+    "why": "rejected messages count toward your team's message budget, so a bot that sends too fast locks itself out; 1.3.0's opt-in pacer keeps a bot under its budget",
     "platforms": []
   }
 ]
