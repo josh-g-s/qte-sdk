@@ -44,7 +44,9 @@ A `Pacer` keeps your sends under `headroom` (80% by default) of each cap:
   watched a full window, it lowers that window's limit: to `headroom` of what it counted
   there, but never by more than half in one reject, since the count can miss another
   connection's messages. Each sustained window (a minute) with no budget reject on it
-  raises the limit again by a tenth, up to the limit from the values passed. With values
+  raises the limit again by a tenth, and by at least a fortieth of the limit from the
+  values passed, up to that limit; a send held by a lowered limit is let go as soon as a
+  raise makes room, and `limits` is up to date whenever it is read. With values
   that are too high the pacer settles near the real cap, rejected now and then rather than
   all session; a reject another connection caused costs a few minutes at a lower limit,
   never the rest of the session. The warning says what it did, and `limits` shows the
@@ -83,7 +85,7 @@ import threading
 import time
 from bisect import bisect_right, insort
 from collections import OrderedDict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -117,6 +119,8 @@ _BURST_PARTS = 4
 # After a budget reject lowers a limit, it is raised again by this share of itself for each
 # sustained window with no budget reject on it, up to its full value.
 _RECOVERY_STEP = 0.1
+# And by at least this share of its full value.
+_RECOVERY_FLOOR = 0.025
 # Waits this short count as none: float rounding must not leave a sleep that never ends.
 _EPSILON = 1e-6
 
@@ -137,11 +141,18 @@ _log = logging.getLogger(__name__)
 Write = Callable[[str, Message], Awaitable[object]]
 
 
+# The largest budget value taken: 9 digits, so each warning's short line, which can name
+# a limit, is at most 512 bytes (see `_warn`). Far above any team's budget.
+_MAX_COUNT = 999_999_999
+
+
 def _count(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an int")
     if value < 1:
         raise ValueError(f"{name} must be at least 1, got {value}")
+    if value > _MAX_COUNT:
+        raise ValueError(f"{name} must be at most {_MAX_COUNT}, got {value}")
     return value
 
 
@@ -163,8 +174,8 @@ class Budget:
     `sustained_per_minute` is the cap on new, cancel and amend together in any
     `sustained_window` (60 s); `burst_per_second` the cap in any `burst_window` (1 s);
     `new_orders_per_minute`, for an arm that has one, the cap on `new` alone in any
-    `sustained_window`. Leave it None otherwise. The windows are term settings too, and
-    change only if the course team says so.
+    `sustained_window`. Leave it None otherwise. Each is from 1 to 999999999. The windows
+    are term settings too, and change only if the course team says so.
     """
 
     sustained_per_minute: int
@@ -271,22 +282,36 @@ class _Window:
             self.held_until = until
             self.held_by_reject = by_reject
 
-    def wait(self, now: float) -> tuple[float, bool]:
+    def wait(self, now: float, raises: Sequence[tuple[float, int]] = ()) -> tuple[float, bool]:
         """Seconds until this window has room for one more stamp, and whether a hold after
-        a budget reject is what decides it."""
+        a budget reject is what decides it. `raises` lists when a lowered limit will be
+        raised again, and to what, in time order: room can come at one of those times
+        too, if nothing else is sent meanwhile."""
         self.prune(now)
         wait, by_reject = 0.0, False
         if self.held_until > now:
             wait, by_reject = self.held_until - now, self.held_by_reject
-        stamps = self.stamps
-        # The stamps that still count: those less than `length + guard` old.
-        counting = len(stamps) - bisect_right(stamps, now - self.length - self.guard + _EPSILON)
-        if self.limit is not None and counting >= self.limit:
-            # Room comes when the stamp that leaves `limit - 1` after it expires.
-            frees = stamps[len(stamps) - self.limit] + self.length + self.guard - now
-            if frees > wait:
-                wait, by_reject = frees, False
+        if self.limit is not None:
+            frees = self._room_at(now, self.limit)
+            for when, limit in raises:
+                if frees <= when:
+                    break
+                frees = self._room_at(when, limit)
+            if frees - now > wait:
+                wait, by_reject = frees - now, False
         return wait, by_reject
+
+    def _room_at(self, start: float, limit: int) -> float:
+        """The first time from `start` at which fewer than `limit` stamps count, if no
+        stamp is added and the limit stays as it is."""
+        stamps = self.stamps
+        span = self.length + self.guard
+        # The stamps that still count at `start`: those less than `length + guard` old.
+        counting = len(stamps) - bisect_right(stamps, start - span + _EPSILON)
+        if counting < limit:
+            return start
+        # Room comes when the stamp that leaves `limit - 1` after it expires.
+        return stamps[len(stamps) - limit] + span
 
     def count_within(self, end: float) -> int | None:
         """The stamps in the exchange's window ending at `end`, (end - length, end], or None
@@ -411,24 +436,42 @@ class Pacer:
         return f"Pacer({self.budget!r}, headroom={self.headroom}, on_limit={self.on_limit!r})"
 
     def _recover(self, now: float) -> None:
-        """Raise each lowered limit again by a tenth for each whole sustained window with no
-        budget reject on it, up to its full value."""
+        """Raise each lowered limit again by one step (see `_step`) for each whole sustained
+        window with no budget reject on it, up to its full value."""
         clean = self.budget.sustained_window
         for window in (self._burst, self._sustained, self._new_order):
             full, limit = window.full, window.limit
             if full is None or limit is None or limit >= full:
                 continue
-            steps = math.floor((now - window.lowered_at) / clean)
-            for _ in range(min(steps, 100)):
-                limit = min(full, limit + self._step(limit))
-            if steps > 0:
-                window.limit = limit
-                window.lowered_at += steps * clean
+            # Due a hair early, with the same sum `_raises` uses, so a wait that ends at a
+            # raise finds the limit raised.
+            while limit < full and window.lowered_at + clean <= now + _EPSILON:
+                limit = min(full, limit + self._step(limit, full))
+                window.lowered_at += clean
+            window.limit = limit
         self._smooth.limit = self._part(self._burst.limit or 1)
 
     @staticmethod
-    def _step(limit: int) -> int:
-        return max(1, math.ceil(limit * _RECOVERY_STEP))
+    def _step(limit: int, full: int) -> int:
+        """One clean window's raise: a tenth of the limit, and at least a fortieth of the
+        full limit, so a deep cut does not take long to recover."""
+        return max(1, math.ceil(limit * _RECOVERY_STEP), math.ceil(full * _RECOVERY_FLOOR))
+
+    def _raises(self, window: _Window) -> list[tuple[float, int]]:
+        """When `window`'s lowered limit will be raised again, and to what, until it is back
+        to its full value, if no budget reject comes first. The smoothing part follows the
+        burst window."""
+        source = self._burst if window is self._smooth else window
+        full, limit = source.full, source.limit
+        raises: list[tuple[float, int]] = []
+        if full is None or limit is None:
+            return raises
+        when = source.lowered_at
+        while limit < full:
+            when += self.budget.sustained_window
+            limit = min(full, limit + self._step(limit, full))
+            raises.append((when, self._part(limit) if window is self._smooth else limit))
+        return raises
 
     def _limit(self, cap: int) -> int:
         return max(1, math.floor(cap * self.headroom))
@@ -440,7 +483,9 @@ class Pacer:
     @property
     def limits(self) -> dict[str, int | None]:
         """The most each window lets this pacer send: `headroom` of each cap, or less once
-        a budget reject has shown the cap is lower. "new-order" is None without a cap."""
+        a budget reject has shown the cap is lower, raised again as clean minutes pass.
+        "new-order" is None without a cap."""
+        self._recover(self._clock())
         return {name: window.limit for name, window in self._by_name.items()}
 
     def wrap(self, sender: Any) -> "PacedSender":
@@ -534,11 +579,10 @@ class Pacer:
             return (self._burst, self._smooth, self._sustained, self._new_order)
         return (self._burst, self._smooth, self._sustained)
 
-    @staticmethod
-    def _blocked(windows: tuple[_Window, ...], now: float) -> tuple[float, _Window, bool]:
+    def _blocked(self, windows: tuple[_Window, ...], now: float) -> tuple[float, _Window, bool]:
         longest, which, by_reject = 0.0, windows[0], False
         for window in windows:
-            wait, rejected = window.wait(now)
+            wait, rejected = window.wait(now, self._raises(window))
             if wait > longest:
                 longest, which, by_reject = wait, window, rejected
         return longest, which, by_reject
@@ -689,8 +733,8 @@ class Pacer:
         ):
             # The count can miss another connection's messages still in flight, its rejects
             # and its late reports, so one reject never lowers a limit by more than half;
-            # but never below what the count shows, either. It is raised again by a tenth
-            # after each clean sustained window (see `_recover`).
+            # but never below what the count shows, either. It is raised again after each
+            # clean sustained window (see `_recover`).
             count = within - itself
             lowered = max(math.ceil(window.limit / 2), self._limit(count) if count > 0 else 1)
             if lowered < window.limit:
@@ -713,7 +757,7 @@ class Pacer:
                 f"Your {window.name} budget may be lower than the {passed} you passed (the "
                 f"pacer counted {count} in the window), so it now keeps under {inferred} per "
                 f"{_per(window.length)}, and raises that again by "
-                f"a tenth after each "
+                f"a tenth (at least {self._step(1, window.full or 1)}) after each "
                 f"{_per(self.budget.sustained_window)} with no budget reject"
             )
         else:
@@ -853,7 +897,8 @@ def _warn(code: str, *, short_what: str | None = None, **fields: Any) -> None:
     terminal would not get (see `qte_sdk.update._log_without_waiting`): `short_what`, or
     else the first part of the message, what happened, then the next step, with only the
     fields in `_SHORT_FIELDS`. Each pacing warning's short line is at most 512 bytes, as
-    JSON or text, with 9-digit counts and the longest numbers of seconds."""
+    JSON or text, with the largest counts a `Budget` takes (9 digits, `_MAX_COUNT`) and the
+    longest numbers of seconds."""
     # Imported here: qte_sdk.dotenv is not needed until a warning is logged.
     from qte_sdk.dotenv import withholding
 

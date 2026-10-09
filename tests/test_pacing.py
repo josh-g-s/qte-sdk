@@ -272,6 +272,17 @@ def test_budget_values_are_checked():
         Budget(sustained_per_minute=10, burst_per_second=10, sustained_window="60")
 
 
+def test_budget_values_are_at_most_nine_digits():
+    # A larger count could make a warning's short line over 512 bytes, dropped on a pipe.
+    Budget(sustained_per_minute=LONGEST_COUNT, burst_per_second=LONGEST_COUNT)
+    for name in ("sustained_per_minute", "burst_per_second", "new_orders_per_minute"):
+        values = {"sustained_per_minute": 10, "burst_per_second": 10, name: LONGEST_COUNT + 1}
+        with pytest.raises(ValueError, match=f"{name} must be at most 999999999"):
+            Budget(**values)
+    with pytest.raises(ValueError, match="at most"):
+        Budget(sustained_per_minute=10**30, burst_per_second=10)
+
+
 def test_pacer_arguments_are_checked():
     with pytest.raises(ValueError):
         Pacer(ONE_X, headroom=0.96)
@@ -1036,9 +1047,9 @@ def test_a_warning_as_a_json_line_withholds_the_token(monkeypatch):
     assert token not in json.dumps(parsed)
 
 
-# The longest numbers a warning can name: 9-digit counts, and seconds as long as a float's
-# repr gets (a window of any length is accepted).
-LONGEST_COUNT = 999_999_999
+# The longest numbers a warning can name: the largest count a Budget takes, and seconds as
+# long as a float's repr gets (a window of any length is accepted).
+LONGEST_COUNT = pacing._MAX_COUNT
 LONGEST_SECONDS = 1.2345678901234567e299
 LONGEST_REASON = max((pacing._reason_name(code) for code in pacing._BUDGET_REASONS), key=len)
 
@@ -1079,14 +1090,22 @@ def _join_warnings(before: set[threading.Thread]) -> None:
             assert not thread.is_alive()
 
 
-def _through_a_pipe(monkeypatch, form: str, warns: list[Callable[[], None]]) -> bytes:
+def _through_a_pipe(
+    monkeypatch,
+    form: str,
+    warns: list[Callable[[], None]],
+    handler_filter: Callable[[logging.LogRecord], bool] | None = None,
+) -> bytes:
     """What the warnings write to a real pipe, on the `qte_sdk.pacing` logger, through a
-    JSON handler as `qte_sdk.logs.configure("json")` adds or a plain text one."""
+    JSON handler as `qte_sdk.logs.configure("json")` adds or a plain text one, with
+    `handler_filter` on that handler when given."""
     from test_update import json_handler, plain_handler, read_all
 
     read, write = os.pipe()
     stream = open(write, "w", encoding="utf-8")  # noqa: SIM115
     handler = json_handler(stream) if form == "json" else plain_handler(stream, form)
+    if handler_filter is not None:
+        handler.addFilter(handler_filter)
     logger = logging.getLogger("qte_sdk.pacing")
     monkeypatch.setattr(logger, "propagate", False)
     logger.addHandler(handler)
@@ -1205,12 +1224,15 @@ def test_pacing_warnings_of_everyday_length_reach_a_real_pipe_whole(monkeypatch,
         assert b"Rejected messages count toward the window too" in data
 
 
-def test_the_short_form_passes_the_pacing_loggers_filters_too(monkeypatch):
-    logger = logging.getLogger("qte_sdk.pacing")
-    monkeypatch.setattr(
-        logger, "filters", [lambda record: "holds that budget" not in record.getMessage()]
+def test_the_short_form_passes_the_handlers_filters_too(monkeypatch):
+    # The handler's filters run again on the short copy; the logger's do not (they passed
+    # the record once, and one that keeps state would refuse the copy).
+    data = _through_a_pipe(
+        monkeypatch,
+        "json",
+        [_longest_warnings()[errors.PACING_REJECTED]],
+        handler_filter=lambda record: "holds that budget" not in record.getMessage(),
     )
-    data = _through_a_pipe(monkeypatch, "json", [_longest_warnings()[errors.PACING_REJECTED]])
     assert data == b""
 
 
@@ -1521,3 +1543,120 @@ async def test_every_reject_on_a_lowered_window_starts_its_clean_minute_again(wa
     sim.now = 64.5 + 60.0 + 2
     await send_one(sender, "new", "c")
     assert pacer.limits["burst"] == 88
+
+
+# Follow-ups (#205)
+
+
+async def lowered_sustained(sim: Sim, pacer: Pacer, sender) -> float:
+    """Watch a minute of quiet cancels, then a reject another connection caused: the
+    sustained limit falls from 960 to 480. Returns the time of the reject."""
+    for n in range(11):
+        await send_one(sender, "cancel", f"q{n}")
+        await sim.sleep(6.0)
+    pacer.observe(reject(SUSTAINED, "elsewhere"))
+    assert pacer.limits["sustained"] == 480
+    return sim.now
+
+
+async def fill_lowered_window(sim: Sim, pacer: Pacer, sender, lowered: float) -> None:
+    """After the drain and the first clean minute (528), wait until 100 s after the reject,
+    then fill the window to 528. Its oldest stamp expires 160 s after the reject, but the
+    next clean minute ends at 120 s, raising the limit to 581."""
+    await sim.sleep(lowered + 100.0 - sim.now)
+    assert pacer.limits["sustained"] == 528
+    await blast(sender, 528, prefix="f")
+    assert sim.now < lowered + 105
+
+
+async def test_a_held_send_goes_when_a_recovery_raise_makes_room(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    wire = Wire(sim)
+    sender = pacer.wrap(wire)
+    lowered = await lowered_sustained(sim, pacer, sender)
+    await fill_lowered_window(sim, pacer, sender, lowered)
+    await send_one(sender, "cancel", "held")
+    assert wire.sent[-1][0] == pytest.approx(lowered + 120.0)
+    assert pacer.limits["sustained"] == 581
+
+
+async def test_retry_after_is_the_recovery_deadline_when_it_comes_first(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    sender = pacer.wrap(Wire(sim))
+    lowered = await lowered_sustained(sim, pacer, sender)
+    await fill_lowered_window(sim, pacer, sender, lowered)
+    pacer.on_limit = "raise"
+    with pytest.raises(PacingLimit) as caught:
+        await send_one(sender, "cancel", "x")
+    assert caught.value.limit == "sustained"
+    assert caught.value.retry_after == pytest.approx(lowered + 120.0 - sim.now)
+    pacer.on_limit, pacer.max_wait = "wait", 1.0
+    with pytest.raises(PacingLimit) as caught:
+        await send_one(sender, "cancel", "y")
+    assert caught.value.retry_after == pytest.approx(lowered + 120.0 - sim.now)
+
+
+async def test_limits_are_up_to_date_after_an_idle_minute(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
+    await lowered_sustained(sim, pacer, pacer.wrap(Wire(sim)))
+    sim.now += 60.0  # no send at all
+    assert pacer.limits["sustained"] == 528
+
+
+async def test_eight_cuts_recover_within_25_clean_minutes(warned):
+    # The bound: from 960 eight rejects another connection caused halve the sustained
+    # limit to 4. Each clean minute raises it by a tenth, but by at least 24 (a fortieth of
+    # 960), so it is back to 960 after 25 clean minutes (it took 50 at a tenth alone).
+    sim = Sim()
+    pacer = Pacer(ONE_X, count_foreign=False, clock=sim.clock, sleep=sim.sleep)
+    sim.now = 61.0
+    for n in range(8):
+        pacer.observe(reject(SUSTAINED, f"elsewhere{n}"))
+        sim.now += 1.0
+    assert pacer.limits["sustained"] == 4
+    minutes = 0
+    while pacer.limits["sustained"] < 960 and minutes < 100:
+        sim.now += 60.0
+        minutes += 1
+    assert minutes == 25
+
+
+async def test_a_wait_that_ends_at_a_raise_still_needs_room(warned):
+    # The burst limit lowered from 20 to 10 makes the smoothing part 2, and a raise to 11
+    # leaves it 2: a send just before the raise must wait for a stamp to expire.
+    sim = Sim()
+    pacer = Pacer(
+        Budget(sustained_per_minute=100_000, burst_per_second=25), clock=sim.clock, sleep=sim.sleep
+    )
+    wire = Wire(sim)
+    sender = pacer.wrap(wire)
+    sim.now = 10.1
+    pacer.observe(reject(BURST, "elsewhere"))
+    assert pacer.limits["burst"] == 10
+    sim.now = 70.0
+    await blast(sender, 2, "cancel", "a")
+    sim.now = 70.099999
+    await send_one(sender, "cancel", "third")
+    assert wire.sent[-1][0] == pytest.approx(70.25)
+    assert most_in_window(wire.times(), 0.25) <= 2
+
+
+async def test_retry_after_skips_a_raise_that_leaves_the_window_full(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, on_limit="raise", clock=sim.clock, sleep=sim.sleep)
+    sim.now = 61.0
+    pacer.observe(reject(SUSTAINED, "elsewhere"))  # lowered to 480 at 61
+    sim.now = 121.0
+    assert pacer.limits["sustained"] == 528
+    sim.now = 141.0
+    for n in range(600):
+        pacer.observe(accepted(f"f{n}"))  # another connection's 600, all at 141
+    sim.now = 160.0
+    with pytest.raises(PacingLimit) as caught:
+        await send_one(pacer.wrap(Wire(sim)), "cancel", "x")
+    # The raise at 181 (to 581) still leaves 600 counting: room comes only when they
+    # expire, at 201.05.
+    assert caught.value.retry_after == pytest.approx(201.05 - 160.0)
