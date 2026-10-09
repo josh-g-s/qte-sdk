@@ -535,6 +535,28 @@ async def test_max_wait_waits_up_to_it_and_raises_past_it():
     assert len(wire.sent) == 49
 
 
+async def test_max_wait_counts_the_time_queued_behind_earlier_sends(warned):
+    # The first send's write takes 1.9 s, holding the send lock; the second, called at
+    # once, waits behind it. A burst reject at 1.0 s holds the burst window until 2.05 s,
+    # so when the second's turn comes, at 1.9 s, its own wait for room is 0.15 s, far under
+    # max_wait, but its whole wait would be 2.05 s, past it: it raises, unsent.
+    sim = Sim()
+    pacer = Pacer(WIDE, max_wait=2.0, clock=sim.clock, sleep=sim.sleep)
+    wire = Wire(sim, write_time=1.9)
+    sender = pacer.wrap(wire)
+    sim.at(1.0, lambda: pacer.observe(reject(BURST, "elsewhere")))
+    first = asyncio.ensure_future(send_one(sender, "cancel", "first"))
+    await asyncio.sleep(0)
+    with pytest.raises(PacingLimit) as caught:
+        await send_one(sender, "cancel", "second")
+    await first
+    assert sim.now == pytest.approx(1.9)
+    assert caught.value.limit == "burst"
+    assert caught.value.retry_after == pytest.approx(0.15)
+    assert caught.value.retry_after < pacer.max_wait
+    assert [ref for _, _, ref in wire.sent] == ["first"]
+
+
 # Waits over a second are logged once
 
 
@@ -999,8 +1021,202 @@ def test_a_warning_as_a_json_line_withholds_the_token(monkeypatch):
 
     parsed = _json_warning(monkeypatch, warn)
     assert parsed["fields"]["why"] == errors.WITHHELD
-    assert parsed["message"] == errors.WITHHELD
+    assert errors.WITHHELD in parsed["message"]
     assert token not in json.dumps(parsed)
+
+
+# The longest numbers a warning can name: 9-digit counts, and seconds as long as a float's
+# repr gets (a window of any length is accepted).
+LONGEST_COUNT = 999_999_999
+LONGEST_SECONDS = 1.2345678901234567e299
+LONGEST_REASON = max((pacing._reason_name(code) for code in pacing._BUDGET_REASONS), key=len)
+
+
+def _longest_warnings(why_extra: str = "") -> dict[str, Callable[[], None]]:
+    """A real `_warn` call for each pacing warning, with its longest fields."""
+    per = pacing._per(LONGEST_SECONDS)
+    why = (
+        f"Your new-order budget may be lower than the {LONGEST_COUNT} you passed (the pacer "
+        f"counted {LONGEST_COUNT} in the window), so it now keeps under {LONGEST_COUNT} per "
+        f"{per}, and raises that again by a tenth after each {per} with no budget "
+        f"reject{why_extra}"
+    )
+    held = pacing._held_types(pacing.BURST)
+    return {
+        errors.BUDGET_REJECTED: lambda: pacing._warn(errors.BUDGET_REJECTED, reason=LONGEST_REASON),
+        errors.PACING_REJECTED: lambda: pacing._warn(
+            errors.PACING_REJECTED,
+            kind=pacing.NEW_ORDER,
+            reason=LONGEST_REASON,
+            type=held,
+            seconds=LONGEST_SECONDS,
+            why=why,
+            short_what=pacing._rejected_short(
+                pacing.NEW_ORDER, LONGEST_REASON, LONGEST_SECONDS, LONGEST_COUNT, LONGEST_SECONDS
+            ),
+        ),
+        errors.PACING_HOLDING: lambda: pacing._warn(
+            errors.PACING_HOLDING, type=held, seconds=LONGEST_SECONDS, kind=pacing.NEW_ORDER
+        ),
+    }
+
+
+def _join_warnings(before: set[threading.Thread]) -> None:
+    for thread in set(threading.enumerate()) - before:
+        if thread.name == "qte-sdk pacing warning":
+            thread.join(5)
+            assert not thread.is_alive()
+
+
+def _through_a_pipe(monkeypatch, form: str, warns: list[Callable[[], None]]) -> bytes:
+    """What the warnings write to a real pipe, on the `qte_sdk.pacing` logger, through a
+    JSON handler as `qte_sdk.logs.configure("json")` adds or a plain text one."""
+    from test_update import json_handler, plain_handler, read_all
+
+    read, write = os.pipe()
+    stream = open(write, "w", encoding="utf-8")  # noqa: SIM115
+    handler = json_handler(stream) if form == "json" else plain_handler(stream, form)
+    logger = logging.getLogger("qte_sdk.pacing")
+    monkeypatch.setattr(logger, "propagate", False)
+    logger.addHandler(handler)
+    before = set(threading.enumerate())
+    try:
+        for warn in warns:
+            warn()
+        _join_warnings(before)
+        return read_all(read)
+    finally:
+        logger.removeHandler(handler)
+        stream.close()
+        os.close(read)
+
+
+PIPE_FORMS = {"json": "json", "last-resort": "%(message)s", "basic-config": logging.BASIC_FORMAT}
+
+
+@pytest.mark.parametrize("form", list(PIPE_FORMS))
+def test_the_longest_pacing_warnings_all_reach_a_real_pipe_each_in_one_line(monkeypatch, form):
+    # A pipe takes at most 512 bytes in one write (see qte_sdk.update): a longer line is
+    # dropped there, so each warning has a short form that fits whatever its numbers.
+    warns = _longest_warnings()
+    data = _through_a_pipe(monkeypatch, PIPE_FORMS[form], list(warns.values()))
+    lines = data.splitlines(keepends=True)
+    assert len(lines) == 3, data
+    for line in lines:
+        assert len(line) <= pacing._update._MAX_DIRECT_LINE, (len(line), line)
+    if form == "json":
+        parsed = [json.loads(line) for line in lines]
+        assert sorted(p["code"] for p in parsed) == sorted(warns)
+        steps = {code: errors.CODES[code].next_step for code in warns}
+        for line in parsed:
+            assert line["logger"] == "qte_sdk.pacing" and line["message"]
+            assert line["next_step"] == steps[line["code"]].strip().rstrip(".")
+        rejected = next(p for p in parsed if p["code"] == errors.PACING_REJECTED)
+        assert rejected["fields"] == {"kind": pacing.NEW_ORDER, "reason": LONGEST_REASON}
+        assert f"now keeps under {LONGEST_COUNT} per" in rejected["message"]
+    else:
+        text = data.decode()
+        for code in warns:
+            assert f"{code}: " in text
+        assert f"now keeps under {LONGEST_COUNT} per" in text
+
+
+def test_each_longest_pacing_warning_is_too_long_whole_and_its_short_form_fits(monkeypatch):
+    from qte_sdk import logs
+
+    caught: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        pacing, "_emit", lambda message, code, **kw: caught.append((message, code, kw))
+    )
+    for warn in _longest_warnings().values():
+        warn()
+    formatters = [logs.JsonFormatter(), logging.Formatter(logging.BASIC_FORMAT)]
+
+    def size(formatter: logging.Formatter, code: str, message: str, step: str, fields: dict) -> int:
+        record = logging.makeLogRecord(
+            {
+                "name": "qte_sdk.pacing",
+                "levelno": logging.WARNING,
+                "levelname": "WARNING",
+                "msg": "%s",
+                "args": (message,),
+                "code": code,
+                "next_step": step,
+                "fields": fields,
+            }
+        )
+        return len((formatter.format(record) + "\n").encode())
+
+    longest_whole = {}
+    for message, code, kw in caught:
+        step = kw["next_step"]
+        longest_whole[code] = size(formatters[0], code, message, step, kw["fields"])
+        assert kw["short"].startswith(f"{code}: ") and kw["short"].endswith(f" {step}.")
+        for formatter in formatters:
+            short = size(formatter, code, kw["short"], step, kw["short_fields"])
+            assert short <= pacing._update._MAX_DIRECT_LINE, (code, short)
+    assert all(length > pacing._update._MAX_DIRECT_LINE for length in longest_whole.values())
+
+
+@pytest.mark.parametrize("form", list(PIPE_FORMS))
+def test_pacing_warnings_of_everyday_length_reach_a_real_pipe_whole(monkeypatch, form):
+    warns = [
+        lambda: pacing._warn(errors.BUDGET_REJECTED, reason="BURST_CAP_EXCEEDED"),
+        lambda: pacing._warn(
+            errors.PACING_REJECTED,
+            kind=pacing.BURST,
+            reason="BURST_CAP_EXCEEDED",
+            type=pacing._held_types(pacing.BURST),
+            seconds=1.05,
+            why="Rejected messages count toward the window too",
+            short_what=pacing._rejected_short(pacing.BURST, "BURST_CAP_EXCEEDED", 1.05, None, 1.0),
+        ),
+        lambda: pacing._warn(
+            errors.PACING_HOLDING,
+            type=pacing._held_types(pacing.SUSTAINED),
+            seconds=12.5,
+            kind=pacing.SUSTAINED,
+        ),
+    ]
+    data = _through_a_pipe(monkeypatch, PIPE_FORMS[form], warns)
+    lines = data.splitlines()
+    assert len(lines) == 3, data
+    if form == "json":
+        holding = next(json.loads(x) for x in lines if b"HOLDING" in x)
+        # Whole when it fits; a reject's JSON line, with its reason twice, does not.
+        assert holding["fields"]["type"] == "new, cancel and amend messages"
+        assert {json.loads(line)["code"] for line in lines} == {
+            errors.BUDGET_REJECTED,
+            errors.PACING_REJECTED,
+            errors.PACING_HOLDING,
+        }
+    else:
+        assert b"Rejected messages count toward the window too" in data
+
+
+def test_the_short_form_passes_the_pacing_loggers_filters_too(monkeypatch):
+    logger = logging.getLogger("qte_sdk.pacing")
+    monkeypatch.setattr(
+        logger, "filters", [lambda record: "holds that budget" not in record.getMessage()]
+    )
+    data = _through_a_pipe(monkeypatch, "json", [_longest_warnings()[errors.PACING_REJECTED]])
+    assert data == b""
+
+
+@pytest.mark.parametrize("form", list(PIPE_FORMS))
+def test_neither_form_of_a_pacing_warning_shows_the_token(monkeypatch, form):
+    token = synthetic_token()
+    monkeypatch.setenv("QTE_TOKEN", token)
+    longest = _longest_warnings(why_extra=f" {token}")
+    data = _through_a_pipe(monkeypatch, PIPE_FORMS[form], [longest[errors.PACING_REJECTED]])
+    short_line = data.decode()
+    assert short_line and token not in short_line
+    everyday = lambda: pacing._warn(  # noqa: E731
+        errors.PACING_REJECTED, kind="burst", reason="r", type="new", seconds=1, why=token
+    )
+    data = _through_a_pipe(monkeypatch, PIPE_FORMS[form], [everyday])
+    assert data and token.encode() not in data
+    assert errors.WITHHELD.encode() in data
 
 
 def test_warnings_never_stop_the_event_loop_on_a_full_stderr_pipe(monkeypatch):

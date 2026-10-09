@@ -994,6 +994,7 @@ def _log_without_waiting(
     next_step: str | None = None,
     fields: dict[str, Any] | None = None,
     short: str | None = None,
+    short_fields: dict[str, Any] | None = None,
 ) -> None:
     """Log `message` through `target` (by default this module's `logger`), with `code` on
     the record (and `next_step` and `fields`, when given, for a JSON formatter: see
@@ -1006,7 +1007,8 @@ def _log_without_waiting(
     exit, and every later write to it, would wait for that. Such a stream gets the line
     only when the pipe, socket or terminal can take it whole now (see `_route`); otherwise
     it is dropped there, unless `short`, the same message made shorter, gives a line that
-    fits: it is written instead, there only. Python's own stderr, and any stream `open()`
+    fits: it is written instead, there only, with `short_fields` as its fields when given.
+    Python's own stderr, and any stream `open()`
     makes, gets it in one `os.write` on its file descriptor, holding no lock; a stream
     that wraps one (colorama's, rich's, a tee, Jupyter's) gets it through `handle`, so the
     wrapper writes it. It runs in the check's own thread, never touches an event loop, and
@@ -1048,7 +1050,7 @@ def _log_without_waiting(
     if not handlers and logging.lastResort is not None:
         handlers = [logging.lastResort]
     later: list[tuple[str, Any, int]] = []
-    shortened = None if short is None else (message, short)
+    shortened = None if short is None else _Shortened(message, short, short_fields, log)
     # Handlers that never wait first, so a write that does wait (another writer filled
     # the pipe after the check) cannot keep the record from a log file or caplog.
     for handler in handlers:
@@ -1159,7 +1161,7 @@ def _write_or_drop(
     handler: logging.StreamHandler,
     fd: int,
     record: logging.LogRecord,
-    shortened: tuple[str, str] | None = None,
+    shortened: "_Shortened | None" = None,
 ) -> None:
     """Write `record` as `handler` would, in one `os.write` on `fd` holding no lock, when
     the stream can take the whole line now; otherwise drop it. A line over 512 bytes is
@@ -1199,7 +1201,7 @@ def _handle_if_ready(
     handler: logging.StreamHandler,
     fd: int,
     record: logging.LogRecord,
-    shortened: tuple[str, str] | None = None,
+    shortened: "_Shortened | None" = None,
 ) -> None:
     """Write `record` to `handler`'s stream (a wrapper), as `handle` and `emit` would, only
     when the line (made shorter, as `_write_or_drop` does, if it is too long) is at
@@ -1234,24 +1236,26 @@ def _handle_if_ready(
 def _line(
     handler: logging.StreamHandler,
     record: logging.LogRecord,
-    shortened: tuple[str, str] | None,
+    shortened: "_Shortened | None",
 ) -> tuple[str, bytes]:
     """The line `handler` writes for `record`, as text and as the bytes it becomes. When
-    those are over 512 bytes and `shortened` is (the message logged, a shorter one), the
-    line for a copy of the record with the shorter message instead, its code, next step
-    and fields unchanged, once the logger's and the handler's filters have passed that
-    copy too; but not when a filter has already changed the message, which is then kept
-    as the filter made it (and so dropped, being too long)."""
+    those are over 512 bytes and `shortened` gives a shorter message, the line for a copy
+    of the record with the shorter message instead, its code and next step unchanged, and
+    its fields too unless `shortened` gives shorter ones, once the logger's and the
+    handler's filters have passed that copy too; but not when a filter has already changed
+    the message, which is then kept as the filter made it (and so dropped, being too
+    long)."""
     text = handler.format(record) + handler.terminator
     data = _encoded(handler, text)
     if len(data) <= _MAX_DIRECT_LINE or shortened is None:
         return text, data
-    message, short = shortened
-    if record.getMessage() != message:
+    if record.getMessage() != shortened.message:
         return text, data
     shorter = copy.copy(record)
-    shorter.msg, shorter.args = "%s", (short,)
-    for check in (logger.filter, handler.filter):
+    shorter.msg, shorter.args = "%s", (shortened.short,)
+    if shortened.fields is not None:
+        shorter.fields = shortened.fields
+    for check in (shortened.log.filter, handler.filter):
         passed = check(shorter)
         if not passed:
             return text, data
@@ -1259,6 +1263,17 @@ def _line(
             shorter = passed
     text = handler.format(shorter) + handler.terminator
     return text, _encoded(handler, text)
+
+
+class _Shortened(NamedTuple):
+    """A record's shorter form, for a line too long to write whole (see `_line`): the
+    message logged, the shorter one, shorter fields or None to keep them, and the logger
+    that logged it, whose filters pass the shorter copy too."""
+
+    message: str
+    short: str
+    fields: dict[str, Any] | None
+    log: logging.Logger
 
 
 def _encoded(handler: logging.StreamHandler, text: str) -> bytes:

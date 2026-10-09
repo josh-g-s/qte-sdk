@@ -186,9 +186,10 @@ class Budget:
 
 class PacingLimit(QteError, RuntimeError):
     """A paced send found no room and was not sent: with `on_limit="raise"`, or when its
-    wait would pass `max_wait`. Code `QTE-PACING-LIMIT`. `limit` is the window that is full
-    ("burst", "sustained" or "new-order"), `retry_after` the seconds until it has room, if
-    nothing else is sent meanwhile, and `type` the message type."""
+    whole wait, time queued behind earlier sends included, would pass `max_wait`. Code
+    `QTE-PACING-LIMIT`. `limit` is the window that is full ("burst", "sustained" or
+    "new-order"), `retry_after` the seconds until it has room, if nothing else is sent
+    meanwhile, and `type` the message type."""
 
     code = _errors.PACING_LIMIT
 
@@ -316,9 +317,11 @@ class Pacer:
     `PacingLimit` at once, or `PacingDraining` after a budget reject, and sends nothing, for
     a bot that would rather requote than send late. In raise mode, the second after each
     connect or reconnect, while the burst window is held (see the module), every paced send
-    raises `PacingLimit`. `max_wait`, if not None, is the longest
-    one send waits for room once its turn comes; a longer wait raises as "raise" does.
-    Sends are served first come, first served, so a send waits behind those before it too.
+    raises `PacingLimit`. Sends are served first come, first served, so a send waits behind
+    those before it too. `max_wait`, if not None, bounds the whole time one send waits,
+    from the call, time queued behind earlier sends included: a send whose wait for room
+    would take it past `max_wait` raises as "raise" does, though that wait alone is
+    shorter.
     `guard` is how long after the exchange's window a stamp still counts (50 ms).
     `count_foreign` counts the team's messages from other connections (see the module).
     `clock` and `sleep` tell the time and wait; replace them in tests.
@@ -724,6 +727,13 @@ class Pacer:
             type=_held_types(window.name),
             seconds=round(hold, 2),
             why=why,
+            short_what=_rejected_short(
+                window.name,
+                _reason_name(reason_code),
+                hold,
+                None if learned is None else learned[1],
+                window.length,
+            ),
         )
 
 
@@ -764,6 +774,20 @@ def _exchange_stamp(receipt_time: int, anchor: tuple[float, int] | None, now: fl
         return now
     local, server_time = anchor
     return min(local + (receipt_time - server_time) / 1000.0, now)
+
+
+def _rejected_short(
+    kind: str, reason: str, hold: float, inferred: int | None, length: float
+) -> str:
+    """What `QTE-PACING-REJECTED` says happened, in its short form (see `_warn`): seconds in
+    at most 12 characters, and the limit learned, if one was, without the count behind it."""
+    what = (
+        f"the exchange rejected a message for your team's {kind} budget ({reason}); "
+        f"the pacer holds that budget for {hold:.6g} s"
+    )
+    if inferred is not None:
+        what += f" and now keeps under {inferred} per {_per(length)}"
+    return what
 
 
 def _held_types(window: str) -> str:
@@ -813,16 +837,35 @@ def _budget_rejected(event: Event, anchor: tuple[float, int] | None) -> None:
     _warn(_errors.BUDGET_REJECTED, reason=_reason_name(message.reason_code))
 
 
-def _warn(code: str, **fields: Any) -> None:
+# The fields a warning's short form keeps: names, never prose or numbers, which its message
+# gives as far as they fit.
+_SHORT_FIELDS = ("kind", "reason")
+
+
+def _warn(code: str, *, short_what: str | None = None, **fields: Any) -> None:
     """Log `code`'s message at WARNING through this module's logger, with `code`, its next
-    step and `fields` on the record, for a JSON formatter (see `qte_sdk.logs`). Whether the
-    logger is enabled is asked in the warning's thread too: asking can wait for logging's
-    lock."""
+    step and `fields` on the record, for a JSON formatter (see `qte_sdk.logs`). Any field
+    that holds the token is withheld. Whether the logger is enabled is asked in the
+    warning's thread too: asking can wait for logging's lock.
+
+    It carries a short form too, for a line over 512 bytes, which a stderr pipe, socket or
+    terminal would not get (see `qte_sdk.update._log_without_waiting`): `short_what`, or
+    else the first part of the message, what happened, then the next step, with only the
+    fields in `_SHORT_FIELDS`. Each pacing warning's short line is at most 512 bytes, as
+    JSON or text, with 9-digit counts and the longest numbers of seconds."""
+    # Imported here: qte_sdk.dotenv is not needed until a warning is logged.
+    from qte_sdk.dotenv import withholding
+
+    withhold = withholding()
+    step = _errors.next_step(code, withhold=withhold, **fields)
+    what = short_what or _errors.what(code, withhold=withhold, **fields)
     _emit(
-        _errors.render(code, **fields),
+        _errors.render(code, withhold=withhold, **fields),
         code,
-        next_step=_errors.next_step(code, **fields),
+        next_step=step,
         fields=fields,
+        short=f"{code}: {what}. {step}.",
+        short_fields={name: fields[name] for name in _SHORT_FIELDS if name in fields},
     )
 
 
@@ -832,22 +875,40 @@ def _emit(
     *,
     next_step: str | None = None,
     fields: dict[str, Any] | None = None,
+    short: str | None = None,
+    short_fields: dict[str, Any] | None = None,
 ) -> None:
     """Write the warning from a thread of its own, never the event loop's: a write to a
     full stderr pipe would stop the loop, and with it market data and orders. It is
-    dropped there rather than wait (see `qte_sdk.update._log_without_waiting`)."""
+    dropped there rather than wait (see `qte_sdk.update._log_without_waiting`), and on a
+    pipe, socket or terminal written as `short`, with `short_fields`, if it is too long
+    to write whole."""
     threading.Thread(
         target=_write,
-        args=(message, code, next_step, fields),
+        args=(message, code, next_step, fields, short, short_fields),
         name="qte-sdk pacing warning",
         daemon=True,
     ).start()
 
 
-def _write(message: str, code: str, next_step: str | None, fields: dict[str, Any] | None) -> None:
+def _write(
+    message: str,
+    code: str,
+    next_step: str | None,
+    fields: dict[str, Any] | None,
+    short: str | None = None,
+    short_fields: dict[str, Any] | None = None,
+) -> None:
     try:
         _update._log_without_waiting(
-            logging.WARNING, message, code, target=_log, next_step=next_step, fields=fields
+            logging.WARNING,
+            message,
+            code,
+            target=_log,
+            next_step=next_step,
+            fields=fields,
+            short=short,
+            short_fields=short_fields,
         )
     except BaseException:
         # Never into the program: a thread's uncaught error would be printed.

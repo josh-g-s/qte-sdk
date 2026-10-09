@@ -665,6 +665,20 @@ def next_step(code: str, /, *, withhold: Callable[[str], bool] | None = None, **
         return f"See {code} in docs/errors.md"
 
 
+def what(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any) -> str:
+    """The first part of `code`'s message, what happened, without its full stop: for a
+    shorter form of the message. Never raises: if a field is missing, or the code is
+    unknown, the code's cause, or a fixed sentence, is given instead. `withhold` is as for
+    `summary`."""
+    try:
+        shown = {name: _shown(value, withhold) for name, value in fields.items()}
+        return _part(CODES[code].what, shown)
+    except Exception:
+        entry = CODES.get(code)
+        cause = entry.cause if entry is not None else "an error with no registered message"
+        return cause.strip().rstrip(".")
+
+
 def _part(template: str, fields: dict[str, Any]) -> str:
     """One part of a message, filled in, without the full stop `summary` adds."""
     return template.format(**fields).strip().rstrip(".")
