@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.27
+**Version:** 0.28
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- JSON output for coding agents and scripts (#180). `python -m qte_sdk.token check --json`, `python -m qte_sdk.update --json` and `python examples/smoke_test.py --json` print one JSON document on stdout, with the same exit status, which it also gives as `exit_code`; the smoke test's comes at the end, on every exit, a stop by Ctrl+C or a signal included. `QTE_LOG_FORMAT=json`, read by the new `qte_sdk.logs.configure()` (which the commands and examples call, and which does nothing on import), writes the SDK's log records to stderr as one JSON object per line, with `level`, `code`, `message`, `next_step` and `fields` (`with qte_sdk.logs.configured(...):` does so for one block); the commands log SDK warnings that way too, and leave a program's own logging setup as they found it. Every line and document is ASCII, never coloured and never holds the token. A `QTE_LOG_FORMAT` other than `json` or `text` is the new code `QTE-LOG-FORMAT-INVALID`, and each command then exits 2. The automatic update check's line, when over 512 bytes (a long reason in a script other than Latin, say), is now written to a pipe or terminal without the reason, which `python -m qte_sdk.update` gives, rather than skipped. `token check` now also withholds a path that holds the token percent-encoded, and a `HistoryClient`'s DEBUG log lines withhold a request path that holds its token. docs/errors.md gives every key.
 
 ## 1.2.0
 

@@ -27,6 +27,7 @@ import sys
 from contextlib import aclosing
 from datetime import date
 
+import qte_sdk.logs
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
 from qte_sdk.history import (
@@ -156,6 +157,8 @@ def fail(message: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # With QTE_LOG_FORMAT=json, the SDK's log records are JSON lines on stderr.
+    qte_sdk.logs.configure()
     try:
         # The address from QTE_HISTORY_URL, the token from QTE_TOKEN, QTE_TOKEN_FILE or .env.
         client = HistoryClient()
