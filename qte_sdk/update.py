@@ -1050,7 +1050,7 @@ def _log_without_waiting(
     if not handlers and logging.lastResort is not None:
         handlers = [logging.lastResort]
     later: list[tuple[str, Any, int]] = []
-    shortened = None if short is None else _Shortened(message, short, short_fields, log)
+    shortened = None if short is None else _Shortened(message, short, short_fields)
     # Handlers that never wait first, so a write that does wait (another writer filled
     # the pipe after the check) cannot keep the record from a log file or caplog.
     for handler in handlers:
@@ -1241,10 +1241,12 @@ def _line(
     """The line `handler` writes for `record`, as text and as the bytes it becomes. When
     those are over 512 bytes and `shortened` gives a shorter message, the line for a copy
     of the record with the shorter message instead, its code and next step unchanged, and
-    its fields too unless `shortened` gives shorter ones, once the logger's and the
-    handler's filters have passed that copy too; but not when a filter has already changed
-    the message, which is then kept as the filter made it (and so dropped, being too
-    long)."""
+    its fields too unless `shortened` gives shorter ones, once the handler's filters have
+    passed that copy too; but not when a filter has already changed the message, which is
+    then kept as the filter made it (and so dropped, being too long). The logger's filters
+    are not run again: they passed the record once, and a filter that keeps state (each
+    code once, a rate limit) would refuse the copy, losing the line on a pipe or terminal
+    that a file keeps."""
     text = handler.format(record) + handler.terminator
     data = _encoded(handler, text)
     if len(data) <= _MAX_DIRECT_LINE or shortened is None:
@@ -1255,25 +1257,22 @@ def _line(
     shorter.msg, shorter.args = "%s", (shortened.short,)
     if shortened.fields is not None:
         shorter.fields = shortened.fields
-    for check in (shortened.log.filter, handler.filter):
-        passed = check(shorter)
-        if not passed:
-            return text, data
-        if isinstance(passed, logging.LogRecord):
-            shorter = passed
+    passed = handler.filter(shorter)
+    if not passed:
+        return text, data
+    if isinstance(passed, logging.LogRecord):
+        shorter = passed
     text = handler.format(shorter) + handler.terminator
     return text, _encoded(handler, text)
 
 
 class _Shortened(NamedTuple):
     """A record's shorter form, for a line too long to write whole (see `_line`): the
-    message logged, the shorter one, shorter fields or None to keep them, and the logger
-    that logged it, whose filters pass the shorter copy too."""
+    message logged, the shorter one, and shorter fields or None to keep them."""
 
     message: str
     short: str
     fields: dict[str, Any] | None
-    log: logging.Logger
 
 
 def _encoded(handler: logging.StreamHandler, text: str) -> bytes:

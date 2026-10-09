@@ -2956,3 +2956,40 @@ def test_the_shorter_line_passes_the_filters_too(
     lone.addHandler(handler)
     log_result(recommended_result(monkeypatch, WHYS["emoji"]))
     assert read_all(read) == b""
+
+
+def test_a_logger_filter_that_passes_each_code_once_still_lets_the_shorter_line_through(
+    monkeypatch: pytest.MonkeyPatch, pipe: Any, lone: logging.Logger
+):
+    read, stream = pipe
+    seen: list[str] = []
+
+    def once_per_code(record: logging.LogRecord) -> bool:
+        code = getattr(record, "code", None)
+        if code in seen:
+            return False
+        seen.append(code)
+        return True
+
+    lone.addFilter(once_per_code)
+    lone.addHandler(json_handler(stream))
+    log_result(recommended_result(monkeypatch, WHYS["emoji"]))
+    line = json.loads(read_all(read))
+    assert line["code"] == update.UPDATE_AVAILABLE
+    assert "python -m qte_sdk.update says why" in line["message"]
+    assert seen == [update.UPDATE_AVAILABLE]  # the logger's filter ran once
+
+
+def test_a_logger_filter_that_changes_the_message_is_not_undone_by_the_shorter_one(
+    monkeypatch: pytest.MonkeyPatch, pipe: Any, lone: logging.Logger
+):
+    read, stream = pipe
+
+    def redact(record: logging.LogRecord) -> bool:
+        record.msg, record.args = "%s", (record.getMessage().replace("archive", "ARCHIVE"),)
+        return True
+
+    lone.addFilter(redact)
+    lone.addHandler(json_handler(stream))
+    log_result(recommended_result(monkeypatch, WHYS["emoji"]))
+    assert read_all(read) == b""  # too long as the filter left it: dropped, never undone

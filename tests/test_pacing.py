@@ -272,6 +272,17 @@ def test_budget_values_are_checked():
         Budget(sustained_per_minute=10, burst_per_second=10, sustained_window="60")
 
 
+def test_budget_values_are_at_most_nine_digits():
+    # A larger count could make a warning's short line over 512 bytes, dropped on a pipe.
+    Budget(sustained_per_minute=LONGEST_COUNT, burst_per_second=LONGEST_COUNT)
+    for name in ("sustained_per_minute", "burst_per_second", "new_orders_per_minute"):
+        values = {"sustained_per_minute": 10, "burst_per_second": 10, name: LONGEST_COUNT + 1}
+        with pytest.raises(ValueError, match=f"{name} must be at most 999999999"):
+            Budget(**values)
+    with pytest.raises(ValueError, match="at most"):
+        Budget(sustained_per_minute=10**30, burst_per_second=10)
+
+
 def test_pacer_arguments_are_checked():
     with pytest.raises(ValueError):
         Pacer(ONE_X, headroom=0.96)
@@ -1036,9 +1047,9 @@ def test_a_warning_as_a_json_line_withholds_the_token(monkeypatch):
     assert token not in json.dumps(parsed)
 
 
-# The longest numbers a warning can name: 9-digit counts, and seconds as long as a float's
-# repr gets (a window of any length is accepted).
-LONGEST_COUNT = 999_999_999
+# The longest numbers a warning can name: the largest count a Budget takes, and seconds as
+# long as a float's repr gets (a window of any length is accepted).
+LONGEST_COUNT = pacing._MAX_COUNT
 LONGEST_SECONDS = 1.2345678901234567e299
 LONGEST_REASON = max((pacing._reason_name(code) for code in pacing._BUDGET_REASONS), key=len)
 
@@ -1079,14 +1090,22 @@ def _join_warnings(before: set[threading.Thread]) -> None:
             assert not thread.is_alive()
 
 
-def _through_a_pipe(monkeypatch, form: str, warns: list[Callable[[], None]]) -> bytes:
+def _through_a_pipe(
+    monkeypatch,
+    form: str,
+    warns: list[Callable[[], None]],
+    handler_filter: Callable[[logging.LogRecord], bool] | None = None,
+) -> bytes:
     """What the warnings write to a real pipe, on the `qte_sdk.pacing` logger, through a
-    JSON handler as `qte_sdk.logs.configure("json")` adds or a plain text one."""
+    JSON handler as `qte_sdk.logs.configure("json")` adds or a plain text one, with
+    `handler_filter` on that handler when given."""
     from test_update import json_handler, plain_handler, read_all
 
     read, write = os.pipe()
     stream = open(write, "w", encoding="utf-8")  # noqa: SIM115
     handler = json_handler(stream) if form == "json" else plain_handler(stream, form)
+    if handler_filter is not None:
+        handler.addFilter(handler_filter)
     logger = logging.getLogger("qte_sdk.pacing")
     monkeypatch.setattr(logger, "propagate", False)
     logger.addHandler(handler)
@@ -1205,12 +1224,15 @@ def test_pacing_warnings_of_everyday_length_reach_a_real_pipe_whole(monkeypatch,
         assert b"Rejected messages count toward the window too" in data
 
 
-def test_the_short_form_passes_the_pacing_loggers_filters_too(monkeypatch):
-    logger = logging.getLogger("qte_sdk.pacing")
-    monkeypatch.setattr(
-        logger, "filters", [lambda record: "holds that budget" not in record.getMessage()]
+def test_the_short_form_passes_the_handlers_filters_too(monkeypatch):
+    # The handler's filters run again on the short copy; the logger's do not (they passed
+    # the record once, and one that keeps state would refuse the copy).
+    data = _through_a_pipe(
+        monkeypatch,
+        "json",
+        [_longest_warnings()[errors.PACING_REJECTED]],
+        handler_filter=lambda record: "holds that budget" not in record.getMessage(),
     )
-    data = _through_a_pipe(monkeypatch, "json", [_longest_warnings()[errors.PACING_REJECTED]])
     assert data == b""
 
 

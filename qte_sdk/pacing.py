@@ -141,11 +141,18 @@ _log = logging.getLogger(__name__)
 Write = Callable[[str, Message], Awaitable[object]]
 
 
+# The largest budget value taken: 9 digits, so each warning's short line, which can name
+# a limit, is at most 512 bytes (see `_warn`). Far above any team's budget.
+_MAX_COUNT = 999_999_999
+
+
 def _count(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an int")
     if value < 1:
         raise ValueError(f"{name} must be at least 1, got {value}")
+    if value > _MAX_COUNT:
+        raise ValueError(f"{name} must be at most {_MAX_COUNT}, got {value}")
     return value
 
 
@@ -167,8 +174,8 @@ class Budget:
     `sustained_per_minute` is the cap on new, cancel and amend together in any
     `sustained_window` (60 s); `burst_per_second` the cap in any `burst_window` (1 s);
     `new_orders_per_minute`, for an arm that has one, the cap on `new` alone in any
-    `sustained_window`. Leave it None otherwise. The windows are term settings too, and
-    change only if the course team says so.
+    `sustained_window`. Leave it None otherwise. Each is from 1 to 999999999. The windows
+    are term settings too, and change only if the course team says so.
     """
 
     sustained_per_minute: int
@@ -890,7 +897,8 @@ def _warn(code: str, *, short_what: str | None = None, **fields: Any) -> None:
     terminal would not get (see `qte_sdk.update._log_without_waiting`): `short_what`, or
     else the first part of the message, what happened, then the next step, with only the
     fields in `_SHORT_FIELDS`. Each pacing warning's short line is at most 512 bytes, as
-    JSON or text, with 9-digit counts and the longest numbers of seconds."""
+    JSON or text, with the largest counts a `Budget` takes (9 digits, `_MAX_COUNT`) and the
+    longest numbers of seconds."""
     # Imported here: qte_sdk.dotenv is not needed until a warning is logged.
     from qte_sdk.dotenv import withholding
 
