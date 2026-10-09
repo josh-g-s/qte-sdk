@@ -34,5 +34,11 @@
     "recommended": true,
     "why": "every error and warning now has a code and a next step, a token pasted in the wrong place is no longer shown, and the guidance for coding agents ships inside the package",
     "platforms": []
+  },
+  {
+    "version": "1.3.0",
+    "recommended": true,
+    "why": "rejected messages count toward your team's message budget, so a bot that sends too fast locks itself out; 1.3.0's opt-in pacer helps keep a bot under its share of the team's budget",
+    "platforms": []
   }
 ]

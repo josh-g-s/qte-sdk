@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.53
+**Version:** 0.54
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -39,10 +39,10 @@ In cmd, activate with `.venv\Scripts\activate.bat` instead. If PowerShell refuse
 The `git+https` install needs git (pip says it cannot find the command `git` without it). Either install git (on Windows, `winget install Git.Git`, then open a new terminal), or install a release from its zip, which needs no git:
 
 ```sh
-pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.2.0.zip
+pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.3.0.zip
 ```
 
-That is the latest release, v1.2.0, as this is written; the [changelog](../CHANGELOG.md) lists each release. Later releases have the same address with their own tag, and the update check below prints it for you.
+That is the latest release, v1.3.0, as this is written; the [changelog](../CHANGELOG.md) lists each release. Later releases have the same address with their own tag, and the update check below prints it for you.
 
 If you use a coding agent, such as Claude Code or Codex, have it read [AGENTS.md](../AGENTS.md) first, the guidance for coding agents on setup, your token, updates and the SDK's message codes. It comes with the SDK from 1.2.0 (and in an install of `main`), where `python -m qte_sdk.agents` prints it.
 
