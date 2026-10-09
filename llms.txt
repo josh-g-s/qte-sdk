@@ -13,6 +13,7 @@ Never ask for, print or read the team token, or the `.env` or token file that ho
 
 - [Quickstart](docs/quickstart.md): from a fresh install to a program that connects, reads market data, places an order and cancels it.
 - [Warning and error codes](docs/errors.md): every `QTE-` code with its cause and fix, and the exit codes of the SDK's commands.
+- [Message budgets](docs/developing-your-algo.md): rejected messages count toward your team's message budget too; pace orders with headroom with `qte_sdk.pacing.Pacer`, using the values in the dated table under "Your message budgets", and stop for a full minute after a budget reject.
 
 ## Optional
 

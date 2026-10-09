@@ -1,8 +1,8 @@
 # Warning and error codes
 
-**Version:** 0.5
+**Version:** 0.6
 
-Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates and the log format. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
+Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format and the message budgets. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
 ## How to read a message
 
@@ -365,6 +365,40 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 - Raised as: `qte_sdk.logs.LogFormatInvalid`, a `ValueError`, from `qte_sdk.logs.configure()`; the SDK's commands and `examples/smoke_test.py` print it on stderr and exit 2. The value is not shown.
 - Cause: `QTE_LOG_FORMAT`, or the format passed to `configure()`, is not `json` or `text` (case and surrounding spaces do not matter; unset or empty means text).
 - Fix: Set `QTE_LOG_FORMAT` to `json` or `text`, or unset it.
+
+## PACING and BUDGET
+
+These are about your team's message budgets. The exchange counts every `new`, `cancel` and `amend` your team sends, rejected ones too, toward rolling windows per team across all its connections, and rejects a message (reason codes 1500 to 1502) when its window is full; `mass_cancel` never counts. The `QTE-PACING-` codes come from a `qte_sdk.pacing.Pacer`, which paces those messages under the values you give it; `QTE-BUDGET-REJECTED` is logged by a session without one. The warnings are logged through the `qte_sdk.pacing` logger, from a thread of their own, never the event loop, and are dropped rather than wait on a stderr pipe that is full. A pipe, socket or terminal takes a line of at most 512 bytes whole, so a longer one (a reject's JSON line always is) is written there in a short form: the code, what happened, the limit learned if any, and the next step, with only `kind` and `reason` in `fields`. A log file or other handler gets the whole line.
+
+### QTE-PACING-LIMIT
+
+- Raised as: `qte_sdk.pacing.PacingLimit`, a `RuntimeError`, with `limit` (`burst`, `sustained` or `new-order`), `retry_after` (seconds) and `type`, from a send through a `Pacer`.
+- Cause: The pacer has `on_limit="raise"`, or its wait would pass `max_wait`, and the window named by `limit` had no room for the message. `max_wait` bounds the whole time a send waits for room, counted from the call, so time queued behind earlier sends counts toward it, and a send can raise when its own wait for room is shorter than `max_wait`. A send that finds room when its turn comes is sent, however long it queued. Nothing was sent. In raise mode this also happens to every paced send in the first second after each connect or reconnect: a session starts with the burst window held for a second, since the pacer cannot see what your team sent just before (`limit` is `burst` and `retry_after` at most a second, unless another window holds the send longer, as after a budget reject, when that window's `PacingLimit` or `PacingDraining` is raised with its own `retry_after`).
+- Fix: Send it again after `retry_after` seconds, or send less often. A pacer with `on_limit="wait"` (the default) waits instead.
+
+### QTE-PACING-DRAINING
+
+- Raised as: `qte_sdk.pacing.PacingDraining`, a `PacingLimit`, with the same fields.
+- Cause: The exchange rejected a message for a budget (1500 to 1502), so the pacer holds that window's messages until the whole window has passed (about a second for the burst cap, a minute for the others), and it has `on_limit="raise"`, or a `max_wait` the hold would pass (counting the time the send already waited, queued behind earlier sends included). Rejected messages count toward the window, so sending sooner only keeps the team locked out. Nothing was sent; `send_mass_cancel` is never held.
+- Fix: Send it again after `retry_after` seconds. If rejects keep coming, check the `Budget` values against your team's, and split them between bots that share a team.
+
+### QTE-PACING-REJECTED
+
+- Raised as: a WARNING from the `qte_sdk.pacing` logger, once per hold.
+- Cause: With a `Pacer`, the exchange rejected a message with code 1500, 1501 or 1502. The pacer's count was wrong: another bot or the web Trade page used the budget, network jitter bunched messages, or the `Budget` values are higher than your team's. It holds that window's messages until the window has passed. When the pacer had watched a whole window, it also lowers that window's limit, to 80% (`headroom`) of what it counted there but never by more than half in one reject, and the message says "your ... budget may be lower than the N you passed (the pacer counted M in the window)". Each minute with no budget reject raises the limit again by a tenth, up to the limit from your values, so a reject another bot caused costs a few minutes at a lower limit.
+- Fix: If it says the pacer counted far fewer than you passed and no other bot shares your team, check the `Budget` values against your team's (the table in [Developing your algo](developing-your-algo.md#your-message-budgets)), and split them between bots that share a team.
+
+### QTE-PACING-HOLDING
+
+- Raised as: a WARNING from the `qte_sdk.pacing` logger, once per hold.
+- Cause: A `Pacer` with `on_limit="wait"` is about to wait over a second for room in a budget window, so nothing paced is sent meanwhile. A hold after a budget reject is logged as `QTE-PACING-REJECTED` instead.
+- Fix: Send less often, or check the `Budget` values. To be told instead of waiting, pass `max_wait` or `on_limit="raise"`.
+
+### QTE-BUDGET-REJECTED
+
+- Raised as: a WARNING from the `qte_sdk.pacing` logger, at most once a minute, from a session without a pacer.
+- Cause: The exchange rejected a message with code 1500, 1501 or 1502. Rejected messages count toward the window too, so a bot that keeps sending at or above its budget stays rejected for as long as it keeps sending; a restarted bot sends into the same window.
+- Fix: Stop sending new, cancel and amend for a full minute, and wait that minute before restarting your bot. Then pace them: `open_session(pacing=Pacer(budget))`, with `Budget` from `qte_sdk.pacing` and your team's values.
 
 ## Retired codes
 
