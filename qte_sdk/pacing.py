@@ -85,7 +85,7 @@ import threading
 import time
 from bisect import bisect_right, insort
 from collections import OrderedDict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -274,24 +274,36 @@ class _Window:
             self.held_until = until
             self.held_by_reject = by_reject
 
-    def wait(self, now: float, recovers_at: float = math.inf) -> tuple[float, bool]:
-        """Seconds until this window has room for one more stamp, or until `recovers_at`,
-        when a lowered limit is raised again, if that comes first; and whether a hold after
-        a budget reject is what decides it. The caller checks again then."""
+    def wait(self, now: float, raises: Sequence[tuple[float, int]] = ()) -> tuple[float, bool]:
+        """Seconds until this window has room for one more stamp, and whether a hold after
+        a budget reject is what decides it. `raises` lists when a lowered limit will be
+        raised again, and to what, in time order: room can come at one of those times
+        too, if nothing else is sent meanwhile."""
         self.prune(now)
         wait, by_reject = 0.0, False
         if self.held_until > now:
             wait, by_reject = self.held_until - now, self.held_by_reject
-        stamps = self.stamps
-        # The stamps that still count: those less than `length + guard` old.
-        counting = len(stamps) - bisect_right(stamps, now - self.length - self.guard + _EPSILON)
-        if self.limit is not None and counting >= self.limit:
-            # Room comes when the stamp that leaves `limit - 1` after it expires.
-            frees = stamps[len(stamps) - self.limit] + self.length + self.guard - now
-            frees = min(frees, recovers_at - now)
-            if frees > wait:
-                wait, by_reject = frees, False
+        if self.limit is not None:
+            frees = self._room_at(now, self.limit)
+            for when, limit in raises:
+                if frees <= when:
+                    break
+                frees = self._room_at(when, limit)
+            if frees - now > wait:
+                wait, by_reject = frees - now, False
         return wait, by_reject
+
+    def _room_at(self, start: float, limit: int) -> float:
+        """The first time from `start` at which fewer than `limit` stamps count, if no
+        stamp is added and the limit stays as it is."""
+        stamps = self.stamps
+        span = self.length + self.guard
+        # The stamps that still count at `start`: those less than `length + guard` old.
+        counting = len(stamps) - bisect_right(stamps, start - span + _EPSILON)
+        if counting < limit:
+            return start
+        # Room comes when the stamp that leaves `limit - 1` after it expires.
+        return stamps[len(stamps) - limit] + span
 
     def count_within(self, end: float) -> int | None:
         """The stamps in the exchange's window ending at `end`, (end - length, end], or None
@@ -420,14 +432,12 @@ class Pacer:
             full, limit = window.full, window.limit
             if full is None or limit is None or limit >= full:
                 continue
-            # Due a hair early, as the waits are, so a wait that ends at the deadline
-            # finds the limit raised.
-            steps = math.floor((now - window.lowered_at + _EPSILON) / clean)
-            for _ in range(min(steps, 100)):
+            # Due a hair early, with the same sum `_raises` uses, so a wait that ends at a
+            # raise finds the limit raised.
+            while limit < full and window.lowered_at + clean <= now + _EPSILON:
                 limit = min(full, limit + self._step(limit, full))
-            if steps > 0:
-                window.limit = limit
-                window.lowered_at += steps * clean
+                window.lowered_at += clean
+            window.limit = limit
         self._smooth.limit = self._part(self._burst.limit or 1)
 
     @staticmethod
@@ -436,12 +446,21 @@ class Pacer:
         full limit, so a deep cut does not take long to recover."""
         return max(1, math.ceil(limit * _RECOVERY_STEP), math.ceil(full * _RECOVERY_FLOOR))
 
-    def _recovers_at(self, window: _Window) -> float:
-        """When `window`'s lowered limit is next raised, or never (infinity)."""
+    def _raises(self, window: _Window) -> list[tuple[float, int]]:
+        """When `window`'s lowered limit will be raised again, and to what, until it is back
+        to its full value, if no budget reject comes first. The smoothing part follows the
+        burst window."""
         source = self._burst if window is self._smooth else window
-        if source.full is None or source.limit is None or source.limit >= source.full:
-            return math.inf
-        return source.lowered_at + self.budget.sustained_window
+        full, limit = source.full, source.limit
+        raises: list[tuple[float, int]] = []
+        if full is None or limit is None:
+            return raises
+        when = source.lowered_at
+        while limit < full:
+            when += self.budget.sustained_window
+            limit = min(full, limit + self._step(limit, full))
+            raises.append((when, self._part(limit) if window is self._smooth else limit))
+        return raises
 
     def _limit(self, cap: int) -> int:
         return max(1, math.floor(cap * self.headroom))
@@ -552,7 +571,7 @@ class Pacer:
     def _blocked(self, windows: tuple[_Window, ...], now: float) -> tuple[float, _Window, bool]:
         longest, which, by_reject = 0.0, windows[0], False
         for window in windows:
-            wait, rejected = window.wait(now, self._recovers_at(window))
+            wait, rejected = window.wait(now, self._raises(window))
             if wait > longest:
                 longest, which, by_reject = wait, window, rejected
         return longest, which, by_reject

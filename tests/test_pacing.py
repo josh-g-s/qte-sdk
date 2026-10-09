@@ -1323,3 +1323,41 @@ async def test_eight_cuts_recover_within_25_clean_minutes(warned):
         sim.now += 60.0
         minutes += 1
     assert minutes == 25
+
+
+async def test_a_wait_that_ends_at_a_raise_still_needs_room(warned):
+    # The burst limit lowered from 20 to 10 makes the smoothing part 2, and a raise to 11
+    # leaves it 2: a send just before the raise must wait for a stamp to expire.
+    sim = Sim()
+    pacer = Pacer(
+        Budget(sustained_per_minute=100_000, burst_per_second=25), clock=sim.clock, sleep=sim.sleep
+    )
+    wire = Wire(sim)
+    sender = pacer.wrap(wire)
+    sim.now = 10.1
+    pacer.observe(reject(BURST, "elsewhere"))
+    assert pacer.limits["burst"] == 10
+    sim.now = 70.0
+    await blast(sender, 2, "cancel", "a")
+    sim.now = 70.099999
+    await send_one(sender, "cancel", "third")
+    assert wire.sent[-1][0] == pytest.approx(70.25)
+    assert most_in_window(wire.times(), 0.25) <= 2
+
+
+async def test_retry_after_skips_a_raise_that_leaves_the_window_full(warned):
+    sim = Sim()
+    pacer = Pacer(ONE_X, on_limit="raise", clock=sim.clock, sleep=sim.sleep)
+    sim.now = 61.0
+    pacer.observe(reject(SUSTAINED, "elsewhere"))  # lowered to 480 at 61
+    sim.now = 121.0
+    assert pacer.limits["sustained"] == 528
+    sim.now = 141.0
+    for n in range(600):
+        pacer.observe(accepted(f"f{n}"))  # another connection's 600, all at 141
+    sim.now = 160.0
+    with pytest.raises(PacingLimit) as caught:
+        await send_one(pacer.wrap(Wire(sim)), "cancel", "x")
+    # The raise at 181 (to 581) still leaves 600 counting: room comes only when they
+    # expire, at 201.05.
+    assert caught.value.retry_after == pytest.approx(201.05 - 160.0)
