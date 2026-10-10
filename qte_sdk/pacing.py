@@ -22,7 +22,7 @@ keeps sending. `mass_cancel` counts toward no window and is never held here; hea
 
 The exchange does not send the budget values, and they change from term to term, so the
 SDK has none built in: pass the values your team was given. docs/developing-your-algo.md
-has a dated table of the current term's values. Two bots that share a team share its
+has dated tables of each term's values. Two bots that share a team share its
 budget: give each its share (two bots, half each).
 
 A `Pacer` keeps your sends under `headroom` (80% by default) of each cap:

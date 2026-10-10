@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.31
+**Version:** 0.32
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- The budget table in `docs/developing-your-algo.md` gave the October term's values (4 times the usual) as if they were the rule. It now labels them as October's and gives the usual values, which apply from the Winter term (26 October 2026): for example 1,200 messages a minute for Market Taking, not 4,800, and a burst of 200 a second, not 800. Agentic AI is closed in Winter; when it opens in Spring its cap is 120 new orders a minute, not 480.
 
 ## 1.3.0
 

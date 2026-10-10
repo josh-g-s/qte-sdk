@@ -1,6 +1,6 @@
 # Developing your algo
 
-**Version:** 0.6
+**Version:** 0.7
 
 This guide is one path from an idea to a program trading on the exchange: explore past market data, run your strategy's loop on a replay of a past session, keep its order logic separate so you can test it, check your setup with the smoke test, then try it on the exchange during a session. Most of it works at any hour, so you can do it while the market is closed.
 
@@ -217,7 +217,7 @@ So pace your orders well under the caps, and stop after a budget reject rather t
 from qte_sdk.pacing import Budget, Pacer
 
 budget = Budget(
-    sustained_per_minute=SUSTAINED,  # your arm's values, from the table below
+    sustained_per_minute=SUSTAINED,  # your arm's values for this term, from the tables below
     burst_per_second=BURST,
     new_orders_per_minute=NEW_ORDERS,  # Agentic AI only; leave it out otherwise
 )
@@ -226,8 +226,10 @@ session = await open_session(pacing=Pacer(budget))  # or ReconnectingSession(...
 
 The pacer keeps you at 80% of each cap (`headroom=0.8`), spreads bursts over the second, and after a budget reject holds new, cancel and amend until the whole window has passed; `send_mass_cancel` always goes at once. If the values you gave may be too high, a reject shows it: the pacer lowers that limit (by at most half at a time, since another bot's messages can cause a reject too), raises it again by a tenth (and at least a fortieth of the limit from your values) after each minute with no budget reject, and logs `QTE-PACING-REJECTED` saying what it counted. A market maker that would rather requote than send late can pass `on_limit="raise"` and catch `qte_sdk.pacing.PacingLimit`; in that mode every paced send in the first second after each connect or reconnect raises it, since the pacer holds the burst window for that second. Two bots that share a team share its budget: give each its share (two bots, half each). After a budget reject, wait a full minute before restarting your bot, since a new pacer cannot see what the last one sent. Without a pacer, a session logs `QTE-BUDGET-REJECTED` when it reads a budget reject. See `qte_sdk/pacing.py` for the details, and [the codes](errors.md#pacing-and-budget).
 
-<!-- The only place in the SDK's docs that gives budget values: update this table, and its date, when the exchange's values change. -->
-Your team's budgets from 12 October 2026, by arm. The exchange does not send them, and they can change from term to term: ask the Head of Technology, Joshua, for your term's values if this date has passed.
+<!-- The only place in the SDK's docs that gives budget values: update these tables, and their dates, when the exchange's values change. -->
+Your team's budgets, by term and arm. The exchange does not send them, and they can change from term to term: ask the Head of Technology, Joshua, for your term's values if your term is not listed here.
+
+The October term (from 12 October 2026) runs at 4 times the usual values:
 
 | Arm | Sustained, per minute | Burst, per second | New orders, per minute |
 |---|---|---|---|
@@ -237,6 +239,18 @@ Your team's budgets from 12 October 2026, by arm. The exchange does not send the
 | Market Taking | 4,800 | 800 | no cap |
 | Agentic AI | 4,800 | 800 | 480 |
 | Execution | 7,200 | 800 | no cap |
+| Fundamentals | sends no orders; tickets do not count | | |
+
+From the Winter term (26 October 2026) the usual values apply:
+
+| Arm | Sustained, per minute | Burst, per second | New orders, per minute |
+|---|---|---|---|
+| Market Making | 4,320 | 200 | no cap |
+| Options Market Making | 4,320 | 200 | no cap |
+| Options Taking | 600 | 200 | no cap |
+| Market Taking | 1,200 | 200 | no cap |
+| Agentic AI (closed in Winter; opens in Spring) | 1,200 | 200 | 120 |
+| Execution | 1,800 | 200 | no cap |
 | Fundamentals | sends no orders; tickets do not count | | |
 
 ## What the replay is not
