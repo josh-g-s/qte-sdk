@@ -55,7 +55,7 @@ sent again after the exchange's next market-data grid point, then after two more
 more and so on. One rejected for a message budget is sent again only after a minute, since
 rejected messages count toward the budget too. That is longer than the default
 --drain-seconds, so a budget reject at the end names itself: wait a minute and cancel the
-level yourself, or run with --drain-seconds above 60.
+level yourself. A --drain-seconds above 60 lets a later run wait out such a reject.
 
 What it cannot tell apart. It follows its order by strategy, contract, side and price
 level, and follows an amend's move to a new level. If anything else acts on that
@@ -582,9 +582,14 @@ class Progress:
     order may still rest."""
 
     bot: OptionsBot | None = None
+    status: int | None = None  # the exit status, once the run has printed its outcome
 
 
 def stopped_at_once(progress: Progress) -> int:
+    if progress.status is not None:
+        # Ctrl+C while the connection closed: the outcome printed before it stands.
+        print("interrupted while closing; the connection is dropped as the example exits")
+        return progress.status
     bot = progress.bot
     if bot is None or bot.ref is None:
         print("interrupted: no order was sent")
@@ -616,98 +621,104 @@ async def trade_and_clean_up(
     session: Session, args: argparse.Namespace, task: asyncio.Task, progress: Progress
 ) -> int:
     async with closing(session):
-        print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
-        table = await session.wait_for_instrument_table(timeout=TABLE_SECONDS)
-        if table is None:
-            print("no instruments table from this exchange, so no listed option contract to use")
-            return 1
-        underlyings = option_underlyings(table)
-        underlying = args.underlying or (underlyings[0] if underlyings else None)
-        if underlying is None:
-            print("the instruments table names no option underlying")
-            return 1
-        contracts = listed_contracts(table, underlying)
-        if not contracts:
-            print(f"no option contract is listed on {underlying}; no order was sent")
-            return 0
-        print(f"{len(contracts)} contract(s) listed on {underlying}; subscribing to them")
-        await subscribe(session, contracts)
+        progress.status = await trade(session, args, task, progress)
+    return progress.status
 
-        bot = OptionsBot(session, table, underlying, args.strat_id)
-        progress.bot = bot
-        interrupted = False
 
-        def absorb_first_interrupt() -> bool:
-            nonlocal interrupted
-            if interrupted:
-                return False
-            interrupted = True
-            # This cancellation is handled. If another is still pending, Ctrl+C was
-            # pressed twice before the first reached this point: stop at once.
-            return task.uncancel() == 0
-
-        try:
-            why = await drive(bot, session, args.seconds)
-        except asyncio.CancelledError:
-            if not absorb_first_interrupt():
-                raise
-            why = "interrupted"
-        if why == "closed":
-            print("the exchange closed the connection")
-            if bot.ref is not None and not bot.finished:
-                print(f"WARNING: the order may still rest at {bot.where}; check and cancel it")
-            return 1
-        if not bot.finished and bot.ref is not None:
-            reason = {"time": "time is up", "interrupted": "interrupted"}[why]
-            print(f"{reason}: cancelling {bot.where}")
-            bot.stopping = True
-            while True:
-                try:
-                    why = await drive(bot, session, args.drain_seconds)
-                    break
-                except asyncio.CancelledError:
-                    if not absorb_first_interrupt():
-                        raise
-                    print("interrupted: still cancelling; press Ctrl+C again to stop at once")
-        if bot.cancel_failed is not None:
-            print(
-                f"WARNING: the cancel was rejected ({bot.cancel_failed}), so the order may "
-                f"still rest at {bot.where}; check and cancel it yourself"
-            )
-            return 1
-        if bot.duplicate:
-            print(
-                f"WARNING: your team already has an order resting at {bot.where}, perhaps "
-                "one an earlier run left, so this one was rejected. That order still rests: "
-                "cancel it yourself with a cancel at that contract, side and price"
-            )
-            return 1
-        if bot.ref is not None and bot.missed and not bot.rejected:
-            print(
-                "WARNING: messages from the exchange were missed, so the order may have "
-                f"moved, filled or still rest (last seen at {bot.where}); check your orders "
-                "and fills"
-            )
-            return 1
-        if bot.ref is not None and not bot.finished and bot.budget_reject is not None:
-            print(
-                f"WARNING: the cancel was rejected ({bot.budget_reject}) and is sent again "
-                f"only after {BUDGET_WAIT_SECONDS:g} s, longer than --drain-seconds "
-                f"{args.drain_seconds:g}, so the order may still rest at {bot.where}. Wait a "
-                "minute, then cancel it yourself, or run with --drain-seconds above "
-                f"{BUDGET_WAIT_SECONDS:g}"
-            )
-            return 1
-        if bot.ref is not None and not bot.finished:
-            print(
-                f"WARNING: the cancel was not confirmed, so the order may still rest at "
-                f"{bot.where}; check and cancel it yourself"
-            )
-            return 1
-        if why == "time" and bot.ref is None:
-            print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
-        print(bot.summary())
+async def trade(
+    session: Session, args: argparse.Namespace, task: asyncio.Task, progress: Progress
+) -> int:
+    print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
+    table = await session.wait_for_instrument_table(timeout=TABLE_SECONDS)
+    if table is None:
+        print("no instruments table from this exchange, so no listed option contract to use")
+        return 1
+    underlyings = option_underlyings(table)
+    underlying = args.underlying or (underlyings[0] if underlyings else None)
+    if underlying is None:
+        print("the instruments table names no option underlying")
+        return 1
+    contracts = listed_contracts(table, underlying)
+    if not contracts:
+        print(f"no option contract is listed on {underlying}; no order was sent")
         return 0
+    print(f"{len(contracts)} contract(s) listed on {underlying}; subscribing to them")
+    await subscribe(session, contracts)
+
+    bot = OptionsBot(session, table, underlying, args.strat_id)
+    progress.bot = bot
+    interrupted = False
+
+    def absorb_first_interrupt() -> bool:
+        nonlocal interrupted
+        if interrupted:
+            return False
+        interrupted = True
+        # This cancellation is handled. If another is still pending, Ctrl+C was
+        # pressed twice before the first reached this point: stop at once.
+        return task.uncancel() == 0
+
+    try:
+        why = await drive(bot, session, args.seconds)
+    except asyncio.CancelledError:
+        if not absorb_first_interrupt():
+            raise
+        why = "interrupted"
+    if why == "closed":
+        print("the exchange closed the connection")
+        if bot.ref is not None and not bot.finished:
+            print(f"WARNING: the order may still rest at {bot.where}; check and cancel it")
+        return 1
+    if not bot.finished and bot.ref is not None:
+        reason = {"time": "time is up", "interrupted": "interrupted"}[why]
+        print(f"{reason}: cancelling {bot.where}")
+        bot.stopping = True
+        while True:
+            try:
+                why = await drive(bot, session, args.drain_seconds)
+                break
+            except asyncio.CancelledError:
+                if not absorb_first_interrupt():
+                    raise
+                print("interrupted: still cancelling; press Ctrl+C again to stop at once")
+    if bot.cancel_failed is not None:
+        print(
+            f"WARNING: the cancel was rejected ({bot.cancel_failed}), so the order may "
+            f"still rest at {bot.where}; check and cancel it yourself"
+        )
+        return 1
+    if bot.duplicate:
+        print(
+            f"WARNING: your team already has an order resting at {bot.where}, perhaps "
+            "one an earlier run left, so this one was rejected. That order still rests: "
+            "cancel it yourself with a cancel at that contract, side and price"
+        )
+        return 1
+    if bot.ref is not None and bot.missed and not bot.rejected:
+        print(
+            "WARNING: messages from the exchange were missed, so the order may have "
+            f"moved, filled or still rest (last seen at {bot.where}); check your orders "
+            "and fills"
+        )
+        return 1
+    if bot.ref is not None and not bot.finished and bot.budget_reject is not None:
+        print(
+            f"WARNING: the cancel was rejected ({bot.budget_reject}) and --drain-seconds "
+            f"ended before it could be sent again {BUDGET_WAIT_SECONDS:g} s later, so the "
+            f"order may still rest at {bot.where}. Wait a minute, then cancel it "
+            "yourself. A --drain-seconds above 60 lets a later run wait out such a reject"
+        )
+        return 1
+    if bot.ref is not None and not bot.finished:
+        print(
+            f"WARNING: the cancel was not confirmed, so the order may still rest at "
+            f"{bot.where}; check and cancel it yourself"
+        )
+        return 1
+    if why == "time" and bot.ref is None:
+        print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
+    print(bot.summary())
+    return 0
 
 
 def fail(message: str) -> int:

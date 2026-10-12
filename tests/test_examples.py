@@ -1757,7 +1757,7 @@ async def test_options_bot_names_a_budget_reject_its_drain_is_too_short_to_wait_
     assert code == 1, out + err
     assert "WARNING: the cancel was rejected (MESSAGE_BUDGET_EXCEEDED)" in out
     assert "may still rest at SPY261120P00665000 BUY @ 4.900000" in out
-    assert "Wait a minute, then cancel it yourself, or run with --drain-seconds above 60" in out
+    assert "Wait a minute, then cancel it yourself." in out
     assert "not confirmed" not in out
     assert exchange.types().count("cancel") == 1
 
@@ -1871,6 +1871,17 @@ async def test_options_bot_keeps_its_outcome_on_ctrl_c_while_closing(capsys):
         task.cancel()  # Ctrl+C
         assert await task == 7
     assert "interrupted while closing" in capsys.readouterr().out
+
+
+def test_options_bot_keeps_its_outcome_on_a_ctrl_c_raised_outside_the_run_while_closing(capsys):
+    # Where the event loop cannot take Ctrl+C itself (Windows), a second one is raised as
+    # KeyboardInterrupt outside the run: the exit status the run decided on still stands.
+    example = load_example("options_bot.py")
+    bot = resting_options_bot(example)  # an order was sent
+    assert example.stopped_at_once(example.Progress(bot=bot, status=0)) == 0
+    assert "interrupted while closing" in capsys.readouterr().out
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    assert "may still rest at SPY261120P00665000 BUY @ 4.900000" in capsys.readouterr().err
 
 
 async def start_options_bot(url: str, *args: str) -> asyncio.subprocess.Process:
