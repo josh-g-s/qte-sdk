@@ -1687,6 +1687,26 @@ async def test_options_bot_follows_its_order_when_an_amend_moves_it():
     assert "moved by an amend to 4.950000" in out
 
 
+async def test_options_bot_cancels_again_when_its_cancel_takes_another_order():
+    # The order moves away, another order of the strategy takes its first level, and the
+    # first cancel takes that one: the example cancels again where its order rests.
+    exchange = options_exchange(move_resting_to=(4_950_000,), refill_level=True)
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 0, out + err
+    assert [c["price"] for c in payloads(exchange, "cancel")] == ["4900000", "4950000"]
+    assert exchange.resting == {}
+
+
+async def test_options_bot_warns_and_fails_when_its_orders_reports_were_missed():
+    # The move is a message the example never receives, so its cancel finds the old level
+    # empty while the order rests elsewhere.
+    exchange = options_exchange(move_resting_to=(4_950_000,), hide_moves=True)
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 1, out + err
+    assert "WARNING: messages from the exchange were missed" in out
+    assert "nothing of the order rests" not in out
+
+
 async def test_options_bot_takes_no_earlier_orders_fill_at_its_level_as_its_own():
     # An earlier order of the same strategy at the level fills during this one's delay.
     exchange = options_exchange(teammate_fill_first="opt-test")

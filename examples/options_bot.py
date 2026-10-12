@@ -45,9 +45,17 @@ of your team's orders rests there when it is applied.
 
 Timing. The exchange holds every order message for its order delay before applying it, and
 an order must rest for a minimum time before it may be cancelled. Both are set by the
-exchange, so nothing here assumes their values: a cancel rejected MIN_REST_VIOLATION, or
-for a message budget, is sent again after the exchange's next market-data grid point, then
-after two more, four more and so on.
+exchange, so nothing here assumes their values: a cancel rejected MIN_REST_VIOLATION is
+sent again after the exchange's next market-data grid point, then after two more, four
+more and so on. One rejected for a message budget is sent again only after a minute, since
+rejected messages count toward the budget too.
+
+What it cannot tell apart. It follows its order by strategy, contract, side and price
+level, and follows an amend's move to a new level. If anything else acts on that
+strategy's buy orders in the contract while it runs (another program, or an amend that
+fills at once), its reports may be misread, so use a strategy nothing else is using. If
+messages from the exchange are missed after the order is sent, it still cancels, but then
+exits with status 1 and a warning to check your orders and fills.
 """
 
 import argparse
@@ -64,7 +72,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.books import LatestBooks
-from qte_sdk.connection import SessionRejected
+from qte_sdk.connection import ReportGap, SessionRejected
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     LIMIT,
@@ -135,14 +143,11 @@ MIN_ROOM_TICKS = 3
 # The longest wait for the instruments table after the session opens. A local choice.
 TABLE_SECONDS = 10.0
 
-# Rejects of a cancel that may pass if sent again later. Each leaves the order unchanged.
-RETRY_CANCEL = frozenset(
-    {
-        ReasonCodes.MIN_REST_VIOLATION,
-        ReasonCodes.MESSAGE_BUDGET_EXCEEDED,
-        ReasonCodes.BURST_CAP_EXCEEDED,
-    }
-)
+# Rejects of a cancel for a message budget. Each leaves the order unchanged, and rejected
+# messages count toward the budget too, so a retry waits a full window, as
+# docs/developing-your-algo.md asks after a budget reject.
+BUDGET_REJECTS = frozenset({ReasonCodes.MESSAGE_BUDGET_EXCEEDED, ReasonCodes.BURST_CAP_EXCEEDED})
+BUDGET_WAIT_SECONDS = 60.0
 
 # Why a contract cannot be chosen yet, though it may be once more data arrives.
 WAIT = "wait"
@@ -218,6 +223,7 @@ class OptionsBot:
         self.grid_points = 0
         self.retry_at: int | None = None
         self.backoff = 1
+        self.retry_after = 0.0  # time.monotonic() before which no cancel is sent
         self.cancel_failed: str | None = None
         self.stopping = False  # no new order; cancel the one sent, if any
         self.missed = False  # whether any message from the exchange was missed
@@ -336,7 +342,9 @@ class OptionsBot:
                 await self.send_order()
             return
         if (self.resting or self.stopping) and self.cancel_ref is None:
-            if self.retry_at is None or self.grid_points >= self.retry_at:
+            if self.retry_at is not None and self.grid_points < self.retry_at:
+                return
+            if time.monotonic() >= self.retry_after:
                 await self.cancel()
 
     async def send_order(self) -> None:
@@ -400,11 +408,12 @@ class OptionsBot:
         elif isinstance(item, Reject):
             detail = f" ({item.instrument})" if item.HasField("instrument") else ""
             print(f"subscription refused: {reason_code_name(item.reason_code)}{detail}")
-        elif isinstance(item, SeqGap | DecodeFailed):
+        elif isinstance(item, SeqGap | DecodeFailed) or isinstance(event, ReportGap):
             print("warning: a message from the exchange was missed or unreadable")
             self.missed = True  # no order is sent after this; one sent is still cancelled
-            self.books.update(item)
-            self.greeks.update(item)
+            if item is not None:
+                self.books.update(item)
+                self.greeks.update(item)
         elif is_order_event(event):
             self.on_order_event(event.message)  # type: ignore[attr-defined]
         await self.act()
@@ -467,12 +476,18 @@ class OptionsBot:
                 if message.remaining_size == 0:
                     self.gone = True
             case OrderCancelled() if self.ours(message) or (
-                ref is not None and ref == self.cancel_ref
+                # This example's own cancel, at the level where its order rests.
+                ref is not None and ref == self.cancel_ref and message.price == self.price
             ):
                 reason = reason_code_name(message.reason_code)
                 rested = "cancelled" if self.resting else "not left resting"
                 print(f"{rested}: {message.cancelled_size} at {self.where} ({reason})")
                 self.gone = True
+            case OrderCancelled() if ref is not None and ref == self.cancel_ref:
+                # The cancel took an order at the level this example's order has left,
+                # someone else's: cancel again where the order rests now.
+                print(f"the cancel took an order at {price_text(message.price)}, not this one")
+                self.cancel_ref = None
 
     def on_cancel_reject(self, message: Reject) -> None:
         reason = reason_code_name(message.reason_code)
@@ -482,15 +497,17 @@ class OptionsBot:
                 return  # the order moved after this cancel was sent: cancel it again
             print(f"nothing rests at {self.where} ({reason})")
             self.gone = True
-        elif message.reason_code in RETRY_CANCEL:
-            # The exchange decides how long an order must rest and how fast you may send,
-            # so its own clock paces the retry: after the next grid point, then after two
-            # more, four more and so on.
+        elif message.reason_code == ReasonCodes.MIN_REST_VIOLATION:
+            # The exchange decides how long an order must rest, so its own clock paces the
+            # retry: after the next grid point, then after two more, four more and so on.
             print(
                 f"cancel rejected ({reason}); sending it again after {self.backoff} grid point(s)"
             )
             self.retry_at = self.grid_points + self.backoff
             self.backoff *= 2
+        elif message.reason_code in BUDGET_REJECTS:
+            print(f"cancel rejected ({reason}); sending it again in {BUDGET_WAIT_SECONDS:g} s")
+            self.retry_after = time.monotonic() + BUDGET_WAIT_SECONDS
         else:
             self.cancel_failed = reason
 
@@ -618,6 +635,13 @@ async def trade_and_clean_up(session: Session, args: argparse.Namespace, task: a
             print(
                 f"WARNING: the cancel was rejected ({bot.cancel_failed}), so the order may "
                 f"still rest at {bot.where}; check and cancel it yourself"
+            )
+            return 1
+        if bot.ref is not None and bot.missed and not bot.rejected:
+            print(
+                "WARNING: messages from the exchange were missed, so the order may have "
+                f"moved, filled or still rest (last seen at {bot.where}); check your orders "
+                "and fills"
             )
             return 1
         if bot.ref is not None and not bot.finished:
