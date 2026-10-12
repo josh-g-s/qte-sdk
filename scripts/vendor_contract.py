@@ -9,7 +9,8 @@ Two sets of files are vendored, each with its own manifest and pinned commit: th
 .proto files (proto/upstream.toml) and the published conformance steps
 (conformance/upstream.toml). For each set, reads the commit from its manifest, copies exactly
 the approved files byte for byte from that commit, and rewrites the manifest with each
-file's git blob hash as `git ls-tree` prints it. CI cannot see that repository, so it checks
+file's git blob hash as `git ls-tree` prints it, keeping its `approved` line (who approved
+the pin, and when) as it was. CI cannot see that repository, so it checks
 the vendored bytes against those hashes instead; `--check` is how a maintainer confirms the
 hashes really belong to the pinned commits.
 """
@@ -61,6 +62,7 @@ def header(target: Target) -> str:
     return f"""\
 # The one place that records where {target.what} came from.
 # Written by scripts/vendor_contract.py; bump `commit` deliberately and re-run it.
+# `approved`, when present, records who approved the pin and when; set it with `commit`.
 # Each blob is the git blob hash of that file at `commit`, and CI checks the vendored
 # bytes against it.
 """
@@ -89,12 +91,18 @@ def upstream_blobs(
 
 
 def write_manifest(
-    target: Target, repo: str, commit: str, path: str, blobs: dict[str, str]
+    target: Target,
+    repo: str,
+    commit: str,
+    path: str,
+    blobs: dict[str, str],
+    approved: str | None = None,
 ) -> None:
     lines = [
         header(target),
         f'repo = "{repo}"',
         f'commit = "{commit}"',
+        *([f'approved = "{approved}"'] if approved is not None else []),
         f'path = "{path}"',
         "",
         "[blobs]",
@@ -129,7 +137,7 @@ def run(target: Target, platform: Path, check: bool) -> int:
     for name in target.allowed:
         (target.dest / name).write_bytes(git(platform, "show", f"{commit}:{path}/{name}"))
         print(f"vendored {name}")
-    write_manifest(target, manifest["repo"], commit, path, blobs)
+    write_manifest(target, manifest["repo"], commit, path, blobs, manifest.get("approved"))
     return 0
 
 

@@ -111,7 +111,25 @@ def test_write_manifest_reproduces_the_committed_manifest_with_lf(target, tmp_pa
     committed = target.manifest.read_bytes()
     values = tomllib.loads(committed.decode())
     out = dataclasses.replace(target, manifest=tmp_path / "upstream.toml")
-    vendor.write_manifest(out, values["repo"], values["commit"], values["path"], values["blobs"])
+    vendor.write_manifest(
+        out,
+        values["repo"],
+        values["commit"],
+        values["path"],
+        values["blobs"],
+        values.get("approved"),
+    )
     written = out.manifest.read_bytes()
     assert b"\r" not in written
     assert written == committed
+
+
+def test_the_contract_pin_records_its_approval_and_a_rewrite_keeps_it(tmp_path):
+    # Who approved the pin is recorded beside it, and re-running the vendor script, which
+    # rewrites the manifest, must not drop it.
+    assert MANIFEST["approved"].startswith("Head, ")
+    target = dataclasses.replace(vendor.TARGETS[0], manifest=tmp_path / "upstream.toml")
+    vendor.write_manifest(target, "repo", "abc", "path", {"a.proto": "1"}, "Head, 1 Jan 2026")
+    assert tomllib.loads(target.manifest.read_text())["approved"] == "Head, 1 Jan 2026"
+    vendor.write_manifest(target, "repo", "abc", "path", {"a.proto": "1"})
+    assert "approved" not in tomllib.loads(target.manifest.read_text())

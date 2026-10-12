@@ -65,6 +65,11 @@ of the desk's child orders still resting when a ticket stops depends on why it s
 - the exchange cancelled it (`TICKET_CANCELLED_BY_ENGINE`): a child still resting would be
   cancelled with a reason from the 1800 band, but as the exchange works today none is
   resting when it cancels a ticket.
+- a split (`TICKET_SPLIT_CANCELLED`): where the term posts splits, the open of a split's
+  ex-date cancels every working ordinary ticket in the instrument, with its fills so far
+  standing and `stopped_mark` 0, since there is no valid mark at the open. No child is
+  resting then, since the close before cancelled each one `SESSION_CLOSE`. Send a new
+  ticket in post-split shares if you still want the trade.
 
 `PARENT_STOPPED` can also come while the ticket keeps working: when the Directors hand a
 ticket's remaining shares over to the exchange to execute, every outstanding child is

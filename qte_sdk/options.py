@@ -95,14 +95,23 @@ Trading state. An option contract's `Book` carries `trading_state`:
 - `OPTION_REDUCING_ONLY`: only orders that reduce your position without crossing zero.
 - `OPTION_SUSPENDED`: no wall and no matching; new orders are refused, cancels are
   accepted.
+- `OPTION_HALTED`: a Director has halted the contract's whole chain, every contract on
+  its underlying, before the underlying's split ex-date in the Winter term. No wall and no
+  matching; new orders and amends are refused (`CONTRACT_HALTED`), cancels are accepted.
+  The orders resting in the chain when the halt started were cancelled (`CHAIN_HALTED`).
+  The mark and Greeks still publish. It lasts until the Director ends the halt, and it
+  wins over every other state. The end restores no order: once the contract's book shows
+  another state, place again whatever you still want. The underlying stock is not halted.
 
 The book is republished when the state changes, so the latest book holds the state in
 force. The list of states may grow. Read it with `trading_state`, which treats a state
-this SDK does not know as `OPTION_SUSPENDED`, the most restrictive, rather than the
-field itself. An option contract's wall is
-one level per side, or none at all while it is suspended or its quote is not two-sided.
+this SDK does not know as `OPTION_SUSPENDED` (no new orders, cancels accepted) rather
+than the field itself. Send a `new` or `amend` only while it is `OPTION_TRADING`, or
+`OPTION_REDUCING_ONLY` for an order that reduces your position. An option contract's wall
+is one level per side, or none at all while it is suspended or halted or its quote is not
+two-sided.
 
-Reasons for options. A `new` or `amend` in an option contract can be rejected for three
+Reasons for options. A `new` or `amend` in an option contract can be rejected for four
 reasons of its own:
 
 - `CONTRACT_NOT_LISTED`: the contract is not listed in this session.
@@ -110,12 +119,19 @@ reasons of its own:
   after its order delay. A `cancel` there still applies.
 - `CONTRACT_REDUCING_ONLY`: the contract is reducing-only and the order would grow your
   team's absolute position in it, or take it across zero.
+- `CONTRACT_HALTED`: a Director's halt of the contract's chain was in force. A `cancel`
+  there still applies. Do not send it again until the book's state is no longer
+  `OPTION_HALTED`.
 
 A resting order in a reducing-only contract can also be cancelled, with an
 `order_cancelled` whose reason is `CONTRACT_REDUCING_RECHECK_FAILED`, when it would grow
 the position or cross zero: the whole order when the contract turns reducing-only, or
-just the part that would, before a fill. Read these as any other reason, with
-`qte_sdk.orders.reason_code_name` or against `ReasonCodes`.
+just the part that would, before a fill. When a Director halts a chain, every order
+resting in it, yours included, is cancelled with an `order_cancelled` whose reason is
+`CHAIN_HALTED`. Read these as any other reason, with `qte_sdk.orders.reason_code_name` or
+against `ReasonCodes`. A session logs `QTE-OPTIONS-CHAIN-HALTED` through the
+`qte_sdk.options` logger, at most once a minute for each underlying, when it reads a
+`CONTRACT_HALTED` reject or a `CHAIN_HALTED` cancel (see docs/errors.md).
 
 Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
 present, and true, only on an option contract's `RESIDUAL` print that went through at the
@@ -137,17 +153,25 @@ Not published yet:
   `qte_sdk.replay` replays no Greeks.
 """
 
+import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
+from qte_sdk import errors as _errors
+from qte_sdk import pacing as _pacing
 from qte_sdk.books import _LatestByInstrument
+from qte_sdk.connection import Event, Received
+from qte_sdk.contract.v1.common_pb2 import ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import (
     OPTION_GREEKS_NONE,
     OPTION_GREEKS_UNAVAILABLE,
     OPTION_GREEKS_VALID,
+    OPTION_HALTED,
     OPTION_REDUCING_ONLY,
     OPTION_ROLE_ACTIVE,
     OPTION_ROLE_OBLIGATED,
@@ -166,6 +190,7 @@ from qte_sdk.contract.v1.market_data_pb2 import (
     OptionTradingState,
     TapePrint,
 )
+from qte_sdk.contract.v1.order_events_pb2 import OrderCancelled, Reject
 from qte_sdk.contract.v1.session_pb2 import Instruments, OptionUnderlying
 
 __all__ = [
@@ -173,6 +198,7 @@ __all__ = [
     "OPTION_GREEKS_NONE",
     "OPTION_GREEKS_UNAVAILABLE",
     "OPTION_GREEKS_VALID",
+    "OPTION_HALTED",
     "OPTION_REDUCING_ONLY",
     "OPTION_ROLE_ACTIVE",
     "OPTION_ROLE_OBLIGATED",
@@ -358,16 +384,27 @@ def _underlying(table: Instruments, underlying: str) -> OptionUnderlying | None:
 
 def trading_state(book: Book) -> OptionTradingState.ValueType | None:
     """What the contract of an option `book` may do now: `OPTION_TRADING`,
-    `OPTION_REDUCING_ONLY` or `OPTION_SUSPENDED`, or None for the book of an instrument
-    that is not an option contract.
+    `OPTION_REDUCING_ONLY`, `OPTION_SUSPENDED` or `OPTION_HALTED`, or None for the book of
+    an instrument that is not an option contract.
 
-    A state this SDK does not know is read as `OPTION_SUSPENDED`, the most restrictive,
-    as the exchange asks. A state name from a newer contract cannot be decoded and leaves
+    Send a `new` or `amend` only while it is `OPTION_TRADING`, or `OPTION_REDUCING_ONLY`
+    for an order that reduces your position. While it is `OPTION_SUSPENDED` or
+    `OPTION_HALTED` send only cancels; after `OPTION_HALTED`, place again whatever you
+    still want, since the exchange cancelled every resting order in the chain when the
+    halt started and the end restores none.
+
+    A state this SDK does not know is read as `OPTION_SUSPENDED`, which accepts no new
+    order, as the exchange asks. A state name from a newer contract cannot be decoded and leaves
     the field unset, but the exchange sets it on every option contract's book, so an
     option contract's book without it is read as `OPTION_SUSPENDED` too."""
     if not book.HasField("trading_state"):
         return OPTION_SUSPENDED if is_option_symbol(book.instrument) else None
-    if book.trading_state in (OPTION_TRADING, OPTION_REDUCING_ONLY, OPTION_SUSPENDED):
+    if book.trading_state in (
+        OPTION_TRADING,
+        OPTION_REDUCING_ONLY,
+        OPTION_SUSPENDED,
+        OPTION_HALTED,
+    ):
         return book.trading_state
     return OPTION_SUSPENDED
 
@@ -428,3 +465,50 @@ def _fixed(value: int, places: int, what: str) -> Decimal:
     sign = 1 if value < 0 else 0
     digits = tuple(int(d) for d in str(abs(value)))
     return Decimal((sign, digits, -places))
+
+
+# The warning a session logs when a chain halt rejects or cancels one of its orders, at most
+# once a minute for each underlying: a halt's start cancels every resting order in the
+# chain at once.
+CHAIN_HALT_WARNING_INTERVAL = 60.0
+_CHAIN_HALT_ACTIONS = {
+    ReasonCodes.CONTRACT_HALTED: "rejected",
+    ReasonCodes.CHAIN_HALTED: "cancelled",
+}
+_log = logging.getLogger(__name__)
+_chain_halt_lock = threading.Lock()
+# The clock of that warning; replaced in tests.
+_monotonic = time.monotonic
+_chain_halt_warned_at: dict[str, float] = {}
+
+
+def _chain_halted(event: Event) -> None:
+    """For a session: log `QTE-OPTIONS-CHAIN-HALTED` for a reject `CONTRACT_HALTED` or an
+    `order_cancelled` `CHAIN_HALTED`, unless one was logged for the same underlying in the
+    last minute."""
+    if not isinstance(event, Received):
+        return
+    message = event.message
+    if not isinstance(message, (Reject, OrderCancelled)):
+        return
+    action = _CHAIN_HALT_ACTIONS.get(message.reason_code)
+    if action is None:
+        return
+    instrument = message.instrument
+    underlying = ""
+    if is_option_symbol(instrument):
+        underlying = parse_option_symbol(instrument).underlying
+    now = _monotonic()
+    with _chain_halt_lock:
+        warned = _chain_halt_warned_at.get(underlying)
+        if warned is not None and now - warned < CHAIN_HALT_WARNING_INTERVAL:
+            return
+        _chain_halt_warned_at[underlying] = now
+    _pacing._warn(
+        _errors.OPTIONS_CHAIN_HALTED,
+        target=_log,
+        action=action,
+        reason=ReasonCodes.ReasonCode.Name(message.reason_code),
+        instrument=instrument or "an option contract",
+        underlying=underlying or "its underlying",
+    )

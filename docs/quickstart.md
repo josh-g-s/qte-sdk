@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.54
+**Version:** 0.55
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -372,7 +372,7 @@ Two more market-data messages are for options only, and reach a connection only 
 - `OptionChain`, the day's listed contracts with each one's role;
 - `OptionGreeks`, a contract's published delta, gamma, vega and theta, with the forward and implied volatility, as fixed-point integers.
 
-An option contract's book also carries `trading_state`: trading, reducing-only or suspended. Read it with `qte_sdk.options.trading_state`, which treats a state it does not know as suspended:
+An option contract's book also carries `trading_state`: trading, reducing-only, suspended or halted. Halted (`OPTION_HALTED`) means a Director has halted the contract's whole chain, every contract on its underlying, before a split ex-date: send no `new` or `amend` there, only cancels, until the book shows another state. The orders resting in the chain when the halt started were cancelled with the reason `CHAIN_HALTED`, the end of the halt restores none, so place again what you still want; the mark and Greeks still publish meanwhile. Read the state with `qte_sdk.options.trading_state`, which treats a state it does not know as suspended:
 
 ```python
 from qte_sdk.options import LatestGreeks, chain_contracts, greek_to_decimal, trading_state
@@ -392,7 +392,7 @@ may_open = book is not None and trading_state(book) == OPTION_TRADING
 
 The `qte_sdk.options` docstring covers when each message arrives. There is no request for the chain, so your first option subscribe must name a listed contract; a contract that is not listed is rejected `UNKNOWN_INSTRUMENT`. Take it from the instruments table (step 3): `qte_sdk.options.listed_contracts(table, "SPY")` gives the underlying's listed contracts, and `strike_increment(table, "SPY")` its strike increment. An underlying with no contract listed yet has none. With an exchange that sends no table, work out a listed contract from the symbol rules.
 
-A `new` or `amend` in an option contract has three reject reasons of its own: `CONTRACT_NOT_LISTED` (the contract is not listed in this session), `CONTRACT_SUSPENDED` (the contract was suspended when the message was applied; a cancel still applies) and `CONTRACT_REDUCING_ONLY` (the contract is reducing-only and the order would grow your position in it or take it across zero). A resting order in a reducing-only contract that would do either is cancelled, with the reason `CONTRACT_REDUCING_RECHECK_FAILED`. The `qte_sdk.options` docstring has the details.
+A `new` or `amend` in an option contract has four reject reasons of its own: `CONTRACT_NOT_LISTED` (the contract is not listed in this session), `CONTRACT_SUSPENDED` (the contract was suspended when the message was applied; a cancel still applies), `CONTRACT_REDUCING_ONLY` (the contract is reducing-only and the order would grow your position in it or take it across zero) and `CONTRACT_HALTED` (a Director's halt of its chain was in force; a cancel still applies). A resting order in a reducing-only contract that would do either is cancelled, with the reason `CONTRACT_REDUCING_RECHECK_FAILED`. A session logs `QTE-OPTIONS-CHAIN-HALTED`, at most once a minute for each underlying, when it reads a `CONTRACT_HALTED` reject or a `CHAIN_HALTED` cancel: do not retry until the chain trades again ([errors](errors.md#qte-options-chain-halted)). The `qte_sdk.options` docstring has the details.
 
 An option contract's print in live `trades` may carry `feed_only`. It is present, and true, only on a `RESIDUAL` print that went through at the live print's own premium because the contract had no wall on the side the aggressor took. It is never sent as false, and every other print, an equity's included, leaves it out, so test it with `print_.HasField("feed_only")` or `qte_sdk.options.is_feed_only(print_)`: absent means an ordinary print.
 

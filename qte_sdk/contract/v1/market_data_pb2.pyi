@@ -24,6 +24,7 @@ class OptionTradingState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     OPTION_TRADING: _ClassVar[OptionTradingState]
     OPTION_REDUCING_ONLY: _ClassVar[OptionTradingState]
     OPTION_SUSPENDED: _ClassVar[OptionTradingState]
+    OPTION_HALTED: _ClassVar[OptionTradingState]
 
 class OptionWindowStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -55,6 +56,7 @@ OPTION_TRADING_STATE_UNSPECIFIED: OptionTradingState
 OPTION_TRADING: OptionTradingState
 OPTION_REDUCING_ONLY: OptionTradingState
 OPTION_SUSPENDED: OptionTradingState
+OPTION_HALTED: OptionTradingState
 OPTION_WINDOW_STATUS_UNSPECIFIED: OptionWindowStatus
 OPTION_WINDOW_COMPUTED: OptionWindowStatus
 OPTION_WINDOW_RETAINED: OptionWindowStatus

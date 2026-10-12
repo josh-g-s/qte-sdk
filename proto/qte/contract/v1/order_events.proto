@@ -152,8 +152,8 @@ message LimitUtilisation {
   // working increasing tickets, with no relief from working reducing tickets;
   // a row is sent for a name with only working tickets. LIMIT_INSTRUMENT_HARD
   // stays the filled position. For LIMIT_SHORT_OF_GROSS, used is held shorts
-  // plus unfilled shares of increasing short tickets, and cap is 20% of filled
-  // gross plus those short shares only (long tickets excluded until filled).
+  // plus unfilled shares of increasing short tickets, and cap is 20% of the
+  // filled gross alone (no unfilled ticket enters it, as at the ticket check).
   // LIMIT_GAMMA_DOLLAR is whole-book, sum of
   // abs(g_i); LIMIT_VEGA_UNDERLYING_AGGREGATE is abs(summed signed vega) of
   // an underlying against the longest live tenor's cap. SPEC 11.1, 18.7, 23.3

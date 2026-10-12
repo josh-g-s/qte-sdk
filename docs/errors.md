@@ -1,8 +1,8 @@
 # Warning and error codes
 
-**Version:** 0.8
+**Version:** 0.9
 
-Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format and the message budgets. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
+Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
 ## How to read a message
 
@@ -399,6 +399,14 @@ These are about your team's message budgets. The exchange counts every `new`, `c
 - Raised as: a WARNING from the `qte_sdk.pacing` logger, at most once a minute, from a session without a pacer.
 - Cause: The exchange rejected a message with code 1500, 1501 or 1502. Rejected messages count toward the window too, so a bot that keeps sending at or above its budget stays rejected for as long as it keeps sending; a restarted bot sends into the same window.
 - Fix: Stop sending new, cancel and amend for a full minute, and wait that minute before restarting your bot. Then pace them: `open_session(pacing=Pacer(budget))`, with `Budget` from `qte_sdk.pacing` and your team's values.
+
+## OPTIONS
+
+### QTE-OPTIONS-CHAIN-HALTED
+
+- Raised as: a WARNING from the `qte_sdk.options` logger, logged by a session at most once a minute for each underlying.
+- Cause: A Director has halted an options chain, every contract on one underlying, before the underlying's split ex-date in the Winter term. The exchange rejected your `new` or `amend` in it with the reason `CONTRACT_HALTED` (1305), or cancelled your resting order in it with an `order_cancelled` whose reason is `CHAIN_HALTED` (1818): a halt's start cancels every order resting in the chain. While the halt lasts the contracts' books carry `trading_state` `OPTION_HALTED`: no wall, no matching, no new order or amend accepted, cancels accepted, and the mark and Greeks still publish. The underlying stock is not halted. The halt lasts until the Director ends it, and its end restores no order. The message names the instrument and underlying when the exchange's message names an option contract.
+- Fix: Do not send a `new` or `amend` in that chain again until `qte_sdk.options.trading_state` of the contract's latest book is no longer `OPTION_HALTED`; cancels still apply. Then place again the orders you still want. Retrying sooner is rejected again and counts toward your message budget.
 
 ## Retired codes
 

@@ -1,6 +1,6 @@
 # Developing qte-sdk
 
-**Version:** 0.18
+**Version:** 0.19
 
 ## Requirements
 
@@ -108,14 +108,14 @@ python scripts/generate_contract.py
 
 CI regenerates on every pull request and fails if the result differs from what is committed.
 
-To move to a newer contract (maintainers with access to the exchange's contract repository only): change `commit` in `proto/upstream.toml`, then run
+To move to a newer contract (maintainers with access to the exchange's contract repository only): once the Head has approved the new commit, change `commit` in `proto/upstream.toml` and set `approved` to who approved it and when, such as `"Head, 12 Oct 2026"`, then run
 
 ```sh
 python scripts/vendor_contract.py /path/to/contract-repository
 python scripts/generate_contract.py
 ```
 
-and commit the protos, the manifest and the generated code together. The vendor script rewrites the blob hashes itself. `python scripts/vendor_contract.py /path/to/contract-repository --check` confirms that the recorded hashes belong to the pinned commits without changing anything.
+and commit the protos, the manifest and the generated code together. The vendor script rewrites the blob hashes itself and keeps the `approved` line. `python scripts/vendor_contract.py /path/to/contract-repository --check` confirms that the recorded hashes belong to the pinned commits without changing anything.
 
 ## Conformance steps
 

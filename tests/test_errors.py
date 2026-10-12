@@ -83,7 +83,7 @@ from qte_sdk.session import (
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs" / "errors.md"
 CODE_SHAPE = re.compile(
-    r"^QTE-(TOKEN|ADDRESS|DOTENV|SESSION|CONNECT|HISTORY|REPLAY|UPDATE|LOG|PACING|BUDGET)(-[A-Z0-9]+)+$"
+    r"^QTE-(TOKEN|ADDRESS|DOTENV|SESSION|CONNECT|HISTORY|REPLAY|UPDATE|LOG|PACING|BUDGET|OPTIONS)(-[A-Z0-9]+)+$"
 )
 CODE_IN_TEXT = re.compile(r"QTE-[A-Z0-9]+(?:-[A-Z0-9]+)+")
 URL = "ws://127.0.0.1:8080/ws"
@@ -97,6 +97,7 @@ FIELD_VALUES: dict[str, object] = {
     "action": "write",
     "command": "`git rm --cached .env` in /home/student/algo",
     "fix": "Choose another path with --file PATH",
+    "instrument": "SPY261120C00450000",
     "kind": "InvalidStatus",
     "latest": "1.2.0",
     "line": 3,
@@ -111,6 +112,7 @@ FIELD_VALUES: dict[str, object] = {
     "step": "Ask the Head of Technology about your team's access",
     "strerror": "Permission denied",
     "type": "new_order",
+    "underlying": "SPY",
     "version": "1.1.1",
     "what": "the connection closed before session_ack (close code 1011)",
     "where": "token=, QTE_TOKEN, QTE_TOKEN_FILE or ./.env",
@@ -1022,6 +1024,22 @@ def budget_rejected(token: str, ctx: Context) -> str:
     return "\n".join(caught)
 
 
+def options_chain_halted(token: str, ctx: Context) -> str:
+    from qte_sdk import options
+    from qte_sdk.connection import Received
+    from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+    from qte_sdk.contract.v1.order_events_pb2 import Reject
+
+    caught = caught_warnings(ctx)
+    ctx.monkeypatch.setattr(options, "_chain_halt_warned_at", {})
+    reject = Reject(request_ref="r", reason_code=ReasonCodes.CONTRACT_HALTED, instrument=SPY_CALL)
+    options._chain_halted(Received("reject", reject, None))
+    return "\n".join(caught)
+
+
+SPY_CALL = "SPY261120C00450000"
+
+
 CASES: dict[str, Case] = {
     errors.TOKEN_MISSING: token_missing,
     errors.TOKEN_FILE_UNREADABLE: token_file_unreadable,
@@ -1075,6 +1093,7 @@ CASES: dict[str, Case] = {
     errors.PACING_REJECTED: pacing_rejected,
     errors.PACING_HOLDING: pacing_holding,
     errors.BUDGET_REJECTED: budget_rejected,
+    errors.OPTIONS_CHAIN_HALTED: options_chain_halted,
 }
 
 
