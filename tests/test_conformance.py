@@ -61,11 +61,11 @@ before and after, as steps 4 to 13 do.
        underlying as the table, each under its own underlying and expiry, with a known
        role
     b  the Greeks: `option_greeks` arrive for every listed contract, at least one of
-       them VALID, each with a known status, every value and `calculated_at` present
-       unless the status is NONE and none if it is, and deltas, gamma, vega, forward and
-       implied volatility in range. Greeks are published every five minutes, so this
-       waits up to QTE_CONFORMANCE_GREEKS_WITHIN seconds (default 300 plus
-       QTE_CONFORMANCE_TIMEOUT) for them
+       them VALID; each received has a known status, every value and `calculated_at`
+       present unless the status is NONE and none if it is, and deltas, gamma, vega,
+       forward and implied volatility of the right sign. Greeks are published every
+       five minutes, so this waits up to QTE_CONFORMANCE_GREEKS_WITHIN seconds (default
+       300 plus QTE_CONFORMANCE_TIMEOUT) for them
     c  a passive buy limit order inside the contract's band is accepted and rests, and a
        cancel then removes it with `CANCEL_REQUEST`
     d  a price half a tick off the contract's tick is rejected `TICK_VIOLATION`
@@ -75,7 +75,8 @@ before and after, as steps 4 to 13 do.
     f  only with QTE_CONFORMANCE_OPTION_MAX_ORDER=<contracts>, the team's maximum option
        order (SPEC.md section 18.1: 30 for Options Market Making, 25 for Options Taking):
        a passive buy of the maximum rests and is mass cancelled, and one of a contract
-       more is rejected `RISK_LIMIT_BREACH`
+       more is rejected `RISK_LIMIT_BREACH`. The team must have room under its other
+       limits for that one contract more, which no message shows, so start it flat
 
 The reject steps compare the reason by its name, as `reason_code_name` decodes it.
 
@@ -1453,8 +1454,6 @@ OPTION_SIZE = 1
 # Greeks are published at each calculation, every five minutes, and a subscribe is
 # answered with the last published, so they are awaited for one cadence and a margin.
 GREEKS_CADENCE = 300.0  # seconds
-# A delta of one, in the 10^-12 units `greek_to_decimal` reads.
-DELTA_ONE = 10**12
 _OPTION_ROLES = (OPTION_ROLE_ACTIVE, OPTION_ROLE_OBLIGATED, OPTION_ROLE_RETAINED)
 _GREEKS_STATUSES = (OPTION_GREEKS_VALID, OPTION_GREEKS_UNAVAILABLE, OPTION_GREEKS_NONE)
 # The fields an `option_greeks` carries exactly when its status is not NONE.
@@ -1578,9 +1577,10 @@ async def test_option_a_chain(client: Client):
 def assert_greeks(greeks: OptionGreeks) -> None:
     """One contract's published Greeks: a known status; every value, `calculated_at`
     included, unless the status is `NONE`, and none if it is; values calculated no later
-    than they are published; and values in their ranges: a call's delta from 0 to 1, a
-    put's from -1 to 0, gamma and vega not negative, the forward and the implied
-    volatility positive."""
+    than they are published; and values of the right sign: a call's delta not negative, a
+    put's not positive, gamma and vega not negative, the forward and the implied
+    volatility positive. A delta's size is not bounded by 1: the exchange's forward form
+    scales it by a carry factor that can exceed 1."""
     name = greeks.instrument
     assert greeks.grid_time > 0, f"{name}'s Greeks have no grid_time"
     assert greeks.status in _GREEKS_STATUSES, f"{name}'s Greeks have no known status"
@@ -1595,13 +1595,9 @@ def assert_greeks(greeks: OptionGreeks) -> None:
         f"published at {greeks.grid_time}"
     )
     if parse_option_symbol(name).right == CALL_LETTER:
-        assert 0 <= greeks.delta <= DELTA_ONE, (
-            f"{name}'s call delta {greek_to_decimal(greeks.delta)}"
-        )
+        assert greeks.delta >= 0, f"{name}'s call delta {greek_to_decimal(greeks.delta)}"
     else:
-        assert -DELTA_ONE <= greeks.delta <= 0, (
-            f"{name}'s put delta {greek_to_decimal(greeks.delta)}"
-        )
+        assert greeks.delta <= 0, f"{name}'s put delta {greek_to_decimal(greeks.delta)}"
     assert greeks.gamma >= 0, f"{name}'s gamma {greek_to_decimal(greeks.gamma)}"
     assert greeks.vega >= 0, f"{name}'s vega {greeks.vega}"
     assert greeks.forward > 0, f"{name}'s forward {greeks.forward}"
@@ -1624,6 +1620,8 @@ async def test_option_b_greeks(client: Client):
         subscribe before a calculation may be answered with NONE or UNAVAILABLE."""
         nonlocal read
         for greeks in c.since(read, OptionGreeks):
+            # Every message is checked, not only the latest per contract.
+            assert_greeks(greeks)
             latest.update(greeks)
         read = c.mark()
         held = [latest.get(contract) for contract in listed]
@@ -1720,7 +1718,8 @@ async def test_option_f_over_the_maximum_order_is_rejected(option_market: tuple[
     (price,) = inside_prices(c.books.get(contract), contract_tick(c, contract), 1)
     # An order of the maximum rests, so the reject below is for the one contract more, not
     # for a lower maximum or another limit the team is already near.
-    await c.rest(c.config.strat_a, BUY, price, size=maximum, instrument=contract)
+    state = await c.rest(c.config.strat_a, BUY, price, size=maximum, instrument=contract)
+    assert state.remaining_size == maximum
     await mass_cancel_all(c)
     reject = await rejected_new(c, contract, price, maximum + 1)
     assert reason_code_name(reject.reason_code) == "RISK_LIMIT_BREACH"
