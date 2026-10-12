@@ -1228,5 +1228,5 @@ async def test_an_option_order_sent_on_a_reconnecting_session_is_recorded(paced)
                     # Sent while the loop holds the session up, as a bot sends.
                     await rs.send("new", order)
                     assert rs._session is not None
-                    assert rs._session._chain_halts._sent == {"r": "SPY261120C00665000"}
+                    assert rs._session._chain_halts._sent == {"r": ("SPY261120C00665000", 1)}
                     break

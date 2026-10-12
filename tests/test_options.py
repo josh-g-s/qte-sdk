@@ -568,14 +568,37 @@ def test_a_request_ref_sent_again_before_its_answer_names_no_chain(halt_warnings
     send_option_new(session, "r", "GOOGL261120C00200000")
     session._keep(halt_reject("r"))
     assert "rejected an order in an option contract" in halt_warnings[0][1]
-    # The same contract again is no doubt, nor is an equity order sent with a fresh ref.
+
+
+def test_a_reused_request_ref_stays_unnamed_until_every_send_is_answered(
+    halt_warnings, monkeypatch
+):
+    now = [1000.0]
+    monkeypatch.setattr(options, "_monotonic", lambda: now[0])
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY261120C00665000")
+    send_option_new(session, "r", "GOOGL261120C00200000")
+    session._keep(Received("accepted", Accepted(request_ref="r"), None))
+    # GOOGL's answer is still to come, so a third send cannot name it.
+    send_option_new(session, "r", "AAPL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+    session._keep(halt_reject("r"))
+    assert session._chain_halts._sent == {}
+    # Every send answered: the next use of it names its chain again.
+    send_option_new(session, "r", "AAPL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "halted the options chain on AAPL" in halt_warnings[1][1]
+
+
+def test_the_same_contract_sent_again_keeps_its_name():
     halts = options._ChainHaltWarnings()
     halts.sent("new", NewOrder(request_ref="s", instrument="SPY261120C00665000"))
     halts.sent("new", NewOrder(request_ref="s", instrument="SPY261120C00665000"))
-    halts.sent("new", NewOrder(request_ref="e", instrument="SPY"))
-    assert halts._sent == {"s": "SPY261120C00665000"}
+    halts.sent("new", NewOrder(request_ref="e", instrument="SPY"))  # not an option
+    assert halts._sent == {"s": ("SPY261120C00665000", 2)}
     halts.sent("new", NewOrder(request_ref="s", instrument="SPY"))
-    assert halts._sent == {"s": None}
+    assert halts._sent == {"s": (None, 3)}
 
 
 def test_the_record_of_sent_orders_is_bounded(monkeypatch):
@@ -586,6 +609,7 @@ def test_the_record_of_sent_orders_is_bounded(monkeypatch):
     halts.sent("new", NewOrder(request_ref="e", instrument="SPY"))  # not an option
     halts.sent("cancel", NewOrder(request_ref="f", instrument="SPY261120C00665000"))
     assert list(halts._sent) == ["b", "c", "d"]
+    assert halts._sent["d"] == ("SPY261120C00665000", 1)
 
 
 def test_other_rejects_and_cancels_say_nothing_of_a_halt(halt_warnings, monkeypatch):
