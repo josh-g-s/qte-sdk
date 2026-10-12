@@ -1873,14 +1873,30 @@ async def test_options_bot_keeps_its_outcome_on_ctrl_c_while_closing(capsys):
     assert "interrupted while closing" in capsys.readouterr().out
 
 
-def test_options_bot_keeps_its_outcome_on_a_ctrl_c_raised_outside_the_run_while_closing(capsys):
+async def test_options_bot_keeps_its_outcome_on_a_ctrl_c_raised_outside_the_run_while_closing(
+    monkeypatch, capsys
+):
     # Where the event loop cannot take Ctrl+C itself (Windows), a second one is raised as
-    # KeyboardInterrupt outside the run: the exit status the run decided on still stands.
+    # KeyboardInterrupt, here while the connection closes after the run has cancelled its
+    # order: the exit status the run decided on still stands.
     example = load_example("options_bot.py")
-    bot = resting_options_bot(example)  # an order was sent
-    assert example.stopped_at_once(example.Progress(bot=bot, status=0)) == 0
+    progress = example.Progress()
+
+    async def cancelled_and_confirmed(session: Any, args: Any, task: Any, progress: Any) -> int:
+        progress.bot = resting_options_bot(example)  # an order was sent
+        return 0
+
+    class InterruptedClose:
+        async def close(self) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(example, "trade", cancelled_and_confirmed)
+    with pytest.raises(KeyboardInterrupt):
+        await example.trade_and_clean_up(InterruptedClose(), None, None, progress)
+    assert example.stopped_at_once(progress) == 0
     assert "interrupted while closing" in capsys.readouterr().out
-    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    progress.status = None  # had it come before the run decided
+    assert example.stopped_at_once(progress) == 1
     assert "may still rest at SPY261120P00665000 BUY @ 4.900000" in capsys.readouterr().err
 
 
