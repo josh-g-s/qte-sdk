@@ -101,7 +101,8 @@ Trading state. An option contract's `Book` carries `trading_state`:
   The orders resting in the chain when the halt started were cancelled (`CHAIN_HALTED`).
   The mark and Greeks still publish. It lasts until the Director ends the halt, and it
   wins over every other state. The end restores no order: once the contract's book shows
-  another state, place again whatever you still want. The underlying stock is not halted.
+  another state, place again only what that state allows. The underlying stock is not
+  halted.
 
 The book is republished when the state changes, so the latest book holds the state in
 force. The list of states may grow. Read it with `trading_state`, which treats a state
@@ -389,8 +390,8 @@ def trading_state(book: Book) -> OptionTradingState.ValueType | None:
 
     Send a `new` or `amend` only while it is `OPTION_TRADING`, or `OPTION_REDUCING_ONLY`
     for an order that reduces your position. While it is `OPTION_SUSPENDED` or
-    `OPTION_HALTED` send only cancels; after `OPTION_HALTED`, place again whatever you
-    still want, since the exchange cancelled every resting order in the chain when the
+    `OPTION_HALTED` send only cancels. After `OPTION_HALTED`, place again what the new
+    state allows, since the exchange cancelled every resting order in the chain when the
     halt started and the end restores none.
 
     A state this SDK does not know is read as `OPTION_SUSPENDED`, which accepts no new

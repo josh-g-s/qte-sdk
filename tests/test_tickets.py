@@ -553,6 +553,8 @@ async def test_a_split_cancelled_ticket_decodes_by_name_and_number_and_is_stoppe
     stopped = event.message
     assert stopped.status == TICKET_SPLIT_CANCELLED == 7
     assert TicketStatus.Name(7) == "TICKET_SPLIT_CANCELLED"
+    [by_number] = await received(frame("ticket_state", state_payload(31, 7), 1))
+    assert by_number.message.status == TICKET_SPLIT_CANCELLED
     assert event.unknown_enum_names() == {}
     # The split's open has no valid mark, so the stop has none.
     assert stopped_mark_of(stopped) is None

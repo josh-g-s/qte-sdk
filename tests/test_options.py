@@ -389,6 +389,9 @@ def test_a_halted_option_book_decodes_by_name_and_number_and_is_held_as_halted()
     }
     book = unpack(payload, Book)
     assert book.HasField("trading_state") and book.trading_state == OPTION_HALTED
+    # By number too.
+    by_number = unpack({**payload, "trading_state": 4}, Book)
+    assert trading_state(by_number) == OPTION_HALTED
     books = LatestBooks()
     assert books.update(book) is True
     assert trading_state(books.get("SPY261120C00665000")) == OPTION_HALTED
@@ -402,6 +405,8 @@ def test_the_chain_halt_reasons_decode_by_name_and_number():
     reject = unpack({"reason_code": "CONTRACT_HALTED", "receipt_time": "1"}, Reject)
     assert reject.reason_code == ReasonCodes.CONTRACT_HALTED == 1305
     assert reason_code_name(reject.reason_code) == "CONTRACT_HALTED"
+    by_number = unpack({"reason_code": 1305, "receipt_time": "1"}, Reject)
+    assert reason_code_name(by_number.reason_code) == "CONTRACT_HALTED"
     cancelled = unpack(
         {
             "origin": "TEAM",
@@ -416,6 +421,11 @@ def test_the_chain_halt_reasons_decode_by_name_and_number():
     )
     assert cancelled.reason_code == ReasonCodes.CHAIN_HALTED == 1818
     assert reason_code_name(cancelled.reason_code) == "CHAIN_HALTED"
+    cancelled_by_number = unpack(
+        {"instrument": "SPY261120C00665000", "reason_code": 1818, "timestamp": "1"},
+        OrderCancelled,
+    )
+    assert reason_code_name(cancelled_by_number.reason_code) == "CHAIN_HALTED"
 
 
 # A Director's chain halt, as a session reads it.
@@ -463,8 +473,8 @@ def test_a_contract_halted_reject_logs_its_code_and_what_to_do(halt_warnings):
             "(CONTRACT_HALTED): a Director has halted the options chain on SPY. No new order "
             "or amend in that chain is accepted until the Director ends the halt, and the end "
             "restores no order. Send only cancels in that chain until "
-            "qte_sdk.options.trading_state of its book is no longer OPTION_HALTED, then place "
-            "again the orders you still want.",
+            "qte_sdk.options.trading_state of its latest book is no longer OPTION_HALTED, then "
+            "place again only what that state allows.",
         )
     ]
 
@@ -524,6 +534,23 @@ def test_a_chain_halt_warning_reaches_the_options_logger(caplog, monkeypatch):
     assert records[0].code == errors.OPTIONS_CHAIN_HALTED
     assert records[0].getMessage().startswith("QTE-OPTIONS-CHAIN-HALTED: the exchange ")
     assert not [r for r in caplog.records if r.name == "qte_sdk.pacing"]
+
+
+def test_a_chain_halt_warning_withholds_a_token_from_its_record_fields(caplog, monkeypatch):
+    # The exchange echoes the instrument an order named; a bot may have put the token there.
+    token = "ab" * 16
+    monkeypatch.setenv("QTE_TOKEN", token)
+    monkeypatch.setattr(options, "_chain_halt_warned_at", {})
+    before = set(threading.enumerate())
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.options"):
+        options._chain_halted(halt_reject(token))
+        for thread in set(threading.enumerate()) - before:
+            if thread.name == "qte-sdk pacing warning":
+                thread.join(5)
+    [record] = [r for r in caplog.records if r.name == "qte_sdk.options"]
+    assert record.fields["instrument"] == errors.WITHHELD
+    assert token not in record.getMessage()
+    assert token not in repr(vars(record))
 
 
 def test_a_feed_only_residual_print_is_told_apart_from_an_ordinary_one():

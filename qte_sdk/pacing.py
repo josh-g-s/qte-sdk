@@ -912,13 +912,15 @@ def _warn(
     withhold = withholding()
     step = _errors.next_step(code, withhold=withhold, **fields)
     what = short_what or _errors.what(code, withhold=withhold, **fields)
+    # The record's own fields too, not only the message: a handler may show them as given.
+    shown = _errors.withheld(withhold, **fields)
     _emit(
         _errors.render(code, withhold=withhold, **fields),
         code,
         next_step=step,
-        fields=fields,
+        fields=shown,
         short=f"{code}: {what}. {step}.",
-        short_fields={name: fields[name] for name in _SHORT_FIELDS if name in fields},
+        short_fields={name: shown[name] for name in _SHORT_FIELDS if name in shown},
         target=target,
     )
 

@@ -527,8 +527,8 @@ CODES: dict[str, Entry] = {
         "the options chain on {underlying}",
         "No new order or amend in that chain is accepted until the Director ends the halt, "
         "and the end restores no order",
-        "Send only cancels in that chain until qte_sdk.options.trading_state of its book is "
-        "no longer OPTION_HALTED, then place again the orders you still want",
+        "Send only cancels in that chain until qte_sdk.options.trading_state of its latest "
+        "book is no longer OPTION_HALTED, then place again only what that state allows",
         "The exchange rejected a new or amend CONTRACT_HALTED (1305), or cancelled a resting "
         "order CHAIN_HALTED (1818), in an option contract (logged at most once a minute for "
         "each underlying)",

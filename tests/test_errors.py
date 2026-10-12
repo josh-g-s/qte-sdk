@@ -1032,8 +1032,15 @@ def options_chain_halted(token: str, ctx: Context) -> str:
 
     caught = caught_warnings(ctx)
     ctx.monkeypatch.setattr(options, "_chain_halt_warned_at", {})
-    reject = Reject(request_ref="r", reason_code=ReasonCodes.CONTRACT_HALTED, instrument=SPY_CALL)
-    options._chain_halted(Received("reject", reject, None))
+    ctx.monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    # The exchange echoes the instrument the order named, which a bot may have filled with
+    # the token by mistake.
+    for instrument in (SPY_CALL, token):
+        reject = Reject(
+            request_ref="r", reason_code=ReasonCodes.CONTRACT_HALTED, instrument=instrument
+        )
+        options._chain_halted(Received("reject", reject, None))
+    assert len(caught) == 2
     return "\n".join(caught)
 
 

@@ -406,7 +406,7 @@ These are about your team's message budgets. The exchange counts every `new`, `c
 
 - Raised as: a WARNING from the `qte_sdk.options` logger, logged by a session at most once a minute for each underlying.
 - Cause: A Director has halted an options chain, every contract on one underlying, before the underlying's split ex-date in the Winter term. The exchange rejected your `new` or `amend` in it with the reason `CONTRACT_HALTED` (1305), or cancelled your resting order in it with an `order_cancelled` whose reason is `CHAIN_HALTED` (1818): a halt's start cancels every order resting in the chain. While the halt lasts the contracts' books carry `trading_state` `OPTION_HALTED`: no wall, no matching, no new order or amend accepted, cancels accepted, and the mark and Greeks still publish. The underlying stock is not halted. The halt lasts until the Director ends it, and its end restores no order. The message names the instrument and underlying when the exchange's message names an option contract.
-- Fix: Do not send a `new` or `amend` in that chain again until `qte_sdk.options.trading_state` of the contract's latest book is no longer `OPTION_HALTED`; cancels still apply. Then place again the orders you still want. Retrying sooner is rejected again and counts toward your message budget.
+- Fix: Do not send a `new` or `amend` in that chain again until `qte_sdk.options.trading_state` of the contract's latest book is no longer `OPTION_HALTED`; cancels still apply. Then place again only what the new state allows: any order at `OPTION_TRADING`, only orders that reduce your position at `OPTION_REDUCING_ONLY`, and none at `OPTION_SUSPENDED`. Retrying sooner is rejected again and counts toward your message budget.
 
 ## Retired codes
 
