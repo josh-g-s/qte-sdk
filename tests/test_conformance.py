@@ -56,14 +56,16 @@ the order steps, if the session is not open or that contract is not trading with
 two-sided live quote. Every order is a buy of one contract, and the steps mass cancel
 before and after, as steps 4 to 13 do.
 
-    a  the chain: the first option subscribe is answered with `option_chain`, for the
-       session's date, listing the same contracts on the underlying as the table, each
-       under its own underlying and expiry, with a known role
-    b  the Greeks: `option_greeks` arrive for every listed contract, with a known status,
-       every value present when VALID, and deltas, gamma, vega, forward and implied
-       volatility in range; at least one contract is VALID. Greeks are published every
-       five minutes, so this waits up to QTE_CONFORMANCE_GREEKS_WITHIN seconds (default
-       300 plus QTE_CONFORMANCE_TIMEOUT)
+    a  the chain: the first option subscribe in an open session is answered with
+       `option_chain`, for the session's date, listing the same contracts on the
+       underlying as the table, each under its own underlying and expiry, with a known
+       role
+    b  the Greeks: `option_greeks` arrive for every listed contract, at least one of
+       them VALID, each with a known status, every value and `calculated_at` present
+       unless the status is NONE and none if it is, and deltas, gamma, vega, forward and
+       implied volatility in range. Greeks are published every five minutes, so this
+       waits up to QTE_CONFORMANCE_GREEKS_WITHIN seconds (default 300 plus
+       QTE_CONFORMANCE_TIMEOUT) for them
     c  a passive buy limit order inside the contract's band is accepted and rests, and a
        cancel then removes it with `CANCEL_REQUEST`
     d  a price half a tick off the contract's tick is rejected `TICK_VIOLATION`
@@ -72,7 +74,8 @@ before and after, as steps 4 to 13 do.
        `CONTRACT_NOT_LISTED`
     f  only with QTE_CONFORMANCE_OPTION_MAX_ORDER=<contracts>, the team's maximum option
        order (SPEC.md section 18.1: 30 for Options Market Making, 25 for Options Taking):
-       one contract more is rejected `RISK_LIMIT_BREACH`
+       a passive buy of the maximum rests and is mass cancelled, and one of a contract
+       more is rejected `RISK_LIMIT_BREACH`
 
 The reject steps compare the reason by its name, as `reason_code_name` decodes it.
 
@@ -91,7 +94,7 @@ working directory:
     digest="$($W/bin/tokendigest < $W/tokens/team)"
     printf '{"contract_version": "0.x", "credentials": [%s]}' \
       "{\"token_sha256_hex\": \"$digest\", \"team\": \"Amsterdam\"}" > $W/gateway.json
-    $W/bin/localgen gen -dir $W -freeze-from ""
+    $W/bin/localgen gen -dir $W -freeze-from "" -end 2026-10-26T16:00:00Z
     $W/bin/localprefix -term fixtures/config/options-orders.yaml -log $W/events.log \
       -stock-recording $W/stock.log -options-recording $W/options.log \
       -session-date 20261026 -recorded-date 20261023 -at 2026-10-26T13:20:00Z \
@@ -103,9 +106,12 @@ working directory:
       -start-offset-ms "$($W/bin/localgen offset -target 2026-10-26T13:28:00Z)"
 
 Amsterdam is an Options Market Making team in that term's roster, whose maximum option
-order is 30 contracts. `-freeze-from ""` keeps SPY two-sided all session; without it SPY's
-offer is withdrawn at 13:37:30 and every contract turns reducing-only at the 13:40
-calculation, and the order steps are skipped. The term needs no strategy registration.
+order is 30 contracts. `-freeze-from ""` keeps SPY two-sided; without it SPY's offer is
+withdrawn at 13:37:30 and every contract turns reducing-only at the 13:40 calculation, and
+the order steps are skipped. `-end` makes the made-up quotes run to 16:00 UTC rather than
+13:45, after which the contracts stop trading in the same way. The term needs no strategy
+registration. An Options team may trade SPY itself only as a hedge, so steps 4 to 13 and
+step 15's order sub-steps are rejected `HEDGE_ONLY` there; run only the option steps.
 Once `curl http://127.0.0.1:18081/healthz` answers, and at least two minutes after the
 start (13:30), run from this repository, the token passed by its file and never printed:
 
@@ -1451,7 +1457,8 @@ GREEKS_CADENCE = 300.0  # seconds
 DELTA_ONE = 10**12
 _OPTION_ROLES = (OPTION_ROLE_ACTIVE, OPTION_ROLE_OBLIGATED, OPTION_ROLE_RETAINED)
 _GREEKS_STATUSES = (OPTION_GREEKS_VALID, OPTION_GREEKS_UNAVAILABLE, OPTION_GREEKS_NONE)
-_GREEKS_VALUES = ("forward", "implied_vol", "delta", "gamma", "vega", "theta")
+# The fields an `option_greeks` carries exactly when its status is not NONE.
+_GREEKS_VALUES = ("calculated_at", "forward", "implied_vol", "delta", "gamma", "vega", "theta")
 
 
 def option_underlying() -> str:
@@ -1532,10 +1539,11 @@ async def test_option_a_chain(client: Client):
     underlying = option_underlying()
     listed = listed_on(c, underlying)
     table = c.session.instrument_table
-    start = c.mark()
-    # The chain is the answer to the first subscribe naming an option contract.
-    await subscribe(c.session, [listed[0]])
-    state = await c.next_session_state(start)
+    # The chain is the answer to the first subscribe naming an option contract. Between
+    # sessions it may already be the next session's, so the session must be open.
+    start = await subscribed_open(c, [listed[0]])
+    state = c.state
+    assert state is not None
     chain = await c.wait_for(lambda m: isinstance(m, OptionChain), "option_chain", start)
     assert chain.session_date == state.session_date, (
         f"the chain is for {chain.session_date}, the session for {state.session_date}"
@@ -1568,9 +1576,11 @@ async def test_option_a_chain(client: Client):
 
 
 def assert_greeks(greeks: OptionGreeks) -> None:
-    """One contract's published Greeks: a known status, every value with `VALID` and none
-    with `NONE`, and values in their ranges: a call's delta from 0 to 1, a put's from -1
-    to 0, gamma, vega, the forward and the implied volatility not negative."""
+    """One contract's published Greeks: a known status; every value, `calculated_at`
+    included, unless the status is `NONE`, and none if it is; values calculated no later
+    than they are published; and values in their ranges: a call's delta from 0 to 1, a
+    put's from -1 to 0, gamma and vega not negative, the forward and the implied
+    volatility positive."""
     name = greeks.instrument
     assert greeks.grid_time > 0, f"{name}'s Greeks have no grid_time"
     assert greeks.status in _GREEKS_STATUSES, f"{name}'s Greeks have no known status"
@@ -1578,10 +1588,12 @@ def assert_greeks(greeks: OptionGreeks) -> None:
     if greeks.status == OPTION_GREEKS_NONE:
         assert not present, f"{name}'s Greeks are NONE but carry {', '.join(present)}"
         return
-    if greeks.status == OPTION_GREEKS_UNAVAILABLE:
-        return
     missing = [field for field in _GREEKS_VALUES if field not in present]
-    assert not missing, f"{name}'s Greeks are VALID but have no {', '.join(missing)}"
+    assert not missing, f"{name}'s Greeks are not NONE but have no {', '.join(missing)}"
+    assert 0 < greeks.calculated_at <= greeks.grid_time, (
+        f"{name}'s Greeks were calculated at {greeks.calculated_at}, "
+        f"published at {greeks.grid_time}"
+    )
     if parse_option_symbol(name).right == CALL_LETTER:
         assert 0 <= greeks.delta <= DELTA_ONE, (
             f"{name}'s call delta {greek_to_decimal(greeks.delta)}"
@@ -1604,27 +1616,33 @@ async def test_option_b_greeks(client: Client):
     start = await subscribed_open(c, list(listed))
     within = greeks_within(c.config)
 
-    def all_arrived() -> bool:
-        return set(listed) <= {g.instrument for g in c.since(start, OptionGreeks)}
+    latest = LatestGreeks()
+    read = start
+
+    def arrived() -> bool:
+        """Every listed contract has Greeks, and at least one of them is VALID: a
+        subscribe before a calculation may be answered with NONE or UNAVAILABLE."""
+        nonlocal read
+        for greeks in c.since(read, OptionGreeks):
+            latest.update(greeks)
+        read = c.mark()
+        held = [latest.get(contract) for contract in listed]
+        return all(held) and any(g.status == OPTION_GREEKS_VALID for g in held)
 
     try:
-        await c.until(all_arrived, "option_greeks for every listed contract", within)
+        await c.until(arrived, "option_greeks for every listed contract", within)
     except NoMessage:
-        got = {g.instrument for g in c.since(start, OptionGreeks)}
-        missing = sorted(set(listed) - got)
+        missing = sorted(contract for contract in listed if latest.get(contract) is None)
+        if not missing:
+            raise AssertionError(f"no listed contract had VALID Greeks within {within} s") from None
         raise AssertionError(
             f"no option_greeks within {within} s for {len(missing)} of {len(listed)} "
             f"contracts, {missing[0]} among them"
         ) from None
-    latest = LatestGreeks()
-    for greeks in c.since(start, OptionGreeks):
-        latest.update(greeks)
     for contract in listed:
         greeks = latest.get(contract)
         assert greeks is not None
         assert_greeks(greeks)
-    statuses = {latest.get(contract).status for contract in listed}
-    assert OPTION_GREEKS_VALID in statuses, "no listed contract has VALID Greeks"
 
 
 async def test_option_c_limit_order_and_cancel(option_market: tuple[Client, str]):
@@ -1700,6 +1718,10 @@ async def test_option_f_over_the_maximum_order_is_rejected(option_market: tuple[
     c, contract = option_market
     maximum = int(os.environ[OPTION_MAX_ORDER_VAR])
     (price,) = inside_prices(c.books.get(contract), contract_tick(c, contract), 1)
+    # An order of the maximum rests, so the reject below is for the one contract more, not
+    # for a lower maximum or another limit the team is already near.
+    await c.rest(c.config.strat_a, BUY, price, size=maximum, instrument=contract)
+    await mass_cancel_all(c)
     reject = await rejected_new(c, contract, price, maximum + 1)
     assert reason_code_name(reject.reason_code) == "RISK_LIMIT_BREACH"
 
