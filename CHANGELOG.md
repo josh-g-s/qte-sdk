@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.33
+**Version:** 0.34
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- `examples/options_bot.py` follow-ups from review. A Ctrl+C before any order is sent now says "no order was sent" and exits 0, and one while the connection closes keeps the run's printed outcome and exit status; only a second Ctrl+C while an order is being cancelled names the level where it may still rest (status 1). A `DUPLICATE_ORDER_AT_LEVEL` reject now says your team's earlier order still rests at that level and to cancel it yourself, with status 1, instead of "nothing rests". A cancel still waiting out a message-budget reject when `--drain-seconds` ends now names the reject and says to wait a minute and cancel the level yourself, or to run with `--drain-seconds` above 60. New tests cover the cancel retry pacing, the SIGINT handler and the room below the asks.
 - New worked example, `examples/options_bot.py` (#217). It reads an option underlying's listed contracts from the instruments table, subscribes to them, keeps the day's chain and the latest Greeks (`LatestGreeks`), and picks the contract in the nearest expiry open to new positions whose strike is nearest the forward of the latest valid Greeks, passing over one whose `trading_state` is not `OPTION_TRADING`. It rests one limit buy of one contract by its OCC symbol, one tick above the wall's bid, prints a reject by its reason's name, cancels the order once it rests (again at the next grid point after `MIN_REST_VIOLATION`), and on `--seconds` or Ctrl+C cancels before it exits, naming the level if the cancel is not confirmed. Linked from the quickstart, AGENTS.md and the README.
 - The budget table in `docs/developing-your-algo.md` gave the October term's values (4 times the usual) as if they were the rule. It now labels them as October's and gives the usual values, which apply from the Winter term (26 October 2026): for example 1,200 messages a minute for Market Taking, not 4,800, and a burst of 200 a second, not 800. Agentic AI is closed in Winter; when it opens in Spring its cap is 120 new orders a minute, not 480.
 
