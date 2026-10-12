@@ -1207,3 +1207,26 @@ async def test_the_update_check_starts_on_the_first_connect_only(
             break
         await asyncio.sleep(0.01)
     assert checked == ["checked"]
+
+
+@pytest.mark.parametrize("paced", [False, True], ids=["unpaced", "paced"])
+async def test_an_option_order_sent_on_a_reconnecting_session_is_recorded(paced):
+    # A CONTRACT_HALTED reject names no instrument: the session's record of the order sent
+    # names the chain, whichever way a reconnecting session sends it.
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+    from qte_sdk.pacing import Budget, Pacer
+
+    pacing = Pacer(Budget(sustained_per_minute=1200, burst_per_second=200)) if paced else None
+    order = NewOrder(
+        request_ref="r", strat_id="s", instrument="SPY261120C00665000", side=BUY, size=1
+    )
+    exchange = Exchange(session())
+    async with serve_local(exchange) as url:
+        async with ReconnectingSession(url, synthetic_token(), pacing=pacing) as rs:
+            async for event in rs:
+                if isinstance(event, Connected):
+                    # Sent while the loop holds the session up, as a bot sends.
+                    await rs.send("new", order)
+                    assert rs._session is not None
+                    assert rs._session._chain_halts._sent == {"r": "SPY261120C00665000"}
+                    break

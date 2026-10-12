@@ -181,19 +181,24 @@ def contract_repo(tmp_path, monkeypatch):
     return upstream, target, commits, git
 
 
-def write_pin(target, commit: str, approved_commit: str | None) -> None:
+def write_pin(target, commit: str, approved_commit: str | None, git) -> None:
+    """A manifest whose blobs are right for `commit`, so that only its approval can fail."""
     approval = (
         f'approved = "Head, 12 Oct 2026"\napproved_commit = "{approved_commit}"\n'
         if approved_commit is not None
         else ""
     )
-    target.manifest.write_text(f'repo = "r"\ncommit = "{commit}"\n{approval}path = "protos"\n')
+    blob = git("rev-parse", f"{commit}:protos/a.proto")
+    target.manifest.write_text(
+        f'repo = "r"\ncommit = "{commit}"\n{approval}path = "protos"\n\n'
+        f'[blobs]\n"a.proto" = "{blob}"\n'
+    )
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
 def test_vendoring_the_approved_commit_keeps_the_approval(contract_repo):
     upstream, target, (first, _second), git = contract_repo
-    write_pin(target, first, first)
+    write_pin(target, first, first, git)
     assert vendor.run(target, upstream, check=False) == 0
     written = tomllib.loads(target.manifest.read_text())
     assert written["approved"] == "Head, 12 Oct 2026"
@@ -205,9 +210,9 @@ def test_vendoring_the_approved_commit_keeps_the_approval(contract_repo):
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
 def test_vendoring_another_commit_drops_the_approval_and_check_fails(contract_repo, capsys):
-    upstream, target, (first, second), _git = contract_repo
+    upstream, target, (first, second), git = contract_repo
     # `commit` bumped by hand, the approval left for the old one: --check refuses it...
-    write_pin(target, second, first)
+    write_pin(target, second, first, git)
     assert vendor.run(target, upstream, check=True) == 1
     assert f"the approval is for {first}, not the pinned {second}" in capsys.readouterr().err
     # ...and vendoring drops it, loudly, so the pin stands unapproved until it is recorded.
@@ -222,10 +227,11 @@ def test_vendoring_another_commit_drops_the_approval_and_check_fails(contract_re
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
 def test_an_approval_without_its_commit_is_dropped(contract_repo, capsys):
-    upstream, target, (first, _second), _git = contract_repo
-    target.manifest.write_text(
-        f'repo = "r"\ncommit = "{first}"\napproved = "Head, 12 Oct 2026"\npath = "protos"\n'
-    )
+    upstream, target, (first, _second), git = contract_repo
+    write_pin(target, first, first, git)
+    text = target.manifest.read_text()
+    target.manifest.write_text(text.replace(f'approved_commit = "{first}"\n', ""))
+    assert "approved_commit" not in target.manifest.read_text()
     assert vendor.run(target, upstream, check=True) == 1
     assert f"the approval is for no recorded commit, not the pinned {first}" in (
         capsys.readouterr().err

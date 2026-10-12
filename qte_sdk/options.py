@@ -134,8 +134,9 @@ against `ReasonCodes`. A session logs `QTE-OPTIONS-CHAIN-HALTED` through the
 `qte_sdk.options` logger, at most once a minute for each underlying, when it reads a
 `CONTRACT_HALTED` reject or a `CHAIN_HALTED` cancel (see docs/errors.md). A reject does
 not name its contract, so the session names it from the `new` or `amend` it sent with that
-`request_ref`; a reject of an order it did not send names no chain, and such rejects share
-one minute. Each session keeps its own minute.
+`request_ref`; a reject of an order it did not send, or of a `request_ref` it sent again
+before an answer, names no chain, and such rejects share one minute. Each session keeps
+its own minute.
 
 Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
 present, and true, only on an option contract's `RESIDUAL` print that went through at the
@@ -498,7 +499,9 @@ class _ChainHaltWarnings:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._warned_at: dict[str, float] = {}
-        self._sent: dict[str, str] = {}
+        # An instrument, or None for a `request_ref` sent again before its first was
+        # answered: its answer could be for either order, so it names no chain.
+        self._sent: dict[str, str | None] = {}
 
     def sent(self, type_: str, payload: Message) -> None:
         """Remember the instrument of a `new` or `amend` the session is about to send."""
@@ -506,11 +509,16 @@ class _ChainHaltWarnings:
             return
         ref = getattr(payload, "request_ref", "")
         instrument = getattr(payload, "instrument", "")
-        if not ref or not is_option_symbol(instrument):
+        if not ref:
             return
         with self._lock:
-            self._sent.pop(ref, None)
-            self._sent[ref] = instrument
+            if ref in self._sent:
+                earlier = self._sent.pop(ref)
+                self._sent[ref] = instrument if earlier == instrument else None
+            elif is_option_symbol(instrument):
+                self._sent[ref] = instrument
+            else:
+                return
             while len(self._sent) > _SENT_LIMIT:
                 del self._sent[next(iter(self._sent))]
 
@@ -531,7 +539,7 @@ class _ChainHaltWarnings:
             instrument = ""
             if message.HasField("request_ref"):
                 with self._lock:
-                    instrument = self._sent.pop(message.request_ref, "")
+                    instrument = self._sent.pop(message.request_ref, None) or ""
         elif isinstance(message, OrderCancelled):
             instrument = message.instrument
         else:

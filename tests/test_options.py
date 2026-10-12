@@ -561,6 +561,23 @@ def test_an_answered_order_is_forgotten(halt_warnings, monkeypatch):
     assert session._chain_halts._sent == {}
 
 
+def test_a_request_ref_sent_again_before_its_answer_names_no_chain(halt_warnings, monkeypatch):
+    # Its reject could answer either order, so naming one chain could name the wrong one.
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY261120C00665000")
+    send_option_new(session, "r", "GOOGL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+    # The same contract again is no doubt, nor is an equity order sent with a fresh ref.
+    halts = options._ChainHaltWarnings()
+    halts.sent("new", NewOrder(request_ref="s", instrument="SPY261120C00665000"))
+    halts.sent("new", NewOrder(request_ref="s", instrument="SPY261120C00665000"))
+    halts.sent("new", NewOrder(request_ref="e", instrument="SPY"))
+    assert halts._sent == {"s": "SPY261120C00665000"}
+    halts.sent("new", NewOrder(request_ref="s", instrument="SPY"))
+    assert halts._sent == {"s": None}
+
+
 def test_the_record_of_sent_orders_is_bounded(monkeypatch):
     monkeypatch.setattr(options, "_SENT_LIMIT", 3)
     halts = options._ChainHaltWarnings()

@@ -506,6 +506,7 @@ class ReconnectingSession:
                 self._instruments.pop(instrument, None)
         failure: BaseException
         try:
+            session._chain_halts.sent(type_, payload)
             await session.connection.send(type_, payload)
         except BaseException as error:
             failure = error
@@ -520,6 +521,7 @@ class ReconnectingSession:
         one up. Returns False, sending nothing, if it is not, for the pacer not to count it."""
         if self._session is not session or not self._up:
             return False
+        session._chain_halts.sent(type_, payload)
         await session.connection.send(type_, payload)
         return True
 
