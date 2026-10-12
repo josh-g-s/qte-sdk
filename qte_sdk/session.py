@@ -394,6 +394,9 @@ class Session:
         else:
             local = _pacing._monotonic()
         self._anchor = (local, info.server_time)
+        # This session's chain halt warnings, and the instrument of each option order it
+        # sent, which a `CONTRACT_HALTED` reject does not name (see qte_sdk.options).
+        self._chain_halts = _options._ChainHaltWarnings()
         # Events read from the connection but not yet delivered: those that arrived before
         # the ack, and any that `wait_for_calendar` or `resume` read ahead. They are kept
         # as read in `_unrouted`, and pass through the report cursor (see `_Reports`) into
@@ -751,8 +754,8 @@ class Session:
                 self._pacer._observe(event, self._anchor)
             else:
                 _pacing._budget_rejected(event, self._anchor)
-        if isinstance(event, Received) and event.type in ("reject", "order_cancelled"):
-            _options._chain_halted(event)
+        if isinstance(event, Received) and event.type in ("accepted", "reject", "order_cancelled"):
+            self._chain_halts.observe(event)
         if not isinstance(event, (Received, DecodeFailed, Unknown)):
             return  # not a message, such as a SeqGap: it says nothing of what came next
         after_calendar = self._after_calendar
@@ -778,6 +781,8 @@ class Session:
         pacer, a `new`, `cancel` or `amend` first waits for room in the budget (see
         `qte_sdk.pacing`)."""
         failure: BaseException
+        # Before it goes: its answer may be read while a paced send is still returning.
+        self._chain_halts.sent(type_, payload)
         try:
             if self._pacer is None or type_ not in _pacing.PACED_TYPES:
                 await self.connection.send(type_, payload)

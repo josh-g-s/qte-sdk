@@ -108,14 +108,14 @@ python scripts/generate_contract.py
 
 CI regenerates on every pull request and fails if the result differs from what is committed.
 
-To move to a newer contract (maintainers with access to the exchange's contract repository only): once the Head has approved the new commit, change `commit` in `proto/upstream.toml` and set `approved` to who approved it and when, such as `"Head, 12 Oct 2026"`, then run
+To move to a newer contract (maintainers with access to the exchange's contract repository only): once the Head has approved the new commit, change `commit` in `proto/upstream.toml` and set `approved` to who approved it and when, such as `"Head, 12 Oct 2026"`, and `approved_commit` to the full commit approved, then run
 
 ```sh
 python scripts/vendor_contract.py /path/to/contract-repository
 python scripts/generate_contract.py
 ```
 
-and commit the protos, the manifest and the generated code together. The vendor script rewrites the blob hashes itself and keeps the `approved` line. `python scripts/vendor_contract.py /path/to/contract-repository --check` confirms that the recorded hashes belong to the pinned commits without changing anything.
+and commit the protos, the manifest and the generated code together. The vendor script rewrites the blob hashes itself. It keeps `approved` and `approved_commit` only while `approved_commit` is the commit it vendors: at any other commit it drops both and says so, and CI fails on an approval for a commit other than the pinned one, so an unapproved pin never passes as approved. `python scripts/vendor_contract.py /path/to/contract-repository --check` confirms that the recorded hashes belong to the pinned commits, and that any approval is for them, without changing anything.
 
 ## Conformance steps
 

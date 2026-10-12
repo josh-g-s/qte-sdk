@@ -1027,19 +1027,23 @@ def budget_rejected(token: str, ctx: Context) -> str:
 def options_chain_halted(token: str, ctx: Context) -> str:
     from qte_sdk import options
     from qte_sdk.connection import Received
-    from qte_sdk.contract.v1.common_pb2 import ReasonCodes
-    from qte_sdk.contract.v1.order_events_pb2 import Reject
+    from qte_sdk.contract.v1.common_pb2 import BUY, ReasonCodes
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+    from qte_sdk.contract.v1.order_events_pb2 import OrderCancelled, Reject
 
     caught = caught_warnings(ctx)
-    ctx.monkeypatch.setattr(options, "_chain_halt_warned_at", {})
     ctx.monkeypatch.setenv(TOKEN_ENV_VAR, token)
-    # The exchange echoes the instrument the order named, which a bot may have filled with
-    # the token by mistake.
-    for instrument in (SPY_CALL, token):
-        reject = Reject(
-            request_ref="r", reason_code=ReasonCodes.CONTRACT_HALTED, instrument=instrument
-        )
-        options._chain_halted(Received("reject", reject, None))
+    halts = options._ChainHaltWarnings()
+    # A reject names no instrument: the session's record of the order it sent does.
+    halts.sent("new", NewOrder(request_ref="r", instrument=SPY_CALL))
+    reject = Reject(request_ref="r", reason_code=ReasonCodes.CONTRACT_HALTED)
+    halts.observe(Received("reject", reject, None))
+    # A cancel echoes the instrument the order named, which a bot may have filled with the
+    # token by mistake.
+    cancelled = OrderCancelled(
+        strat_id="s", instrument=token, side=BUY, reason_code=ReasonCodes.CHAIN_HALTED
+    )
+    halts.observe(Received("order_cancelled", cancelled, None))
     assert len(caught) == 2
     return "\n".join(caught)
 

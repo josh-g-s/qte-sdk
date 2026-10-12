@@ -9,10 +9,13 @@ Two sets of files are vendored, each with its own manifest and pinned commit: th
 .proto files (proto/upstream.toml) and the published conformance steps
 (conformance/upstream.toml). For each set, reads the commit from its manifest, copies exactly
 the approved files byte for byte from that commit, and rewrites the manifest with each
-file's git blob hash as `git ls-tree` prints it, keeping its `approved` line (who approved
-the pin, and when) as it was. CI cannot see that repository, so it checks
-the vendored bytes against those hashes instead; `--check` is how a maintainer confirms the
-hashes really belong to the pinned commits.
+file's git blob hash as `git ls-tree` prints it. Its `approved` line (who approved the pin,
+and when) is kept only while its `approved_commit` is the commit vendored: a re-vendor at
+another commit drops both, and says so, since that approval was not for this commit.
+CI cannot see that repository, so it checks the vendored bytes against those hashes
+instead, and that the approval is for the pinned commit; `--check` is how a maintainer
+confirms the hashes really belong to the pinned commits, and fails too on an approval for
+another commit.
 """
 
 import subprocess
@@ -62,7 +65,8 @@ def header(target: Target) -> str:
     return f"""\
 # The one place that records where {target.what} came from.
 # Written by scripts/vendor_contract.py; bump `commit` deliberately and re-run it.
-# `approved`, when present, records who approved the pin and when; set it with `commit`.
+# `approved`, when present, records who approved the pin and when, and `approved_commit`
+# the commit approved; set both with `commit`. Re-vendoring another commit drops them.
 # Each blob is the git blob hash of that file at `commit`, and CI checks the vendored
 # bytes against it.
 """
@@ -97,12 +101,14 @@ def write_manifest(
     path: str,
     blobs: dict[str, str],
     approved: str | None = None,
+    approved_commit: str | None = None,
 ) -> None:
     lines = [
         header(target),
         f'repo = "{repo}"',
         f'commit = "{commit}"',
         *([f'approved = "{approved}"'] if approved is not None else []),
+        *([f'approved_commit = "{approved_commit}"'] if approved_commit is not None else []),
         f'path = "{path}"',
         "",
         "[blobs]",
@@ -118,13 +124,26 @@ def run(target: Target, platform: Path, check: bool) -> int:
     manifest = tomllib.loads(target.manifest.read_text())
     commit, path = manifest["commit"], manifest["path"]
     blobs = upstream_blobs(platform, commit, path, target.allowed)
+    approved, approved_commit = manifest.get("approved"), manifest.get("approved_commit")
+    misapproved = (approved is not None or approved_commit is not None) and (
+        approved is None or approved_commit != commit
+    )
+    approved_for = approved_commit or "no recorded commit"
 
     if check:
+        failed = 0
         if manifest.get("blobs") != blobs:
             print(f"{name}: blobs do not match {commit}", file=sys.stderr)
-            return 1
-        print(f"{name} matches {commit}")
-        return 0
+            failed = 1
+        if misapproved:
+            print(
+                f"{name}: the approval is for {approved_for}, not the pinned {commit}",
+                file=sys.stderr,
+            )
+            failed = 1
+        if not failed:
+            print(f"{name} matches {commit}")
+        return failed
 
     # The manifest may live in the same directory as the files it describes.
     expected = set(target.allowed)
@@ -137,7 +156,14 @@ def run(target: Target, platform: Path, check: bool) -> int:
     for name in target.allowed:
         (target.dest / name).write_bytes(git(platform, "show", f"{commit}:{path}/{name}"))
         print(f"vendored {name}")
-    write_manifest(target, manifest["repo"], commit, path, blobs, manifest.get("approved"))
+    if misapproved:
+        print(
+            f"{name}: APPROVAL DROPPED: {approved!r} approved {approved_for}, not {commit};"
+            " record who approved this commit in `approved` and `approved_commit`",
+            file=sys.stderr,
+        )
+        approved = approved_commit = None
+    write_manifest(target, manifest["repo"], commit, path, blobs, approved, approved_commit)
     return 0
 
 
