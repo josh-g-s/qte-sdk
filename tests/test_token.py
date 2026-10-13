@@ -1608,6 +1608,27 @@ def test_a_folder_another_account_owns_passed_before_dot_dot_in_a_sticky_folder_
 
 
 @needs_posix
+def test_a_dot_dot_after_a_folder_link_is_judged_above_the_target(tmp_path):
+    # holder/alias/../.env opens unsafe/.env, so unsafe is the folder to judge.
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    os.chmod(holder, 0o700)
+    unsafe = tmp_path / "unsafe"
+    (unsafe / "subdir").mkdir(parents=True)
+    os.chmod(unsafe, 0o777)
+    (holder / "alias").symlink_to(unsafe / "subdir")
+    found = dotenv_module.open_folders(Path(f"{holder}/alias/../.env"))
+    assert found is not None
+    assert found.real == str(unsafe / ".env")
+    fields = found.fields(0)
+    assert fields is not None
+    assert (
+        f"other users can add or remove files in {unsafe}, which has no sticky bit"
+        in (fields["problem"])
+    )
+
+
+@needs_posix
 def test_a_folder_link_loop_is_handled(tmp_path):
     os.chmod(tmp_path, 0o700)
     (tmp_path / "a").symlink_to(tmp_path / "b")

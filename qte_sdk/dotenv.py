@@ -758,7 +758,8 @@ def open_folders(path: Path) -> OpenFolders | None:
     if os.name != "posix" or _fileaccess.on_windows():
         return None
     me = os.geteuid()
-    named = os.path.abspath(path)
+    # Not normalised: a .. after a link leads above the link's target, not its own folder.
+    named = os.path.join(os.getcwd(), os.fspath(path))
     real = os.path.realpath(named)
     linked = os.path.islink(named)
     risks: list[tuple[str, str, bool]] = []
