@@ -715,6 +715,8 @@ class ReconnectingSession:
         saved = self._reports.saved()
         saved_term = self._reports_term
         self._term_change_seen = False
+        # Answers read from here on, before the ack included, are this connection's.
+        self._chain_halts._connecting()
         try:
             opened = await self._unless_closed(
                 _open_session(
@@ -862,7 +864,9 @@ class ReconnectingSession:
             stale = term is not None and counted_in is not None and term != counted_in
         if stale and reports.resume is None and reports.cursor is not None:
             reports.restore((None, frozenset()))
-            self._chain_halts._new_term()
+        # The chain halt record keeps a term of its own: it counts answers as they are
+        # read, before they are delivered, so the cursor's term need not be its own.
+        self._chain_halts._term_entered(term)
         if term is not None or reports.cursor is None:
             self._reports_term = term
 

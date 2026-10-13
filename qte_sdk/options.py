@@ -507,9 +507,18 @@ class _ChainHaltWarnings:
         # again for another instrument before every earlier send was answered (an answer
         # could be for either order, so it names no chain), and how many sends await one.
         self._sent: dict[str, tuple[str | None, int]] = {}
-        # The report_seq of the latest answers counted, so that one read again, as a
-        # resume replays what was read before a reconnect, is not counted twice.
-        self._counted: dict[int, None] = {}
+        # For the report_seq of each of the latest answers counted: its request_ref and the
+        # option contract it named, or "". One read again, as a resume replays what was
+        # read before a reconnect, is not counted twice and names what it named before.
+        self._counted: dict[int, tuple[str, str]] = {}
+        # The report_seq of the answers counted on the current connection, once a
+        # reconnecting session has started one (see `_connecting`), else None; the term,
+        # as a calendar names it, that every other answer counted was counted in, or None
+        # if unknown; and whether the current connection's calendar named that term. Until
+        # it does, an answer counted on an earlier connection may be another term's.
+        self._connection: set[int] | None = None
+        self._term: tuple[str, str] | None = None
+        self._same_term = False
 
     def sent(self, type_: str, payload: Message) -> None:
         """Remember the instrument of a `new` or `amend` the session is sending. Every one is
@@ -540,24 +549,67 @@ class _ChainHaltWarnings:
                 self._sent[ref] = (instrument, waiting - 1)
         return instrument if instrument and is_option_symbol(instrument) else ""
 
+    def _connecting(self) -> None:
+        """A reconnecting session is opening a connection: the answers counted from now on
+        are read on it, in a term not known until its calendar names one. Those counted on
+        the last connection are forgotten if its calendar never did."""
+        with self._lock:
+            if self._connection is not None and not self._same_term:
+                dropped = self._connection
+                self._counted = {seq: v for seq, v in self._counted.items() if seq not in dropped}
+            self._connection = set()
+            self._same_term = False
+
+    def _term_entered(self, term: tuple[str, str] | None) -> None:
+        """The current connection's calendar names `term` (None if it names none, which
+        tells nothing). The answers counted on earlier connections in another term are
+        forgotten; those counted on this one, before its calendar too, are its term's."""
+        if term is None:
+            return
+        with self._lock:
+            if term != self._term:
+                kept = self._connection or set()
+                self._counted = {seq: v for seq, v in self._counted.items() if seq in kept}
+                self._term = term
+            self._same_term = True
+
     def _new_term(self) -> None:
         """Report numbers start again in a new term: forget those already counted."""
         with self._lock:
             self._counted.clear()
+            if self._connection is not None:
+                self._connection.clear()
+            self._term = None
+            self._same_term = False
 
-    def _first_reading(self, event: Received) -> bool:
-        """Whether this answer is read for the first time: False for a report read again,
-        by its report_seq, which then counts against no order and names no chain."""
+    def _answer(self, event: Received, ref: str) -> str:
+        """Count one answer to `ref`, once however often it is read, and return the option
+        contract it names, or "". An answer read again, by its report_seq and request_ref,
+        counts against no order and names the contract it named when first read. One
+        counted on an earlier connection is taken as read again only once this connection's
+        term is known to be the same: the new term's report with the same number would
+        otherwise take its name, and that chain's minute could hide its warning."""
         seq = event.report_seq
-        if seq is None:
-            return True
-        with self._lock:
-            if seq in self._counted:
-                return False
-            self._counted[seq] = None
-            while len(self._counted) > _SENT_LIMIT:
-                del self._counted[next(iter(self._counted))]
-        return True
+        if seq is not None:
+            with self._lock:
+                counted = self._counted.get(seq)
+                connection = self._connection
+                same = connection is None or self._same_term or seq in connection
+            if counted is not None and counted[0] == ref and same:
+                return counted[1]
+        instrument = self._answered(ref)
+        if seq is not None:
+            with self._lock:
+                self._counted.pop(seq, None)
+                self._counted[seq] = (ref, instrument)
+                if self._connection is not None:
+                    self._connection.add(seq)
+                while len(self._counted) > _SENT_LIMIT:
+                    oldest = next(iter(self._counted))
+                    del self._counted[oldest]
+                    if self._connection is not None:
+                        self._connection.discard(oldest)
+        return instrument
 
     def observe(self, event: Event) -> None:
         """Forget the order an `accepted` or `reject` of a `new` or `amend` answers, and log
@@ -570,8 +622,8 @@ class _ChainHaltWarnings:
         message = event.message
         if isinstance(message, Accepted):
             # Only a `new` or `amend` is recorded, so only its answer counts against one.
-            if message.request_type in (NEW, AMEND) and self._first_reading(event):
-                self._answered(message.request_ref)
+            if message.request_type in (NEW, AMEND):
+                self._answer(event, message.request_ref)
             return
         if isinstance(message, Reject):
             instrument = ""
@@ -579,9 +631,8 @@ class _ChainHaltWarnings:
                 message.HasField("request_ref")
                 and message.HasField("request_type")
                 and message.request_type in (NEW, AMEND)
-                and self._first_reading(event)
             ):
-                instrument = self._answered(message.request_ref)
+                instrument = self._answer(event, message.request_ref)
         elif isinstance(message, OrderCancelled):
             instrument = message.instrument
         else:

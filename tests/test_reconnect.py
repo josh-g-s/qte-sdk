@@ -1277,7 +1277,7 @@ def counted_answer(rs: ReconnectingSession) -> None:
 
     accepted = Accepted(request_ref="r", request_type=NEW)
     rs._chain_halts.observe(Received("accepted", accepted, 3, report_seq=7))
-    assert rs._chain_halts._counted == {7: None}
+    assert rs._chain_halts._counted == {7: ("r", "")}
 
 
 def test_a_cursor_forgotten_for_a_term_change_forgets_the_answers_counted():
@@ -1299,14 +1299,131 @@ def test_a_cursor_from_another_term_forgets_the_answers_counted(strict):
     assert rs._chain_halts._counted == {}
 
 
-def test_a_cursor_kept_in_its_own_term_keeps_the_answers_counted():
+def test_a_cursor_from_another_term_keeps_the_answers_counted_on_this_connection():
+    # Read after the ack but before the calendar: already the new term's, and a resume
+    # from 0 replays them.
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
     rs._reports.restore((7, frozenset()))
     rs._reports_term = ("2026-09-01", "2026-12-18")
     counted_answer(rs)
+    rs._chain_halts._connecting()
+    from qte_sdk.contract.v1.common_pb2 import NEW
+    from qte_sdk.contract.v1.order_events_pb2 import Accepted
+
+    accepted = Accepted(request_ref="s", request_type=NEW)
+    rs._chain_halts.observe(Received("accepted", accepted, 3, report_seq=1))
+    rs._enter_term(("2027-01-04", "2027-03-26"), strict=True)
+    assert rs._reports.cursor is None
+    assert rs._chain_halts._counted == {1: ("s", "")}
+
+
+def halt_reject_read(rs: ReconnectingSession, report_seq: int) -> None:
+    from qte_sdk.contract.v1.common_pb2 import NEW
+    from qte_sdk.contract.v1.order_events_pb2 import Reject
+
+    reject = Reject(
+        request_ref="r",
+        request_type=NEW,
+        reason_code=ReasonCodes.CONTRACT_HALTED,
+        receipt_time=1,
+    )
+    rs._chain_halts.observe(Received("reject", reject, 3, report_seq=report_seq))
+
+
+def test_an_earlier_connections_answer_is_not_read_again_before_the_term_is_known(
+    monkeypatch,
+):
+    # The new term's report 2 reuses "r" for GOOGL. Read before its calendar, it is not
+    # taken for the old term's report 2, which named SPY: SPY's minute would hide it.
+    from qte_sdk import options, pacing
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+
+    caught: list[str] = []
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    rs._reports.restore((2, frozenset()))
+    rs._reports_term = ("2026-09-01", "2026-12-18")
+    halts = rs._chain_halts
+    halts._connecting()
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halt_reject_read(rs, 2)
+    halts._connecting()
+    halts.sent("new", NewOrder(request_ref="r", instrument="GOOGL261120C00200000"))
+    halt_reject_read(rs, 2)
+    assert len(caught) == 2
+    assert "halted the options chain on GOOGL" in caught[1]
+    assert halts._sent == {}
+    rs._enter_term(("2027-01-04", "2027-03-26"), strict=True)
+    assert halts._counted == {2: ("r", "GOOGL261120C00200000")}
+
+
+@pytest.mark.parametrize("calendar", ["none", "failed"])
+def test_an_earlier_connections_answer_is_not_read_again_unless_its_term_is_named(
+    calendar, monkeypatch
+):
+    # SPY's reject, report 2, was read on a connection whose calendar named the old term.
+    # The next connection's calendar names no term ("none"), or one attempt between read
+    # it again and failed before its calendar ("failed"): GOOGL's report 2, sent with "r"
+    # again, is not taken for SPY's either way.
+    from qte_sdk import options, pacing
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+
+    caught: list[str] = []
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    halts = rs._chain_halts
+    halts._connecting()
+    rs._enter_term(("2026-09-01", "2026-12-18"), strict=False)
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halt_reject_read(rs, 2)
+    halts._connecting()
+    if calendar == "failed":
+        halt_reject_read(rs, 2)
+        halts._connecting()
+    else:
+        rs._enter_term(None, strict=False)
+    halts.sent("new", NewOrder(request_ref="r", instrument="GOOGL261120C00200000"))
+    halt_reject_read(rs, 2)
+    assert "halted the options chain on GOOGL" in caught[-1]
+    assert halts._sent == {}
+
+
+def test_an_earlier_connections_answer_is_read_again_once_the_term_is_the_same(monkeypatch):
+    # A resume in the same term replays a reject read on the connection before: it counts
+    # against no order and logs nothing more within the minute.
+    from qte_sdk import options, pacing
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+
+    caught: list[str] = []
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    rs._reports.restore((2, frozenset()))
+    rs._reports_term = ("2026-09-01", "2026-12-18")
+    halts = rs._chain_halts
+    halts._connecting()
+    rs._enter_term(("2026-09-01", "2026-12-18"), strict=True)
+    for _ in range(2):
+        halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halt_reject_read(rs, 3)
+    halts._connecting()
+    rs._enter_term(("2026-09-01", "2026-12-18"), strict=True)
+    halt_reject_read(rs, 3)
+    assert len(caught) == 1
+    assert halts._sent == {"r": ("SPY261120C00665000", 1)}
+
+
+def test_a_cursor_kept_in_its_own_term_keeps_the_answers_counted():
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    rs._reports.restore((7, frozenset()))
+    rs._reports_term = ("2026-09-01", "2026-12-18")
+    rs._chain_halts._term_entered(("2026-09-01", "2026-12-18"))
+    counted_answer(rs)
     rs._enter_term(("2026-09-01", "2026-12-18"), strict=True)
     assert rs._reports.cursor == 7
-    assert rs._chain_halts._counted == {7: None}
+    assert rs._chain_halts._counted == {7: ("r", "")}
 
 
 async def test_a_chain_halt_read_before_the_ack_shares_the_reconnecting_sessions_minute(
