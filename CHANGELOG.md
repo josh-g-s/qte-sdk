@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.33
+**Version:** 0.34
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- `tests/test_conformance.py` now checks options against a real exchange (#218), when `QTE_CONFORMANCE_OPTION_UNDERLYING` names an underlying such as SPY: the chain arrives for the first option subscribe, Greeks arrive for every listed contract, a passive limit order on a contract rests and is cancelled, and a price off the option tick and a contract that is not listed are rejected `TICK_VIOLATION` and `CONTRACT_NOT_LISTED`. With `QTE_CONFORMANCE_OPTION_MAX_ORDER` it also checks that an order of the team's maximum rests and one a contract over it is rejected `RISK_LIMIT_BREACH`. Its docstring gives the commands that start qte-platform's local options exchange on your own machine, with no AWS access, and run these steps against it.
 - New worked example, `examples/options_bot.py` (#217). It reads an option underlying's listed contracts from the instruments table, subscribes to them, keeps the day's chain and the latest Greeks (`LatestGreeks`), and picks the contract in the nearest expiry open to new positions whose strike is nearest the forward of the latest valid Greeks, passing over one whose `trading_state` is not `OPTION_TRADING`. It rests one limit buy of one contract by its OCC symbol, one tick above the wall's bid, prints a reject by its reason's name, cancels the order once it rests (again at the next grid point after `MIN_REST_VIOLATION`), and on `--seconds` or Ctrl+C cancels before it exits, naming the level if the cancel is not confirmed. Linked from the quickstart, AGENTS.md and the README.
 - The budget table in `docs/developing-your-algo.md` gave the October term's values (4 times the usual) as if they were the rule. It now labels them as October's and gives the usual values, which apply from the Winter term (26 October 2026): for example 1,200 messages a minute for Market Taking, not 4,800, and a burst of 200 a second, not 800. Agentic AI is closed in Winter; when it opens in Spring its cap is 120 new orders a minute, not 480.
 
