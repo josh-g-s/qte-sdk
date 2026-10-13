@@ -173,7 +173,7 @@ from qte_sdk import errors as _errors
 from qte_sdk import pacing as _pacing
 from qte_sdk.books import _LatestByInstrument
 from qte_sdk.connection import Event, Received
-from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+from qte_sdk.contract.v1.common_pb2 import AMEND, NEW, ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import (
     OPTION_GREEKS_NONE,
     OPTION_GREEKS_UNAVAILABLE,
@@ -505,37 +505,36 @@ class _ChainHaltWarnings:
         self._sent: dict[str, tuple[str | None, int]] = {}
 
     def sent(self, type_: str, payload: Message) -> None:
-        """Remember the instrument of a `new` or `amend` the session is about to send."""
+        """Remember the instrument of a `new` or `amend` the session is sending. Every one is
+        counted, an option's or not, so a `request_ref` sent again is always noticed."""
         if type_ not in ("new", "amend"):
             return
         ref = getattr(payload, "request_ref", "")
-        instrument = getattr(payload, "instrument", "")
         if not ref:
             return
+        instrument = getattr(payload, "instrument", "")
         with self._lock:
             if ref in self._sent:
                 earlier, waiting = self._sent.pop(ref)
                 self._sent[ref] = (instrument if earlier == instrument else None, waiting + 1)
-            elif is_option_symbol(instrument):
-                self._sent[ref] = (instrument, 1)
             else:
-                return
+                self._sent[ref] = (instrument, 1)
             while len(self._sent) > _SENT_LIMIT:
                 del self._sent[next(iter(self._sent))]
 
     def _answered(self, ref: str) -> str:
         """Count one answer to `ref`, forgetting it once every send of it is answered.
-        Returns its instrument, or "" when it has none or names no one instrument."""
+        Returns its option contract, or "" when it names no one option contract."""
         with self._lock:
             if ref not in self._sent:
                 return ""
             instrument, waiting = self._sent.pop(ref)
             if waiting > 1:
                 self._sent[ref] = (instrument, waiting - 1)
-            return instrument or ""
+        return instrument if instrument and is_option_symbol(instrument) else ""
 
     def observe(self, event: Event) -> None:
-        """Forget the order an `accepted` or `reject` answers, and log
+        """Forget the order an `accepted` or `reject` of a `new` or `amend` answers, and log
         `QTE-OPTIONS-CHAIN-HALTED` for a reject `CONTRACT_HALTED` or an `order_cancelled`
         `CHAIN_HALTED`, unless this session logged one for the same underlying in the last
         minute. A reject whose order this session did not send names no chain; such rejects
@@ -544,11 +543,17 @@ class _ChainHaltWarnings:
             return
         message = event.message
         if isinstance(message, Accepted):
-            self._answered(message.request_ref)
+            # Only a `new` or `amend` is recorded, so only its answer counts against one.
+            if message.request_type in (NEW, AMEND):
+                self._answered(message.request_ref)
             return
         if isinstance(message, Reject):
             instrument = ""
-            if message.HasField("request_ref"):
+            if (
+                message.HasField("request_ref")
+                and message.HasField("request_type")
+                and message.request_type in (NEW, AMEND)
+            ):
                 instrument = self._answered(message.request_ref)
         elif isinstance(message, OrderCancelled):
             instrument = message.instrument

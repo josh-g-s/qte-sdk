@@ -18,7 +18,14 @@ from qte_sdk.connection import (
     SessionInfo,
 )
 from qte_sdk.contract.codec import unpack
-from qte_sdk.contract.v1.common_pb2 import BUY, RESIDUAL, STUDENT_TO_WALL, ReasonCodes
+from qte_sdk.contract.v1.common_pb2 import (
+    BUY,
+    CANCEL,
+    NEW,
+    RESIDUAL,
+    STUDENT_TO_WALL,
+    ReasonCodes,
+)
 from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, OptionTradingState, Trades
 from qte_sdk.contract.v1.order_entry_pb2 import AmendOrder, NewOrder
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, OrderCancelled, Reject
@@ -457,9 +464,11 @@ def send_option_new(session: Session, ref: str, instrument: str = "SPY261120C006
     asyncio.run(session.send("new", order))
 
 
-def halt_reject(ref: str | None = "r") -> Received:
+def halt_reject(ref: str | None = "r", request_type: int = NEW) -> Received:
     # As the exchange sends it: a reject names an instrument only for UNKNOWN_INSTRUMENT.
-    reject = Reject(reason_code=ReasonCodes.CONTRACT_HALTED, receipt_time=1)
+    reject = Reject(
+        reason_code=ReasonCodes.CONTRACT_HALTED, request_type=request_type, receipt_time=1
+    )
     if ref is not None:
         reject.request_ref = ref
     return Received("reject", reject, None)
@@ -555,7 +564,7 @@ def test_a_halt_reject_for_an_order_the_session_did_not_send_still_logs(halt_war
 def test_an_answered_order_is_forgotten(halt_warnings, monkeypatch):
     session = halt_session(monkeypatch)
     send_option_new(session, "r")
-    session._keep(Received("accepted", Accepted(request_ref="r"), None))
+    session._keep(Received("accepted", Accepted(request_ref="r", request_type=NEW), None))
     session._keep(halt_reject("r"))
     assert "rejected an order in an option contract" in halt_warnings[0][1]
     assert session._chain_halts._sent == {}
@@ -578,7 +587,7 @@ def test_a_reused_request_ref_stays_unnamed_until_every_send_is_answered(
     session = halt_session(monkeypatch)
     send_option_new(session, "r", "SPY261120C00665000")
     send_option_new(session, "r", "GOOGL261120C00200000")
-    session._keep(Received("accepted", Accepted(request_ref="r"), None))
+    session._keep(Received("accepted", Accepted(request_ref="r", request_type=NEW), None))
     # GOOGL's answer is still to come, so a third send cannot name it.
     send_option_new(session, "r", "AAPL261120C00200000")
     session._keep(halt_reject("r"))
@@ -595,21 +604,54 @@ def test_the_same_contract_sent_again_keeps_its_name():
     halts = options._ChainHaltWarnings()
     halts.sent("new", NewOrder(request_ref="s", instrument="SPY261120C00665000"))
     halts.sent("new", NewOrder(request_ref="s", instrument="SPY261120C00665000"))
-    halts.sent("new", NewOrder(request_ref="e", instrument="SPY"))  # not an option
-    assert halts._sent == {"s": ("SPY261120C00665000", 2)}
+    # Not an option, but counted, so its request_ref sent again is noticed.
+    halts.sent("new", NewOrder(request_ref="e", instrument="SPY"))
+    assert halts._sent == {"s": ("SPY261120C00665000", 2), "e": ("SPY", 1)}
     halts.sent("new", NewOrder(request_ref="s", instrument="SPY"))
-    assert halts._sent == {"s": (None, 3)}
+    assert halts._sent == {"s": (None, 3), "e": ("SPY", 1)}
 
 
 def test_the_record_of_sent_orders_is_bounded(monkeypatch):
     monkeypatch.setattr(options, "_SENT_LIMIT", 3)
     halts = options._ChainHaltWarnings()
-    for ref in "abcd":
+    for ref in "abc":
         halts.sent("new", NewOrder(request_ref=ref, instrument="SPY261120C00665000"))
-    halts.sent("new", NewOrder(request_ref="e", instrument="SPY"))  # not an option
+    halts.sent("new", NewOrder(request_ref="d", instrument="SPY"))
     halts.sent("cancel", NewOrder(request_ref="f", instrument="SPY261120C00665000"))
     assert list(halts._sent) == ["b", "c", "d"]
-    assert halts._sent["d"] == ("SPY261120C00665000", 1)
+    assert halts._sent["c"] == ("SPY261120C00665000", 1)
+
+
+def test_an_answer_to_a_cancel_forgets_no_order(halt_warnings, monkeypatch):
+    # A cancel is not recorded, so its answer, though it echoes the same request_ref, must
+    # not consume SPY's record: GOOGL sent with it next would take SPY's reject.
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY261120C00665000")
+    session._keep(Received("accepted", Accepted(request_ref="r", request_type=CANCEL), None))
+    other = halt_reject("r", CANCEL)
+    other.message.reason_code = ReasonCodes.MIN_REST_VIOLATION
+    session._keep(other)
+    send_option_new(session, "r", "GOOGL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+
+
+def test_an_answer_to_an_order_in_a_stock_is_counted(halt_warnings, monkeypatch):
+    # The stock's answer must not consume SPY's record: GOOGL sent next would take SPY's.
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY")
+    send_option_new(session, "r", "SPY261120C00665000")
+    session._keep(Received("accepted", Accepted(request_ref="r", request_type=NEW), None))
+    send_option_new(session, "r", "GOOGL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+
+
+def test_a_halt_reject_of_a_stock_order_names_no_contract(halt_warnings, monkeypatch):
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
 
 
 def test_other_rejects_and_cancels_say_nothing_of_a_halt(halt_warnings, monkeypatch):
