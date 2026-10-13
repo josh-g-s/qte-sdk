@@ -55,7 +55,8 @@ sent again after the exchange's next market-data grid point, then after two more
 more and so on. One rejected for a message budget is sent again only after a minute, since
 rejected messages count toward the budget too. That is longer than the default
 --drain-seconds, so a budget reject at the end names itself: wait a minute and cancel the
-level yourself. A --drain-seconds above 60 lets a later run wait out such a reject.
+level yourself. To have the run wait out such a reject itself before it exits, start it
+with --drain-seconds above 60.
 
 What it cannot tell apart. It follows its order by strategy, contract, side and price
 level, and follows an amend's move to a new level. If anything else acts on that
@@ -706,7 +707,8 @@ async def trade(
             f"WARNING: the cancel was rejected ({bot.budget_reject}) and --drain-seconds "
             f"ended before it could be sent again {BUDGET_WAIT_SECONDS:g} s later, so the "
             f"order may still rest at {bot.where}. Wait a minute, then cancel it "
-            "yourself. A --drain-seconds above 60 lets a later run wait out such a reject"
+            "yourself. Next time, a --drain-seconds above 60 lets the run wait out such a "
+            "reject itself before it exits"
         )
         return 1
     if bot.ref is not None and not bot.finished:

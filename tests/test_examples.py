@@ -1791,7 +1791,9 @@ async def test_options_bot_sends_a_min_rest_rejected_cancel_again_only_after_gri
     example = load_example("options_bot.py")
     bot = resting_options_bot(example)
     await bot.act()  # the cancel
-    for grid_points in (1, 2):  # one more grid point after the first reject, two after the next
+    # One more grid point after the first reject, two after the next, then four: the wait
+    # doubles, so a fixed step (1, 2, 3) fails at the third.
+    for grid_points in (1, 2, 4):
         reject_last_cancel(bot, "MIN_REST_VIOLATION")
         await bot.act()
         assert bot.session.sent == []  # not at once
@@ -1813,9 +1815,13 @@ async def test_options_bot_sends_a_budget_rejected_cancel_again_only_after_a_min
     clock[0] += 59.9
     await bot.act()
     assert bot.session.sent == []
+    assert bot.budget_reject == "MESSAGE_BUDGET_EXCEEDED"
     clock[0] += 0.2
     await bot.act()
     assert [type_ for type_, _ in bot.session.sent] == ["cancel"]
+    # The cancel sent again clears the reject, so a run that ends now warns only that the
+    # cancel was not confirmed, not that a budget reject is still being waited out.
+    assert bot.budget_reject is None
 
 
 @SENDS_SIGINT
@@ -1898,6 +1904,20 @@ async def test_options_bot_keeps_its_outcome_on_a_ctrl_c_raised_outside_the_run_
     progress.status = None  # had it come before the run decided
     assert example.stopped_at_once(progress) == 1
     assert "may still rest at SPY261120P00665000 BUY @ 4.900000" in capsys.readouterr().err
+
+
+def test_options_bot_says_no_order_was_sent_on_ctrl_c_while_waiting_for_a_contract(capsys):
+    # Two quick Ctrl+Cs while the bot waits for a contract open to new orders stop the run
+    # with the bot made but no order sent: nothing can rest, so the status is 0.
+    example = load_example("options_bot.py")
+    progress = example.Progress()
+    progress.bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test")
+    assert progress.bot.ref is None
+    assert example.stopped_at_once(progress) == 0
+    out, err = capsys.readouterr()
+    assert "interrupted: no order was sent" in out
+    assert "may still rest" not in out + err
+    assert "None" not in out + err
 
 
 async def start_options_bot(url: str, *args: str) -> asyncio.subprocess.Process:
