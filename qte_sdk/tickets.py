@@ -98,10 +98,10 @@ missing from it is no longer one to follow. `LatestTickets` forgets every ticket
 `Disconnected` so that the next connection's set rebuilds it.
 
 A pod's session is also sent `execution_route` (an `ExecutionRoute`; pick it out with
-`is_execution_route`), once on each connection after the `session_ack` and the
-instruments table and before that connection's ticket states, so the routing is known
-before the states are read and before a ticket is sent, and again whenever the Directors
-change the automatic execution control. It carries no `report_seq` and a resume does not
+`is_execution_route`), once on each connection after the `session_ack`, the calendar
+and the instruments table and before that connection's ticket states, so the routing is
+known before the states are read and before a ticket is sent, and again whenever the
+Directors change the automatic execution control. It carries no `report_seq` and a resume does not
 replay it. It says:
 
 - `routing_in_force`, an `ExecutionRouting`: `ROUTING_SERVICE` while a ticket you send
