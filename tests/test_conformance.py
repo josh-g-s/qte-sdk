@@ -1,4 +1,4 @@
-"""The published conformance session, run against a local exchange.
+r"""The published conformance session, run against a local exchange.
 
 `conformance/CONFORMANCE.md` is vendored byte for byte from the exchange's published
 conformance steps. This module runs its WebSocket session (steps 1 to 16, with 1a and 9a
@@ -8,6 +8,8 @@ every ping, absorbs heartbeats, parses payloads and drops a report it has alread
 delivered), so most of its sub-steps also drive connections frame by frame with the
 `websockets` library, still building and reading messages with the SDK's codec and
 contract types (see `Wire`). The history service steps (H1 to H19) are not run here.
+The vendored steps check options only in step 1a's listing, so this module adds steps of
+its own for options (see "Options" below).
 
 It is skipped unless these are set, so CI and a plain `pytest` never reach an exchange:
 
@@ -36,12 +38,90 @@ cancelling the team's resting orders, so a step that fails or is skipped leaves 
 behind for the next. Steps 3 to 14 and those sub-steps need the instrument's session to be
 open; if it is not, they are skipped. Step 15's precondition puts its restart before step
 14's close and its empty marker after it, and step 16 needs no restart after that close,
-so the tests run in this order: steps 1 to 13; step 15's heartbeat, silence, replay,
-snapshot, restart and market data sub-steps; step 14; step 15's empty marker, and its
-heartbeat and silence sub-steps again, now outside a session; step 16. The empty marker
-and step 16 run only after step 14 has closed the session in the same run. Step 15's
-heartbeat and silence sub-steps wait out the exchange's own timers, about three minutes
-each time.
+so the tests run in this order: steps 1 to 13; the option steps; step 15's heartbeat,
+silence, replay, snapshot, restart and market data sub-steps; step 14; step 15's empty
+marker, and its heartbeat and silence sub-steps again, now outside a session; step 16.
+The empty marker and step 16 run only after step 14 has closed the session in the same
+run. Step 15's heartbeat and silence sub-steps wait out the exchange's own timers, about
+three minutes each time.
+
+Options. These steps are the SDK's own, checking the exchange's published option rules,
+not numbered steps of CONFORMANCE.md. They run only when this is set too:
+
+    QTE_CONFORMANCE_OPTION_UNDERLYING  an option underlying the exchange lists, such as SPY
+
+Each takes the first contract the `instruments` table lists on that underlying, and is
+skipped if none is listed (before the first open of an options term, for example) or, for
+the order steps, if the session is not open or that contract is not trading with a
+two-sided live quote. Every order is a buy of one contract, and the steps mass cancel
+before and after, as steps 4 to 13 do.
+
+    a  the chain: the first option subscribe in an open session is answered with
+       `option_chain`, for the session's date, listing the same contracts on the
+       underlying as the table, each under its own underlying and expiry, with a known
+       role
+    b  the Greeks: `option_greeks` arrive for every listed contract, at least one of
+       them VALID; each received has a known status, every value and `calculated_at`
+       present unless the status is NONE and none if it is, and deltas, gamma, vega,
+       forward and implied volatility of the right sign. Greeks are published every
+       five minutes, so this waits up to QTE_CONFORMANCE_GREEKS_WITHIN seconds (default
+       300 plus QTE_CONFORMANCE_TIMEOUT) for them
+    c  a passive buy limit order inside the contract's band is accepted and rests, and a
+       cancel then removes it with `CANCEL_REQUEST`
+    d  a price half a tick off the contract's tick is rejected `TICK_VIOLATION`
+    e  an order in a contract of the underlying that is not listed (the contract's expiry
+       and right, at a strike twenty increments above the highest listed) is rejected
+       `CONTRACT_NOT_LISTED`
+    f  only with QTE_CONFORMANCE_OPTION_MAX_ORDER=<contracts>, the team's maximum option
+       order (SPEC.md section 18.1: 30 for Options Market Making, 25 for Options Taking):
+       a passive buy of the maximum rests and is mass cancelled, and one of a contract
+       more is rejected `RISK_LIMIT_BREACH`. The team must have room under its other
+       limits for that one contract more, which no message shows, so start it flat
+
+The reject steps compare the reason by its name, as `reason_code_name` decodes it.
+
+Running the option steps on this machine. qte-platform's options rehearsal starts a local
+exchange with no AWS access (tools/optionsrehearsal/local.sh there): qte-skeleton on a
+made-up session of 26 October 2026, with SPY quoted 649.99 / 650.01 and a chain of SPY
+contracts, its clock started at 13:28 UTC (09:28 in New York) and running at real speed.
+The contracts are listed at the 13:30 UTC open, and the first Greeks are published at
+13:35 UTC. Go 1.26 or later and openssl are needed. In a qte-platform checkout, with W a new
+working directory:
+
+    go build -o $W/bin/ ./engine/cmd/qte-skeleton ./gateway/cmd/tokendigest \
+      ./tools/optionsrehearsal/localgen ./tools/optionsrehearsal/localprefix
+    mkdir -p $W/tokens && chmod 700 $W/tokens && umask 077
+    openssl rand -hex 32 | tr -d '\n' > $W/tokens/team
+    digest="$($W/bin/tokendigest < $W/tokens/team)"
+    printf '{"contract_version": "0.x", "credentials": [%s]}' \
+      "{\"token_sha256_hex\": \"$digest\", \"team\": \"Amsterdam\"}" > $W/gateway.json
+    $W/bin/localgen gen -dir $W -freeze-from "" -end 2026-10-26T16:00:00Z
+    $W/bin/localprefix -term fixtures/config/options-orders.yaml -log $W/events.log \
+      -stock-recording $W/stock.log -options-recording $W/options.log \
+      -session-date 20261026 -recorded-date 20261023 -at 2026-10-26T13:20:00Z \
+      -sofr-effective 20261022 -sofr-published 20261023 -sofr-rate-micro-bp 431000000
+    $W/bin/qte-skeleton -term fixtures/config/options-orders.yaml \
+      -gateway-config $W/gateway.json -log $W/events.log -addr 127.0.0.1:18081 \
+      -session-file $W/stock.log -options-session-file $W/options.log \
+      -align-time-of-day \
+      -start-offset-ms "$($W/bin/localgen offset -target 2026-10-26T13:28:00Z)"
+
+Amsterdam is an Options Market Making team in that term's roster, whose maximum option
+order is 30 contracts. `-freeze-from ""` keeps SPY two-sided; without it SPY's offer is
+withdrawn at 13:37:30 and every contract turns reducing-only at the 13:40 calculation, and
+the order steps are skipped. `-end` makes the made-up quotes run to 16:00 UTC rather than
+13:45, after which the contracts stop trading in the same way. The term needs no strategy
+registration. An Options team may trade SPY itself only as a hedge, so steps 4 to 13 and
+step 15's order sub-steps are rejected `HEDGE_ONLY` there; run only the option steps.
+Once `curl http://127.0.0.1:18081/healthz` answers, and at least two minutes after the
+start (13:30), run from this repository, the token passed by its file and never printed:
+
+    QTE_CONFORMANCE_URL=ws://127.0.0.1:18081/ws \
+    QTE_CONFORMANCE_TOKEN="$(cat $W/tokens/team)" \
+    QTE_CONFORMANCE_INSTRUMENT=SPY QTE_CONFORMANCE_OPTION_UNDERLYING=SPY \
+    QTE_CONFORMANCE_OPTION_MAX_ORDER=30 pytest tests/test_conformance.py -k option -rs
+
+Step b waits for the 13:35 Greeks if it runs before them.
 
 Every timestamp on the wire is a count of milliseconds since the Unix epoch, UTC, as the
 vendored steps state. The steps only compare timestamps with each other, subtract one from
@@ -84,7 +164,8 @@ declared by setting a variable:
         as unknown, it makes every other check, QTEA's value included, and then skips.
 
 The instrument must be an equity whose buy collar is mark x 1.05, the figure steps 10
-and 11 name; an option's wider guard does not fit them.
+and 11 name; an option's wider guard does not fit them. The option steps below trade a
+contract of their own.
 
 The others are checked when the step runs: the instrument has a two-sided live quote
 (steps 4 to 14), its book shows ten ask levels all within mark x 1.05 (step 11), the
@@ -156,6 +237,8 @@ from qte_sdk.contract.v1.market_data_pb2 import (
     Book,
     Mark,
     OfficialClose,
+    OptionChain,
+    OptionGreeks,
     SessionState,
     Trades,
 )
@@ -172,8 +255,27 @@ from qte_sdk.contract.v1.session_pb2 import Auth, OrderSnapshot, Resume, ResumeA
 from qte_sdk.instruments import EQUITY, OPTION, InstrumentInfo, instrument_info
 from qte_sdk.market_data import as_market_data, subscribe
 from qte_sdk.options import CALL as CALL_LETTER
+from qte_sdk.options import (
+    OPTION_GREEKS_NONE,
+    OPTION_GREEKS_UNAVAILABLE,
+    OPTION_GREEKS_VALID,
+    OPTION_ROLE_ACTIVE,
+    OPTION_ROLE_OBLIGATED,
+    OPTION_ROLE_RETAINED,
+    OPTION_TRADING,
+    LatestGreeks,
+    chain_contracts,
+    expiry_date,
+    greek_to_decimal,
+    listed_contracts,
+    option_symbol,
+    option_underlyings,
+    parse_option_symbol,
+    strike_increment,
+    trading_state,
+    vol_to_decimal,
+)
 from qte_sdk.options import PUT as PUT_LETTER
-from qte_sdk.options import option_underlyings, parse_option_symbol, strike_increment
 from qte_sdk.orders import (
     reason_code_name,
     request_ref_of,
@@ -420,12 +522,17 @@ class Client:
         assert isinstance(reply, Reject), "the request was accepted, not rejected"
         return reply
 
-    async def order_state(self, strat: str, side: int, price: int, since: int) -> OrderState:
+    async def order_state(
+        self, strat: str, side: int, price: int, since: int, instrument: str | None = None
+    ) -> OrderState:
+        """The `order_state` for `strat`'s order at the level, in `instrument` (by default
+        the configured instrument)."""
+        instrument = self.config.instrument if instrument is None else instrument
         return await self.wait_for(
             lambda m: (
                 isinstance(m, OrderState)
                 and m.strat_id == strat
-                and m.instrument == self.config.instrument
+                and m.instrument == instrument
                 and m.side == side
                 and m.price == price
             ),
@@ -433,21 +540,30 @@ class Client:
             since,
         )
 
-    async def rest(self, strat: str, side: int, price: int, size: int | None = None) -> OrderState:
-        """Enter a limit order and wait until it is reported resting."""
+    async def rest(
+        self,
+        strat: str,
+        side: int,
+        price: int,
+        size: int | None = None,
+        instrument: str | None = None,
+    ) -> OrderState:
+        """Enter a limit order and wait until it is reported resting. The order is in
+        `instrument`, by default the configured instrument."""
         size = self.config.size if size is None else size
+        instrument = self.config.instrument if instrument is None else instrument
         start = self.mark()
         ref = await send_new(
             self.session,
             strat_id=strat,
-            instrument=self.config.instrument,
+            instrument=instrument,
             side=side,
             order_type=LIMIT,
             price=price,
             size=size,
         )
         await self.answer(ref, start)
-        state = await self.order_state(strat, side, price, start)
+        state = await self.order_state(strat, side, price, start, instrument)
         assert state.state == RESTING
         return state
 
@@ -1323,6 +1439,290 @@ async def test_step_13_mass_cancel(market: Client):
         assert m.reason_code == ReasonCodes.MASS_CANCEL
         assert m.timestamp == accepted.release_time, "not cancelled at the mass cancel's release"
     # "No budget consumed" is not checked: no message reports a team's budget use.
+
+
+# Options: the SDK's own steps. The vendored steps check options only in step 1a's
+# listing, so these check the option contract's published rules instead: the chain, the
+# Greeks, a resting limit order and its cancel, and the option rejects. Each picks its
+# contract at run time from the `instruments` table: the first listed on
+# QTE_CONFORMANCE_OPTION_UNDERLYING.
+
+OPTION_UNDERLYING_VAR = "QTE_CONFORMANCE_OPTION_UNDERLYING"
+OPTION_MAX_ORDER_VAR = "QTE_CONFORMANCE_OPTION_MAX_ORDER"
+# Every option order here is for one contract, within any arm's maximum order.
+OPTION_SIZE = 1
+# Greeks are published at each calculation, every five minutes, and a subscribe is
+# answered with the last published, so they are awaited for one cadence and a margin.
+GREEKS_CADENCE = 300.0  # seconds
+_OPTION_ROLES = (OPTION_ROLE_ACTIVE, OPTION_ROLE_OBLIGATED, OPTION_ROLE_RETAINED)
+_GREEKS_STATUSES = (OPTION_GREEKS_VALID, OPTION_GREEKS_UNAVAILABLE, OPTION_GREEKS_NONE)
+# The fields an `option_greeks` carries exactly when its status is not NONE.
+_GREEKS_VALUES = ("calculated_at", "forward", "implied_vol", "delta", "gamma", "vega", "theta")
+
+
+def option_underlying() -> str:
+    """The underlying whose contracts the option steps use; skips the step if unset."""
+    underlying = os.environ.get(OPTION_UNDERLYING_VAR)
+    if not underlying:
+        pytest.skip(
+            f"precondition: an exchange that lists option contracts ({OPTION_UNDERLYING_VAR}"
+            "=<underlying>, for example SPY)"
+        )
+    return underlying
+
+
+def greeks_within(config: Settings) -> float:
+    """Seconds to wait for every subscribed contract's Greeks."""
+    default = GREEKS_CADENCE + config.timeout
+    return float(os.environ.get("QTE_CONFORMANCE_GREEKS_WITHIN", default))
+
+
+def listed_on(c: Client, underlying: str) -> tuple[str, ...]:
+    """The contracts the exchange's table lists on `underlying`; skips the step if none."""
+    table = c.session.instrument_table
+    assert table is not None, "no instruments after the calendar"
+    listed = listed_contracts(table, underlying)
+    if not listed:
+        pytest.skip(f"precondition: the exchange lists contracts on {underlying}")
+    return listed
+
+
+async def subscribed_open(c: Client, instruments: list[str]) -> int:
+    """Subscribe to `instruments`, skip the step unless the session is open, and return
+    the index in `seen` from which the answer was read."""
+    start = c.mark()
+    await subscribe(c.session, instruments)
+    state = await c.next_session_state(start)
+    if state.state != OPEN:
+        pytest.skip("precondition: the session is open")
+    return start
+
+
+def contract_tick(c: Client, contract: str) -> int:
+    table = c.session.instrument_table
+    assert table is not None
+    info = instrument_info(table, contract)
+    assert info is not None and info.kind == OPTION, f"{contract} is not a listed option"
+    assert info.tick_size > 0, f"{contract} has no tick"
+    return info.tick_size
+
+
+@pytest.fixture
+async def option_market(client: Client):
+    """An open session, the first contract listed on the underlying trading with a
+    two-sided live book, and none of the team's orders resting."""
+    c = client
+    contract = listed_on(c, option_underlying())[0]
+    start = await subscribed_open(c, [contract])
+    try:
+        await c.wait_for(lambda m: isinstance(m, Book) and m.instrument == contract, "book", start)
+    except NoMessage:
+        pytest.skip(f"precondition: {contract} has a book")
+    book = c.books.get(contract)
+    assert book is not None
+    if trading_state(book) != OPTION_TRADING:
+        pytest.skip(f"precondition: {contract} is trading, not reducing-only or suspended")
+    if book.condition != LIVE or not book.bid_levels or not book.ask_levels:
+        pytest.skip(f"precondition: {contract} has a two-sided live quote")
+    await mass_cancel_all(c)
+    yield c, contract
+    if c.state is not None and c.state.state == OPEN and not c._ended:
+        try:
+            await mass_cancel_all(c)
+        except (Exception, pytest.fail.Exception):
+            pass
+
+
+async def test_option_a_chain(client: Client):
+    c = client
+    underlying = option_underlying()
+    listed = listed_on(c, underlying)
+    table = c.session.instrument_table
+    # The chain is the answer to the first subscribe naming an option contract. Between
+    # sessions it may already be the next session's, so the session must be open.
+    start = await subscribed_open(c, [listed[0]])
+    state = c.state
+    assert state is not None
+    chain = await c.wait_for(lambda m: isinstance(m, OptionChain), "option_chain", start)
+    assert chain.session_date == state.session_date, (
+        f"the chain is for {chain.session_date}, the session for {state.session_date}"
+    )
+    names = [contract.instrument for contract in chain_contracts(chain)]
+    assert len(names) == len(set(names)), "the chain lists a contract twice"
+    on_underlying = {
+        contract.instrument for contract in chain_contracts(chain, underlying=underlying)
+    }
+    assert on_underlying == set(listed), (
+        f"the chain's {underlying} contracts are not the ones the instruments table lists"
+    )
+    for entry in chain.expiries:
+        try:
+            expiry = expiry_date(entry)
+        except ValueError:
+            raise AssertionError(
+                f"{entry.underlying}'s expiry {entry.expiry} is not a date"
+            ) from None
+        for contract in entry.contracts:
+            symbol = parse_option_symbol(contract.instrument)
+            assert (symbol.underlying, symbol.expiry) == (entry.underlying, expiry), (
+                f"{contract.instrument} is listed under {entry.underlying} {entry.expiry}"
+            )
+            assert contract.role in _OPTION_ROLES, f"{contract.instrument} has no known role"
+            info = instrument_info(table, contract.instrument)
+            assert info is not None and info.kind == OPTION, (
+                f"{contract.instrument} is not an option in the instruments table"
+            )
+
+
+def assert_greeks(greeks: OptionGreeks) -> None:
+    """One contract's published Greeks: a known status; every value, `calculated_at`
+    included, unless the status is `NONE`, and none if it is; values calculated no later
+    than they are published; and values of the right sign: a call's delta not negative, a
+    put's not positive, gamma and vega not negative, the forward and the implied
+    volatility positive. A delta's size is not bounded by 1: the exchange's forward form
+    scales it by a carry factor that can exceed 1."""
+    name = greeks.instrument
+    assert greeks.grid_time > 0, f"{name}'s Greeks have no grid_time"
+    assert greeks.status in _GREEKS_STATUSES, f"{name}'s Greeks have no known status"
+    present = [field for field in _GREEKS_VALUES if greeks.HasField(field)]
+    if greeks.status == OPTION_GREEKS_NONE:
+        assert not present, f"{name}'s Greeks are NONE but carry {', '.join(present)}"
+        return
+    missing = [field for field in _GREEKS_VALUES if field not in present]
+    assert not missing, f"{name}'s Greeks are not NONE but have no {', '.join(missing)}"
+    assert 0 < greeks.calculated_at <= greeks.grid_time, (
+        f"{name}'s Greeks were calculated at {greeks.calculated_at}, "
+        f"published at {greeks.grid_time}"
+    )
+    if parse_option_symbol(name).right == CALL_LETTER:
+        assert greeks.delta >= 0, f"{name}'s call delta {greek_to_decimal(greeks.delta)}"
+    else:
+        assert greeks.delta <= 0, f"{name}'s put delta {greek_to_decimal(greeks.delta)}"
+    assert greeks.gamma >= 0, f"{name}'s gamma {greek_to_decimal(greeks.gamma)}"
+    assert greeks.vega >= 0, f"{name}'s vega {greeks.vega}"
+    assert greeks.forward > 0, f"{name}'s forward {greeks.forward}"
+    assert greeks.implied_vol > 0, (
+        f"{name}'s implied volatility {vol_to_decimal(greeks.implied_vol)}"
+    )
+
+
+async def test_option_b_greeks(client: Client):
+    c = client
+    listed = listed_on(c, option_underlying())
+    start = await subscribed_open(c, list(listed))
+    within = greeks_within(c.config)
+
+    latest = LatestGreeks()
+    read = start
+
+    def arrived() -> bool:
+        """Every listed contract has Greeks, and at least one of them is VALID: a
+        subscribe before a calculation may be answered with NONE or UNAVAILABLE."""
+        nonlocal read
+        for greeks in c.since(read, OptionGreeks):
+            # Every message is checked, not only the latest per contract.
+            assert_greeks(greeks)
+            latest.update(greeks)
+        read = c.mark()
+        held = [latest.get(contract) for contract in listed]
+        return all(held) and any(g.status == OPTION_GREEKS_VALID for g in held)
+
+    try:
+        await c.until(arrived, "option_greeks for every listed contract", within)
+    except NoMessage:
+        missing = sorted(contract for contract in listed if latest.get(contract) is None)
+        if not missing:
+            raise AssertionError(f"no listed contract had VALID Greeks within {within} s") from None
+        raise AssertionError(
+            f"no option_greeks within {within} s for {len(missing)} of {len(listed)} "
+            f"contracts, {missing[0]} among them"
+        ) from None
+    for contract in listed:
+        greeks = latest.get(contract)
+        assert greeks is not None
+        assert_greeks(greeks)
+
+
+async def test_option_c_limit_order_and_cancel(option_market: tuple[Client, str]):
+    c, contract = option_market
+    (price,) = inside_prices(c.books.get(contract), contract_tick(c, contract), 1)
+    state = await c.rest(c.config.strat_a, BUY, price, size=OPTION_SIZE, instrument=contract)
+    assert state.remaining_size == OPTION_SIZE
+    start = c.mark()
+    ref = await send_cancel(c.session, instrument=contract, side=BUY, price=price)
+    cancelled = await c.wait_for(
+        lambda m: isinstance(m, OrderCancelled) and request_ref_of(m) == ref,
+        "order_cancelled for the cancel",
+        start,
+    )
+    assert cancelled.instrument == contract
+    assert cancelled.strat_id == c.config.strat_a
+    assert cancelled.reason_code == ReasonCodes.CANCEL_REQUEST, reason_code_name(
+        cancelled.reason_code
+    )
+    assert cancelled.cancelled_size == OPTION_SIZE
+
+
+async def rejected_new(c: Client, contract: str, price: int, size: int) -> Reject:
+    """Send a buy limit order that must be rejected, and return its `reject`."""
+    start = c.mark()
+    ref = await send_new(
+        c.session,
+        strat_id=c.config.strat_a,
+        instrument=contract,
+        side=BUY,
+        order_type=LIMIT,
+        price=price,
+        size=size,
+    )
+    reject = await c.rejection(ref, start)
+    assert reject.request_type == RequestType.NEW
+    return reject
+
+
+async def test_option_d_off_tick_price_is_rejected(option_market: tuple[Client, str]):
+    c, contract = option_market
+    tick = contract_tick(c, contract)
+    if tick < 2:
+        pytest.skip(f"precondition: {contract}'s tick has a price between two ticks")
+    (price,) = inside_prices(c.books.get(contract), tick, 1)
+    reject = await rejected_new(c, contract, price + tick // 2, OPTION_SIZE)
+    assert reason_code_name(reject.reason_code) == "TICK_VIOLATION"
+
+
+async def test_option_e_contract_not_listed_is_rejected(option_market: tuple[Client, str]):
+    c, contract = option_market
+    table = c.session.instrument_table
+    symbol = parse_option_symbol(contract)
+    listed = listed_contracts(table, symbol.underlying)
+    increment = strike_increment(table, symbol.underlying)
+    assert increment, f"{symbol.underlying} has no strike increment"
+    # The contract's own expiry and right, at a strike well above every listed one.
+    highest = max(parse_option_symbol(name).strike for name in listed)
+    unlisted = option_symbol(
+        symbol.underlying, symbol.expiry, symbol.right, highest + 20 * increment
+    )
+    assert unlisted not in listed
+    (price,) = inside_prices(c.books.get(contract), contract_tick(c, contract), 1)
+    reject = await rejected_new(c, unlisted, price, OPTION_SIZE)
+    assert reason_code_name(reject.reason_code) == "CONTRACT_NOT_LISTED"
+
+
+@pytest.mark.skipif(
+    not os.environ.get(OPTION_MAX_ORDER_VAR),
+    reason=f"precondition: the team's maximum option order ({OPTION_MAX_ORDER_VAR}=<contracts>)",
+)
+async def test_option_f_over_the_maximum_order_is_rejected(option_market: tuple[Client, str]):
+    c, contract = option_market
+    maximum = int(os.environ[OPTION_MAX_ORDER_VAR])
+    (price,) = inside_prices(c.books.get(contract), contract_tick(c, contract), 1)
+    # An order of the maximum rests, so the reject below is for the one contract more, not
+    # for a lower maximum or another limit the team is already near.
+    state = await c.rest(c.config.strat_a, BUY, price, size=maximum, instrument=contract)
+    assert state.remaining_size == maximum
+    await mass_cancel_all(c)
+    reject = await rejected_new(c, contract, price, maximum + 1)
+    assert reason_code_name(reject.reason_code) == "RISK_LIMIT_BREACH"
 
 
 # Steps 14 to 16: the close, and step 15, heartbeat and resume.
