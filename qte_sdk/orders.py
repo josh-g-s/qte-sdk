@@ -43,8 +43,8 @@ others are orders the exchange placed: `CURE_TRADE` and `AUTO_FLATTEN` from the 
 account; `AUTO_EXECUTION`, a child of a Fundamentals ticket the automatic execution
 service works, and `FALLBACK`, the engine's child of a ticket the Directors handed over
 from its desk. A fill of an `AUTO_EXECUTION` or `FALLBACK` child goes to the ticket's pod
-only, naming the ticket in `parent_ticket_id`, with no `strat_id` (a `FALLBACK` child is
-a market order, with no `order_price` either); nothing else of those orders (no
+only, naming the ticket in `parent_ticket_id`, with a `report_seq` (a resume replays it)
+and with no `strat_id` and no `order_price`; nothing else of those orders (no
 `accepted`, `order_state` or `order_cancelled`) is sent. An origin this SDK does not know
 decodes as `ORIGIN_UNSPECIFIED` (0), its name kept in `unknown_enum_names()`.
 """
