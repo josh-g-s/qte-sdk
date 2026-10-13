@@ -1268,3 +1268,86 @@ async def test_a_reject_replayed_after_a_reconnect_never_names_a_later_order(mon
             assert rs._session._chain_halts._sent == {"r": (None, 1)}
     assert len(caught) == 1
     assert "rejected an order in an option contract" in caught[0]
+
+
+def counted_answer(rs: ReconnectingSession) -> None:
+    """Count an answer with report_seq 7 in `rs`'s chain halt record, as one read is."""
+    from qte_sdk.contract.v1.common_pb2 import NEW
+    from qte_sdk.contract.v1.order_events_pb2 import Accepted
+
+    accepted = Accepted(request_ref="r", request_type=NEW)
+    rs._chain_halts.observe(Received("accepted", accepted, 3, report_seq=7))
+    assert rs._chain_halts._counted == {7: None}
+
+
+def test_a_cursor_forgotten_for_a_term_change_forgets_the_answers_counted():
+    # report_seq starts again each term: the new term's report 7 is not the old one's.
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    counted_answer(rs)
+    rs._forget_cursor()
+    assert rs._chain_halts._counted == {}
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_cursor_from_another_term_forgets_the_answers_counted(strict):
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    rs._reports.restore((7, frozenset()))
+    rs._reports_term = ("2026-09-01", "2026-12-18")
+    counted_answer(rs)
+    rs._enter_term(("2027-01-04", "2027-03-26"), strict=strict)
+    assert rs._reports.cursor is None
+    assert rs._chain_halts._counted == {}
+
+
+def test_a_cursor_kept_in_its_own_term_keeps_the_answers_counted():
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    rs._reports.restore((7, frozenset()))
+    rs._reports_term = ("2026-09-01", "2026-12-18")
+    counted_answer(rs)
+    rs._enter_term(("2026-09-01", "2026-12-18"), strict=True)
+    assert rs._reports.cursor == 7
+    assert rs._chain_halts._counted == {7: None}
+
+
+async def test_a_chain_halt_read_before_the_ack_shares_the_reconnecting_sessions_minute(
+    monkeypatch,
+):
+    # A cancel the exchange sends before session_ack is read as the session opens: it
+    # counts against the same minute as the cancel read on the connection before.
+    from qte_sdk import options, pacing
+
+    caught: list[str] = []
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    cancel = frame(
+        "order_cancelled",
+        {
+            "strat_id": "s",
+            "instrument": "SPY261120C00665000",
+            "side": "BUY",
+            "cancelled_size": "5",
+            "reason_code": "CHAIN_HALTED",
+            "timestamp": "1",
+        },
+        1,
+    )
+
+    async def cancel_before_ack(ws: ServerConnection, exchange: Exchange) -> None:
+        await exchange.recv(ws)
+        await ws.send(cancel)
+        await ws.send(ack())
+        await exchange.recv(ws)
+        await ws.send(EMPTY)
+        await hold(ws, exchange)
+
+    cancels = 0
+    exchange = Exchange(session(cancel, then=drop), cancel_before_ack)
+    async with serve_local(exchange) as url:
+        async with ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep) as rs:
+            async for event in rs:
+                if isinstance(event, Received) and event.type == "order_cancelled":
+                    cancels += 1
+                    if cancels == 2:
+                        break
+    assert len(caught) == 1
+    assert "halted the options chain on SPY" in caught[0]

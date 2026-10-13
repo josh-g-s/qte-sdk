@@ -382,6 +382,7 @@ class Session:
         info: SessionInfo,
         early: list[Event],
         pacing: Pacer | None = None,
+        chain_halts: _options._ChainHaltWarnings | None = None,
     ) -> None:
         self.connection = connection
         self.info = info
@@ -395,8 +396,12 @@ class Session:
             local = _pacing._monotonic()
         self._anchor = (local, info.server_time)
         # This session's chain halt warnings, and the instrument of each option order it
-        # sent, which a `CONTRACT_HALTED` reject does not name (see qte_sdk.options).
-        self._chain_halts = _options._ChainHaltWarnings()
+        # sent, which a `CONTRACT_HALTED` reject does not name (see qte_sdk.options). A
+        # `ReconnectingSession` passes its own, shared across its connections, so that the
+        # events read before the ack count against it too.
+        self._chain_halts = (
+            chain_halts if chain_halts is not None else _options._ChainHaltWarnings()
+        )
         # Events read from the connection but not yet delivered: those that arrived before
         # the ack, and any that `wait_for_calendar` or `resume` read ahead. They are kept
         # as read in `_unrouted`, and pass through the report cursor (see `_Reports`) into
@@ -1054,6 +1059,7 @@ async def _open_session(
     url: str,
     secret: "_Secret",
     on_close: Callable[[int], None] | None,
+    chain_halts: _options._ChainHaltWarnings | None = None,
     /,
     *,
     ack_timeout: float | None,
@@ -1063,8 +1069,9 @@ async def _open_session(
     """`open_session`, for a resolved address and token. `on_close`, if not None, is called
     with the close code the exchange sent, if it closed the connection before the session
     was acknowledged, even when a cancellation then replaces the error; `ReconnectingSession`
-    uses it. It is positional-only, so an `on_close=` among a caller's options is passed
-    on with them and never reaches it."""
+    uses it, and passes in `chain_halts` the chain halt warnings its sessions share. Both
+    are positional-only, so an `on_close=` among a caller's options is passed on with them
+    and never reaches it."""
     # In a daemon thread, at most once in a program and once a day: it never waits here.
     _update.check_in_background()
     # Connection keeps the token out of the websockets log itself, for any logger passed.
@@ -1103,7 +1110,7 @@ async def _open_session(
         if safe is None and not interrupted:
             raise
     else:
-        return Session(conn, SessionInfo.from_ack(ack), early, pacing)
+        return Session(conn, SessionInfo.from_ack(ack), early, pacing, chain_halts)
     # Raised outside the handler, so the original error, which may mention the token, is
     # not chained to it.
     if interrupted:
