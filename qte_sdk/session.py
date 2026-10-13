@@ -39,6 +39,7 @@ from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk import errors as _errors
+from qte_sdk import options as _options
 from qte_sdk import pacing as _pacing
 from qte_sdk import update as _update
 from qte_sdk.connection import (
@@ -750,6 +751,8 @@ class Session:
                 self._pacer._observe(event, self._anchor)
             else:
                 _pacing._budget_rejected(event, self._anchor)
+        if isinstance(event, Received) and event.type in ("reject", "order_cancelled"):
+            _options._chain_halted(event)
         if not isinstance(event, (Received, DecodeFailed, Unknown)):
             return  # not a message, such as a SeqGap: it says nothing of what came next
         after_calendar = self._after_calendar

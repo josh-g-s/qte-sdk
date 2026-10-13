@@ -30,10 +30,12 @@ from qte_sdk.contract.v1.common_pb2 import (
     TICKET_LIMIT_CANCELLED,
     TICKET_REQUEST_CANCEL,
     TICKET_REQUEST_SUBMIT,
+    TICKET_SPLIT_CANCELLED,
     TICKET_URGENCY_UNSPECIFIED,
     TICKET_WORKING,
     ReasonCodes,
     TicketReasonCodes,
+    TicketStatus,
     TicketUrgency,
 )
 from qte_sdk.contract.v1.order_entry_pb2 import (
@@ -536,6 +538,30 @@ async def test_a_stopped_ticket_carries_its_stop_time_and_mark():
     assert stopped.status == TICKET_LIMIT_CANCELLED
     assert stopped_time_of(stopped) == 1_791_207_000_500
     assert stopped_mark_of(stopped) == 199_000_000
+
+
+async def test_a_split_cancelled_ticket_decodes_by_name_and_number_and_is_stopped():
+    [event] = await received(
+        frame(
+            "ticket_state",
+            state_payload(
+                30, "TICKET_SPLIT_CANCELLED", stopped_time="1791207000000", stopped_mark="0"
+            ),
+            1,
+        )
+    )
+    stopped = event.message
+    assert stopped.status == TICKET_SPLIT_CANCELLED == 7
+    assert TicketStatus.Name(7) == "TICKET_SPLIT_CANCELLED"
+    [by_number] = await received(frame("ticket_state", state_payload(31, 7), 1))
+    assert by_number.message.status == TICKET_SPLIT_CANCELLED
+    assert event.unknown_enum_names() == {}
+    # The split's open has no valid mark, so the stop has none.
+    assert stopped_mark_of(stopped) is None
+    latest = LatestTickets()
+    latest.update(state(stopped.ticket_id, 1))
+    assert latest.update(stopped)
+    assert latest.working() == []
 
 
 async def test_a_stop_with_no_valid_mark_reads_as_no_mark():

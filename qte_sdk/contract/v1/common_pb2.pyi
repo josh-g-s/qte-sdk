@@ -125,6 +125,7 @@ class TicketStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     TICKET_LIMIT_CANCELLED: _ClassVar[TicketStatus]
     TICKET_CANCELLED_BY_POD: _ClassVar[TicketStatus]
     TICKET_CANCELLED_BY_ENGINE: _ClassVar[TicketStatus]
+    TICKET_SPLIT_CANCELLED: _ClassVar[TicketStatus]
 
 class TicketRequestKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -211,6 +212,7 @@ TICKET_EXPIRED: TicketStatus
 TICKET_LIMIT_CANCELLED: TicketStatus
 TICKET_CANCELLED_BY_POD: TicketStatus
 TICKET_CANCELLED_BY_ENGINE: TicketStatus
+TICKET_SPLIT_CANCELLED: TicketStatus
 TICKET_REQUEST_KIND_UNSPECIFIED: TicketRequestKind
 TICKET_REQUEST_SUBMIT: TicketRequestKind
 TICKET_REQUEST_CANCEL: TicketRequestKind
@@ -307,6 +309,7 @@ class ReasonCodes(_message.Message):
         NO_WALL_ON_SIDE: _ClassVar[ReasonCodes.ReasonCode]
         AMEND_PRICE_AT_OR_BEYOND_WALL: _ClassVar[ReasonCodes.ReasonCode]
         CONTRACT_SUSPENDED: _ClassVar[ReasonCodes.ReasonCode]
+        CONTRACT_HALTED: _ClassVar[ReasonCodes.ReasonCode]
         MIN_REST_VIOLATION: _ClassVar[ReasonCodes.ReasonCode]
         DUPLICATE_ORDER_AT_LEVEL: _ClassVar[ReasonCodes.ReasonCode]
         AMEND_WOULD_MAKE_STALE_MARKETABLE: _ClassVar[ReasonCodes.ReasonCode]
@@ -341,6 +344,7 @@ class ReasonCodes(_message.Message):
         TERM_CUTOFF: _ClassVar[ReasonCodes.ReasonCode]
         CONTRACT_REDUCING_RECHECK_FAILED: _ClassVar[ReasonCodes.ReasonCode]
         PARENT_STOPPED: _ClassVar[ReasonCodes.ReasonCode]
+        CHAIN_HALTED: _ClassVar[ReasonCodes.ReasonCode]
     REASON_CODE_UNSPECIFIED: ReasonCodes.ReasonCode
     NOT_AUTHENTICATED: ReasonCodes.ReasonCode
     VERSION_MISMATCH: ReasonCodes.ReasonCode
@@ -368,6 +372,7 @@ class ReasonCodes(_message.Message):
     NO_WALL_ON_SIDE: ReasonCodes.ReasonCode
     AMEND_PRICE_AT_OR_BEYOND_WALL: ReasonCodes.ReasonCode
     CONTRACT_SUSPENDED: ReasonCodes.ReasonCode
+    CONTRACT_HALTED: ReasonCodes.ReasonCode
     MIN_REST_VIOLATION: ReasonCodes.ReasonCode
     DUPLICATE_ORDER_AT_LEVEL: ReasonCodes.ReasonCode
     AMEND_WOULD_MAKE_STALE_MARKETABLE: ReasonCodes.ReasonCode
@@ -402,4 +407,5 @@ class ReasonCodes(_message.Message):
     TERM_CUTOFF: ReasonCodes.ReasonCode
     CONTRACT_REDUCING_RECHECK_FAILED: ReasonCodes.ReasonCode
     PARENT_STOPPED: ReasonCodes.ReasonCode
+    CHAIN_HALTED: ReasonCodes.ReasonCode
     def __init__(self) -> None: ...
