@@ -119,29 +119,44 @@ def test_write_manifest_reproduces_the_committed_manifest_with_lf(target, tmp_pa
         values["path"],
         values["blobs"],
         values.get("approved"),
+        values.get("approved_commit"),
     )
     written = out.manifest.read_bytes()
     assert b"\r" not in written
     assert written == committed
 
 
-def test_the_contract_pin_records_its_approval_and_a_rewrite_keeps_it(tmp_path):
-    # Who approved the pin is recorded beside it, and re-running the vendor script, which
-    # rewrites the manifest, must not drop it.
+def test_the_contract_pin_records_its_approval_for_the_pinned_commit():
+    # CI cannot see the contract repository, so this is what stops a pin nobody approved
+    # passing as approved: the approval must name the very commit pinned.
     assert MANIFEST["approved"].startswith("Head, ")
+    assert MANIFEST["approved_commit"] == MANIFEST["commit"]
+
+
+@pytest.mark.parametrize("manifest", [MANIFEST, CONFORMANCE_MANIFEST], ids=["proto", "conformance"])
+def test_an_approval_is_never_for_another_commit(manifest):
+    if "approved" in manifest or "approved_commit" in manifest:
+        assert manifest.get("approved_commit") == manifest["commit"]
+        assert "approved" in manifest
+
+
+def test_a_rewrite_writes_the_approval_it_is_given(tmp_path):
     target = dataclasses.replace(vendor.TARGETS[0], manifest=tmp_path / "upstream.toml")
-    vendor.write_manifest(target, "repo", "abc", "path", {"a.proto": "1"}, "Head, 1 Jan 2026")
-    assert tomllib.loads(target.manifest.read_text())["approved"] == "Head, 1 Jan 2026"
+    vendor.write_manifest(
+        target, "repo", "abc", "path", {"a.proto": "1"}, "Head, 1 Jan 2026", "abc"
+    )
+    written = tomllib.loads(target.manifest.read_text())
+    assert (written["approved"], written["approved_commit"]) == ("Head, 1 Jan 2026", "abc")
     vendor.write_manifest(target, "repo", "abc", "path", {"a.proto": "1"})
-    assert "approved" not in tomllib.loads(target.manifest.read_text())
+    written = tomllib.loads(target.manifest.read_text())
+    assert "approved" not in written and "approved_commit" not in written
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
-def test_vendoring_keeps_the_approved_line_of_the_manifest(tmp_path, monkeypatch):
-    # run() itself, against a contract repository made here, must carry `approved` over.
+@pytest.fixture
+def contract_repo(tmp_path, monkeypatch):
+    """A contract repository made here, with two commits, and a target to vendor from it."""
     upstream = tmp_path / "upstream"
     (upstream / "protos").mkdir(parents=True)
-    (upstream / "protos" / "a.proto").write_text('syntax = "proto3";\n')
 
     def git(*args: str) -> str:
         return subprocess.run(
@@ -152,19 +167,78 @@ def test_vendoring_keeps_the_approved_line_of_the_manifest(tmp_path, monkeypatch
         ).stdout.strip()
 
     git("init", "-q")
-    git("add", ".")
-    git("commit", "-q", "-m", "contract")
-    commit = git("rev-parse", "HEAD")
+    commits = []
+    for text in ('syntax = "proto3";\n', 'syntax = "proto3";\n// v2\n'):
+        (upstream / "protos" / "a.proto").write_text(text)
+        git("add", ".")
+        git("commit", "-q", "-m", "contract")
+        commits.append(git("rev-parse", "HEAD"))
     dest = tmp_path / "dest"
     dest.mkdir()
     manifest = tmp_path / "upstream.toml"
-    manifest.write_text(
-        f'repo = "r"\ncommit = "{commit}"\napproved = "Head, 12 Oct 2026"\npath = "protos"\n'
-    )
     target = vendor.Target(manifest=manifest, dest=dest, allowed=("a.proto",), what="a test")
     monkeypatch.setattr(vendor, "ROOT", tmp_path)  # run() names the manifest from it
+    return upstream, target, commits, git
+
+
+def write_pin(target, commit: str, approved_commit: str | None, git) -> None:
+    """A manifest whose blobs are right for `commit`, so that only its approval can fail."""
+    approval = (
+        f'approved = "Head, 12 Oct 2026"\napproved_commit = "{approved_commit}"\n'
+        if approved_commit is not None
+        else ""
+    )
+    blob = git("rev-parse", f"{commit}:protos/a.proto")
+    target.manifest.write_text(
+        f'repo = "r"\ncommit = "{commit}"\n{approval}path = "protos"\n\n'
+        f'[blobs]\n"a.proto" = "{blob}"\n'
+    )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
+def test_vendoring_the_approved_commit_keeps_the_approval(contract_repo):
+    upstream, target, (first, _second), git = contract_repo
+    write_pin(target, first, first, git)
     assert vendor.run(target, upstream, check=False) == 0
-    written = tomllib.loads(manifest.read_text())
+    written = tomllib.loads(target.manifest.read_text())
     assert written["approved"] == "Head, 12 Oct 2026"
-    assert written["blobs"] == {"a.proto": git("rev-parse", "HEAD:protos/a.proto")}
-    assert (dest / "a.proto").read_text() == 'syntax = "proto3";\n'
+    assert written["approved_commit"] == first
+    assert written["blobs"] == {"a.proto": git("rev-parse", f"{first}:protos/a.proto")}
+    assert (target.dest / "a.proto").read_text() == 'syntax = "proto3";\n'
+    assert vendor.run(target, upstream, check=True) == 0
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
+def test_vendoring_another_commit_drops_the_approval_and_check_fails(contract_repo, capsys):
+    upstream, target, (first, second), git = contract_repo
+    # `commit` bumped by hand, the approval left for the old one: --check refuses it...
+    write_pin(target, second, first, git)
+    assert vendor.run(target, upstream, check=True) == 1
+    assert f"the approval is for {first}, not the pinned {second}" in capsys.readouterr().err
+    # ...and vendoring drops it, loudly, so the pin stands unapproved until it is recorded.
+    assert vendor.run(target, upstream, check=False) == 0
+    (dropped,) = [x for x in capsys.readouterr().err.splitlines() if "APPROVAL DROPPED" in x]
+    # Named by its manifest, not by the last file vendored.
+    assert dropped.startswith(f"{target.manifest.relative_to(vendor.ROOT)}: APPROVAL DROPPED")
+    written = tomllib.loads(target.manifest.read_text())
+    assert written["commit"] == second
+    assert "approved" not in written and "approved_commit" not in written
+    assert (target.dest / "a.proto").read_text().endswith("// v2\n")
+    assert vendor.run(target, upstream, check=True) == 0
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
+def test_an_approval_without_its_commit_is_dropped(contract_repo, capsys):
+    upstream, target, (first, _second), git = contract_repo
+    write_pin(target, first, first, git)
+    text = target.manifest.read_text()
+    target.manifest.write_text(text.replace(f'approved_commit = "{first}"\n', ""))
+    assert "approved_commit" not in target.manifest.read_text()
+    assert vendor.run(target, upstream, check=True) == 1
+    assert f"the approval is for no recorded commit, not the pinned {first}" in (
+        capsys.readouterr().err
+    )
+    assert vendor.run(target, upstream, check=False) == 0
+    assert "APPROVAL DROPPED" in capsys.readouterr().err
+    assert vendor.run(target, upstream, check=True) == 0
+    assert "approved" not in tomllib.loads(target.manifest.read_text())

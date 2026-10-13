@@ -1,12 +1,14 @@
 # The one place that records where the vendored contract came from.
 # Written by scripts/vendor_contract.py; bump `commit` deliberately and re-run it.
-# `approved`, when present, records who approved the pin and when; set it with `commit`.
+# `approved`, when present, records who approved the pin and when, and `approved_commit`
+# the commit approved; set both with `commit`. Re-vendoring another commit drops them.
 # Each blob is the git blob hash of that file at `commit`, and CI checks the vendored
 # bytes against it.
 
 repo = "qte-platform"
 commit = "ebe7d705d29c848cd51ce42747233a0356e62e34"
 approved = "Head, 12 Oct 2026"
+approved_commit = "ebe7d705d29c848cd51ce42747233a0356e62e34"
 path = "schemas/proto/qte/contract/v1"
 
 [blobs]

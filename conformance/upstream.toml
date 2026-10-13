@@ -1,6 +1,7 @@
 # The one place that records where the vendored conformance steps came from.
 # Written by scripts/vendor_contract.py; bump `commit` deliberately and re-run it.
-# `approved`, when present, records who approved the pin and when; set it with `commit`.
+# `approved`, when present, records who approved the pin and when, and `approved_commit`
+# the commit approved; set both with `commit`. Re-vendoring another commit drops them.
 # Each blob is the git blob hash of that file at `commit`, and CI checks the vendored
 # bytes against it.
 

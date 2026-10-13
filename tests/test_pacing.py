@@ -496,6 +496,26 @@ async def test_a_new_order_reject_holds_news_but_not_cancels(warned):
 # 6. on_limit="raise" and max_wait
 
 
+async def test_an_option_order_the_pacer_refuses_leaves_no_record(monkeypatch):
+    # Never sent, so never answered: a record of it would wait for an answer forever.
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+
+    sim = Sim()
+    pacer = Pacer(ONE_X, on_limit="raise", clock=sim.clock, sleep=sim.sleep)
+    session = Session(Connection("ws://127.0.0.1:9"), info(), [], pacer)
+    sent: list[str] = []
+
+    async def write(type_: str, payload: object) -> None:
+        sent.append(type_)
+
+    monkeypatch.setattr(session.connection, "send", write)
+    pacer.observe(reject(BURST))
+    order = NewOrder(request_ref="r", strat_id="s", instrument="SPY261120C00665000", size=1)
+    with pytest.raises(PacingLimit):
+        await session.send("new", order)
+    assert sent == [] and session._chain_halts._sent == {}
+
+
 async def test_raise_mode_raises_with_the_window_and_retry_after_and_sends_nothing():
     sim = Sim()
     pacer = Pacer(ONE_X, on_limit="raise", clock=sim.clock, sleep=sim.sleep)
@@ -1356,23 +1376,30 @@ async def test_a_new_waiting_its_turn_obeys_a_new_order_reject_that_arrives_mean
     assert wire.sent[-1][0] == pytest.approx(0.1 + 60.0 + GUARD)
 
 
-async def test_an_order_queued_before_a_disconnect_is_not_sent_on_the_next_session():
+def fake_session(connection: object) -> object:
+    """What ReconnectingSession uses of a Session to send a paced order."""
     from types import SimpleNamespace
 
+    from qte_sdk.options import _ChainHaltWarnings
+
+    return SimpleNamespace(connection=connection, _chain_halts=_ChainHaltWarnings())
+
+
+async def test_an_order_queued_before_a_disconnect_is_not_sent_on_the_next_session():
     from qte_sdk.reconnect import NotConnected
 
     sim = Sim()
     pacer = Pacer(ONE_X, clock=sim.clock, sleep=sim.sleep)
     old, replacement = Wire(sim), Wire(sim)
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token(), pacing=pacer)
-    rs._session, rs._up = SimpleNamespace(connection=old), True
+    rs._session, rs._up = fake_session(old), True
     pacer.observe(reject(BURST))
 
     def down() -> None:
         rs._session, rs._up = None, False
 
     def up() -> None:
-        rs._session, rs._up = SimpleNamespace(connection=replacement), True
+        rs._session, rs._up = fake_session(replacement), True
 
     sim.at(0.25, down)
     sim.at(0.5, up)
@@ -1493,8 +1520,6 @@ async def test_a_report_of_another_type_never_answers_our_send():
 
 
 async def test_orders_dropped_with_their_session_are_not_counted():
-    from types import SimpleNamespace
-
     from qte_sdk.reconnect import NotConnected
 
     sim = Sim()
@@ -1503,11 +1528,11 @@ async def test_orders_dropped_with_their_session_are_not_counted():
     )
     wire = Wire(sim)
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token(), pacing=pacer)
-    rs._session, rs._up = SimpleNamespace(connection=wire), True
+    rs._session, rs._up = fake_session(wire), True
     pacer.observe(reject(BURST))  # every send waits a second
 
     def replaced() -> None:
-        rs._session = SimpleNamespace(connection=wire)
+        rs._session = fake_session(wire)
 
     sim.at(0.5, replaced)
     results = await asyncio.gather(
