@@ -627,10 +627,11 @@ def _privacy(path: Path, *, sets_address: bool = True) -> str:
     file itself was just made writable only by you)."""
     if not _fileaccess.on_windows():
         folders = dotenv_module.open_folders(path) if sets_address else None
-        fields = dotenv_module.writable_fields(path, 0, folders or [])
+        withhold = dotenv_module.withholding()
+        fields = folders.fields(0, withhold) if folders is not None else None
         if fields is None:
             return ", readable only by you."
-        message = dotenv_module.writable_message(path, fields, withhold=dotenv_module.withholding())
+        message = dotenv_module.writable_message(path, fields, withhold=withhold)
         return f", readable only by you.\nWarning: {message}"
     access = _fileaccess.broad_access(path)
     if access is None:

@@ -1340,11 +1340,66 @@ def test_a_linked_dotenv_is_judged_by_its_file_and_both_folders(tmp_path, monkey
     message = str(found[0].message)
     real = os.path.realpath(target)
     assert f"its group can change {real}, the file it links to;" in message
+    assert f"files in {folder}, which has no sticky bit, so they could replace the link;" in message
     assert (
         f"files in {os.path.dirname(real)}, which has no sticky bit, so they could replace "
-        "the file it links to;" in message
+        "the file it links to." in message
     )
-    assert f"files in {folder}, which has no sticky bit, so they could replace the link." in message
+
+
+@needs_posix
+def test_a_link_on_the_way_in_an_open_folder_is_reported(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    target = private / "settings.env"
+    target.write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    target.chmod(0o600)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    (shared / "middle").symlink_to(target)
+    project(tmp_path, monkeypatch, 0o700)
+    dotenv().symlink_to(shared / "middle")
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert (
+        f"files in {os.path.realpath(shared)}, which has no sticky bit, so they could replace "
+        "a link it leads through." in message
+    )
+    assert str(private) not in message.replace(str(target), "")
+
+
+@needs_posix
+def test_a_sticky_folder_another_account_owns_is_reported(tmp_path, monkeypatch):
+    folder = project(tmp_path, monkeypatch, 0o1777)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    # As if another account had made the folder: its owner may remove any file in it.
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(folder).st_uid + 1)
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    assert f"files in {folder}, which another account owns, so they could replace it." in str(
+        found[0].message
+    )
+
+
+@needs_posix
+def test_no_command_names_a_path_that_holds_the_token(tmp_path, monkeypatch):
+    token = synthetic_token() + "'x"
+    folder = tmp_path / token
+    folder.mkdir()
+    os.chmod(folder, 0o770)
+    monkeypatch.chdir(folder)
+    dotenv().write_text(f'QTE_URL={URL}\nQTE_TOKEN="{token}"\n')
+    dotenv().chmod(0o600)
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert "Run chmod go-w on each path named above, or move the file" in message
+    assert_token_absent(token, message)
+    assert_token_absent(shlex.quote(token), message)
 
 
 @needs_posix
