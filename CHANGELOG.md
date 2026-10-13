@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.43
+**Version:** 0.44
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- On macOS and Linux, the `QTE-DOTENV-WRITABLE` check now looks at each part of the `.env`'s path as named, so a link to a folder on the way is judged like any other link: the folder that holds it and the folders above it are checked, as well as those it leads to, and a link another account owns is reported when others can write to its folder. Root-owned links such as `/tmp`, `/var` and `/etc` on macOS are not reported (#238).
 - On macOS and Linux, a `.env` that holds `QTE_TOKEN` or sets `QTE_URL` now gives a warning, code `QTE-DOTENV-WRITABLE`, when its group or other users can write to it, or to a folder that holds it, a link on the way to it, or a folder above them, up to `/` (a folder with the sticky bit that you or the system own is fine), or when another account than you or root owns any of them, since whoever can change or replace it could point `QTE_URL` at a server of their own and capture the token. The warning names the paths and either the `chmod go-w` command that fixes it, when you own them all, or else to move the `.env` to a folder you own; never the token, and the file is still used: on Linux a umask of 002 with a private group for each user makes files group-writable harmlessly. `python -m qte_sdk.token check` reports it and exits 1, and `token set` prints it after saving (#171).
 - A `CONTRACT_HALTED` reject that a resume replays no longer logs `QTE-OPTIONS-CHAIN-HALTED` a second time, unnamed. A reject read again names the chain its first reading named and shares that chain's minute, so it logs at most once a minute. A reconnecting session takes a reject read on a new connection for one read before only once the new session's calendar shows the same term, so the new term's report with the same number keeps its own chain and minute; and a reject read before a calendar that names a new term stays counted (#235).
 - The resting-order view (`qte_sdk.resting.RestingOrders`) now applies only executions of the team's own orders (origin `TEAM`) (#215). An execution with any other origin, including one this SDK does not know yet (such as qte-platform's coming fallback child), can no longer change or remove the entry of an order the team rests at that execution's `order_price`. Cure trades and auto-flattens never could: they are market orders and carry no `order_price`.
