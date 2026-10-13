@@ -35,14 +35,14 @@ the session asks from 0 instead and gets a snapshot.
 Report numbers also belong to one event log, which each `session_ack` names in `log_id`
 (see `SessionInfo.log_id`): the same across restarts of the exchange that keep its log,
 and different for each new log. When a new session's `log_id` and the one the report
-number was counted under are both known and differ, the number is forgotten before
-anything else, as at a term change, and `QTE-SESSION-LOG-CHANGED` is logged at WARNING
-through the `qte_sdk.reconnect` logger: the session then asks from 0 and gets a snapshot,
-or, with `resume=False`, counts the new log's reports from the first it reads. A `log_id`
-that is absent, or is not 16 lowercase hex characters, is unknown and changes nothing: the
-number is kept, and checked against the term as above. The contract's own rule is
-stricter here, asking a client to reset its cursor whenever `log_id` is absent too; this
-session relies on the term check instead in that case.
+number was counted under differ, the number is forgotten before anything else, as at a
+term change: the session then asks from 0 and gets a snapshot, or, with `resume=False`,
+counts the new log's reports from the first it reads. Following the contract, the number
+is kept only when both are known and equal, so it is forgotten too when either is
+unknown: a `log_id` that is absent, or is not 16 lowercase hex characters, or a number
+counted before any `log_id` was known. When both are known and differ, and there was a
+number to forget, `QTE-SESSION-LOG-CHANGED` is logged at WARNING through the
+`qte_sdk.reconnect` logger; an unknown `log_id` forgets the number without a warning.
 
 When one term ends and the next begins, the exchange closes every connection open at that
 moment with close code `qte_sdk.connection.TERM_CHANGE_CLOSE_CODE` (4001) and reason
@@ -934,17 +934,22 @@ class ReconnectingSession:
         as the new session's `session_ack` names it (None if it names none, or none that
         is well formed, which tells nothing).
 
-        report_seq belongs to one log, so when both this log and the one the cursor was
-        counted in are known and differ, the cursor is forgotten, as at a term change, and
-        `QTE-SESSION-LOG-CHANGED` is logged if there was one to forget. A known `log_id` is
-        then recorded; an unknown one changes nothing."""
+        report_seq belongs to one log, so the cursor is kept only when `log_id` is known
+        and equal to the one the cursor was counted in (contract 01, DL-116). Otherwise it
+        is forgotten, as at a term change: when either is unknown too, since an empty log
+        can gain its first reports between the `session_ack` and the `resume`, and a
+        forgotten cursor then costs at most a few reports. `QTE-SESSION-LOG-CHANGED` is
+        logged when both are known, differ and there was a cursor to forget. This
+        session's `log_id`, known or not, is then recorded."""
         counted_in = self._reports_log_id
-        if log_id is None:
-            return
-        if counted_in is not None and log_id != counted_in:
+        if log_id is None or log_id != counted_in:
             reports = self._reports
             cursor = reports.cursor
-            if cursor is not None or reports.above:
+            if (
+                log_id is not None
+                and counted_in is not None
+                and (cursor is not None or reports.above)
+            ):
                 _pacing._warn(
                     _errors.SESSION_LOG_CHANGED,
                     target=_log,
