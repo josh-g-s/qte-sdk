@@ -136,7 +136,8 @@ against `ReasonCodes`. A session logs `QTE-OPTIONS-CHAIN-HALTED` through the
 not name its contract, so the session names it from the `new` or `amend` it sent with that
 `request_ref`; a reject of an order it did not send, or of a `request_ref` it sent again
 for another contract before every send of it was answered, names no chain, and such
-rejects share one minute. Each session keeps its own minute.
+rejects share one minute. Each session keeps its own minute and record of the orders it
+sent, and a `ReconnectingSession` one across its connections.
 
 Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
 present, and true, only on an option contract's `RESIDUAL` print that went through at the
