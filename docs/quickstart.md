@@ -396,6 +396,8 @@ A `new` or `amend` in an option contract has four reject reasons of its own: `CO
 
 An option contract's print in live `trades` may carry `feed_only`. It is present, and true, only on a `RESIDUAL` print that went through at the live print's own premium because the contract had no wall on the side the aggressor took. It is never sent as false, and every other print, an equity's included, leaves it out, so test it with `print_.HasField("feed_only")` or `qte_sdk.options.is_feed_only(print_)`: absent means an ordinary print.
 
+`examples/options_bot.py` puts these together (step 11): it subscribes to an underlying's listed contracts, keeps the chain and the latest Greeks, picks the nearest expiry and the strike nearest the forward, passes over a contract whose `trading_state` is not `OPTION_TRADING`, rests one limit buy of one contract by its OCC symbol, prints any reject by name, and cancels the order before it exits.
+
 Not settled yet: options in the history service.
 
 ## 6. Place and cancel an order
@@ -688,6 +690,7 @@ Run the examples from your project folder, with the `examples` folder copied int
 | `examples/print_book.py` | Connect, subscribe and print the book, trades, mark and market session state, or the official close outside a session. Sends no orders. Stops after `--seconds` or `--max-messages`. |
 | `examples/quote_both_sides.py` | Rest a limit order on each side, inside the wall's best prices, and manage them: cancel and re-enter when the wall moves, amend the size back up after a partial fill, re-enter after a full fill. Keeps the latest book with `LatestBooks` and acts on it after each order event and on its own timer, not only when a new book arrives, since the exchange publishes a book only when it changes. Cancels its own orders when `--seconds` are up. |
 | `examples/take_liquidity.py` | Send one market order once the latest book shows the side it trades against, and report its fills. Sends at most one order and never retries. Stops when the order is finished or after `--seconds`. |
+| `examples/options_bot.py` | Read an option underlying's chain from the instruments table and the subscribe, keep the latest Greeks with `LatestGreeks`, pick the contract nearest the forward in the nearest expiry, passing over one that is not trading, and rest one limit buy of one contract one tick above the wall's bid. Cancels it once it rests, and on `--seconds` or Ctrl+C, and names the level if the cancel is not confirmed. Prints a reject by name and never retries the order. |
 | `examples/out_of_hours.py` | Outside a session: read the calendar, subscribe, and print the closed market's session state and the wait until the next open. Sends no orders, and stops at once if a session is under way. The runnable part of [Using the SDK outside session hours](out-of-hours.md). Stops after `--seconds`. |
 | `examples/replay_book.py` | Replay one instrument's book from a past session with `qte_sdk.replay` and print the best bid and ask each time it changes. It reads the history service, so it needs `QTE_HISTORY_URL` and your token but not `QTE_URL`, and works at any hour for a session that has closed. Sends no orders. Stops after `--max-books`, `--seconds` or the end of the session's data. |
 
@@ -696,6 +699,7 @@ python examples/smoke_test.py --instruments AAPL MSFT
 python examples/print_book.py --instrument AAPL --seconds 10
 python examples/quote_both_sides.py --instrument AAPL --strat-id my-strategy --seconds 30
 python examples/take_liquidity.py --instrument AAPL --strat-id my-strategy --side buy --size 1
+python examples/options_bot.py --underlying SPY --strat-id my-strategy --seconds 30
 python examples/out_of_hours.py --instrument AAPL
 python examples/replay_book.py --date 2026-01-05 --instrument AAPL
 ```
