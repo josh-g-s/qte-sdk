@@ -1230,3 +1230,41 @@ async def test_an_option_order_sent_on_a_reconnecting_session_is_recorded(paced)
                     assert rs._session is not None
                     assert rs._session._chain_halts._sent == {"r": ("SPY261120C00665000", 1)}
                     break
+
+
+async def test_a_reject_replayed_after_a_reconnect_never_names_a_later_order(monkeypatch):
+    # SPY's order is sent with "r" on one connection and GOOGL's on the next; SPY's halt
+    # reject, replayed on the second, could answer either, so it names no chain.
+    from qte_sdk import pacing
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+
+    caught: list[str] = []
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    reject = {
+        "request_ref": "r",
+        "request_type": "NEW",
+        "reason_code": "CONTRACT_HALTED",
+        "receipt_time": "1",
+    }
+
+    async def replay(ws: ServerConnection, exchange: Exchange) -> None:
+        await ws.send(frame("reject", reject, 1))
+        await hold(ws, exchange)
+
+    def order(instrument: str) -> NewOrder:
+        return NewOrder(request_ref="r", strat_id="s", instrument=instrument, side=BUY, size=1)
+
+    exchange = Exchange(session(recv_after=1, then=drop), session(recv_after=1, then=replay))
+    async with serve_local(exchange) as url:
+        async with ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep) as rs:
+            async for event in rs:
+                if isinstance(event, Connected) and not event.reconnected:
+                    await rs.send("new", order("SPY261120C00665000"))
+                elif isinstance(event, Connected):
+                    await rs.send("new", order("GOOGL261120C00200000"))
+                elif isinstance(event, Received) and event.type == "reject":
+                    break
+            assert rs._session is not None
+            assert rs._session._chain_halts._sent == {"r": (None, 1)}
+    assert len(caught) == 1
+    assert "rejected an order in an option contract" in caught[0]
