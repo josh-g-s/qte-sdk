@@ -512,8 +512,11 @@ class _ChainHaltWarnings:
         # read before a reconnect, is not counted twice and names what it named before.
         self._counted: dict[int, tuple[str, str]] = {}
         # The report_seq of the answers counted on the current connection, once a
-        # reconnecting session has started one (see `_connecting`), else None.
+        # reconnecting session has started one (see `_connecting`), else None; and whether
+        # that connection's term is known to be the one the earlier answers were counted in.
+        # Until it is, an answer counted on an earlier connection may be another term's.
         self._connection: set[int] | None = None
+        self._same_term = True
 
     def sent(self, type_: str, payload: Message) -> None:
         """Remember the instrument of a `new` or `amend` the session is sending. Every one is
@@ -546,19 +549,24 @@ class _ChainHaltWarnings:
 
     def _connecting(self) -> None:
         """A reconnecting session is opening a connection: the answers counted from now on
-        are read on it, in the term its calendar names."""
+        are read on it, in a term not known until its calendar arrives."""
         with self._lock:
             self._connection = set()
+            self._same_term = False
 
-    def _new_term(self, *, keep_connection: bool = False) -> None:
-        """Report numbers start again in a new term: forget those already counted. With
-        `keep_connection`, those counted on the current connection, which are already the
-        new term's, are kept, so a resume that replays them does not count them again."""
+    def _term_entered(self, *, new: bool) -> None:
+        """The current connection's term is known: `new` if the answers counted on earlier
+        connections were counted in another one, when they are forgotten. Those counted on
+        this connection, before its calendar too, are already its term's and are kept."""
         with self._lock:
-            if keep_connection and self._connection is not None:
-                kept = self._connection
+            if new:
+                kept = self._connection or set()
                 self._counted = {seq: v for seq, v in self._counted.items() if seq in kept}
-                return
+            self._same_term = True
+
+    def _new_term(self) -> None:
+        """Report numbers start again in a new term: forget those already counted."""
+        with self._lock:
             self._counted.clear()
             if self._connection is not None:
                 self._connection.clear()
@@ -566,17 +574,17 @@ class _ChainHaltWarnings:
     def _answer(self, event: Received, ref: str) -> str:
         """Count one answer to `ref`, once however often it is read, and return the option
         contract it names, or "". An answer read again, by its report_seq and request_ref,
-        counts against no order and names the contract it named when first read."""
+        counts against no order and names the contract it named when first read. One
+        counted on an earlier connection is taken as read again only once this connection's
+        term is known to be the same: the new term's report with the same number would
+        otherwise take its name, and that chain's minute could hide its warning."""
         seq = event.report_seq
         if seq is not None:
             with self._lock:
                 counted = self._counted.get(seq)
-                if counted is not None and counted[0] == ref:
-                    # Read on this connection too, as after a failed attempt: a calendar
-                    # that names a new term must not forget it.
-                    if self._connection is not None:
-                        self._connection.add(seq)
-                    return counted[1]
+                same = self._same_term or (self._connection is not None and seq in self._connection)
+            if counted is not None and counted[0] == ref and same:
+                return counted[1]
         instrument = self._answered(ref)
         if seq is not None:
             with self._lock:

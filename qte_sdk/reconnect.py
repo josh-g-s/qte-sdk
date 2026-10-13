@@ -862,11 +862,10 @@ class ReconnectingSession:
             stale = term is None or term != counted_in
         else:
             stale = term is not None and counted_in is not None and term != counted_in
-        if stale and reports.resume is None and reports.cursor is not None:
+        forget = stale and reports.resume is None and reports.cursor is not None
+        if forget:
             reports.restore((None, frozenset()))
-            # Answers read on this connection, before its calendar too, are already
-            # counted in its term, and a resume from 0 replays them.
-            self._chain_halts._new_term(keep_connection=True)
+        self._chain_halts._term_entered(new=forget)
         if term is not None or reports.cursor is None:
             self._reports_term = term
 

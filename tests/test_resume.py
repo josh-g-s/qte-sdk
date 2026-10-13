@@ -1450,8 +1450,9 @@ async def test_a_reconnect_in_a_new_term_asks_for_a_snapshot_and_drops_nothing()
 
 async def test_a_halt_reject_read_before_a_new_terms_calendar_is_counted_once(monkeypatch):
     # "r" is sent twice in the old term. The new term's reject of the first is read before
-    # its calendar, which makes the resume ask from 0 and replay it: counted again, it would
-    # take the second send's record, and the reject of that one would name no chain.
+    # its calendar, which makes the resume ask from 0. The contract answers that with a
+    # snapshot, never a replay; were the reject replayed all the same, counted again it
+    # would take the second send's record, and the reject of that one would name no chain.
     from qte_sdk import options, pacing
     from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 
