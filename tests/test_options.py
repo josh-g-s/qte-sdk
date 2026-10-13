@@ -611,6 +611,20 @@ def test_the_same_contract_sent_again_keeps_its_name():
     assert halts._sent == {"s": (None, 3), "e": ("SPY", 1)}
 
 
+def test_an_answer_read_again_is_counted_once():
+    # A resume replays reports read before the reconnect: counting SPY's accepted twice
+    # would leave GOOGL's send looking like the only one, so SPY's reject would name GOOGL.
+    halts = options._ChainHaltWarnings()
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halts.sent("new", NewOrder(request_ref="r", instrument="AAPL261120C00200000"))
+    accepted = Accepted(request_ref="r", request_type=NEW)
+    halts.observe(Received("accepted", accepted, 3, report_seq=7))
+    halts.observe(Received("accepted", accepted, 1, report_seq=7))
+    assert halts._sent == {"r": (None, 1)}
+    halts.sent("new", NewOrder(request_ref="r", instrument="GOOGL261120C00200000"))
+    assert halts._sent == {"r": (None, 2)}
+
+
 def test_the_record_of_sent_orders_is_bounded(monkeypatch):
     monkeypatch.setattr(options, "_SENT_LIMIT", 3)
     halts = options._ChainHaltWarnings()

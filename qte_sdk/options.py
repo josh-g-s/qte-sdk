@@ -136,7 +136,9 @@ against `ReasonCodes`. A session logs `QTE-OPTIONS-CHAIN-HALTED` through the
 not name its contract, so the session names it from the `new` or `amend` it sent with that
 `request_ref`; a reject of an order it did not send, or of a `request_ref` it sent again
 for another contract before every send of it was answered, names no chain, and such
-rejects share one minute. Each session keeps its own minute and record of the orders it
+rejects share one minute. Another connection of your team's may read the same reject, so
+use a `request_ref` on one connection only while its order awaits an answer: a session
+cannot tell another connection's order from its own. Each session keeps its own minute and record of the orders it
 sent, and a `ReconnectingSession` one across its connections.
 
 Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
@@ -504,6 +506,9 @@ class _ChainHaltWarnings:
         # again for another instrument before every earlier send was answered (an answer
         # could be for either order, so it names no chain), and how many sends await one.
         self._sent: dict[str, tuple[str | None, int]] = {}
+        # The report_seq of the latest answers counted, so that one read again, as a
+        # resume replays what was read before a reconnect, is not counted twice.
+        self._counted: dict[int, None] = {}
 
     def sent(self, type_: str, payload: Message) -> None:
         """Remember the instrument of a `new` or `amend` the session is sending. Every one is
@@ -534,6 +539,20 @@ class _ChainHaltWarnings:
                 self._sent[ref] = (instrument, waiting - 1)
         return instrument if instrument and is_option_symbol(instrument) else ""
 
+    def _first_reading(self, event: Received) -> bool:
+        """Whether this answer is read for the first time: False for a report read again,
+        by its report_seq, which then counts against no order and names no chain."""
+        seq = event.report_seq
+        if seq is None:
+            return True
+        with self._lock:
+            if seq in self._counted:
+                return False
+            self._counted[seq] = None
+            while len(self._counted) > _SENT_LIMIT:
+                del self._counted[next(iter(self._counted))]
+        return True
+
     def observe(self, event: Event) -> None:
         """Forget the order an `accepted` or `reject` of a `new` or `amend` answers, and log
         `QTE-OPTIONS-CHAIN-HALTED` for a reject `CONTRACT_HALTED` or an `order_cancelled`
@@ -545,7 +564,7 @@ class _ChainHaltWarnings:
         message = event.message
         if isinstance(message, Accepted):
             # Only a `new` or `amend` is recorded, so only its answer counts against one.
-            if message.request_type in (NEW, AMEND):
+            if message.request_type in (NEW, AMEND) and self._first_reading(event):
                 self._answered(message.request_ref)
             return
         if isinstance(message, Reject):
@@ -554,6 +573,7 @@ class _ChainHaltWarnings:
                 message.HasField("request_ref")
                 and message.HasField("request_type")
                 and message.request_type in (NEW, AMEND)
+                and self._first_reading(event)
             ):
                 instrument = self._answered(message.request_ref)
         elif isinstance(message, OrderCancelled):
