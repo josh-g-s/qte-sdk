@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.57
+**Version:** 0.58
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -373,7 +373,7 @@ Two more market-data messages are for options only, and reach a connection only 
 - `OptionChain`, the day's listed contracts with each one's role;
 - `OptionGreeks`, a contract's published delta, gamma, vega and theta, with the forward and implied volatility, as fixed-point integers.
 
-An option contract's book also carries `trading_state`: trading, reducing-only, suspended or halted. Halted (`OPTION_HALTED`) means a Director has halted the contract's whole chain, every contract on its underlying, before a split ex-date: send no `new` or `amend` there, only cancels, until the book shows another state. The orders resting in the chain when the halt started were cancelled with the reason `CHAIN_HALTED`, the end of the halt restores none, so once the book shows another state, place again only what that state allows; the mark and Greeks still publish meanwhile. Read the state with `qte_sdk.options.trading_state`, which treats a state it does not know as suspended:
+An option contract's book also carries `trading_state`: trading, reducing-only, suspended or halted. Halted (`OPTION_HALTED`) means a Director has halted the contract's whole chain, every contract on its underlying, before a split ex-date: send no `new` or `amend` there, only cancels, until the book shows another state. The orders resting in the chain when the halt started were cancelled with the reason `CHAIN_HALTED`, the end of the halt restores none, so once the book shows another state, place again only what that state allows; the mark and Greeks still publish meanwhile. Decide what you may send from this state alone, never from the book's `condition` and the Greeks' `status`: a contract can be suspended while its `condition` is `LIVE`. Read the state with `qte_sdk.options.trading_state`, which treats a state it does not know as suspended:
 
 ```python
 from qte_sdk.options import LatestGreeks, chain_contracts, greek_to_decimal, trading_state

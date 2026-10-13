@@ -81,10 +81,14 @@ are micro-dollars, for `qte_sdk.units.to_decimal`:
     >>> vol_to_decimal(18_000_000)  # 18 volatility points: 18 percent
     Decimal('18.000000')
 
-`status` says whether to rely on them. With `OPTION_GREEKS_VALID` the values come from
-the latest calculation. With `OPTION_GREEKS_UNAVAILABLE` they are the last published,
-and the contract is reducing-only. With `OPTION_GREEKS_NONE` there are no values at
-all (check `HasField` before reading one), and the contract is suspended. A status
+`status` says whether to rely on the values, not what you may send: read that from the
+book's `trading_state` (below). With `OPTION_GREEKS_VALID` the values come from the
+latest calculation. With `OPTION_GREEKS_UNAVAILABLE` they are the last published, and
+the contract can send at most reducing orders: it stays suspended until a calculation
+succeeds for it this session (values carried from an earlier session or held across a
+frozen mark do not lift it), and is reducing-only after that.
+With `OPTION_GREEKS_NONE` there are no values at all (check `HasField` before reading
+one), and the contract is suspended. A status
 added in a later contract decodes as `OPTION_GREEKS_STATUS_UNSPECIFIED`: rely on the
 values only when `status` is `OPTION_GREEKS_VALID`. Likewise a role added later decodes
 as `OPTION_CONTRACT_ROLE_UNSPECIFIED`, which no role filter matches.
@@ -94,7 +98,8 @@ Trading state. An option contract's `Book` carries `trading_state`:
 - `OPTION_TRADING`: ordinary trading.
 - `OPTION_REDUCING_ONLY`: only orders that reduce your position without crossing zero.
 - `OPTION_SUSPENDED`: no wall and no matching; new orders are refused, cancels are
-  accepted.
+  accepted. A contract can be suspended while its `condition` is `LIVE`: when no Greeks
+  calculation has succeeded for it this session, or when its quote is not two-sided.
 - `OPTION_HALTED`: a Director has halted the contract's whole chain, every contract on
   its underlying, before the underlying's split ex-date in the Winter term. No wall and no
   matching; new orders and amends are refused (`CONTRACT_HALTED`), cancels are accepted.
@@ -108,7 +113,10 @@ The book is republished when the state changes, so the latest book holds the sta
 force. The list of states may grow. Read it with `trading_state`, which treats a state
 this SDK does not know as `OPTION_SUSPENDED` (no new orders, cancels accepted) rather
 than the field itself. Send a `new` or `amend` only while it is `OPTION_TRADING`, or
-`OPTION_REDUCING_ONLY` for an order that reduces your position. An option contract's wall
+`OPTION_REDUCING_ONLY` for an order that reduces your position. Decide from
+`trading_state` alone, never from `condition` and the Greeks' `status` together: the
+order in which a contract's `book` and `OptionGreeks` arrive says nothing about which
+belong together, and the state also turns on things neither field carries. An option contract's wall
 is one level per side, or none at all while it is suspended or halted or its quote is not
 two-sided.
 
@@ -555,6 +563,9 @@ class _ChainHaltWarnings:
         the last connection are forgotten if its calendar never did."""
         with self._lock:
             if self._connection is not None and not self._same_term:
+                # Defensive: while terms only move forward, a later term change forgets
+                # these too. Kept so that an unconfirmed connection's answers never count
+                # in a term they were not read in, whatever order terms arrive in.
                 dropped = self._connection
                 self._counted = {seq: v for seq, v in self._counted.items() if seq not in dropped}
             self._connection = set()
