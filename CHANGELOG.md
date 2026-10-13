@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.37
+**Version:** 0.38
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- The resting-order view (`qte_sdk.resting.RestingOrders`) now applies only executions of the team's own orders (origin `TEAM`) (#215). An execution with another origin, such as a cure trade, an auto-flatten or a fallback child, at a price where the team rests an order no longer changes or removes that order's entry.
 - The option order steps of `tests/test_conformance.py` (c to f) no longer skip when the first listed contract is reducing-only, retained, suspended or halted (#224): they take the first listed contract open to new orders, and skip, naming each contract's reason, only if none is. If another team's sell trades with a step's resting buy, the step is skipped naming the fill (contract, size and price) after market orders flatten the position, rather than failing with "no order_state within 10 s" and leaving the position open; it fails, naming the position, if flattening is not possible.
 - `examples/options_bot.py` follow-ups from review. A Ctrl+C before any order is sent now says "no order was sent" and exits 0, and one while the connection closes keeps the run's printed outcome and exit status; only a second Ctrl+C while an order is being cancelled names the level where it may still rest (status 1). A `DUPLICATE_ORDER_AT_LEVEL` reject now says your team's earlier order still rests at that level and to cancel it yourself, with status 1, instead of "nothing rests". A cancel still waiting out a message-budget reject when `--drain-seconds` ends now names the reject and says to wait a minute and cancel the level yourself (a `--drain-seconds` above 60 lets a later run wait it out). New tests cover the cancel retry pacing, the SIGINT handler and the room below the asks.
 - Options: a Director's halt of an options chain is named (#216). An option book's `trading_state` can be `OPTION_HALTED` (4), which `qte_sdk.options.trading_state` now returns as itself rather than as `OPTION_SUSPENDED`: a Director has halted every contract on one underlying before its split ex-date in the Winter term, so there is no wall and no matching, new orders and amends are rejected with the new reason `CONTRACT_HALTED` (1305) and cancels are accepted. The orders resting in the chain when the halt started are cancelled with the new reason `CHAIN_HALTED` (1818), and the end of the halt restores none. The mark and Greeks still publish. A session now logs the new code `QTE-OPTIONS-CHAIN-HALTED` through the `qte_sdk.options` logger, at most once a minute for each underlying, when it reads either reason, with the next step: send only cancels in that chain until its book shows another state, then place again only what that state allows. `OPTION_HALTED` is exported from `qte_sdk.options`.

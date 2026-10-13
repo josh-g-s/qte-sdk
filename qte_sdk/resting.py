@@ -14,7 +14,9 @@ sends changes the view; only what the exchange reports does:
   `order_state` reads FILLED or CANCELLED with `remaining_size` 0, and nothing is left at
   either price.
 - `execution` with an `order_price` sets the entry's remaining size from
-  `remaining_size`, and removes the entry when that reaches 0.
+  `remaining_size`, and removes the entry when that reaches 0. Only an execution of the
+  team's own order (origin `TEAM`) counts: a cure trade, an auto-flatten, a house order
+  or an origin this SDK does not know changes nothing, even at a level the team rests at.
 - `order_cancelled` with a `price` removes the entry, whatever the reason: a cancel, a
   mass-cancel (one `order_cancelled` per order), the purge of a STALE order, the close.
 - `accepted` and `reject` change nothing. `accepted` carries no level key, and a rejected
@@ -81,7 +83,7 @@ from qte_sdk.connection import (
     Received,
     ResumeComplete,
 )
-from qte_sdk.contract.v1.common_pb2 import RESTING, STALE
+from qte_sdk.contract.v1.common_pb2 import RESTING, STALE, TEAM
 from qte_sdk.contract.v1.order_events_pb2 import Execution, OrderCancelled, OrderState
 from qte_sdk.contract.v1.session_pb2 import OrderSnapshot, ResumeAck
 
@@ -272,6 +274,11 @@ class RestingOrders:
         )
 
     def _on_execution(self, msg: Execution) -> None:
+        if msg.origin != TEAM:
+            # A cure trade, an auto-flatten, a house order or any origin added later
+            # (such as a fallback child) is not the pod's own resting order, even when
+            # it carries a price where that order rests.
+            return
         if not msg.HasField("order_price"):
             return  # a market order, which never rests
         key = LevelKey(msg.instrument, msg.side, msg.order_price)
