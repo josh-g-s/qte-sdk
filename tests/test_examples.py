@@ -1725,6 +1725,241 @@ async def test_options_bot_stops_when_its_underlying_has_no_contract_listed():
     assert exchange.types() == ["auth"]
 
 
+async def test_options_bot_passes_over_a_contract_without_room_below_the_asks():
+    # The chosen put's asks are two ticks above its price, one fewer than it needs: the
+    # next nearest strike is taken instead.
+    market = options_market()
+    for book in market["books"]:
+        if book["instrument"] == "SPY261120P00665000":
+            book["ask_levels"] = [{"price": str(4_850_000 + 3 * OPTION_TICK), "size": "10"}]
+    exchange = FakeExchange(instruments=options_table(), options=market)
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 0, out + err
+    assert "passing over SPY261120P00665000: fewer than 3 ticks" in out
+    [new] = payloads(exchange, "new")
+    assert new["instrument"] == "SPY261120C00670000"
+
+
+async def test_options_bot_names_an_earlier_order_that_rests_at_its_level():
+    exchange = options_exchange(reject_new="DUPLICATE_ORDER_AT_LEVEL")
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 1, out + err
+    assert "REJECTED: DUPLICATE_ORDER_AT_LEVEL" in out
+    assert "already has an order resting at SPY261120P00665000 BUY @ 4.900000" in out
+    assert "That order still rests: cancel it yourself" in out
+    assert "nothing rests" not in out
+    assert exchange.types().count("cancel") == 0
+
+
+async def test_options_bot_names_a_budget_reject_its_drain_is_too_short_to_wait_out():
+    exchange = options_exchange(cancel_rejects=["MESSAGE_BUDGET_EXCEEDED"])
+    code, out, err = await run_options_bot(exchange, "--seconds", "1", "--drain-seconds", "0.5")
+    assert code == 1, out + err
+    assert "WARNING: the cancel was rejected (MESSAGE_BUDGET_EXCEEDED)" in out
+    assert "may still rest at SPY261120P00665000 BUY @ 4.900000" in out
+    assert "Wait a minute, then cancel it yourself." in out
+    assert "not confirmed" not in out
+    assert exchange.types().count("cancel") == 1
+
+
+class RecordingSender:
+    """A session that records each message sent."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, Any]] = []
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append((type_, payload))
+
+
+def resting_options_bot(example: Any) -> Any:
+    """The example's bot with its order reported resting, before any cancel."""
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test")
+    bot.contract, bot.price, bot.ref = "SPY261120P00665000", 4_900_000, "order-ref"
+    bot.accepted = bot.resting = True
+    return bot
+
+
+def reject_last_cancel(bot: Any, reason: str) -> None:
+    type_, cancel = bot.session.sent.pop()
+    assert type_ == "cancel" and bot.session.sent == []
+    reason_code = ReasonCodes.ReasonCode.Value(reason)
+    bot.on_order_event(Reject(request_ref=cancel.request_ref, reason_code=reason_code))
+
+
+async def test_options_bot_sends_a_min_rest_rejected_cancel_again_only_after_grid_points():
+    example = load_example("options_bot.py")
+    bot = resting_options_bot(example)
+    await bot.act()  # the cancel
+    for grid_points in (1, 2):  # one more grid point after the first reject, two after the next
+        reject_last_cancel(bot, "MIN_REST_VIOLATION")
+        await bot.act()
+        assert bot.session.sent == []  # not at once
+        for _ in range(grid_points - 1):
+            await bot.on_event(session_state_event())
+            assert bot.session.sent == []
+        await bot.on_event(session_state_event())
+        assert [type_ for type_, _ in bot.session.sent] == ["cancel"]
+
+
+async def test_options_bot_sends_a_budget_rejected_cancel_again_only_after_a_minute(monkeypatch):
+    example = load_example("options_bot.py")
+    clock = [1000.0]
+    monkeypatch.setattr(example, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    bot = resting_options_bot(example)
+    await bot.act()  # the cancel
+    reject_last_cancel(bot, "MESSAGE_BUDGET_EXCEEDED")
+    await bot.on_event(session_state_event())  # a grid point is not what it waits for
+    clock[0] += 59.9
+    await bot.act()
+    assert bot.session.sent == []
+    clock[0] += 0.2
+    await bot.act()
+    assert [type_ for type_, _ in bot.session.sent] == ["cancel"]
+
+
+@SENDS_SIGINT
+async def test_options_bot_takes_ctrl_c_as_its_own_cancel_of_the_run(monkeypatch):
+    # The example's own SIGINT handler cancels the run, so the run can finish cancelling
+    # its order. Without it, Ctrl+C would reach whatever handler was there before: here a
+    # recorder, so the run would not stop.
+    example = load_example("options_bot.py")
+    started = asyncio.Event()
+
+    async def opened(url: str) -> object:
+        return object()
+
+    async def trading(*args: Any) -> int:
+        started.set()
+        await asyncio.sleep(RUN_LIMIT)
+        return 0
+
+    monkeypatch.setattr(example, "open_session", opened)
+    monkeypatch.setattr(example, "trade_and_clean_up", trading)
+    caught: list[int] = []
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: caught.append(signum))
+    args = example.parse_args(["--strat-id", "opt-test"])
+    run = asyncio.create_task(example.run("ws://127.0.0.1:1/ws", args, example.Progress()))
+    try:
+        async with asyncio.timeout(RUN_LIMIT):
+            await started.wait()
+        signal.raise_signal(signal.SIGINT)
+        await asyncio.wait({run}, timeout=5)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        run.cancel()
+    assert caught == []
+    assert run.cancelled()
+
+
+async def test_options_bot_keeps_its_outcome_on_ctrl_c_while_closing(capsys):
+    example = load_example("options_bot.py")
+    closing = asyncio.Event()
+
+    class SlowToClose:
+        async def close(self) -> None:
+            closing.set()
+            await asyncio.Event().wait()
+
+    async def finished_run() -> int:
+        async with example.closing(SlowToClose()):
+            return 7  # the exit status the run decided on
+
+    task = asyncio.create_task(finished_run())
+    async with asyncio.timeout(RUN_LIMIT):
+        await closing.wait()
+        task.cancel()  # Ctrl+C
+        assert await task == 7
+    assert "interrupted while closing" in capsys.readouterr().out
+
+
+async def test_options_bot_keeps_its_outcome_on_a_ctrl_c_raised_outside_the_run_while_closing(
+    monkeypatch, capsys
+):
+    # Where the event loop cannot take Ctrl+C itself (Windows), a second one is raised as
+    # KeyboardInterrupt, here while the connection closes after the run has cancelled its
+    # order: the exit status the run decided on still stands.
+    example = load_example("options_bot.py")
+    progress = example.Progress()
+
+    async def cancelled_and_confirmed(session: Any, args: Any, task: Any, progress: Any) -> int:
+        progress.bot = resting_options_bot(example)  # an order was sent
+        return 0
+
+    class InterruptedClose:
+        async def close(self) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(example, "trade", cancelled_and_confirmed)
+    with pytest.raises(KeyboardInterrupt):
+        await example.trade_and_clean_up(InterruptedClose(), None, None, progress)
+    assert example.stopped_at_once(progress) == 0
+    assert "interrupted while closing" in capsys.readouterr().out
+    progress.status = None  # had it come before the run decided
+    assert example.stopped_at_once(progress) == 1
+    assert "may still rest at SPY261120P00665000 BUY @ 4.900000" in capsys.readouterr().err
+
+
+async def start_options_bot(url: str, *args: str) -> asyncio.subprocess.Process:
+    env = example_env()
+    env.update(QTE_URL=url, QTE_TOKEN=synthetic_token(), PYTHONUNBUFFERED="1")
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(EXAMPLES_DIR / "options_bot.py"),
+        *("--strat-id", "opt-test", *args),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+
+async def interrupt_options_bot(
+    exchange: FakeExchange, args: tuple[str, ...], waits: list[bytes]
+) -> tuple[int, str, str]:
+    """Run the example, sending Ctrl+C once its output shows each of `waits` in turn."""
+    async with serve_local(exchange) as url:
+        process = await start_options_bot(url, *args)
+        seen = bytearray()
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                for text in waits:
+                    await read_until(process, text, seen)
+                    process.send_signal(signal.SIGINT)
+                out, err = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    assert process.returncode is not None
+    return process.returncode, (seen + out).decode(), err.decode()
+
+
+@SENDS_SIGINT
+async def test_options_bot_says_no_order_was_sent_on_ctrl_c_before_it_could_send_one():
+    # No instruments table comes, so the Ctrl+C lands while the example waits for it.
+    code, out, err = await interrupt_options_bot(
+        FakeExchange(), ("--seconds", "10"), [b"connected:"]
+    )
+    assert code == 0, out + err
+    assert "interrupted: no order was sent" in out
+    assert "may still rest" not in out + err
+
+
+@SENDS_SIGINT
+async def test_options_bot_names_the_level_on_a_second_ctrl_c_while_cancelling():
+    # The cancel is never confirmed, so the example is still cancelling at each Ctrl+C.
+    exchange = options_exchange(confirm_cancels=asyncio.Event())
+    args = ("--seconds", "1", "--drain-seconds", "20")
+    code, out, err = await interrupt_options_bot(
+        exchange, args, [b"time is up: cancelling", b"still cancelling"]
+    )
+    assert code == 1, out + err
+    assert (
+        "interrupted: this example's order may still rest at SPY261120P00665000 BUY @ 4.900000"
+        in err
+    )
+
+
 @pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
 async def test_each_example_refuses_to_start_without_an_exchange_url(path: Path):
     code, out, err = await run_example(path.name, None, synthetic_token(), QTE_STRAT_ID="x")
