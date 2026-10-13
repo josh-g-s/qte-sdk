@@ -15,9 +15,12 @@ from qte_sdk.connection import (
 )
 from qte_sdk.contract.v1.common_pb2 import (
     AMEND,
+    AUTO_FLATTEN,
     BUY,
     CANCELLED,
+    CURE_TRADE,
     FILLED,
+    HOUSE,
     LIMIT,
     MAKER,
     MASS_CANCEL,
@@ -57,10 +60,10 @@ def rested(price=PX, size=100, side=BUY, instrument="AAPL", state=RESTING, **kw)
     )
 
 
-def fill(remaining, size, price=PX, side=BUY, liquidity=MAKER) -> Execution:
+def fill(remaining, size, price=PX, side=BUY, liquidity=MAKER, origin=TEAM) -> Execution:
     return Execution(
         exec_id="x",
-        origin=TEAM,
+        origin=origin,
         strat_id="mm-1",
         instrument="AAPL",
         side=side,
@@ -128,6 +131,23 @@ def test_a_market_order_fill_has_no_level_key_and_changes_nothing():
     )
     view = view_of(rested(), market)
     assert view.get("AAPL", BUY, PX).remaining_size == 100
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [CURE_TRADE, AUTO_FLATTEN, HOUSE, 5, 0],
+    ids=["cure", "flatten", "house", "unknown-5", "unspecified"],
+)
+@pytest.mark.parametrize("remaining", [0, 30])
+def test_an_execution_the_pod_did_not_make_leaves_its_resting_order_alone(origin, remaining):
+    # Same instrument, side and order_price as the resting order, but not the pod's own
+    # order (5 is FALLBACK from qte-platform #2066, unknown to this contract; over JSON an
+    # origin name this contract does not know, such as "FALLBACK", decodes as 0).
+    view = view_of(rested(size=100), fill(remaining=remaining, size=10, origin=origin))
+    assert view.get("AAPL", BUY, PX) == RestingOrder(
+        LevelKey("AAPL", BUY, PX), "mm-1", 100, RESTING, None
+    )
+    assert not view.incomplete
 
 
 def amended(price, old_price, state=RESTING, size=100, **kw) -> OrderState:
