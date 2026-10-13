@@ -571,8 +571,12 @@ class _ChainHaltWarnings:
         if seq is not None:
             with self._lock:
                 counted = self._counted.get(seq)
-            if counted is not None and counted[0] == ref:
-                return counted[1]
+                if counted is not None and counted[0] == ref:
+                    # Read on this connection too, as after a failed attempt: a calendar
+                    # that names a new term must not forget it.
+                    if self._connection is not None:
+                        self._connection.add(seq)
+                    return counted[1]
         instrument = self._answered(ref)
         if seq is not None:
             with self._lock:

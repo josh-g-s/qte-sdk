@@ -1317,6 +1317,24 @@ def test_a_cursor_from_another_term_keeps_the_answers_counted_on_this_connection
     assert rs._chain_halts._counted == {1: ("s", "")}
 
 
+def test_an_answer_read_again_on_a_later_attempt_is_kept_as_that_connections():
+    # Read before the calendar on an attempt that failed, then again on the next one: the
+    # next one's calendar keeps it, so the resume from 0 that replays it does not count it.
+    from qte_sdk.contract.v1.common_pb2 import NEW
+    from qte_sdk.contract.v1.order_events_pb2 import Accepted
+
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    rs._reports.restore((7, frozenset()))
+    rs._reports_term = ("2026-09-01", "2026-12-18")
+    accepted = Accepted(request_ref="s", request_type=NEW)
+    rs._chain_halts._connecting()
+    rs._chain_halts.observe(Received("accepted", accepted, 3, report_seq=1))
+    rs._chain_halts._connecting()
+    rs._chain_halts.observe(Received("accepted", accepted, 3, report_seq=1))
+    rs._enter_term(("2027-01-04", "2027-03-26"), strict=True)
+    assert rs._chain_halts._counted == {1: ("s", "")}
+
+
 def test_a_cursor_kept_in_its_own_term_keeps_the_answers_counted():
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
     rs._reports.restore((7, frozenset()))
