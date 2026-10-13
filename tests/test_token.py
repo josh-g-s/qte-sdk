@@ -1584,6 +1584,30 @@ def test_a_folder_passed_through_before_dot_dot_is_judged(tmp_path):
 
 
 @needs_posix
+def test_a_folder_another_account_owns_passed_before_dot_dot_in_a_sticky_folder_warns(
+    tmp_path, monkeypatch
+):
+    # .env -> ../sticky/pivot/../../private/.env: pivot's owner may rename it in a sticky folder.
+    linked_folder(tmp_path, 0o700)
+    sticky = tmp_path / "sticky"
+    (sticky / "pivot").mkdir(parents=True)
+    os.chmod(sticky, 0o1777)
+    project_folder = tmp_path / "project"
+    project_folder.mkdir()
+    os.chmod(project_folder, 0o700)
+    (project_folder / ".env").symlink_to("../sticky/pivot/../../private/.env")
+    owned_as(monkeypatch, {str(sticky / "pivot"): another_account()})
+    found = dotenv_module.open_folders(project_folder / ".env")
+    assert found is not None
+    fields = found.fields(0)
+    assert fields is not None
+    assert (
+        f"another account owns {sticky / 'pivot'}, a folder its path passes through, and "
+        "could replace it" in fields["problem"]
+    )
+
+
+@needs_posix
 def test_a_folder_link_loop_is_handled(tmp_path):
     os.chmod(tmp_path, 0o700)
     (tmp_path / "a").symlink_to(tmp_path / "b")

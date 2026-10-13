@@ -816,6 +816,24 @@ def open_folders(path: Path) -> OpenFolders | None:
             parent = os.path.dirname(folder)
             if parent != folder:
                 held(parent, "a folder its path passes through")
+                # Its owner could rename it, as a link's owner could, if others can write
+                # to the folder that holds it, sticky bit or not.
+                passed = _owner_and_mode(folder)
+                holder = _owner_and_mode(parent)
+                if (
+                    passed is not None
+                    and passed[0] not in (me, 0)
+                    and holder is not None
+                    and holder[1] & 0o022
+                ):
+                    risks.append(
+                        (
+                            folder,
+                            f"another account owns {folder}, a folder its path passes "
+                            "through, and could replace it",
+                            False,
+                        )
+                    )
             folder = parent
             continue
         candidate = os.path.join(folder, part)
