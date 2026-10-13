@@ -21,12 +21,17 @@ leaves no room for a resting buy, and tries the next nearest strike.
 On that contract it sends one LIMIT buy of one lot (one contract, never 100 shares), naming
 the contract by its OCC symbol. It waits for the exchange to report the order resting,
 cancels that price level, waits for the cancel to be confirmed and stops. It never
-retries an order: a reject is printed with its reason's name and the example stops.
+retries an order: a reject is printed with its reason's name and the example stops. A
+DUPLICATE_ORDER_AT_LEVEL reject means your team already has an order at that level, often
+one an earlier run left: the example names the level, so you can cancel that order
+yourself, and exits with status 1.
 
 It never means to leave the order resting. When --seconds are up, or on Ctrl+C, it stops
 choosing and cancels the order's level, waiting at most --drain-seconds for the exchange
 to confirm. If it cannot confirm, it names the level where the order may still rest, so
-you can cancel it yourself, and exits with status 1. Press Ctrl+C twice to stop at once.
+you can cancel it yourself, and exits with status 1. Press Ctrl+C twice to stop at once;
+if an order was sent, it then names the level where it may still rest and exits with
+status 1. A Ctrl+C before any order is sent stops the example with status 0.
 
 The price. Your orders rest only strictly inside the wall's best bid and ask: one at the
 wall's own price or beyond it is not left resting (`order_cancelled` with
@@ -48,7 +53,9 @@ an order must rest for a minimum time before it may be cancelled. Both are set b
 exchange, so nothing here assumes their values: a cancel rejected MIN_REST_VIOLATION is
 sent again after the exchange's next market-data grid point, then after two more, four
 more and so on. One rejected for a message budget is sent again only after a minute, since
-rejected messages count toward the budget too.
+rejected messages count toward the budget too. That is longer than the default
+--drain-seconds, so a budget reject at the end names itself: wait a minute and cancel the
+level yourself. A --drain-seconds above 60 lets a later run wait out such a reject.
 
 What it cannot tell apart. It follows its order by strategy, contract, side and price
 level, and follows an amend's move to a new level. If anything else acts on that
@@ -61,6 +68,7 @@ exits with status 1 and a warning to check your orders and fills.
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import os
 import signal
 import sys
@@ -176,7 +184,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--drain-seconds",
         type=float,
         default=10.0,
-        help="the longest wait, at the end, for the cancel to be confirmed (default 10)",
+        help="the longest wait, at the end, for the cancel to be confirmed (default 10; "
+        "a cancel rejected for a message budget is sent again only after 60)",
     )
     args = parser.parse_args(argv)
     if not args.strat_id:
@@ -215,6 +224,7 @@ class OptionsBot:
         self.resting = False  # the exchange has reported it resting
         self.gone = False  # nothing of it rests: cancelled, filled or never left resting
         self.rejected = False
+        self.duplicate = False  # rejected because the team already rests at the level
         self.filled = 0
         # The cancel: its request_ref and price while one is in flight, and the grid point
         # to wait for before sending it again after a reject that may pass later.
@@ -224,6 +234,7 @@ class OptionsBot:
         self.retry_at: int | None = None
         self.backoff = 1
         self.retry_after = 0.0  # time.monotonic() before which no cancel is sent
+        self.budget_reject: str | None = None  # why the cancel waits that long, if it does
         self.cancel_failed: str | None = None
         self.stopping = False  # no new order; cancel the one sent, if any
         self.missed = False  # whether any message from the exchange was missed
@@ -383,6 +394,7 @@ class OptionsBot:
         assert self.contract is not None
         self.cancel_ref = new_request_ref()  # recorded first, so its reply is matched
         self.cancel_price = self.price
+        self.budget_reject = None
         print(f"cancelling {self.where}")
         await send_cancel(
             self.session,
@@ -453,6 +465,7 @@ class OptionsBot:
                 detail = f" ({message.reason_detail})" if message.HasField("reason_detail") else ""
                 print(f"REJECTED: {reason_code_name(message.reason_code)}{detail}")
                 self.rejected = True
+                self.duplicate = message.reason_code == ReasonCodes.DUPLICATE_ORDER_AT_LEVEL
             case Reject() if ref is not None and ref == self.cancel_ref:
                 self.on_cancel_reject(message)
             case OrderState() if self.ours(message):
@@ -508,6 +521,7 @@ class OptionsBot:
         elif message.reason_code in BUDGET_REJECTS:
             print(f"cancel rejected ({reason}); sending it again in {BUDGET_WAIT_SECONDS:g} s")
             self.retry_after = time.monotonic() + BUDGET_WAIT_SECONDS
+            self.budget_reject = reason
         else:
             self.cancel_failed = reason
 
@@ -540,6 +554,9 @@ async def closing(session: Session) -> AsyncIterator[Session]:
                 await session.close()
         except TimeoutError:
             print("the connection did not close in time; it is dropped as the example exits")
+        except asyncio.CancelledError:
+            # Ctrl+C while closing: what the run printed and its exit status stand.
+            print("interrupted while closing; the connection is dropped as the example exits")
 
 
 async def drive(bot: OptionsBot, session: Session, seconds: float) -> str:
@@ -559,7 +576,30 @@ async def drive(bot: OptionsBot, session: Session, seconds: float) -> str:
     return "closed"
 
 
-async def run(url: str, args: argparse.Namespace) -> int:
+@dataclasses.dataclass
+class Progress:
+    """How far a run got, so that a run stopped at once by Ctrl+C can say whether an
+    order may still rest."""
+
+    bot: OptionsBot | None = None
+    status: int | None = None  # the exit status, once the run has printed its outcome
+
+
+def stopped_at_once(progress: Progress) -> int:
+    if progress.status is not None:
+        # Ctrl+C while the connection closed: the outcome printed before it stands.
+        print("interrupted while closing; the connection is dropped as the example exits")
+        return progress.status
+    bot = progress.bot
+    if bot is None or bot.ref is None:
+        print("interrupted: no order was sent")
+        return 0
+    return fail(
+        f"interrupted: this example's order may still rest at {bot.where}; check and cancel it"
+    )
+
+
+async def run(url: str, args: argparse.Namespace, progress: Progress) -> int:
     # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE.
     session = await open_session(url)
     # Each Ctrl+C from here on cancels this task. The first is absorbed, so the run still
@@ -571,89 +611,114 @@ async def run(url: str, args: argparse.Namespace) -> int:
     with contextlib.suppress(NotImplementedError):
         loop.add_signal_handler(signal.SIGINT, task.cancel)
     try:
-        return await trade_and_clean_up(session, args, task)
+        return await trade_and_clean_up(session, args, task, progress)
     finally:
         with contextlib.suppress(NotImplementedError):
             loop.remove_signal_handler(signal.SIGINT)
 
 
-async def trade_and_clean_up(session: Session, args: argparse.Namespace, task: asyncio.Task) -> int:
+async def trade_and_clean_up(
+    session: Session, args: argparse.Namespace, task: asyncio.Task, progress: Progress
+) -> int:
     async with closing(session):
-        print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
-        table = await session.wait_for_instrument_table(timeout=TABLE_SECONDS)
-        if table is None:
-            print("no instruments table from this exchange, so no listed option contract to use")
-            return 1
-        underlyings = option_underlyings(table)
-        underlying = args.underlying or (underlyings[0] if underlyings else None)
-        if underlying is None:
-            print("the instruments table names no option underlying")
-            return 1
-        contracts = listed_contracts(table, underlying)
-        if not contracts:
-            print(f"no option contract is listed on {underlying}; no order was sent")
-            return 0
-        print(f"{len(contracts)} contract(s) listed on {underlying}; subscribing to them")
-        await subscribe(session, contracts)
+        progress.status = await trade(session, args, task, progress)
+    return progress.status
 
-        bot = OptionsBot(session, table, underlying, args.strat_id)
-        interrupted = False
 
-        def absorb_first_interrupt() -> bool:
-            nonlocal interrupted
-            if interrupted:
-                return False
-            interrupted = True
-            # This cancellation is handled. If another is still pending, Ctrl+C was
-            # pressed twice before the first reached this point: stop at once.
-            return task.uncancel() == 0
-
-        try:
-            why = await drive(bot, session, args.seconds)
-        except asyncio.CancelledError:
-            if not absorb_first_interrupt():
-                raise
-            why = "interrupted"
-        if why == "closed":
-            print("the exchange closed the connection")
-            if bot.ref is not None and not bot.finished:
-                print(f"WARNING: the order may still rest at {bot.where}; check and cancel it")
-            return 1
-        if not bot.finished and bot.ref is not None:
-            reason = {"time": "time is up", "interrupted": "interrupted"}[why]
-            print(f"{reason}: cancelling {bot.where}")
-            bot.stopping = True
-            while True:
-                try:
-                    why = await drive(bot, session, args.drain_seconds)
-                    break
-                except asyncio.CancelledError:
-                    if not absorb_first_interrupt():
-                        raise
-                    print("interrupted: still cancelling; press Ctrl+C again to stop at once")
-        if bot.cancel_failed is not None:
-            print(
-                f"WARNING: the cancel was rejected ({bot.cancel_failed}), so the order may "
-                f"still rest at {bot.where}; check and cancel it yourself"
-            )
-            return 1
-        if bot.ref is not None and bot.missed and not bot.rejected:
-            print(
-                "WARNING: messages from the exchange were missed, so the order may have "
-                f"moved, filled or still rest (last seen at {bot.where}); check your orders "
-                "and fills"
-            )
-            return 1
-        if bot.ref is not None and not bot.finished:
-            print(
-                f"WARNING: the cancel was not confirmed, so the order may still rest at "
-                f"{bot.where}; check and cancel it yourself"
-            )
-            return 1
-        if why == "time" and bot.ref is None:
-            print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
-        print(bot.summary())
+async def trade(
+    session: Session, args: argparse.Namespace, task: asyncio.Task, progress: Progress
+) -> int:
+    print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
+    table = await session.wait_for_instrument_table(timeout=TABLE_SECONDS)
+    if table is None:
+        print("no instruments table from this exchange, so no listed option contract to use")
+        return 1
+    underlyings = option_underlyings(table)
+    underlying = args.underlying or (underlyings[0] if underlyings else None)
+    if underlying is None:
+        print("the instruments table names no option underlying")
+        return 1
+    contracts = listed_contracts(table, underlying)
+    if not contracts:
+        print(f"no option contract is listed on {underlying}; no order was sent")
         return 0
+    print(f"{len(contracts)} contract(s) listed on {underlying}; subscribing to them")
+    await subscribe(session, contracts)
+
+    bot = OptionsBot(session, table, underlying, args.strat_id)
+    progress.bot = bot
+    interrupted = False
+
+    def absorb_first_interrupt() -> bool:
+        nonlocal interrupted
+        if interrupted:
+            return False
+        interrupted = True
+        # This cancellation is handled. If another is still pending, Ctrl+C was
+        # pressed twice before the first reached this point: stop at once.
+        return task.uncancel() == 0
+
+    try:
+        why = await drive(bot, session, args.seconds)
+    except asyncio.CancelledError:
+        if not absorb_first_interrupt():
+            raise
+        why = "interrupted"
+    if why == "closed":
+        print("the exchange closed the connection")
+        if bot.ref is not None and not bot.finished:
+            print(f"WARNING: the order may still rest at {bot.where}; check and cancel it")
+        return 1
+    if not bot.finished and bot.ref is not None:
+        reason = {"time": "time is up", "interrupted": "interrupted"}[why]
+        print(f"{reason}: cancelling {bot.where}")
+        bot.stopping = True
+        while True:
+            try:
+                why = await drive(bot, session, args.drain_seconds)
+                break
+            except asyncio.CancelledError:
+                if not absorb_first_interrupt():
+                    raise
+                print("interrupted: still cancelling; press Ctrl+C again to stop at once")
+    if bot.cancel_failed is not None:
+        print(
+            f"WARNING: the cancel was rejected ({bot.cancel_failed}), so the order may "
+            f"still rest at {bot.where}; check and cancel it yourself"
+        )
+        return 1
+    if bot.duplicate:
+        print(
+            f"WARNING: your team already has an order resting at {bot.where}, perhaps "
+            "one an earlier run left, so this one was rejected. That order still rests: "
+            "cancel it yourself with a cancel at that contract, side and price"
+        )
+        return 1
+    if bot.ref is not None and bot.missed and not bot.rejected:
+        print(
+            "WARNING: messages from the exchange were missed, so the order may have "
+            f"moved, filled or still rest (last seen at {bot.where}); check your orders "
+            "and fills"
+        )
+        return 1
+    if bot.ref is not None and not bot.finished and bot.budget_reject is not None:
+        print(
+            f"WARNING: the cancel was rejected ({bot.budget_reject}) and --drain-seconds "
+            f"ended before it could be sent again {BUDGET_WAIT_SECONDS:g} s later, so the "
+            f"order may still rest at {bot.where}. Wait a minute, then cancel it "
+            "yourself. A --drain-seconds above 60 lets a later run wait out such a reject"
+        )
+        return 1
+    if bot.ref is not None and not bot.finished:
+        print(
+            f"WARNING: the cancel was not confirmed, so the order may still rest at "
+            f"{bot.where}; check and cancel it yourself"
+        )
+        return 1
+    if why == "time" and bot.ref is None:
+        print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
+    print(bot.summary())
+    return 0
 
 
 def fail(message: str) -> int:
@@ -670,8 +735,9 @@ def main(argv: list[str] | None = None) -> int:
     except MissingURL as error:
         fail(f"{error}; for example ws://127.0.0.1:8080/ws (see docs/quickstart.md)")
         return 2
+    progress = Progress()
     try:
-        return asyncio.run(run(url, args))
+        return asyncio.run(run(url, args, progress))
     except MissingToken as error:
         # The message names the variable and the problem, never the token.
         fail(f"{error} (see docs/quickstart.md)")
@@ -688,8 +754,8 @@ def main(argv: list[str] | None = None) -> int:
             "still rest: reconnect and cancel it"
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
-        # A second Ctrl+C, before the order was confirmed cancelled.
-        return fail("interrupted: this example's order may still rest; check and cancel it")
+        # A Ctrl+C before the run could take it over, or a second one while it cancels.
+        return stopped_at_once(progress)
 
 
 if __name__ == "__main__":
