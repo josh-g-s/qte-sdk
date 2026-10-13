@@ -132,7 +132,15 @@ resting in it, yours included, is cancelled with an `order_cancelled` whose reas
 `CHAIN_HALTED`. Read these as any other reason, with `qte_sdk.orders.reason_code_name` or
 against `ReasonCodes`. A session logs `QTE-OPTIONS-CHAIN-HALTED` through the
 `qte_sdk.options` logger, at most once a minute for each underlying, when it reads a
-`CONTRACT_HALTED` reject or a `CHAIN_HALTED` cancel (see docs/errors.md).
+`CONTRACT_HALTED` reject or a `CHAIN_HALTED` cancel (see docs/errors.md). A reject does
+not name its contract, so the session names it from the `new` or `amend` it sent with that
+`request_ref`; a reject of an order it did not send, or of a `request_ref` it sent again
+for another contract before every send of it was answered, names no chain, and such
+rejects share one minute. Another connection of your team's may read the same reject, so
+use a `request_ref` on one connection only while its order awaits an answer: a session
+cannot tell another connection's order from its own, so a `request_ref` reused on another
+connection can name the other order's chain. Each session keeps its own minute
+and record of the orders it sent, and a `ReconnectingSession` one across its connections.
 
 Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
 present, and true, only on an option contract's `RESIDUAL` print that went through at the
@@ -163,11 +171,13 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
+from google.protobuf.message import Message
+
 from qte_sdk import errors as _errors
 from qte_sdk import pacing as _pacing
 from qte_sdk.books import _LatestByInstrument
 from qte_sdk.connection import Event, Received
-from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+from qte_sdk.contract.v1.common_pb2 import AMEND, NEW, ReasonCodes
 from qte_sdk.contract.v1.market_data_pb2 import (
     OPTION_GREEKS_NONE,
     OPTION_GREEKS_UNAVAILABLE,
@@ -191,7 +201,7 @@ from qte_sdk.contract.v1.market_data_pb2 import (
     OptionTradingState,
     TapePrint,
 )
-from qte_sdk.contract.v1.order_events_pb2 import OrderCancelled, Reject
+from qte_sdk.contract.v1.order_events_pb2 import Accepted, OrderCancelled, Reject
 from qte_sdk.contract.v1.session_pb2 import Instruments, OptionUnderlying
 
 __all__ = [
@@ -476,40 +486,123 @@ _CHAIN_HALT_ACTIONS = {
     ReasonCodes.CONTRACT_HALTED: "rejected",
     ReasonCodes.CHAIN_HALTED: "cancelled",
 }
+# The most `new` and `amend` a session remembers the instrument of while it waits for their
+# `accepted` or `reject`; the oldest is forgotten first.
+_SENT_LIMIT = 4096
 _log = logging.getLogger(__name__)
-_chain_halt_lock = threading.Lock()
 # The clock of that warning; replaced in tests.
 _monotonic = time.monotonic
-_chain_halt_warned_at: dict[str, float] = {}
 
 
-def _chain_halted(event: Event) -> None:
-    """For a session: log `QTE-OPTIONS-CHAIN-HALTED` for a reject `CONTRACT_HALTED` or an
-    `order_cancelled` `CHAIN_HALTED`, unless one was logged for the same underlying in the
-    last minute."""
-    if not isinstance(event, Received):
-        return
-    message = event.message
-    if not isinstance(message, (Reject, OrderCancelled)):
-        return
-    action = _CHAIN_HALT_ACTIONS.get(message.reason_code)
-    if action is None:
-        return
-    instrument = message.instrument
-    underlying = ""
-    if is_option_symbol(instrument):
-        underlying = parse_option_symbol(instrument).underlying
-    now = _monotonic()
-    with _chain_halt_lock:
-        warned = _chain_halt_warned_at.get(underlying)
-        if warned is not None and now - warned < CHAIN_HALT_WARNING_INTERVAL:
+class _ChainHaltWarnings:
+    """One session's `QTE-OPTIONS-CHAIN-HALTED` warnings: when each underlying's was last
+    logged, and the instrument of each `new` and `amend` the session sent and has no answer
+    to yet. A `reject` names no instrument (only `UNKNOWN_INSTRUMENT` does), so a
+    `CONTRACT_HALTED` reject is matched to its order through the `request_ref` it echoes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._warned_at: dict[str, float] = {}
+        # For each `request_ref` awaiting an answer: the instrument, or None once it was sent
+        # again for another instrument before every earlier send was answered (an answer
+        # could be for either order, so it names no chain), and how many sends await one.
+        self._sent: dict[str, tuple[str | None, int]] = {}
+        # The report_seq of the latest answers counted, so that one read again, as a
+        # resume replays what was read before a reconnect, is not counted twice.
+        self._counted: dict[int, None] = {}
+
+    def sent(self, type_: str, payload: Message) -> None:
+        """Remember the instrument of a `new` or `amend` the session is sending. Every one is
+        counted, an option's or not, so a `request_ref` sent again is always noticed."""
+        if type_ not in ("new", "amend"):
             return
-        _chain_halt_warned_at[underlying] = now
-    _pacing._warn(
-        _errors.OPTIONS_CHAIN_HALTED,
-        target=_log,
-        action=action,
-        reason=ReasonCodes.ReasonCode.Name(message.reason_code),
-        instrument=instrument or "an option contract",
-        underlying=underlying or "its underlying",
-    )
+        ref = getattr(payload, "request_ref", "")
+        if not ref:
+            return
+        instrument = getattr(payload, "instrument", "")
+        with self._lock:
+            if ref in self._sent:
+                earlier, waiting = self._sent.pop(ref)
+                self._sent[ref] = (instrument if earlier == instrument else None, waiting + 1)
+            else:
+                self._sent[ref] = (instrument, 1)
+            while len(self._sent) > _SENT_LIMIT:
+                del self._sent[next(iter(self._sent))]
+
+    def _answered(self, ref: str) -> str:
+        """Count one answer to `ref`, forgetting it once every send of it is answered.
+        Returns its option contract, or "" when it names no one option contract."""
+        with self._lock:
+            if ref not in self._sent:
+                return ""
+            instrument, waiting = self._sent.pop(ref)
+            if waiting > 1:
+                self._sent[ref] = (instrument, waiting - 1)
+        return instrument if instrument and is_option_symbol(instrument) else ""
+
+    def _new_term(self) -> None:
+        """Report numbers start again in a new term: forget those already counted."""
+        with self._lock:
+            self._counted.clear()
+
+    def _first_reading(self, event: Received) -> bool:
+        """Whether this answer is read for the first time: False for a report read again,
+        by its report_seq, which then counts against no order and names no chain."""
+        seq = event.report_seq
+        if seq is None:
+            return True
+        with self._lock:
+            if seq in self._counted:
+                return False
+            self._counted[seq] = None
+            while len(self._counted) > _SENT_LIMIT:
+                del self._counted[next(iter(self._counted))]
+        return True
+
+    def observe(self, event: Event) -> None:
+        """Forget the order an `accepted` or `reject` of a `new` or `amend` answers, and log
+        `QTE-OPTIONS-CHAIN-HALTED` for a reject `CONTRACT_HALTED` or an `order_cancelled`
+        `CHAIN_HALTED`, unless this session logged one for the same underlying in the last
+        minute. A reject whose order this session did not send names no chain; such rejects
+        share one minute between them."""
+        if not isinstance(event, Received):
+            return
+        message = event.message
+        if isinstance(message, Accepted):
+            # Only a `new` or `amend` is recorded, so only its answer counts against one.
+            if message.request_type in (NEW, AMEND) and self._first_reading(event):
+                self._answered(message.request_ref)
+            return
+        if isinstance(message, Reject):
+            instrument = ""
+            if (
+                message.HasField("request_ref")
+                and message.HasField("request_type")
+                and message.request_type in (NEW, AMEND)
+                and self._first_reading(event)
+            ):
+                instrument = self._answered(message.request_ref)
+        elif isinstance(message, OrderCancelled):
+            instrument = message.instrument
+        else:
+            return
+        action = _CHAIN_HALT_ACTIONS.get(message.reason_code)
+        if action is None:
+            return
+        underlying = ""
+        if is_option_symbol(instrument):
+            underlying = parse_option_symbol(instrument).underlying
+        now = _monotonic()
+        with self._lock:
+            warned = self._warned_at.get(underlying)
+            if warned is not None and now - warned < CHAIN_HALT_WARNING_INTERVAL:
+                return
+            self._warned_at[underlying] = now
+        _pacing._warn(
+            _errors.OPTIONS_CHAIN_HALTED,
+            target=_log,
+            action=action,
+            reason=ReasonCodes.ReasonCode.Name(message.reason_code),
+            instrument=instrument or "an option contract",
+            underlying=underlying or "its underlying",
+        )

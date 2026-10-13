@@ -150,6 +150,7 @@ from google.protobuf.message import Message
 from websockets.exceptions import ConnectionClosed
 
 from qte_sdk import errors as _errors
+from qte_sdk import options as _options
 from qte_sdk import pacing as _pacing
 from qte_sdk.connection import (
     TERM_CHANGE_CLOSE_CODE,
@@ -377,6 +378,10 @@ class ReconnectingSession:
         self._resume = resume
         # The report cursor, carried from each session to the next.
         self._reports = _Reports()
+        # One record of the option orders sent, carried from each connection to the next,
+        # since an answer to one sent on the last may be replayed on this one; and one
+        # minute of chain halt warnings (see qte_sdk.options).
+        self._chain_halts = _options._ChainHaltWarnings()
         # The term the cursor was counted in, as the calendar names it, or None if unknown.
         self._reports_term: tuple[str, str] | None = None
         # Set when the exchange closed the current attempt's connection for a term change,
@@ -506,6 +511,7 @@ class ReconnectingSession:
                 self._instruments.pop(instrument, None)
         failure: BaseException
         try:
+            session._chain_halts.sent(type_, payload)
             await session.connection.send(type_, payload)
         except BaseException as error:
             failure = error
@@ -520,6 +526,7 @@ class ReconnectingSession:
         one up. Returns False, sending nothing, if it is not, for the pacer not to count it."""
         if self._session is not session or not self._up:
             return False
+        session._chain_halts.sent(type_, payload)
         await session.connection.send(type_, payload)
         return True
 
@@ -731,6 +738,7 @@ class ReconnectingSession:
             # even without a resume.
             self._reports.restore(saved)
             session._reports = self._reports
+            session._chain_halts = self._chain_halts
             if not (self._reports.cursor or self._reports.above):
                 # Nothing is counted that another term could make wrong (a cursor of 0
                 # means the same in every term). Whatever the cursor becomes from here on,
@@ -897,6 +905,7 @@ class ReconnectingSession:
         connection because a term ended, and report numbers start again in the next."""
         self._reports.restore((None, frozenset()))
         self._reports_term = None
+        self._chain_halts._new_term()
 
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):

@@ -394,6 +394,9 @@ class Session:
         else:
             local = _pacing._monotonic()
         self._anchor = (local, info.server_time)
+        # This session's chain halt warnings, and the instrument of each option order it
+        # sent, which a `CONTRACT_HALTED` reject does not name (see qte_sdk.options).
+        self._chain_halts = _options._ChainHaltWarnings()
         # Events read from the connection but not yet delivered: those that arrived before
         # the ack, and any that `wait_for_calendar` or `resume` read ahead. They are kept
         # as read in `_unrouted`, and pass through the report cursor (see `_Reports`) into
@@ -751,8 +754,8 @@ class Session:
                 self._pacer._observe(event, self._anchor)
             else:
                 _pacing._budget_rejected(event, self._anchor)
-        if isinstance(event, Received) and event.type in ("reject", "order_cancelled"):
-            _options._chain_halted(event)
+        if isinstance(event, Received) and event.type in ("accepted", "reject", "order_cancelled"):
+            self._chain_halts.observe(event)
         if not isinstance(event, (Received, DecodeFailed, Unknown)):
             return  # not a message, such as a SeqGap: it says nothing of what came next
         after_calendar = self._after_calendar
@@ -780,9 +783,10 @@ class Session:
         failure: BaseException
         try:
             if self._pacer is None or type_ not in _pacing.PACED_TYPES:
+                self._chain_halts.sent(type_, payload)
                 await self.connection.send(type_, payload)
             else:
-                await self._pacer._send(type_, payload, self.connection.send)
+                await self._pacer._send(type_, payload, self._write)
         except BaseException as error:
             failure = error
         else:
@@ -790,6 +794,21 @@ class Session:
         # The connection keeps the message out of its traceback; so does this frame, since
         # the message may be `auth`. Raised outside the handler, so nothing is chained.
         del payload
+        raise failure
+
+    async def _write(self, type_: str, payload: Message) -> None:
+        """Send a paced message once the pacer lets it go. Its order is recorded only then,
+        never when the pacer refuses it, and before the write yields, so its answer is
+        never read first (see qte_sdk.options)."""
+        failure: BaseException
+        self._chain_halts.sent(type_, payload)
+        try:
+            await self.connection.send(type_, payload)
+        except BaseException as error:
+            failure = error
+        else:
+            return
+        del payload  # as in `send`, out of the traceback
         raise failure
 
     async def close(self) -> None:

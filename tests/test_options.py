@@ -1,3 +1,4 @@
+import asyncio
 import doctest
 import logging
 import threading
@@ -17,9 +18,17 @@ from qte_sdk.connection import (
     SessionInfo,
 )
 from qte_sdk.contract.codec import unpack
-from qte_sdk.contract.v1.common_pb2 import BUY, RESIDUAL, STUDENT_TO_WALL, ReasonCodes
+from qte_sdk.contract.v1.common_pb2 import (
+    BUY,
+    CANCEL,
+    NEW,
+    RESIDUAL,
+    STUDENT_TO_WALL,
+    ReasonCodes,
+)
 from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, OptionTradingState, Trades
-from qte_sdk.contract.v1.order_events_pb2 import OrderCancelled, Reject
+from qte_sdk.contract.v1.order_entry_pb2 import AmendOrder, NewOrder
+from qte_sdk.contract.v1.order_events_pb2 import Accepted, OrderCancelled, Reject
 from qte_sdk.options import (
     CALL,
     OPTION_GREEKS_VALID,
@@ -436,19 +445,32 @@ def halt_warnings(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """The warnings logged, as (code, message), caught before their thread."""
     caught: list[tuple[str, str]] = []
     monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append((code, message)))
-    monkeypatch.setattr(options, "_chain_halt_warned_at", {})
     return caught
 
 
-def halt_session() -> Session:
+async def _sent_nowhere(type_: str, payload: object) -> None:
+    pass
+
+
+def halt_session(monkeypatch: pytest.MonkeyPatch) -> Session:
     info = SessionInfo("s-1", "team-a", 1_760_000_000_000, "0.x", False)
-    return Session(Connection("ws://127.0.0.1:9"), info, [])
+    session = Session(Connection("ws://127.0.0.1:9"), info, [])
+    monkeypatch.setattr(session.connection, "send", _sent_nowhere)
+    return session
 
 
-def halt_reject(instrument: str | None = "SPY261120C00665000") -> Received:
-    reject = Reject(request_ref="r", reason_code=ReasonCodes.CONTRACT_HALTED, receipt_time=1)
-    if instrument is not None:
-        reject.instrument = instrument
+def send_option_new(session: Session, ref: str, instrument: str = "SPY261120C00665000") -> None:
+    order = NewOrder(request_ref=ref, strat_id="s", instrument=instrument, side=BUY, size=1)
+    asyncio.run(session.send("new", order))
+
+
+def halt_reject(ref: str | None = "r", request_type: int = NEW) -> Received:
+    # As the exchange sends it: a reject names an instrument only for UNKNOWN_INSTRUMENT.
+    reject = Reject(
+        reason_code=ReasonCodes.CONTRACT_HALTED, request_type=request_type, receipt_time=1
+    )
+    if ref is not None:
+        reject.request_ref = ref
     return Received("reject", reject, None)
 
 
@@ -464,8 +486,10 @@ def halt_cancel(instrument: str = "SPY261120C00665000") -> Received:
     return Received("order_cancelled", cancelled, None)
 
 
-def test_a_contract_halted_reject_logs_its_code_and_what_to_do(halt_warnings):
-    halt_session()._keep(halt_reject())
+def test_a_contract_halted_reject_logs_its_code_and_what_to_do(halt_warnings, monkeypatch):
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r")
+    session._keep(halt_reject("r"))
     assert halt_warnings == [
         (
             errors.OPTIONS_CHAIN_HALTED,
@@ -479,30 +503,57 @@ def test_a_contract_halted_reject_logs_its_code_and_what_to_do(halt_warnings):
     ]
 
 
+def test_an_amend_reject_names_the_chain_the_amend_named(halt_warnings, monkeypatch):
+    session = halt_session(monkeypatch)
+    amend = AmendOrder(request_ref="a", instrument="GOOGL261120C00200000", side=BUY, new_size=2)
+    asyncio.run(session.send("amend", amend))
+    session._keep(halt_reject("a"))
+    assert "halted the options chain on GOOGL" in halt_warnings[0][1]
+
+
 def test_a_chain_halt_logs_once_a_minute_for_each_underlying(halt_warnings, monkeypatch):
     now = [1000.0]
     monkeypatch.setattr(options, "_monotonic", lambda: now[0])
-    session = halt_session()
+    session = halt_session(monkeypatch)
     # The halt's start cancels every resting order in the chain at once: one warning.
     for _ in range(5):
         session._keep(halt_cancel())
-    session._keep(halt_reject("SPY261120P00600000"))
+    send_option_new(session, "p", "SPY261120P00600000")
+    session._keep(halt_reject("p"))
     assert len(halt_warnings) == 1
     assert "cancelled an order in SPY261120C00665000 (CHAIN_HALTED)" in halt_warnings[0][1]
-    # Another underlying's chain has a warning of its own.
-    session._keep(halt_cancel("GOOGL261120C00200000"))
+    # Another underlying's chain has a warning of its own, a reject's as a cancel's.
+    send_option_new(session, "g", "GOOGL261120C00200000")
+    session._keep(halt_reject("g"))
     assert len(halt_warnings) == 2
+    assert "rejected an order in GOOGL261120C00200000" in halt_warnings[1][1]
     assert "halted the options chain on GOOGL" in halt_warnings[1][1]
     now[0] += 59
-    session._keep(halt_reject())
+    session._keep(halt_cancel())
     assert len(halt_warnings) == 2
     now[0] += 1
-    session._keep(halt_reject())
+    session._keep(halt_cancel())
     assert len(halt_warnings) == 3
 
 
-def test_a_halt_reject_that_names_no_instrument_still_logs(halt_warnings):
-    halt_session()._keep(halt_reject(instrument=None))
+def test_each_session_has_its_own_minute(halt_warnings, monkeypatch):
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    first, second = halt_session(monkeypatch), halt_session(monkeypatch)
+    first._keep(halt_cancel())
+    first._keep(halt_cancel())
+    second._keep(halt_cancel())
+    assert len(halt_warnings) == 2
+    # One session's record of what it sent is not another's.
+    send_option_new(first, "r")
+    second._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[2][1]
+
+
+def test_a_halt_reject_for_an_order_the_session_did_not_send_still_logs(halt_warnings, monkeypatch):
+    session = halt_session(monkeypatch)
+    session._keep(halt_reject("not-sent"))
+    session._keep(halt_reject(None))
+    # Neither names a chain, so they share one minute.
     assert len(halt_warnings) == 1
     assert (
         "rejected an order in an option contract (CONTRACT_HALTED): a Director has halted "
@@ -510,25 +561,148 @@ def test_a_halt_reject_that_names_no_instrument_still_logs(halt_warnings):
     )
 
 
-def test_other_rejects_and_cancels_say_nothing_of_a_halt(halt_warnings):
-    session = halt_session()
-    suspended = halt_reject()
+def test_an_answered_order_is_forgotten(halt_warnings, monkeypatch):
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r")
+    session._keep(Received("accepted", Accepted(request_ref="r", request_type=NEW), None))
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+    assert session._chain_halts._sent == {}
+
+
+def test_a_request_ref_sent_again_before_its_answer_names_no_chain(halt_warnings, monkeypatch):
+    # Its reject could answer either order, so naming one chain could name the wrong one.
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY261120C00665000")
+    send_option_new(session, "r", "GOOGL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+
+
+def test_a_reused_request_ref_stays_unnamed_until_every_send_is_answered(
+    halt_warnings, monkeypatch
+):
+    now = [1000.0]
+    monkeypatch.setattr(options, "_monotonic", lambda: now[0])
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY261120C00665000")
+    send_option_new(session, "r", "GOOGL261120C00200000")
+    session._keep(Received("accepted", Accepted(request_ref="r", request_type=NEW), None))
+    # GOOGL's answer is still to come, so a third send cannot name it.
+    send_option_new(session, "r", "AAPL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+    session._keep(halt_reject("r"))
+    assert session._chain_halts._sent == {}
+    # Every send answered: the next use of it names its chain again.
+    send_option_new(session, "r", "AAPL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "halted the options chain on AAPL" in halt_warnings[1][1]
+
+
+def test_the_same_contract_sent_again_keeps_its_name():
+    halts = options._ChainHaltWarnings()
+    halts.sent("new", NewOrder(request_ref="s", instrument="SPY261120C00665000"))
+    halts.sent("new", NewOrder(request_ref="s", instrument="SPY261120C00665000"))
+    # Not an option, but counted, so its request_ref sent again is noticed.
+    halts.sent("new", NewOrder(request_ref="e", instrument="SPY"))
+    assert halts._sent == {"s": ("SPY261120C00665000", 2), "e": ("SPY", 1)}
+    halts.sent("new", NewOrder(request_ref="s", instrument="SPY"))
+    assert halts._sent == {"s": (None, 3), "e": ("SPY", 1)}
+
+
+def test_an_answer_read_again_is_counted_once():
+    # A resume replays reports read before the reconnect: counting SPY's accepted twice
+    # would leave GOOGL's send looking like the only one, so SPY's reject would name GOOGL.
+    halts = options._ChainHaltWarnings()
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halts.sent("new", NewOrder(request_ref="r", instrument="AAPL261120C00200000"))
+    accepted = Accepted(request_ref="r", request_type=NEW)
+    halts.observe(Received("accepted", accepted, 3, report_seq=7))
+    halts.observe(Received("accepted", accepted, 1, report_seq=7))
+    assert halts._sent == {"r": (None, 1)}
+    halts.sent("new", NewOrder(request_ref="r", instrument="GOOGL261120C00200000"))
+    assert halts._sent == {"r": (None, 2)}
+
+
+def test_a_new_term_counts_report_numbers_again():
+    halts = options._ChainHaltWarnings()
+    accepted = Accepted(request_ref="r", request_type=NEW)
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halts.observe(Received("accepted", accepted, 3, report_seq=7))
+    halts._new_term()
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halts.observe(Received("accepted", accepted, 3, report_seq=7))
+    assert halts._sent == {}
+
+
+def test_the_record_of_sent_orders_is_bounded(monkeypatch):
+    monkeypatch.setattr(options, "_SENT_LIMIT", 3)
+    halts = options._ChainHaltWarnings()
+    for ref in "abc":
+        halts.sent("new", NewOrder(request_ref=ref, instrument="SPY261120C00665000"))
+    halts.sent("new", NewOrder(request_ref="d", instrument="SPY"))
+    halts.sent("cancel", NewOrder(request_ref="f", instrument="SPY261120C00665000"))
+    assert list(halts._sent) == ["b", "c", "d"]
+    assert halts._sent["c"] == ("SPY261120C00665000", 1)
+
+
+def test_an_answer_to_a_cancel_forgets_no_order(halt_warnings, monkeypatch):
+    # A cancel is not recorded, so its answer, though it echoes the same request_ref, must
+    # not consume SPY's record: GOOGL sent with it next would take SPY's reject.
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY261120C00665000")
+    session._keep(Received("accepted", Accepted(request_ref="r", request_type=CANCEL), None))
+    other = halt_reject("r", CANCEL)
+    other.message.reason_code = ReasonCodes.MIN_REST_VIOLATION
+    session._keep(other)
+    send_option_new(session, "r", "GOOGL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+
+
+def test_an_answer_to_an_order_in_a_stock_is_counted(halt_warnings, monkeypatch):
+    # The stock's answer must not consume SPY's record: GOOGL sent next would take SPY's.
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY")
+    send_option_new(session, "r", "SPY261120C00665000")
+    session._keep(Received("accepted", Accepted(request_ref="r", request_type=NEW), None))
+    send_option_new(session, "r", "GOOGL261120C00200000")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+
+
+def test_a_halt_reject_of_a_stock_order_names_no_contract(halt_warnings, monkeypatch):
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY")
+    session._keep(halt_reject("r"))
+    assert "rejected an order in an option contract" in halt_warnings[0][1]
+
+
+def test_other_rejects_and_cancels_say_nothing_of_a_halt(halt_warnings, monkeypatch):
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r")
+    suspended = halt_reject("r")
     suspended.message.reason_code = ReasonCodes.CONTRACT_SUSPENDED
     session._keep(suspended)
     closed = halt_cancel()
     closed.message.reason_code = ReasonCodes.SESSION_CLOSE
     session._keep(closed)
     assert halt_warnings == []
+    assert session._chain_halts._sent == {}
 
 
-def test_a_chain_halt_warning_reaches_the_options_logger(caplog, monkeypatch):
-    monkeypatch.setattr(options, "_chain_halt_warned_at", {})
+def _join_warning_threads(before: set[threading.Thread]) -> None:
+    for thread in set(threading.enumerate()) - before:
+        if thread.name == "qte-sdk pacing warning":
+            thread.join(5)
+
+
+def test_a_chain_halt_warning_reaches_the_options_logger(caplog):
     before = set(threading.enumerate())
     with caplog.at_level(logging.WARNING, logger="qte_sdk.options"):
-        options._chain_halted(halt_cancel())
-        for thread in set(threading.enumerate()) - before:
-            if thread.name == "qte-sdk pacing warning":
-                thread.join(5)
+        options._ChainHaltWarnings().observe(halt_cancel())
+        _join_warning_threads(before)
     records = [r for r in caplog.records if r.name == "qte_sdk.options"]
     assert len(records) == 1
     assert records[0].code == errors.OPTIONS_CHAIN_HALTED
@@ -540,13 +714,10 @@ def test_a_chain_halt_warning_withholds_a_token_from_its_record_fields(caplog, m
     # The exchange echoes the instrument an order named; a bot may have put the token there.
     token = "ab" * 16
     monkeypatch.setenv("QTE_TOKEN", token)
-    monkeypatch.setattr(options, "_chain_halt_warned_at", {})
     before = set(threading.enumerate())
     with caplog.at_level(logging.WARNING, logger="qte_sdk.options"):
-        options._chain_halted(halt_reject(token))
-        for thread in set(threading.enumerate()) - before:
-            if thread.name == "qte-sdk pacing warning":
-                thread.join(5)
+        options._ChainHaltWarnings().observe(halt_cancel(token))
+        _join_warning_threads(before)
     [record] = [r for r in caplog.records if r.name == "qte_sdk.options"]
     assert record.fields["instrument"] == errors.WITHHELD
     assert token not in record.getMessage()
