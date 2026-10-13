@@ -50,11 +50,17 @@ not numbered steps of CONFORMANCE.md. They run only when this is set too:
 
     QTE_CONFORMANCE_OPTION_UNDERLYING  an option underlying the exchange lists, such as SPY
 
-Each takes the first contract the `instruments` table lists on that underlying, and is
-skipped if none is listed (before the first open of an options term, for example) or, for
-the order steps, if the session is not open or that contract is not trading with a
-two-sided live quote. Every order is a buy of one contract, and the steps mass cancel
-before and after, as steps 4 to 13 do.
+Each is skipped if the `instruments` table lists no contract on that underlying (before
+the first open of an options term, for example). The order steps (c to f) take the first
+listed contract, in the table's order, that is open to new orders: trading (not
+reducing-only, as a retained contract is, nor suspended), with a two-sided live quote and
+a tick of room above the wall's bid. They are skipped if the session is not open or no
+listed contract is open, naming each one's reason. Every order is a buy, of one contract
+except in f, and the steps mass cancel before and after, as steps 4 to 13 do. A step's
+buy rests a tick above the wall's bid, where another team's sell may reach it first: the
+step is then skipped, naming the fill (contract, size and price), after market orders
+flatten the position, and fails, naming the position left open, if they cannot. A fill
+found only at the end is flattened the same way, with a warning naming it.
 
     a  the chain: the first option subscribe in an open session is answered with
        `option_chain`, for the session's date, listing the same contracts on the
@@ -189,6 +195,7 @@ import logging
 import math
 import os
 import re
+import warnings
 from collections.abc import Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
@@ -1443,9 +1450,9 @@ async def test_step_13_mass_cancel(market: Client):
 
 # Options: the SDK's own steps. The vendored steps check options only in step 1a's
 # listing, so these check the option contract's published rules instead: the chain, the
-# Greeks, a resting limit order and its cancel, and the option rejects. Each picks its
-# contract at run time from the `instruments` table: the first listed on
-# QTE_CONFORMANCE_OPTION_UNDERLYING.
+# Greeks, a resting limit order and its cancel, and the option rejects. The order steps
+# pick their contract at run time from the `instruments` table: the first listed on
+# QTE_CONFORMANCE_OPTION_UNDERLYING that is open to new orders.
 
 OPTION_UNDERLYING_VAR = "QTE_CONFORMANCE_OPTION_UNDERLYING"
 OPTION_MAX_ORDER_VAR = "QTE_CONFORMANCE_OPTION_MAX_ORDER"
@@ -1507,30 +1514,246 @@ def contract_tick(c: Client, contract: str) -> int:
     return info.tick_size
 
 
+def closed_to_new_orders(c: Client, contract: str) -> str | None:
+    """Why `contract` cannot take the order steps' passive buy now, or None if it can: it
+    must be trading (not reducing-only, as a retained contract is, nor suspended), with a
+    two-sided live quote and a tick of room above the wall's bid below every sell."""
+    book = c.books.get(contract)
+    if book is None:
+        return "no book"
+    if trading_state(book) != OPTION_TRADING:
+        return "not trading (reducing-only or suspended)"
+    if book.condition != LIVE or not book.bid_levels or not book.ask_levels:
+        return "no two-sided live quote"
+    tick = contract_tick(c, contract)
+    best_ask = min([book.ask_levels[0].price] + [level.price for level in book.student_ask_levels])
+    if (book.bid_levels[0].price // tick + 1) * tick >= best_ask:
+        return "no room inside the band"
+    return None
+
+
+async def open_contract(c: Client, listed: tuple[str, ...], start: int) -> str:
+    """The first of `listed` open to new orders, in the table's order, waiting for the
+    books of the subscribe read from `start` under one deadline. Skips the step, naming
+    each contract's reason, if none is."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + c.config.timeout
+    reasons = []
+    for contract in listed:
+        if c.books.get(contract) is None:
+            try:
+                await c.wait_for(
+                    lambda m, name=contract: isinstance(m, Book) and m.instrument == name,
+                    "book",
+                    start,
+                    max(deadline - loop.time(), 0.0),
+                )
+            except NoMessage:
+                pass
+        reason = closed_to_new_orders(c, contract)
+        if reason is None:
+            return contract
+        reasons.append(f"{contract}: {reason}")
+    shown = "; ".join(reasons[:5]) + ("; ..." if len(reasons) > 5 else "")
+    pytest.skip(
+        f"precondition: a listed contract is trading with a two-sided live quote "
+        f"(none of {len(listed)}: {shown})"
+    )
+
+
+def price_text(micros: int) -> str:
+    return f"{micros / 1_000_000:.6f}".rstrip("0").rstrip(".")
+
+
+def team_fills(c: Client, contract: str, since: int) -> list[Execution]:
+    """The team's executions in `contract` read from index `since` on."""
+    return [m for m in c.since(since, Execution) if m.instrument == contract]
+
+
+def net_position(c: Client, contract: str, since: int) -> int:
+    """The team's contracts bought less those sold in `contract`, from index `since` on."""
+    return sum(
+        m.fill_size if m.side == BUY else -m.fill_size for m in team_fills(c, contract, since)
+    )
+
+
+def fills_text(contract: str, fills: list[Execution]) -> str:
+    return ", ".join(
+        f"{'bought' if m.side == BUY else 'sold'} {m.fill_size} {contract} at "
+        f"{price_text(m.fill_price)}"
+        for m in fills
+    )
+
+
+# A flattening market order fills at most the wall's 10 contracts a tick, so a position
+# of up to the largest maximum order (30) needs a few; this bounds the attempts.
+FLATTEN_ATTEMPTS = 8
+
+
+async def flatten(c: Client, contract: str, since: int) -> tuple[int, str]:
+    """Send market orders against the team's position in `contract`, as counted from
+    index `since`, until it is flat or they stop filling. Returns the position left and
+    why flattening stopped short ("" if it did not)."""
+    for _ in range(FLATTEN_ATTEMPTS):
+        net = net_position(c, contract, since)
+        if net == 0:
+            return 0, ""
+        side = SELL if net > 0 else BUY
+        start = c.mark()
+        ref = await send_new(
+            c.session,
+            strat_id=c.config.strat_a,
+            instrument=contract,
+            side=side,
+            order_type=MARKET,
+            size=abs(net),
+        )
+        try:
+            reply = await c.wait_for(
+                lambda m, ref=ref: isinstance(m, Accepted | Reject) and request_ref_of(m) == ref,
+                "accepted or reject for the flattening order",
+                start,
+            )
+            if isinstance(reply, Reject):
+                return net, f"the market order was rejected {reason_code_name(reply.reason_code)}"
+            # The market order ends with an execution that fills it, or the cancel of its
+            # remainder.
+            await c.wait_for(
+                lambda m, side=side: (
+                    (
+                        (
+                            isinstance(m, Execution)
+                            and not m.HasField("order_price")
+                            and m.remaining_size == 0
+                        )
+                        or (isinstance(m, OrderCancelled) and not m.HasField("price"))
+                    )
+                    and m.instrument == contract
+                    and m.side == side
+                ),
+                "the end of the flattening order",
+                c.after(reply),
+            )
+        except NoMessage as e:
+            return net_position(c, contract, since), str(e)
+        # The wall restores its size at the next 100 ms tick.
+        await c.drain(0.2)
+    net = net_position(c, contract, since)
+    return net, "" if net == 0 else f"{FLATTEN_ATTEMPTS} market orders did not flatten it"
+
+
+async def flatten_or_fail(c: Client, contract: str, since: int, what: str) -> None:
+    """Flatten the team's position in `contract` from index `since`, if any; fail naming
+    the open position if that is not possible."""
+    if net_position(c, contract, since) == 0:
+        return
+    left, why = await flatten(c, contract, since)
+    if left:
+        pytest.fail(
+            f"{what}; the team still holds {left:+d} {contract} ({why}): flatten it by hand "
+            "before running the option steps again"
+        )
+
+
+async def skip_if_filled(c: Client, contract: str, since: int) -> None:
+    """If the team traded in `contract` from index `since` on, as when another team's
+    sell reaches the step's resting buy first, flatten the position and skip the step
+    naming the fills; fail, naming the open position, if it cannot be flattened."""
+    fills = team_fills(c, contract, since)
+    if not fills:
+        return
+    what = f"the step's buy traded: {fills_text(contract, fills)}"
+    await flatten_or_fail(c, contract, since, what)
+    pytest.skip(
+        f"precondition: no other order trades with the step's resting buy ({what}; "
+        "the position was flattened)"
+    )
+
+
+async def rest_option(c: Client, contract: str, price: int, size: int) -> tuple[OrderState, int]:
+    """Rest a buy limit order of `size` contracts at `price`, and return its `order_state`
+    and the index in `seen` it was sent from. Skips the step, naming the fill, if it
+    trades instead of resting in full."""
+    start = c.mark()
+    ref = await send_new(
+        c.session,
+        strat_id=c.config.strat_a,
+        instrument=contract,
+        side=BUY,
+        order_type=LIMIT,
+        price=price,
+        size=size,
+    )
+    await c.answer(ref, start)
+    try:
+        reply = await c.wait_for(
+            lambda m: (
+                (
+                    isinstance(m, OrderState)
+                    and m.strat_id == c.config.strat_a
+                    and m.instrument == contract
+                    and m.side == BUY
+                    and m.price == price
+                )
+                or (
+                    isinstance(m, Execution)
+                    and m.instrument == contract
+                    and m.side == BUY
+                    and m.HasField("order_price")
+                    and m.order_price == price
+                    and m.remaining_size == 0
+                )
+                or (
+                    # A remainder not strictly inside the band is cancelled, not rested.
+                    isinstance(m, OrderCancelled)
+                    and m.instrument == contract
+                    and m.side == BUY
+                    and m.HasField("price")
+                    and m.price == price
+                )
+            ),
+            f"order_state for the buy of {contract} at {price_text(price)}, or its end",
+            start,
+        )
+    except NoMessage:
+        await skip_if_filled(c, contract, start)
+        raise
+    await skip_if_filled(c, contract, start)
+    assert isinstance(reply, OrderState), f"the buy did not rest: {reply}"
+    assert reply.state == RESTING
+    return reply, start
+
+
 @pytest.fixture
 async def option_market(client: Client):
-    """An open session, the first contract listed on the underlying trading with a
-    two-sided live book, and none of the team's orders resting."""
+    """An open session, the first contract listed on the underlying open to new orders
+    (trading, with a two-sided live book), and none of the team's orders resting. Fills
+    the step did not handle are flattened at the end, with a warning naming them."""
     c = client
-    contract = listed_on(c, option_underlying())[0]
-    start = await subscribed_open(c, [contract])
-    try:
-        await c.wait_for(lambda m: isinstance(m, Book) and m.instrument == contract, "book", start)
-    except NoMessage:
-        pytest.skip(f"precondition: {contract} has a book")
-    book = c.books.get(contract)
-    assert book is not None
-    if trading_state(book) != OPTION_TRADING:
-        pytest.skip(f"precondition: {contract} is trading, not reducing-only or suspended")
-    if book.condition != LIVE or not book.bid_levels or not book.ask_levels:
-        pytest.skip(f"precondition: {contract} has a two-sided live quote")
+    listed = listed_on(c, option_underlying())
+    start = await subscribed_open(c, list(listed))
+    contract = await open_contract(c, listed, start)
     await mass_cancel_all(c)
+    begin = c.mark()
     yield c, contract
     if c.state is not None and c.state.state == OPEN and not c._ended:
         try:
             await mass_cancel_all(c)
         except (Exception, pytest.fail.Exception):
             pass
+    fills = team_fills(c, contract, begin)
+    net = net_position(c, contract, begin)
+    if net:
+        what = f"the step's orders traded: {fills_text(contract, fills)}"
+        if c.state is None or c.state.state != OPEN or c._ended:
+            warnings.warn(
+                f"{what}; the team still holds {net:+d} {contract}, not flattened as the "
+                "session is not open: flatten it by hand",
+                stacklevel=1,
+            )
+            return
+        await flatten_or_fail(c, contract, begin, what)
+        warnings.warn(f"{what}; the position was flattened", stacklevel=1)
 
 
 async def test_option_a_chain(client: Client):
@@ -1646,15 +1869,19 @@ async def test_option_b_greeks(client: Client):
 async def test_option_c_limit_order_and_cancel(option_market: tuple[Client, str]):
     c, contract = option_market
     (price,) = inside_prices(c.books.get(contract), contract_tick(c, contract), 1)
-    state = await c.rest(c.config.strat_a, BUY, price, size=OPTION_SIZE, instrument=contract)
+    state, sent = await rest_option(c, contract, price, OPTION_SIZE)
     assert state.remaining_size == OPTION_SIZE
     start = c.mark()
     ref = await send_cancel(c.session, instrument=contract, side=BUY, price=price)
     cancelled = await c.wait_for(
-        lambda m: isinstance(m, OrderCancelled) and request_ref_of(m) == ref,
-        "order_cancelled for the cancel",
+        lambda m: isinstance(m, OrderCancelled | Reject) and request_ref_of(m) == ref,
+        "order_cancelled or reject for the cancel",
         start,
     )
+    if isinstance(cancelled, Reject):
+        # A sell that reached the order after it rested leaves nothing to cancel.
+        await skip_if_filled(c, contract, sent)
+        pytest.fail(f"cancel rejected: {reason_code_name(cancelled.reason_code)}")
     assert cancelled.instrument == contract
     assert cancelled.strat_id == c.config.strat_a
     assert cancelled.reason_code == ReasonCodes.CANCEL_REQUEST, reason_code_name(
@@ -1718,9 +1945,12 @@ async def test_option_f_over_the_maximum_order_is_rejected(option_market: tuple[
     (price,) = inside_prices(c.books.get(contract), contract_tick(c, contract), 1)
     # An order of the maximum rests, so the reject below is for the one contract more, not
     # for a lower maximum or another limit the team is already near.
-    state = await c.rest(c.config.strat_a, BUY, price, size=maximum, instrument=contract)
+    state, sent = await rest_option(c, contract, price, maximum)
     assert state.remaining_size == maximum
     await mass_cancel_all(c)
+    # A sell that reached the order before the mass cancel leaves a position, which could
+    # itself be the reason for a reject.
+    await skip_if_filled(c, contract, sent)
     reject = await rejected_new(c, contract, price, maximum + 1)
     assert reason_code_name(reject.reason_code) == "RISK_LIMIT_BREACH"
 
