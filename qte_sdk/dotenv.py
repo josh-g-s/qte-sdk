@@ -27,7 +27,8 @@ Four safeguards apply:
   the sticky bit and you or the system own it), since whoever can change or replace it can
   point `QTE_URL` at a server of their own and capture the token when you next connect.
   When the `.env` is a symbolic link, the file it leads to is judged, and the folders
-  that hold that file and each link on the way.
+  that hold that file and each link in the chain that leads to it (a link to a folder on
+  the way is not followed).
   It is a warning, not a refusal: on Linux a umask of 002 with a private group for each
   user makes files group-writable harmlessly. Its code is `QTE-DOTENV-WRITABLE`, and
   `chmod go-w` on the paths it names fixes it.
