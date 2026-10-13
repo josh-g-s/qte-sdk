@@ -23,15 +23,17 @@ Four safeguards apply:
   nothing in it is used (`chmod 600 .env` fixes it).
 - On POSIX, a `TokenFileShared` warning, or an `AddressFileShared` one for a file without
   the token, is issued, once per process for each file, if a `.env` that holds `QTE_TOKEN`
-  or sets `QTE_URL` is writable by its group or by others, or its folder is (unless it has
-  the sticky bit and you or the system own it), since whoever can change or replace it can
+  or sets `QTE_URL` is writable by its group or by others, or its folder or a folder
+  above it is (unless it has the sticky bit and you or the system own it), or another
+  account than you or root owns any of them, since whoever can change or replace it can
   point `QTE_URL` at a server of their own and capture the token when you next connect.
-  When the `.env` is a symbolic link, the file it leads to is judged, and the folders
-  that hold that file and each link in the chain that leads to it (a link to a folder on
-  the way is not followed).
+  When the `.env` is a symbolic link, the file it leads to is judged, and each link in
+  the chain that leads to it, the folders that hold them and the folders above those (a
+  link to a folder on the way is not followed).
   It is a warning, not a refusal: on Linux a umask of 002 with a private group for each
-  user makes files group-writable harmlessly. Its code is `QTE-DOTENV-WRITABLE`, and
-  `chmod go-w` on the paths it names fixes it.
+  user makes files group-writable harmlessly. Its code is `QTE-DOTENV-WRITABLE`; it gives
+  `chmod go-w` on the paths it names when you own them all, and otherwise says to move
+  the `.env` to a folder you own.
 - On Windows, where files have access lists rather than modes, a `TokenFileShared`
   warning is issued, once per process for each file, if the access list of a `.env` that
   holds `QTE_TOKEN` lets a broad group read or change it: Everyone, Authenticated Users,
@@ -669,37 +671,48 @@ def warn_shared(
 
 class OpenFolders(NamedTuple):
     """What `open_folders` found about a `.env` on macOS or Linux: the file it leads to,
-    whether it is a symbolic link, and the folders other users can add or remove files in,
-    each with what they could replace there and why the sticky bit does not stop them, as
-    the message names them."""
+    whether it is a symbolic link, whether you own that file, and the risks in the chain
+    that leads to it, each as `(path, clause, yours)`: the path to name, the clause that
+    says who could change or replace what through it, and whether you own it, so that
+    `chmod go-w` on it is yours to run."""
 
     real: str
     linked: bool
-    folders: tuple[tuple[str, str, str], ...]
+    real_yours: bool
+    risks: tuple[tuple[str, str, bool], ...]
 
     def fields(
         self, file_bits: int, withhold: Callable[[str], bool] | None = None
     ) -> dict[str, str] | None:
-        """The `problem` and `command` fields of a `QTE-DOTENV-WRITABLE` message, given
+        """The `problem` and `step` fields of a `QTE-DOTENV-WRITABLE` message, given
         `file_bits`, the group and other write bits of the file; None if neither they nor
-        a folder let other users change it. Looks at no file. A path `withhold` says yes to
-        (one that holds the token, say), or one with a line break, is put in no command,
-        since quoting it would change the text `withhold` looked at."""
-        if not (file_bits or self.folders):
+        a risk let others change or replace it. Looks at no file. The step is a
+        `chmod go-w` command only when you own every path it would name; otherwise it is
+        to move the `.env`. A path `withhold` says yes to (one that holds the token, say),
+        or one with a line break, is put in no command, since quoting it would change the
+        text `withhold` looked at."""
+        if not (file_bits or self.risks):
             return None
         problems = []
         targets = []
+        yours = True
         if file_bits:
             who = "its group" if file_bits == 0o020 else "any user of this computer"
             it = f"{self.real}, the file it links to" if self.linked else "it"
             problems.append(f"{who} can change {it}")
             targets.append(self.real)
-        for folder, replaced, why in self.folders:
-            problems.append(
-                f"other users can add or remove files in {folder}, which {why}, so they "
-                f"could replace {replaced}"
+            yours = yours and self.real_yours
+        for target, clause, mine in self.risks:
+            problems.append(clause)
+            targets.append(target)
+            yours = yours and mine
+        problem = _join(problems, "; ")
+        if not yours:
+            step = (
+                "Move the .env to a folder you own that only you can change and run chmod 600 "
+                "on it, since chmod go-w cannot fix a path you do not own"
             )
-            targets.append(folder)
+            return {"problem": problem, "step": step}
 
         def unsafe(target: str) -> bool:
             flat = _errors.one_line(target)
@@ -709,55 +722,106 @@ class OpenFolders(NamedTuple):
             command = "chmod go-w on each path named above"
         else:
             command = f"`chmod go-w {' '.join(shlex.quote(target) for target in targets)}`"
-        return {"problem": _join(problems, "; "), "command": command}
+        step = (
+            f"Run {command}, or move the file to a folder only you can change and run "
+            "chmod 600 on it"
+        )
+        return {"problem": problem, "step": step}
 
 
 # At most this many links are followed, as the system itself allows, before giving up.
 _MAX_LINKS = 40
 
 
+def _owner_and_mode(path: str, *, follow: bool = True) -> tuple[int, int] | None:
+    """The owner's user id and the mode of `path`, or of the link itself if not `follow`;
+    None if it cannot be looked at."""
+    try:
+        info = os.stat(path) if follow else os.lstat(path)
+    except OSError:
+        return None
+    return info.st_uid, info.st_mode
+
+
 def open_folders(path: Path) -> OpenFolders | None:
-    """On macOS and Linux, the folders other users can add or remove files in, and so
-    replace `path`, a link on the way to the file it leads to, or that file: each folder
-    that holds one of them and is writable by its group or by others, unless it has the
-    sticky bit (as /tmp has, which lets only a file's owner, or the folder's, remove it)
-    and is yours or the system's. None on Windows. A folder that cannot be looked at, or a
-    link that cannot be read, is skipped. Takes only the path, so call it before the file
+    """On macOS and Linux, what lets others change or replace `path`: a link on the way to
+    the file it leads to, that file, or a folder that holds one of them or is above one,
+    up to /. Reported are each of them that another account owns (not you, not root),
+    whatever its mode, since an owner may change it or anything in it; and each folder
+    that its group or others can write to, unless it has the sticky bit (as /tmp has,
+    which lets only a file's owner, or the folder's, remove it). None on Windows. A path
+    that cannot be looked at, or a link that cannot be read, is skipped. A link to a
+    folder on the way is not followed. Takes only the path, so call it before the file
     is read."""
     if os.name != "posix" or _fileaccess.on_windows():
         return None
+    me = os.geteuid()
     named = os.path.abspath(path)
     real = os.path.realpath(named)
     linked = os.path.islink(named)
+    risks: list[tuple[str, str, bool]] = []
     roles: dict[str, list[str]] = {}
+
+    def held(folder: str, replaced: str) -> None:
+        # The folder that holds `replaced`, then each folder above it, up to /.
+        roles.setdefault(folder, [])
+        if replaced not in roles[folder]:
+            roles[folder].append(replaced)
+        above = f"a folder on the way to {replaced}"
+        while True:
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return
+            folder = parent
+            roles.setdefault(folder, [])
+            if above not in roles[folder]:
+                roles[folder].append(above)
+
     current = named
     for _ in range(_MAX_LINKS):
         if not os.path.islink(current):
             break
         role = "the link" if current == named else "a link it leads through"
-        holder = os.path.realpath(os.path.dirname(current))
-        roles.setdefault(holder, [])
-        if role not in roles[holder]:
-            roles[holder].append(role)
+        held(os.path.realpath(os.path.dirname(current)), role)
+        status = _owner_and_mode(current, follow=False)
+        if status is not None and status[0] not in (me, 0):
+            what = role if current == named else f"{current}, {role},"
+            risks.append(
+                (current, f"another account owns {what} and can change where it leads", False)
+            )
         try:
             current = os.path.join(os.path.dirname(current), os.readlink(current))
         except OSError:
             break
-    roles.setdefault(os.path.dirname(real), []).append("the file it links to" if linked else "it")
-    found = []
+    it = "the file it links to" if linked else "it"
+    status = _owner_and_mode(real)
+    real_yours = status is None or status[0] == me
+    if status is not None and status[0] not in (me, 0):
+        which = f"{real}, the file it links to," if linked else "it"
+        risks.append((real, f"another account owns {which} and can change it", False))
+    held(os.path.dirname(real), it)
     for folder, replaced in roles.items():
-        try:
-            info = os.stat(folder)
-        except OSError:
+        status = _owner_and_mode(folder)
+        if status is None:
             continue
-        if not info.st_mode & 0o022:
-            continue
-        if not info.st_mode & stat.S_ISVTX:
-            found.append((folder, " or ".join(replaced), "has no sticky bit"))
-        elif info.st_uid not in (os.geteuid(), 0):
-            # Its owner may remove any file in it, sticky bit or not.
-            found.append((folder, " or ".join(replaced), "another account owns"))
-    return OpenFolders(real, linked, tuple(found))
+        owner, mode = status
+        what = " or ".join(replaced)
+        if owner not in (me, 0):
+            # Its owner may add or remove any file in it, sticky bit or not.
+            risks.append(
+                (folder, f"another account owns {folder}, so it could replace {what}", False)
+            )
+        elif mode & 0o022 and not mode & stat.S_ISVTX:
+            whose = "" if owner == me else " and the system owns it"
+            risks.append(
+                (
+                    folder,
+                    f"other users can add or remove files in {folder}, which has no sticky "
+                    f"bit{whose}, so they could replace {what}",
+                    owner == me,
+                )
+            )
+    return OpenFolders(real, linked, real_yours, tuple(risks))
 
 
 def writable_message(

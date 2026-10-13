@@ -228,12 +228,12 @@ CODES: dict[str, Entry] = {
         "{path} {what}, and {problem}",
         "They could point QTE_URL at a server of their own and capture your token when you "
         "next connect",
-        f"Run {{command}}, or move the file to a folder only you can change and run chmod 600 "
-        f"on it, then run {_TOKEN_CHECK}",
+        f"{{step}}, then run {_TOKEN_CHECK}",
         "On macOS and Linux, other users can change the .env that holds the token or sets "
-        "QTE_URL, or add or remove files in a folder that holds it or a link to it",
-        "chmod go-w the paths the message names, or move the .env to a folder only you can "
-        "change and chmod 600 it",
+        "QTE_URL, or add or remove files in a folder that holds it, a link to it or a folder "
+        "above them, or another account owns one of them",
+        "chmod go-w the paths the message names if you own them all, or else move the .env "
+        "to a folder you own that only you can change and chmod 600 it",
     ),
     DOTENV_GIT_UNKNOWN: Entry(
         "{path} is inside a git repository, but git could not say whether it tracks or "
