@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.46
+**Version:** 0.47
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- Fundamentals tickets under automatic execution (qte-platform #2234, with #2029, #2056, #2064 and #2066). `send_ticket` takes `algorithm=TWAP` (the default) or `algorithm=VWAP`, exported from `qte_sdk.tickets`, for a ticket the exchange's automatic execution service works; a desk's ticket and a cure ticket are always TWAP, and a cure ticket naming VWAP is refused before sending. `ticket_reason_code_name` names `TICKET_ALGORITHM_UNAVAILABLE` (1713). `ticket_accepted` carries the `algorithm` and `executor` (`SERVICE` or `DESK`), and `ticket_state` the service's progress (`activity`, `behind_schedule`, `revised_completion_time`, `config_version`, `last_assessment_time`), `filled_notional`, and after the Directors hand a desk's ticket over, `executor` `ENGINE` with `handover_time` and the desk's frozen part. The new session message `execution_route` (where a pod's new tickets go, and whether the service is paused) is decoded, picked out with `is_execution_route` and kept in `LatestTickets.route`. Fills of the exchange's child orders reach the pod as `execution`s with `origin` `AUTO_EXECUTION` or `FALLBACK` and the ticket's `parent_ticket_id`; `RestingOrders` ignores them, and `reason_code_name` names `PARENT_HANDED_OVER` (1610). The docs describe both executors. The vendored contract moves to qte-platform 7b26be70 (common.proto 1.21, order_events.proto 1.21) (#242).
 - `ReconnectingSession` forgets its report cursor when a new session's `session_ack` names a different event log (`log_id`, qte-platform contract 01 at 2.28) from the one the cursor was counted under, as at a term change, and logs `QTE-SESSION-LOG-CHANGED`: the resume then asks from 0 and gets a snapshot, so a new log's first reports are not skipped. As contract 01 asks, the cursor is kept only under a known, equal `log_id`, so an absent or malformed one forgets it too, without a warning. `SessionInfo.log_id` exposes it, so a cursor you save for `Session.resume` can carry the log it belongs to. The vendored contract moves to qte-platform d21433a6 (session.proto 1.11) (#233).
 - Options docs: the Greeks' `status` no longer says what an option contract may send; its book's `trading_state` does (#232). Since qte-platform contract 05 at 2.21, a contract whose Greeks are `OPTION_GREEKS_UNAVAILABLE` is suspended, not reducing-only, until a calculation succeeds for it this session, and a contract whose quote is not two-sided is suspended while its `condition` is `LIVE`. `qte_sdk.options.trading_state` already reads only the book's field, so no code changes.
 

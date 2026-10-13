@@ -4,7 +4,8 @@
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `instruments`, `session_reject`, `heartbeat`, `resume`,
-// `resume_ack`, `order_snapshot`, `subscribe`, `unsubscribe`, `account_query`.
+// `resume_ack`, `order_snapshot`, `subscribe`, `unsubscribe`, `account_query`,
+// `execution_route`.
 //
 // Status: PROVISIONAL. The session layer is partly specified. Auth.token,
 // SessionAck.log_id, Calendar, Instruments, Heartbeat, Resume, ResumeAck and
@@ -244,6 +245,28 @@ message SessionReject {
 // has received no message of any kind for 45 seconds treats the link as dead
 // and reconnects.
 message Heartbeat {
+}
+
+// Outbound, to a Fundamentals pod's session only. How the exchange executes
+// the pod's tickets (SPEC 23.2; epic #2233): sent once after session_ack, and
+// again each time the Directors log an automatic execution control. Routing
+// changes only at a session open, so a ticket sent while routing_in_force is
+// ROUTING_SERVICE is worked by the service, with no desk, and one sent while
+// it is ROUTING_DESK goes to the pod's desk.
+message ExecutionRoute {
+  // The routing in force. ROUTING_DESK while no control is in force.
+  ExecutionRouting routing_in_force = 1;
+  // Present iff a control logged since the last session open changes the
+  // routing at the next open: the routing from then.
+  optional ExecutionRouting routing_next_open = 2;
+  // The automatic execution configuration's version in force, the one a
+  // SERVICE ticket accepted now is stamped with (`ticket_state.
+  // config_version`). 0 while no control is in force.
+  uint32 config_version = 3;
+  // Whether the Directors have paused the service. A pause applies at once:
+  // a SERVICE ticket is still accepted, but no child is placed for it until
+  // the service resumes.
+  bool paused = 4;
 }
 
 // Inbound. Optional. Sent once on a connection, after `auth`, to ask for the

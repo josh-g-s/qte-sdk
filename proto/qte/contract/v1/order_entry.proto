@@ -187,6 +187,13 @@ message SubmitTicket {
   // Present and true on a cure ticket; absent means an ordinary ticket.
   // SPEC 23.3
   optional bool cure = 11;
+  // The execution algorithm the automatic execution service works the ticket
+  // with (SPEC 23.2; epic #2233). TICKET_ALGORITHM_UNSPECIFIED (unset) means
+  // TWAP. Read only when the ticket is routed to the service at acceptance:
+  // a desk-routed ticket ignores it. A cure ticket is always TWAP, whatever
+  // it names. VWAP is refused TICKET_ALGORITHM_UNAVAILABLE while no VWAP
+  // profile is available. On a SERVICE ticket `notes` is ignored.
+  TicketAlgorithm algorithm = 12;
 }
 
 // Cancels one of the pod's own ordinary tickets that is still working. The
