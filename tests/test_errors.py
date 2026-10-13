@@ -38,7 +38,7 @@ from test_token import PRIVATE_FILE, SECOND_DRIVE, answers, windows  # noqa: F40
 from websockets.asyncio.server import serve
 
 import qte_sdk
-from qte_sdk import dotenv, errors, replay, update
+from qte_sdk import _fileaccess, dotenv, errors, replay, update
 from qte_sdk import token as token_command
 from qte_sdk.connection import (
     ContractVersionMismatch,
@@ -655,6 +655,15 @@ def dotenv_not_ignored(token: str, ctx: Context) -> str:
     return ctx.warned(resolve_token)
 
 
+def dotenv_writable(token: str, ctx: Context) -> str:
+    if os.name != "posix":
+        pytest.skip("POSIX permissions: Windows checks access lists instead")
+    # The `windows` fixture acts as on Windows for every case: this one is about the others.
+    ctx.monkeypatch.setattr(_fileaccess, "on_windows", lambda: False)
+    private_dotenv(f"QTE_URL={URL}\nQTE_TOKEN={token}\n").chmod(0o620)
+    return ctx.warned(resolve_token) + ctx.cli(["check"])
+
+
 def dotenv_git_unknown(token: str, ctx: Context) -> str:
     (Path.cwd() / ".git").mkdir()
     private_dotenv(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
@@ -1066,6 +1075,7 @@ CASES: dict[str, Case] = {
     errors.ADDRESS_UNCHECKED: address_unchecked,
     errors.DOTENV_TRACKED: dotenv_tracked,
     errors.DOTENV_NOT_IGNORED: dotenv_not_ignored,
+    errors.DOTENV_WRITABLE: dotenv_writable,
     errors.DOTENV_GIT_UNKNOWN: dotenv_git_unknown,
     errors.DOTENV_UNREADABLE: dotenv_unreadable,
     errors.DOTENV_INVALID: dotenv_invalid,

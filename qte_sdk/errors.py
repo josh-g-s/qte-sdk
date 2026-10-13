@@ -52,6 +52,7 @@ ADDRESS_UNCHECKED = "QTE-ADDRESS-UNCHECKED"
 # DOTENV
 DOTENV_TRACKED = "QTE-DOTENV-TRACKED"
 DOTENV_NOT_IGNORED = "QTE-DOTENV-NOT-IGNORED"
+DOTENV_WRITABLE = "QTE-DOTENV-WRITABLE"
 DOTENV_GIT_UNKNOWN = "QTE-DOTENV-GIT-UNKNOWN"
 DOTENV_UNREADABLE = "QTE-DOTENV-UNREADABLE"
 DOTENV_INVALID = "QTE-DOTENV-INVALID"
@@ -222,6 +223,16 @@ CODES: dict[str, Entry] = {
         "Add {name} to .gitignore",
         "The .env is in a git working tree and is not in .gitignore",
         "Add .env to .gitignore",
+    ),
+    DOTENV_WRITABLE: Entry(
+        "{path} {what}, and {problem}",
+        "They could point QTE_URL at a server of their own and capture your token when you "
+        "next connect",
+        f"Run {{command}}, or move the file to a folder only you can change, then run "
+        f"{_TOKEN_CHECK}",
+        "On macOS and Linux, other users can change the .env that holds the token or sets "
+        "QTE_URL, or add or remove files in its folder, which has no sticky bit",
+        "chmod go-w the file and its folder, or move the .env to a folder only you can change",
     ),
     DOTENV_GIT_UNKNOWN: Entry(
         "{path} is inside a git repository, but git could not say whether it tracks or "

@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.42
+**Version:** 0.43
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- On macOS and Linux, a `.env` that holds `QTE_TOKEN` or sets `QTE_URL` now gives a warning, code `QTE-DOTENV-WRITABLE`, when its group or other users can write to it, or to its folder without the sticky bit, since whoever can change it could point `QTE_URL` at a server of their own and capture the token. The warning names the paths and the `chmod go-w` command that fixes it, never the token, and the file is still used: on Linux a umask of 002 with a private group for each user makes files group-writable harmlessly. `python -m qte_sdk.token check` reports it and exits 1, and `token set` prints it after saving (#171).
 - A `CONTRACT_HALTED` reject that a resume replays no longer logs `QTE-OPTIONS-CHAIN-HALTED` a second time, unnamed. A reject read again names the chain its first reading named and shares that chain's minute, so it logs at most once a minute. A reconnecting session takes a reject read on a new connection for one read before only once the new session's calendar shows the same term, so the new term's report with the same number keeps its own chain and minute; and a reject read before a calendar that names a new term stays counted (#235).
 - The resting-order view (`qte_sdk.resting.RestingOrders`) now applies only executions of the team's own orders (origin `TEAM`) (#215). An execution with any other origin, including one this SDK does not know yet (such as qte-platform's coming fallback child), can no longer change or remove the entry of an order the team rests at that execution's `order_price`. Cure trades and auto-flattens never could: they are market orders and carry no `order_price`.
 - The option order steps of `tests/test_conformance.py` (c to f) no longer skip when the first listed contract is reducing-only, retained, suspended or halted (#224): they take the first listed contract open to new orders, and skip, naming each contract's reason, only if none is. If another team's sell trades with a step's resting buy, the step is skipped naming the fill (contract, size and price) after market orders flatten the position, rather than failing with "no order_state within 10 s" and leaving the position open; it fails, naming the position, if flattening is not possible.
