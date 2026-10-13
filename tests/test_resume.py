@@ -2473,7 +2473,7 @@ async def test_an_attempt_cancelled_after_its_resume_puts_the_cursor_back(
         nonlocal connections
         connections += 1
         await ws.recv()
-        await ws.send(ack())
+        await ws.send(ack(log_id=SCRIPTED_LOG))
         await ws.send(term_calendar(TERM))
         if connections == 1:
             await ws.recv()
@@ -2686,6 +2686,21 @@ async def test_a_failed_attempt_in_another_log_still_resets_the_cursor_next_time
         # cursor it gave back is still log A's.
         {"log_id": LOG_B, "term": TERM, "answer": [], "drop": True},
         {"log_id": LOG_B, "term": TERM, "answer": [EMPTY]},
+    )
+    assert await resumes_over(exchange, 3) == [resume(0), resume(0), resume(0)]
+
+
+@pytest.mark.parametrize("failed_log", [None, LOG_B], ids=["absent", "other"])
+async def test_a_failed_attempt_that_reset_the_cursor_keeps_it_reset_back_in_the_old_log(
+    failed_log: str | None,
+) -> None:
+    # The second ack resets the cursor, then the attempt fails before the resume is
+    # answered: giving back what it read must not give back log A's cursor too, or the
+    # third ack, naming log A again, would resume from it.
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"log_id": failed_log, "term": TERM, "answer": [], "drop": True},
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY]},
     )
     assert await resumes_over(exchange, 3) == [resume(0), resume(0), resume(0)]
 

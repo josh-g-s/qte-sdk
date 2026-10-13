@@ -733,6 +733,10 @@ class ReconnectingSession:
         saved = self._reports.saved()
         saved_term = self._reports_term
         saved_log_id = self._reports_log_id
+        # Whether this session's ack forgot the cursor for its log, and the log it named:
+        # a failed attempt gives back what it read, but not a cursor of another log.
+        log_reset = False
+        acked_log_id: str | None = None
         self._term_change_seen = False
         # Answers read from here on, before the ack included, are this connection's.
         self._chain_halts._connecting()
@@ -762,7 +766,8 @@ class ReconnectingSession:
             session._reports = self._reports
             # Before the term check: a cursor of another log is forgotten, so it is
             # neither waited on nor sent in `resume`.
-            self._enter_log(session.info.log_id)
+            acked_log_id = session.info.log_id
+            log_reset = self._enter_log(acked_log_id)
             if not (self._reports.cursor or self._reports.above):
                 # Nothing is counted that another term could make wrong (a cursor of 0
                 # means the same in every term). Whatever the cursor becomes from here on,
@@ -808,6 +813,7 @@ class ReconnectingSession:
             self._reports.restore(saved)
             self._reports_term = saved_term
             self._reports_log_id = saved_log_id
+            self._keep_log_reset(log_reset, acked_log_id)
             if self._closed_for_term_change(session):
                 # The exchange closed the connection for a term change before the
                 # cancellation, which took the place of the error that said so.
@@ -821,6 +827,7 @@ class ReconnectingSession:
             self._reports.restore(saved)
             self._reports_term = saved_term
             self._reports_log_id = saved_log_id
+            self._keep_log_reset(log_reset, acked_log_id)
             if term_changed:
                 # What the attempt read is not delivered, and the cursor it was given back
                 # belongs to the old term.
@@ -929,7 +936,7 @@ class ReconnectingSession:
             session.connection._close_code_received() == TERM_CHANGE_CLOSE_CODE
         )
 
-    def _enter_log(self, log_id: str | None) -> None:
+    def _enter_log(self, log_id: str | None) -> bool:
         """Note that the reports read from now on are counted in the event log `log_id`,
         as the new session's `session_ack` names it (None if it names none, or none that
         is well formed, which tells nothing).
@@ -940,7 +947,8 @@ class ReconnectingSession:
         can gain its first reports between the `session_ack` and the `resume`, and a
         forgotten cursor then costs at most a few reports. `QTE-SESSION-LOG-CHANGED` is
         logged when both are known, differ and there was a cursor to forget. This
-        session's `log_id`, known or not, is then recorded."""
+        session's `log_id`, known or not, is then recorded. Returns whether the cursor
+        was forgotten."""
         counted_in = self._reports_log_id
         if log_id is None or log_id != counted_in:
             reports = self._reports
@@ -958,7 +966,17 @@ class ReconnectingSession:
                     cursor=cursor if cursor is not None else 0,
                 )
             self._forget_cursor()
-        self._reports_log_id = log_id
+            self._reports_log_id = log_id
+            return True
+        return False
+
+    def _keep_log_reset(self, log_reset: bool, log_id: str | None) -> None:
+        """After a failed attempt has given its cursor back: if that attempt's ack forgot
+        the cursor for its log, forget it again and keep the log the ack named, so the
+        next ack is compared with that log and the old cursor is never sent in `resume`."""
+        if log_reset:
+            self._forget_cursor()
+            self._reports_log_id = log_id
 
     def _forget_cursor(self) -> None:
         """Forget the report cursor, its term and its log, as at the start: the exchange
