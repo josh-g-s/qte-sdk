@@ -2691,3 +2691,68 @@ async def test_a_term_change_close_forgets_the_log_with_the_cursor():
             assert rs._reports_log_id == LOG_B
     resumes = [e for e in exchange.received if e["type"] == "resume"]
     assert resumes == [resume(0), resume(0)]
+
+
+async def test_after_a_log_reset_a_lower_snapshot_cursor_counts_on_and_resumes_again():
+    exchange = Scripted(
+        {
+            "log_id": LOG_A,
+            "term": TERM,
+            "answer": [EMPTY],
+            "after": [order_state(1), execution(2, 90), execution(3, 80)],
+            "drop": True,
+        },
+        # A new log whose head is 1: the snapshot's cursor is below the old one, and live
+        # report 2 follows it.
+        {
+            "log_id": LOG_B,
+            "term": TERM,
+            "answer": [resume_ack(False, 1, 1), snapshot("AAPL", "BUY", PRICE, 60)],
+            "after": [execution(2, 40)],
+            "drop": True,
+        },
+        {"log_id": LOG_B, "term": TERM, "answer": [resume_ack(True, 2)]},
+    )
+    delivered: list[str] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                delivered.extend(kinds([event]))
+                if isinstance(event, ResumeComplete) and exchange.connections >= 3:
+                    break
+    resumes = [e for e in exchange.received if e["type"] == "resume"]
+    # The old log's 3 is never sent into log B; B's own 2 is, on the next reconnect.
+    assert resumes == [resume(0), resume(0), resume(2)]
+    # The new log's report 2 is below the old cursor and still delivered.
+    assert delivered.count("execution:2") == 2
+
+
+async def test_without_resume_a_log_change_starts_the_count_afresh(caplog):
+    # The same term and no close code: only log_id says the numbering started again, so
+    # without the reset the new log's reports 1 and 2 would be dropped as duplicates of 7.
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "after": [order_state(6), order_state(7)], "drop": True},
+        {"log_id": LOG_B, "term": TERM, "after": [order_state(1), execution(2, 90)]},
+    )
+    events = []
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        async with serve_local(exchange) as url:
+            rs = ReconnectingSession(url, synthetic_token(), resume=False, sleep=Clock().sleep)
+            async with rs, asyncio.timeout(5):
+                async for event in rs:
+                    events.append(event)
+                    if isinstance(event, Received) and event.report_seq == 2:
+                        break
+                assert rs.last_report_seq == 2
+        assert len(log_changed_records(caplog)) == 1
+    assert [k for k in kinds(events) if not k.startswith("calendar")] == [
+        "Connected",
+        "order_state:6",
+        "order_state:7",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+        "order_state:1",
+        "execution:2",
+    ]

@@ -328,8 +328,9 @@ CODES: dict[str, Entry] = {
         "The cursor was reset, as at a term change: with a resume the session asks from 0 "
         "and gets a snapshot of your resting orders, and without one it counts the new "
         "log's reports from the first it reads",
-        "Treat the resting orders you track as unknown until the next ResumeComplete, and "
-        "check your positions with send_account_query before you trade",
+        "Treat the resting orders you track as unknown until a snapshot (with resume=False, "
+        "until you resume(0) on a session of your own), and check your positions with "
+        "send_account_query before you trade",
         "A ReconnectingSession's new session_ack named a different event log (log_id) from "
         "the one its report cursor was counted under",
         "Wait for the snapshot, then check positions",
