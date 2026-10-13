@@ -147,6 +147,7 @@ def test_an_execution_the_pod_did_not_make_leaves_its_resting_order_alone(origin
     assert view.get("AAPL", BUY, PX) == RestingOrder(
         LevelKey("AAPL", BUY, PX), "mm-1", 100, RESTING, None
     )
+    assert not view.incomplete
 
 
 def amended(price, old_price, state=RESTING, size=100, **kw) -> OrderState:
