@@ -1448,6 +1448,73 @@ async def test_a_reconnect_in_a_new_term_asks_for_a_snapshot_and_drops_nothing()
     assert entry is not None and entry.remaining_size == 20
 
 
+async def test_a_halt_reject_read_before_a_new_terms_calendar_is_counted_once(monkeypatch):
+    # "r" is sent twice in the old term. The new term's reject of the first is read before
+    # its calendar, which makes the resume ask from 0 and replay it: counted again, it would
+    # take the second send's record, and the reject of that one would name no chain.
+    from qte_sdk import options, pacing
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+
+    caught: list[str] = []
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    received: list[dict] = []
+
+    def halt_reject(report_seq: int) -> str:
+        payload = {
+            "request_ref": "r",
+            "request_type": "NEW",
+            "reason_code": "CONTRACT_HALTED",
+            "receipt_time": "1",
+        }
+        return frame("reject", payload, report_seq=str(report_seq))
+
+    def term_calendar(term: tuple[str, str]) -> str:
+        start, end = term
+        return calendar_frame(None, {**CALENDAR_PAYLOAD, "term_start": start, "term_end": end})
+
+    connections = 0
+
+    async def handler(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        received.append(json.loads(await ws.recv()))
+        await ws.send(ack())
+        if connections == 1:
+            await ws.send(term_calendar(TERM))
+            received.append(json.loads(await ws.recv()))
+            await ws.send(EMPTY)
+            await ws.send(order_state(3))
+            for _ in range(2):
+                received.append(json.loads(await ws.recv()))
+            await drop_connection(ws)
+            return
+        await ws.send(halt_reject(1))
+        await ws.send(term_calendar(NEXT_TERM))
+        received.append(json.loads(await ws.recv()))
+        await ws.send(resume_ack(True, 1))
+        await ws.send(halt_reject(1))
+        await ws.send(halt_reject(2))
+        await ws.wait_closed()
+
+    order = NewOrder(
+        request_ref="r", strat_id="s", instrument="SPY261120C00665000", side=BUY, size=1
+    )
+    async with serve_local(handler) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                if isinstance(event, Received) and event.report_seq == 3:
+                    await rs.send("new", order)
+                    await rs.send("new", order)
+                elif isinstance(event, Received) and event.report_seq == 2:
+                    break
+            assert rs._chain_halts._sent == {}
+    assert [e for e in received if e["type"] == "resume"] == [resume(0), resume(0)]
+    assert len(caught) == 1
+    assert "halted the options chain on SPY" in caught[0]
+
+
 async def test_a_failed_attempt_keeps_the_term_the_cursor_belongs_to():
     exchange = Scripted(
         {"term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},

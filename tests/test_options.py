@@ -636,6 +636,76 @@ def test_a_new_term_counts_report_numbers_again():
     assert halts._sent == {}
 
 
+def numbered_halt_reject(ref: str, report_seq: int) -> Received:
+    return Received("reject", halt_reject(ref).message, None, report_seq=report_seq)
+
+
+def test_a_halt_reject_replayed_after_it_was_read_live_logs_once_a_minute_named(
+    halt_warnings, monkeypatch
+):
+    # A resume replays the reject read before the reconnect. Its order is already answered,
+    # so it names the chain its first reading named, and shares that chain's minute.
+    now = [1000.0]
+    monkeypatch.setattr(options, "_monotonic", lambda: now[0])
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r")
+    session._keep(numbered_halt_reject("r", 7))
+    session._keep(numbered_halt_reject("r", 7))
+    assert len(halt_warnings) == 1
+    assert "halted the options chain on SPY" in halt_warnings[0][1]
+    now[0] += 60
+    session._keep(numbered_halt_reject("r", 7))
+    assert len(halt_warnings) == 2
+    assert "halted the options chain on SPY" in halt_warnings[1][1]
+
+
+def test_a_halt_reject_read_only_in_replays_logs_once_named(halt_warnings, monkeypatch):
+    # Sent on one connection, its reject first read in the next one's replay and read again
+    # in a later one's: one warning, which names the chain.
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    halts = options._ChainHaltWarnings()
+    info = SessionInfo("s-1", "team-a", 1_760_000_000_000, "0.x", False)
+    sessions = [Session(Connection("ws://127.0.0.1:9"), info, [], None, halts) for _ in range(3)]
+    for session in sessions:
+        monkeypatch.setattr(session.connection, "send", _sent_nowhere)
+    send_option_new(sessions[0], "r")
+    sessions[1]._keep(numbered_halt_reject("r", 7))
+    sessions[2]._keep(numbered_halt_reject("r", 7))
+    assert len(halt_warnings) == 1
+    assert "halted the options chain on SPY" in halt_warnings[0][1]
+    assert halts._sent == {}
+
+
+def test_halt_rejects_in_two_chains_replayed_log_once_each_named(halt_warnings, monkeypatch):
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY261120C00665000")
+    send_option_new(session, "g", "GOOGL261120C00200000")
+    session._keep(numbered_halt_reject("r", 5))
+    session._keep(numbered_halt_reject("g", 6))
+    session._keep(numbered_halt_reject("r", 5))
+    session._keep(numbered_halt_reject("g", 6))
+    assert len(halt_warnings) == 2
+    assert "halted the options chain on SPY" in halt_warnings[0][1]
+    assert "halted the options chain on GOOGL" in halt_warnings[1][1]
+
+
+def test_a_report_number_counted_for_another_request_ref_is_not_a_reading_again(
+    halt_warnings, monkeypatch
+):
+    # A record of report 7 for "r", kept by mistake into another term, does not make the
+    # new term's report 7 for "g" a reading again: it answers GOOGL's order and names it.
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    session = halt_session(monkeypatch)
+    send_option_new(session, "r", "SPY261120C00665000")
+    session._keep(numbered_halt_reject("r", 7))
+    send_option_new(session, "g", "GOOGL261120C00200000")
+    session._keep(numbered_halt_reject("g", 7))
+    assert len(halt_warnings) == 2
+    assert "halted the options chain on GOOGL" in halt_warnings[1][1]
+    assert session._chain_halts._sent == {}
+
+
 def test_the_record_of_sent_orders_is_bounded(monkeypatch):
     monkeypatch.setattr(options, "_SENT_LIMIT", 3)
     halts = options._ChainHaltWarnings()

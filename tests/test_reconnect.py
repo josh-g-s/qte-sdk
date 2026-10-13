@@ -1277,7 +1277,7 @@ def counted_answer(rs: ReconnectingSession) -> None:
 
     accepted = Accepted(request_ref="r", request_type=NEW)
     rs._chain_halts.observe(Received("accepted", accepted, 3, report_seq=7))
-    assert rs._chain_halts._counted == {7: None}
+    assert rs._chain_halts._counted == {7: ("r", "")}
 
 
 def test_a_cursor_forgotten_for_a_term_change_forgets_the_answers_counted():
@@ -1299,6 +1299,24 @@ def test_a_cursor_from_another_term_forgets_the_answers_counted(strict):
     assert rs._chain_halts._counted == {}
 
 
+def test_a_cursor_from_another_term_keeps_the_answers_counted_on_this_connection():
+    # Read after the ack but before the calendar: already the new term's, and a resume
+    # from 0 replays them.
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    rs._reports.restore((7, frozenset()))
+    rs._reports_term = ("2026-09-01", "2026-12-18")
+    counted_answer(rs)
+    rs._chain_halts._connecting()
+    from qte_sdk.contract.v1.common_pb2 import NEW
+    from qte_sdk.contract.v1.order_events_pb2 import Accepted
+
+    accepted = Accepted(request_ref="s", request_type=NEW)
+    rs._chain_halts.observe(Received("accepted", accepted, 3, report_seq=1))
+    rs._enter_term(("2027-01-04", "2027-03-26"), strict=True)
+    assert rs._reports.cursor is None
+    assert rs._chain_halts._counted == {1: ("s", "")}
+
+
 def test_a_cursor_kept_in_its_own_term_keeps_the_answers_counted():
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
     rs._reports.restore((7, frozenset()))
@@ -1306,7 +1324,7 @@ def test_a_cursor_kept_in_its_own_term_keeps_the_answers_counted():
     counted_answer(rs)
     rs._enter_term(("2026-09-01", "2026-12-18"), strict=True)
     assert rs._reports.cursor == 7
-    assert rs._chain_halts._counted == {7: None}
+    assert rs._chain_halts._counted == {7: ("r", "")}
 
 
 async def test_a_chain_halt_read_before_the_ack_shares_the_reconnecting_sessions_minute(
