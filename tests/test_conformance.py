@@ -1550,6 +1550,10 @@ async def open_contract(c: Client, listed: tuple[str, ...], start: int) -> str:
                 )
             except NoMessage:
                 pass
+        if closed_to_new_orders(c, contract) is None:
+            return contract
+    # Books read while waiting for a later contract's may have opened an earlier one.
+    for contract in listed:
         reason = closed_to_new_orders(c, contract)
         if reason is None:
             return contract
@@ -1732,8 +1736,9 @@ async def option_market(client: Client):
     c = client
     listed = listed_on(c, option_underlying())
     start = await subscribed_open(c, list(listed))
-    contract = await open_contract(c, listed, start)
+    # Before choosing, so that none of the team's own orders narrows a contract's room.
     await mass_cancel_all(c)
+    contract = await open_contract(c, listed, start)
     begin = c.mark()
     yield c, contract
     if c.state is not None and c.state.state == OPEN and not c._ended:
@@ -1746,12 +1751,10 @@ async def option_market(client: Client):
     if net:
         what = f"the step's orders traded: {fills_text(contract, fills)}"
         if c.state is None or c.state.state != OPEN or c._ended:
-            warnings.warn(
+            pytest.fail(
                 f"{what}; the team still holds {net:+d} {contract}, not flattened as the "
-                "session is not open: flatten it by hand",
-                stacklevel=1,
+                "session is not open: flatten it by hand"
             )
-            return
         await flatten_or_fail(c, contract, begin, what)
         warnings.warn(f"{what}; the position was flattened", stacklevel=1)
 
