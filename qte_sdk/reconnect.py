@@ -721,6 +721,7 @@ class ReconnectingSession:
                     self.url,
                     self._secret,
                     self._note_close,
+                    self._chain_halts,
                     ack_timeout=self._ack_timeout,
                     pacing=self._pacing,
                     **self._connection_options,
@@ -738,7 +739,6 @@ class ReconnectingSession:
             # even without a resume.
             self._reports.restore(saved)
             session._reports = self._reports
-            session._chain_halts = self._chain_halts
             if not (self._reports.cursor or self._reports.above):
                 # Nothing is counted that another term could make wrong (a cursor of 0
                 # means the same in every term). Whatever the cursor becomes from here on,
@@ -862,6 +862,7 @@ class ReconnectingSession:
             stale = term is not None and counted_in is not None and term != counted_in
         if stale and reports.resume is None and reports.cursor is not None:
             reports.restore((None, frozenset()))
+            self._chain_halts._new_term()
         if term is not None or reports.cursor is None:
             self._reports_term = term
 

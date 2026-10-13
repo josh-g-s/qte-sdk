@@ -242,3 +242,19 @@ def test_an_approval_without_its_commit_is_dropped(contract_repo, capsys):
     assert "APPROVAL DROPPED" in capsys.readouterr().err
     assert vendor.run(target, upstream, check=True) == 0
     assert "approved" not in tomllib.loads(target.manifest.read_text())
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
+def test_a_commit_without_its_approval_is_dropped(contract_repo, capsys):
+    # `approved_commit` names the pinned commit, but nobody is recorded as approving it.
+    upstream, target, (first, _second), git = contract_repo
+    write_pin(target, first, first, git)
+    text = target.manifest.read_text()
+    target.manifest.write_text(text.replace('approved = "Head, 12 Oct 2026"\n', ""))
+    assert "approved =" not in target.manifest.read_text()
+    assert vendor.run(target, upstream, check=True) == 1
+    assert "the approval is for" in capsys.readouterr().err
+    assert vendor.run(target, upstream, check=False) == 0
+    assert "APPROVAL DROPPED" in capsys.readouterr().err
+    assert vendor.run(target, upstream, check=True) == 0
+    assert "approved_commit" not in tomllib.loads(target.manifest.read_text())
