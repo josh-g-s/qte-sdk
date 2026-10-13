@@ -44,18 +44,20 @@ class Auth(_message.Message):
     def __init__(self, token: _Optional[str] = ...) -> None: ...
 
 class SessionAck(_message.Message):
-    __slots__ = ("session_id", "team", "server_time", "contract_version", "unscored")
+    __slots__ = ("session_id", "team", "server_time", "contract_version", "unscored", "log_id")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     TEAM_FIELD_NUMBER: _ClassVar[int]
     SERVER_TIME_FIELD_NUMBER: _ClassVar[int]
     CONTRACT_VERSION_FIELD_NUMBER: _ClassVar[int]
     UNSCORED_FIELD_NUMBER: _ClassVar[int]
+    LOG_ID_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     team: str
     server_time: int
     contract_version: str
     unscored: bool
-    def __init__(self, session_id: _Optional[str] = ..., team: _Optional[str] = ..., server_time: _Optional[int] = ..., contract_version: _Optional[str] = ..., unscored: bool = ...) -> None: ...
+    log_id: str
+    def __init__(self, session_id: _Optional[str] = ..., team: _Optional[str] = ..., server_time: _Optional[int] = ..., contract_version: _Optional[str] = ..., unscored: bool = ..., log_id: _Optional[str] = ...) -> None: ...
 
 class CalendarSession(_message.Message):
     __slots__ = ("session_date", "open_time", "close_time", "early_close")
