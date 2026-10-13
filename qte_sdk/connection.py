@@ -349,8 +349,8 @@ class SessionInfo:
     new log. It is None when the exchange sent none (a log that holds no record yet, or an
     exchange that predates it) or sent one that is not 16 lowercase hex characters. Compare
     it for equality only. A `last_report_seq` you save to pass to a later session's
-    `resume` belongs to the log named here: if that session's `log_id` is known and
-    differs, resume from 0 instead.
+    `resume` belongs to the log named here: reuse it only when both this `log_id` and
+    that session's are known and equal, and otherwise resume from 0.
     """
 
     session_id: str
