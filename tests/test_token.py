@@ -1562,6 +1562,28 @@ def test_a_dotenv_leading_through_a_folder_link_in_an_open_folder_warns(tmp_path
 
 
 @needs_posix
+def test_a_folder_passed_through_before_dot_dot_is_judged(tmp_path):
+    # .env -> ../shared/pivot/../../private/.env: pivot could be swapped through shared.
+    _, private, _ = linked_folder(tmp_path, 0o700)
+    shared = tmp_path / "shared"
+    (shared / "pivot").mkdir(parents=True)
+    os.chmod(shared, 0o777)
+    project_folder = tmp_path / "project"
+    project_folder.mkdir()
+    os.chmod(project_folder, 0o700)
+    (project_folder / ".env").symlink_to("../shared/pivot/../../private/.env")
+    found = dotenv_module.open_folders(project_folder / ".env")
+    assert found is not None
+    fields = found.fields(0)
+    assert fields is not None
+    assert (
+        f"other users can add or remove files in {shared}, which has no sticky bit, so they "
+        "could replace a folder its path passes through" in fields["problem"]
+    )
+    assert str(private) not in fields["problem"]
+
+
+@needs_posix
 def test_a_folder_link_loop_is_handled(tmp_path):
     os.chmod(tmp_path, 0o700)
     (tmp_path / "a").symlink_to(tmp_path / "b")

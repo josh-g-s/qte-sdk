@@ -811,7 +811,12 @@ def open_folders(path: Path) -> OpenFolders | None:
         if part in ("", "."):
             continue
         if part == "..":
-            folder = os.path.dirname(folder)
+            # The folder left behind was passed through, so whoever can replace it, through
+            # the folder that holds it, could redirect the path.
+            parent = os.path.dirname(folder)
+            if parent != folder:
+                held(parent, "a folder its path passes through")
+            folder = parent
             continue
         candidate = os.path.join(folder, part)
         status = _owner_and_mode(candidate, follow=False)
