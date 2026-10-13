@@ -496,6 +496,26 @@ async def test_a_new_order_reject_holds_news_but_not_cancels(warned):
 # 6. on_limit="raise" and max_wait
 
 
+async def test_an_option_order_the_pacer_refuses_leaves_no_record(monkeypatch):
+    # Never sent, so never answered: a record of it would wait for an answer forever.
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+
+    sim = Sim()
+    pacer = Pacer(ONE_X, on_limit="raise", clock=sim.clock, sleep=sim.sleep)
+    session = Session(Connection("ws://127.0.0.1:9"), info(), [], pacer)
+    sent: list[str] = []
+
+    async def write(type_: str, payload: object) -> None:
+        sent.append(type_)
+
+    monkeypatch.setattr(session.connection, "send", write)
+    pacer.observe(reject(BURST))
+    order = NewOrder(request_ref="r", strat_id="s", instrument="SPY261120C00665000", size=1)
+    with pytest.raises(PacingLimit):
+        await session.send("new", order)
+    assert sent == [] and session._chain_halts._sent == {}
+
+
 async def test_raise_mode_raises_with_the_window_and_retry_after_and_sends_nothing():
     sim = Sim()
     pacer = Pacer(ONE_X, on_limit="raise", clock=sim.clock, sleep=sim.sleep)

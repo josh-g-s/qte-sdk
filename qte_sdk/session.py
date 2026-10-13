@@ -781,13 +781,12 @@ class Session:
         pacer, a `new`, `cancel` or `amend` first waits for room in the budget (see
         `qte_sdk.pacing`)."""
         failure: BaseException
-        # Before it goes: its answer may be read while a paced send is still returning.
-        self._chain_halts.sent(type_, payload)
         try:
             if self._pacer is None or type_ not in _pacing.PACED_TYPES:
+                self._chain_halts.sent(type_, payload)
                 await self.connection.send(type_, payload)
             else:
-                await self._pacer._send(type_, payload, self.connection.send)
+                await self._pacer._send(type_, payload, self._write)
         except BaseException as error:
             failure = error
         else:
@@ -795,6 +794,21 @@ class Session:
         # The connection keeps the message out of its traceback; so does this frame, since
         # the message may be `auth`. Raised outside the handler, so nothing is chained.
         del payload
+        raise failure
+
+    async def _write(self, type_: str, payload: Message) -> None:
+        """Send a paced message once the pacer lets it go. Its order is recorded only then,
+        never when the pacer refuses it, and before the write yields, so its answer is
+        never read first (see qte_sdk.options)."""
+        failure: BaseException
+        self._chain_halts.sent(type_, payload)
+        try:
+            await self.connection.send(type_, payload)
+        except BaseException as error:
+            failure = error
+        else:
+            return
+        del payload  # as in `send`, out of the traceback
         raise failure
 
     async def close(self) -> None:
