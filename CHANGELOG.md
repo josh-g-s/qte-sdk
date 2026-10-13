@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.44
+**Version:** 0.45
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- Options docs: the Greeks' `status` no longer says what an option contract may send; its book's `trading_state` does (#232). Since qte-platform contract 05 at 2.21, a contract whose Greeks are `OPTION_GREEKS_UNAVAILABLE` is suspended, not reducing-only, until a calculation succeeds for it this session, and a contract whose quote is not two-sided is suspended while its `condition` is `LIVE`. `qte_sdk.options.trading_state` already reads only the book's field, so no code changes.
 
 - On macOS and Linux, the `QTE-DOTENV-WRITABLE` check now looks at each part of the `.env`'s path as named, so a link to a folder on the way is judged like any other link: the folder that holds it and the folders above it are checked, as well as those it leads to, and a link another account owns is reported when others can write to its folder. Root-owned links such as `/tmp`, `/var` and `/etc` on macOS are not reported (#238).
 - On macOS and Linux, a `.env` that holds `QTE_TOKEN` or sets `QTE_URL` now gives a warning, code `QTE-DOTENV-WRITABLE`, when its group or other users can write to it, or to a folder that holds it, a link on the way to it, or a folder above them, up to `/` (a folder with the sticky bit that you or the system own is fine), or when another account than you or root owns any of them, since whoever can change or replace it could point `QTE_URL` at a server of their own and capture the token. The warning names the paths and either the `chmod go-w` command that fixes it, when you own them all, or else to move the `.env` to a folder you own; never the token, and the file is still used: on Linux a umask of 002 with a private group for each user makes files group-writable harmlessly. `python -m qte_sdk.token check` reports it and exits 1, and `token set` prints it after saving (#171).
