@@ -98,6 +98,9 @@ PACING_REJECTED = "QTE-PACING-REJECTED"
 PACING_HOLDING = "QTE-PACING-HOLDING"
 BUDGET_REJECTED = "QTE-BUDGET-REJECTED"
 
+# OPTIONS: a Director's halt of an options chain.
+OPTIONS_CHAIN_HALTED = "QTE-OPTIONS-CHAIN-HALTED"
+
 
 class Entry(NamedTuple):
     """One code's message and documentation. `what`, `why` and `next_step` are
@@ -519,6 +522,18 @@ CODES: dict[str, Entry] = {
         "(logged at most once a minute)",
         "Wait a full minute, then pace with qte_sdk.pacing.Pacer",
     ),
+    OPTIONS_CHAIN_HALTED: Entry(
+        "the exchange {action} an order in {instrument} ({reason}): a Director has halted "
+        "the options chain on {underlying}",
+        "No new order or amend in that chain is accepted until the Director ends the halt, "
+        "and the end restores no order",
+        "Send only cancels in that chain until qte_sdk.options.trading_state of its latest "
+        "book is no longer OPTION_HALTED, then place again only what that state allows",
+        "The exchange rejected a new or amend CONTRACT_HALTED (1305), or cancelled a resting "
+        "order CHAIN_HALTED (1818), in an option contract (logged at most once a minute for "
+        "each underlying)",
+        "Send no new or amend in that chain until its book is no longer OPTION_HALTED",
+    ),
 }
 
 # Codes retired, with the release that retired them. None yet.
@@ -565,6 +580,7 @@ FIELDS = frozenset(
         "action",
         "command",
         "fix",
+        "instrument",
         "kind",
         "latest",
         "line",
@@ -579,6 +595,7 @@ FIELDS = frozenset(
         "step",
         "strerror",
         "type",
+        "underlying",
         "version",
         "what",
         "where",
