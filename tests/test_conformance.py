@@ -1539,7 +1539,7 @@ async def open_contract(c: Client, listed: tuple[str, ...], start: int) -> str:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + c.config.timeout
     reasons = []
-    for contract in listed:
+    for index, contract in enumerate(listed):
         if c.books.get(contract) is None:
             try:
                 await c.wait_for(
@@ -1551,7 +1551,8 @@ async def open_contract(c: Client, listed: tuple[str, ...], start: int) -> str:
             except NoMessage:
                 pass
         if closed_to_new_orders(c, contract) is None:
-            return contract
+            # Books read while waiting for this one's may have opened an earlier one.
+            return next(e for e in listed[: index + 1] if closed_to_new_orders(c, e) is None)
     # Books read while waiting for a later contract's may have opened an earlier one.
     for contract in listed:
         reason = closed_to_new_orders(c, contract)
