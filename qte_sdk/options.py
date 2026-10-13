@@ -138,8 +138,8 @@ not name its contract, so the session names it from the `new` or `amend` it sent
 for another contract before every send of it was answered, names no chain, and such
 rejects share one minute. Another connection of your team's may read the same reject, so
 use a `request_ref` on one connection only while its order awaits an answer: a session
-cannot tell another connection's order from its own. Each session keeps its own minute and record of the orders it
-sent, and a `ReconnectingSession` one across its connections.
+cannot tell another connection's order from its own. Each session keeps its own minute
+and record of the orders it sent, and a `ReconnectingSession` one across its connections.
 
 Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is
 present, and true, only on an option contract's `RESIDUAL` print that went through at the
@@ -538,6 +538,11 @@ class _ChainHaltWarnings:
             if waiting > 1:
                 self._sent[ref] = (instrument, waiting - 1)
         return instrument if instrument and is_option_symbol(instrument) else ""
+
+    def _new_term(self) -> None:
+        """Report numbers start again in a new term: forget those already counted."""
+        with self._lock:
+            self._counted.clear()
 
     def _first_reading(self, event: Received) -> bool:
         """Whether this answer is read for the first time: False for a report read again,

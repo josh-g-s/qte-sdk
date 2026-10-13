@@ -625,6 +625,17 @@ def test_an_answer_read_again_is_counted_once():
     assert halts._sent == {"r": (None, 2)}
 
 
+def test_a_new_term_counts_report_numbers_again():
+    halts = options._ChainHaltWarnings()
+    accepted = Accepted(request_ref="r", request_type=NEW)
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halts.observe(Received("accepted", accepted, 3, report_seq=7))
+    halts._new_term()
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halts.observe(Received("accepted", accepted, 3, report_seq=7))
+    assert halts._sent == {}
+
+
 def test_the_record_of_sent_orders_is_bounded(monkeypatch):
     monkeypatch.setattr(options, "_SENT_LIMIT", 3)
     halts = options._ChainHaltWarnings()

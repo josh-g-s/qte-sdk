@@ -905,6 +905,7 @@ class ReconnectingSession:
         connection because a term ended, and report numbers start again in the next."""
         self._reports.restore((None, frozenset()))
         self._reports_term = None
+        self._chain_halts._new_term()
 
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):
