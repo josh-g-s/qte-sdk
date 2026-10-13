@@ -42,6 +42,7 @@ from qte_sdk.contract.v1.common_pb2 import (
     TICKET_REQUEST_CANCEL,
     TICKET_REQUEST_SUBMIT,
     TICKET_SPLIT_CANCELLED,
+    TICKET_STATUS_UNSPECIFIED,
     TICKET_URGENCY_UNSPECIFIED,
     TICKET_WORKING,
     ReasonCodes,
@@ -987,6 +988,20 @@ async def test_an_activity_this_sdk_does_not_know_keeps_its_name():
     )
     assert event.message.activity == TICKET_ACTIVITY_UNSPECIFIED
     assert event.unknown_enum_names() == {"activity": "SOMETHING_NEW"}
+
+
+async def test_a_status_this_sdk_does_not_know_is_a_stop_that_keeps_its_name():
+    # A newer contract can add a way a ticket stops (a Director's cancel, say): it decodes,
+    # keeps the name the exchange sent, and the ticket is no longer working.
+    events = await received(
+        frame("ticket_state", state_payload(10), 1),
+        frame("ticket_state", state_payload(20, "TICKET_CANCELLED_BY_SOMEONE_NEW"), 2),
+    )
+    latest = LatestTickets()
+    assert [latest.update(e) for e in events] == [True, True]
+    assert events[1].message.status == TICKET_STATUS_UNSPECIFIED
+    assert events[1].unknown_enum_names() == {"status": "TICKET_CANCELLED_BY_SOMEONE_NEW"}
+    assert latest.working() == []
 
 
 async def test_a_desk_ticket_has_no_service_fields_and_a_handover_carries_the_desks_part():
