@@ -153,11 +153,10 @@ Every send checks what it can before sending, and raises `ValueError` or `TypeEr
 and sends nothing if a check fails: `request_ref` is 1 to 32 bytes of UTF-8, `instrument`
 and `thesis_id` at most 32 bytes, none containing NUL; a ticket id is a string of decimal
 digits; `notes` is at most 280 characters with no NUL; an ordinary ticket has a
-`limit_price` and a cure ticket has none; `algorithm` is `TWAP` or `VWAP`, and a cure
-ticket names no `VWAP`. Whether a ticket is accepted (its thesis, its size against the
-position, its limit against the wall, the schedule against the term, a VWAP profile) is
-for the exchange to judge. Prices are integers in micro-dollars, and `shares` is a whole
-number of shares.
+`limit_price` and a cure ticket has none; `algorithm` is `TWAP` or `VWAP`. Whether a
+ticket is accepted (its thesis, its size against the position, its limit against the
+wall, the schedule against the term, a VWAP profile) is for the exchange to judge. Prices
+are integers in micro-dollars, and `shares` is a whole number of shares.
 """
 
 from collections.abc import Iterator
@@ -268,10 +267,10 @@ async def send_ticket(
 
     `algorithm` is `TWAP` or `VWAP`; left out (None), the ticket carries
     `TICKET_ALGORITHM_UNSPECIFIED`, which the exchange reads as TWAP. Only the service
-    reads it: a ticket that goes to a desk, and a cure ticket, are TWAP, so a cure ticket
-    may not name `VWAP`. `ticket_accepted.algorithm` says what the ticket was accepted
-    with. The service refuses `VWAP` with
-    `TICKET_ALGORITHM_UNAVAILABLE` while no VWAP profile is available for the instrument.
+    reads it: a ticket that goes to a desk, and a cure ticket, are TWAP whatever they name.
+    `ticket_accepted.algorithm` says what the ticket was accepted with. The service refuses
+    `VWAP` with `TICKET_ALGORITHM_UNAVAILABLE` while no VWAP profile is available for the
+    instrument.
     """
     ref = _ref(request_ref)
     _id("instrument", instrument, required=False)
@@ -301,8 +300,6 @@ async def send_ticket(
         _ticket_id("replaces_ticket_id", replaces_ticket_id)
     if algorithm is not None:
         _algorithm(algorithm)
-        if cure and algorithm == VWAP:
-            raise ValueError("a cure ticket is always TWAP: it names no VWAP")
     msg = SubmitTicket(
         request_ref=ref, instrument=instrument, side=side, shares=shares, urgency=urgency
     )

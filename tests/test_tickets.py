@@ -251,7 +251,6 @@ async def test_a_ticket_goes_on_the_wire_as_its_canonical_json():
         ({"limit_price": 1, "algorithm": 3}, "^algorithm must be TWAP or VWAP"),
         ({"limit_price": 1, "algorithm": True}, "^algorithm must be TWAP or VWAP"),
         ({"limit_price": 1, "algorithm": "VWAP"}, "^algorithm must be TWAP or VWAP"),
-        ({"cure": True, "algorithm": VWAP}, "^a cure ticket is always TWAP"),
     ],
 )
 async def test_a_ticket_that_breaks_a_rule_is_refused_before_sending(kwargs, message):
@@ -887,7 +886,10 @@ async def test_a_ticket_with_no_algorithm_sends_the_unset_value_the_exchange_rea
     assert msg.algorithm == TICKET_ALGORITHM_UNSPECIFIED
 
 
-async def test_a_cure_ticket_may_name_twap():
+@pytest.mark.parametrize("algorithm", [TWAP, VWAP])
+async def test_a_cure_ticket_may_name_either_algorithm_and_sends_it_as_given(algorithm):
+    # The exchange works a cure ticket as TWAP whatever it names, so naming VWAP is not
+    # an error to refuse: ticket_accepted.algorithm says TWAP.
     _, _, msg = await one_sent(
         lambda c: send_ticket(
             c,
@@ -896,10 +898,10 @@ async def test_a_cure_ticket_may_name_twap():
             shares=1,
             urgency=URGENCY_LOW,
             cure=True,
-            algorithm=TWAP,
+            algorithm=algorithm,
         )
     )
-    assert msg.cure and msg.algorithm == TWAP
+    assert msg.cure and msg.algorithm == algorithm
 
 
 async def test_a_vwap_ticket_goes_on_the_wire_by_name():
@@ -1091,32 +1093,37 @@ async def test_latest_tickets_keeps_the_newest_route_and_forgets_it_on_a_disconn
     assert latest.route is None
 
 
-ROUTE = frame("execution_route", route_payload())
+DESK_ROUTE = frame("execution_route", {"routing_in_force": "ROUTING_DESK"})
+SERVICE_ROUTE = frame("execution_route", route_payload())
+# A control logged mid-session: the service paused, under a new configuration.
+PAUSED_ROUTE = frame("execution_route", route_payload(config_version=5, paused=True))
 
 
 @pytest.mark.parametrize("first", [True, False], ids=["before-states", "after-states"])
 async def test_a_reconnect_delivers_each_connections_route_before_its_replay(first):
-    def group(*states: str) -> list[str]:
+    def group(route: str, *states: str) -> list[str]:
         # Contract 01 sends the calendar and the instruments straight after the ack; the
         # route follows, at a point among the ticket states the contract does not fix.
-        return connect_group(ROUTE, *states) if first else connect_group(*states, ROUTE)
+        return connect_group(route, *states) if first else connect_group(*states, route)
 
     exchange = Scripted(
         {
             "term": TERM,
-            "before_resume": group(ticket_frame("17", 10)),
+            "before_resume": group(DESK_ROUTE, ticket_frame("17", 10)),
             "answer": [resume_ack()],
             "after": [order_state(1)],
             "drop": True,
         },
         {
             "term": TERM,
-            "before_resume": group(ticket_frame("17", 50)),
-            "answer": [resume_ack(True, 1)],
-            "after": [book(7)],
+            "before_resume": group(SERVICE_ROUTE, ticket_frame("17", 50)),
+            # A report missed while disconnected is replayed after the route arrives.
+            "answer": [resume_ack(True, 2), order_state(2)],
+            "after": [PAUSED_ROUTE, book(7)],
         },
     )
-    events, latest, _ = await read_until_book(exchange)
+    events, latest, last_report_seq = await read_until_book(exchange)
+    assert last_report_seq == 2
     reconnected = kinds(events)[kinds(events).index("Disconnected") :]
     states = ["ticket_state:None"]
     expected = ["execution_route:None", *states] if first else [*states, "execution_route:None"]
@@ -1125,9 +1132,16 @@ async def test_a_reconnect_delivers_each_connections_route_before_its_replay(fir
         "instruments:None",
         *expected,
         "resume_ack:None",
+        "order_state:2",
         "ResumeComplete",
+        "execution_route:None",
         "book:None",
     ]
-    assert kinds(events).count("execution_route:None") == 2
-    assert latest.route is not None and latest.route.routing_in_force == ROUTING_SERVICE
+    routes = [e.message for e in events if is_execution_route(e)]
+    assert [(r.routing_in_force, r.config_version, r.paused) for r in routes] == [
+        (ROUTING_DESK, 0, False),
+        (ROUTING_SERVICE, 4, False),
+        (ROUTING_SERVICE, 5, True),
+    ]
+    assert latest.route == routes[-1]
     assert latest.get("17").update_time == 50
