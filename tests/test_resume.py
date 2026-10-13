@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+import threading
 import time
 import traceback
 import typing
@@ -20,6 +22,7 @@ from websockets.frames import Close
 import qte_sdk.connection
 import qte_sdk.reconnect
 import qte_sdk.session
+from qte_sdk import errors
 from qte_sdk.connection import (
     DEFAULT_LIVENESS_TIMEOUT,
     HEARTBEAT_TIMEOUT_CLOSE_CODE,
@@ -137,7 +140,8 @@ def resume_reject(detail: str = "a second resume") -> str:
 
 
 class Scripted:
-    """Answers auth with an ack, then the calendar of `term` (start, end) if given, and
+    """Answers auth with an ack, carrying `log_id` if given, then the calendar of `term`
+    (start, end) if given, and
     sends `before_resume`; then, if `answer` is given,
     receives `resume` and sends `answer`; then sends `after` and holds the connection
     open, unless `drop` is set, when it drops the connection, or `close` (a code and a
@@ -154,7 +158,7 @@ class Scripted:
         script = self.scripts[min(self.connections, len(self.scripts) - 1)]
         self.connections += 1
         self.received.append(json.loads(await ws.recv()))
-        await ws.send(ack())
+        await ws.send(ack(log_id=script.get("log_id")))
         if script.get("term") is not None:
             # The calendar the exchange sends straight after the ack, naming the term.
             start, end = script["term"]
@@ -2578,3 +2582,112 @@ async def test_a_calendar_read_ahead_is_never_replaced_by_an_older_one():
                         break
     assert seen[0] == newer
     assert all(c == newer for c in seen)
+
+
+# The event log a cursor belongs to (session_ack's log_id)
+
+LOG_A = "0123456789abcdef"
+LOG_B = "fedcba9876543210"
+
+
+async def resumes_over(exchange: "Scripted", connections: int) -> list[dict]:
+    """The `resume` messages a ReconnectingSession sends over `connections` connections."""
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                if isinstance(event, ResumeComplete) and exchange.connections >= connections:
+                    break
+    return [e for e in exchange.received if e["type"] == "resume"]
+
+
+def log_changed_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    for thread in threading.enumerate():
+        if thread.name == "qte-sdk pacing warning":
+            thread.join(5)
+    return [r for r in caplog.records if getattr(r, "code", None) == errors.SESSION_LOG_CHANGED]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (LOG_A, LOG_A),  # the same log
+        (LOG_A, None),  # missing on the new ack
+        (None, LOG_B),  # missing on the old
+        (LOG_A, "FEDCBA9876543210"),  # malformed: uppercase
+        (LOG_A, "fedcba987654321"),  # malformed: 15 characters
+        (LOG_A, ""),  # malformed: empty
+    ],
+)
+async def test_a_cursor_is_kept_unless_both_logs_are_known_and_differ(
+    old: str | None, new: str | None, caplog
+):
+    exchange = Scripted(
+        {"log_id": old, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"log_id": new, "term": TERM, "answer": [resume_ack(True, 1)]},
+    )
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        assert await resumes_over(exchange, 2) == [resume(0), resume(1)]
+        assert log_changed_records(caplog) == []
+
+
+async def test_a_cursor_of_another_log_is_reset_and_the_reconnect_takes_a_snapshot(caplog):
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        # The same term by its calendar, but a new event log: its numbering starts again.
+        {
+            "log_id": LOG_B,
+            "term": TERM,
+            "answer": [resume_ack(False, 2, 1), snapshot("AAPL", "BUY", PRICE, 60)],
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        assert await resumes_over(exchange, 2) == [resume(0), resume(0)]
+        records = log_changed_records(caplog)
+    assert len(records) == 1
+    assert records[0].name == "qte_sdk.reconnect"
+    assert records[0].levelno == logging.WARNING
+    assert records[0].fields == {"old_log_id": LOG_A, "new_log_id": LOG_B, "cursor": 1}
+    assert records[0].getMessage().startswith("QTE-SESSION-LOG-CHANGED: ")
+
+
+async def test_a_log_seen_only_on_the_new_ack_is_recorded_for_the_next_one():
+    exchange = Scripted(
+        {"term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"log_id": LOG_A, "term": TERM, "answer": [resume_ack(True, 1)], "drop": True},
+        {"log_id": LOG_B, "term": TERM, "answer": [EMPTY]},
+    )
+    assert await resumes_over(exchange, 3) == [resume(0), resume(1), resume(0)]
+
+
+async def test_a_failed_attempt_in_another_log_still_resets_the_cursor_next_time():
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        # Acknowledged in another log, then dropped before the resume is answered: the
+        # cursor it gave back is still log A's.
+        {"log_id": LOG_B, "term": TERM, "answer": [], "drop": True},
+        {"log_id": LOG_B, "term": TERM, "answer": [EMPTY]},
+    )
+    assert await resumes_over(exchange, 3) == [resume(0), resume(0), resume(0)]
+
+
+async def test_a_term_change_close_forgets_the_log_with_the_cursor():
+    exchange = Scripted(
+        {
+            "log_id": LOG_A,
+            "term": TERM,
+            "answer": [EMPTY],
+            "after": [order_state(1)],
+            "close": (TERM_CHANGE_CLOSE_CODE, "term change"),
+        },
+        {"log_id": LOG_B, "term": NEXT_TERM, "answer": [EMPTY]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                if isinstance(event, ResumeComplete) and exchange.connections >= 2:
+                    break
+            assert rs._reports_log_id == LOG_B
+    resumes = [e for e in exchange.received if e["type"] == "resume"]
+    assert resumes == [resume(0), resume(0)]

@@ -343,6 +343,14 @@ class SessionInfo:
     `session_id` names the session in logs and when you ask for help. It is unique only
     within one run of the exchange: after the exchange restarts, an id can come round again,
     so never use it as a key across restarts or days.
+
+    `log_id` names the exchange's event log, whose numbering every `report_seq` belongs to:
+    16 lowercase hex characters, the same across restarts of one log and different for each
+    new log. It is None when the exchange sent none (a log that holds no record yet, or an
+    exchange that predates it) or sent one that is not 16 lowercase hex characters. Compare
+    it for equality only. A `last_report_seq` you save to pass to a later session's
+    `resume` belongs to the log named here: if that session's `log_id` is known and
+    differs, resume from 0 instead.
     """
 
     session_id: str
@@ -350,6 +358,7 @@ class SessionInfo:
     server_time: int
     contract_version: str
     unscored: bool
+    log_id: str | None = None
 
     @classmethod
     def from_ack(cls, ack: SessionAck) -> "SessionInfo":
@@ -359,7 +368,19 @@ class SessionInfo:
             server_time=ack.server_time,
             contract_version=ack.contract_version,
             unscored=ack.unscored,
+            log_id=_log_id(ack),
         )
+
+
+def _log_id(ack: SessionAck) -> str | None:
+    """`ack`'s `log_id`, or None if it is absent or not exactly 16 lowercase hex
+    characters, which is treated as unknown."""
+    if not ack.HasField("log_id"):
+        return None
+    value = ack.log_id
+    if len(value) != 16 or not all(c in "0123456789abcdef" for c in value):
+        return None
+    return value
 
 
 @dataclass(frozen=True)

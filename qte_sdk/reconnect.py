@@ -32,6 +32,18 @@ number to carry over, the new session first waits for it, for at most `ack_timeo
 else it reads meanwhile for delivery. If the term has changed, or either term is unknown,
 the session asks from 0 instead and gets a snapshot.
 
+Report numbers also belong to one event log, which each `session_ack` names in `log_id`
+(see `SessionInfo.log_id`): the same across restarts of the exchange that keep its log,
+and different for each new log. When a new session's `log_id` and the one the report
+number was counted under are both known and differ, the number is forgotten before
+anything else, as at a term change, and `QTE-SESSION-LOG-CHANGED` is logged at WARNING
+through the `qte_sdk.reconnect` logger: the session then asks from 0 and gets a snapshot,
+or, with `resume=False`, counts the new log's reports from the first it reads. A `log_id`
+that is absent, or is not 16 lowercase hex characters, is unknown and changes nothing: the
+number is kept, and checked against the term as above. The contract's own rule is
+stricter here, asking a client to reset its cursor whenever `log_id` is absent too; this
+session relies on the term check instead in that case.
+
 When one term ends and the next begins, the exchange closes every connection open at that
 moment with close code `qte_sdk.connection.TERM_CHANGE_CLOSE_CODE` (4001) and reason
 `term change`, after every message already queued for it, so no session carries reports
@@ -140,6 +152,7 @@ error this module delivers or raises that would repeat the token has it replaced
 
 import asyncio
 import functools
+import logging
 import random
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -384,6 +397,9 @@ class ReconnectingSession:
         self._chain_halts = _options._ChainHaltWarnings()
         # The term the cursor was counted in, as the calendar names it, or None if unknown.
         self._reports_term: tuple[str, str] | None = None
+        # The event log the cursor was counted in, as session_ack's log_id names it, or
+        # None if unknown.
+        self._reports_log_id: str | None = None
         # Set when the exchange closed the current attempt's connection for a term change,
         # which an attempt checks even when a cancellation hides the error that said so.
         self._term_change_seen = False
@@ -469,8 +485,10 @@ class ReconnectingSession:
         """The `report_seq` up to which every private report has been read with no gap,
         across all sessions so far, or None before the first. The next session resumes
         from it if its calendar names the same term; report numbers start again each term,
-        so in a new term it resumes from 0 instead. It is forgotten, and reads None again,
-        when the exchange closes the connection at a term change."""
+        so in a new term it resumes from 0 instead, and likewise when the new session's
+        `log_id` names another event log. It is forgotten, and reads None again, when the
+        exchange closes the connection at a term change or a new session names another
+        log. It belongs to the log `info.log_id` names, when that is known."""
         return self._reports.cursor
 
     @property
@@ -714,6 +732,7 @@ class ReconnectingSession:
         # Events a failed attempt read ahead are never delivered, so the cursor goes back.
         saved = self._reports.saved()
         saved_term = self._reports_term
+        saved_log_id = self._reports_log_id
         self._term_change_seen = False
         # Answers read from here on, before the ack included, are this connection's.
         self._chain_halts._connecting()
@@ -741,6 +760,9 @@ class ReconnectingSession:
             # even without a resume.
             self._reports.restore(saved)
             session._reports = self._reports
+            # Before the term check: a cursor of another log is forgotten, so it is
+            # neither waited on nor sent in `resume`.
+            self._enter_log(session.info.log_id)
             if not (self._reports.cursor or self._reports.above):
                 # Nothing is counted that another term could make wrong (a cursor of 0
                 # means the same in every term). Whatever the cursor becomes from here on,
@@ -785,6 +807,7 @@ class ReconnectingSession:
             # so the cursor goes back. Whoever handles the cancellation closes the session.
             self._reports.restore(saved)
             self._reports_term = saved_term
+            self._reports_log_id = saved_log_id
             if self._closed_for_term_change(session):
                 # The exchange closed the connection for a term change before the
                 # cancellation, which took the place of the error that said so.
@@ -797,6 +820,7 @@ class ReconnectingSession:
             # Restored before anything else is awaited, so a cancellation cannot skip it.
             self._reports.restore(saved)
             self._reports_term = saved_term
+            self._reports_log_id = saved_log_id
             if term_changed:
                 # What the attempt read is not delivered, and the cursor it was given back
                 # belongs to the old term.
@@ -905,11 +929,39 @@ class ReconnectingSession:
             session.connection._close_code_received() == TERM_CHANGE_CLOSE_CODE
         )
 
+    def _enter_log(self, log_id: str | None) -> None:
+        """Note that the reports read from now on are counted in the event log `log_id`,
+        as the new session's `session_ack` names it (None if it names none, or none that
+        is well formed, which tells nothing).
+
+        report_seq belongs to one log, so when both this log and the one the cursor was
+        counted in are known and differ, the cursor is forgotten, as at a term change, and
+        `QTE-SESSION-LOG-CHANGED` is logged if there was one to forget. A known `log_id` is
+        then recorded; an unknown one changes nothing."""
+        counted_in = self._reports_log_id
+        if log_id is None:
+            return
+        if counted_in is not None and log_id != counted_in:
+            reports = self._reports
+            cursor = reports.cursor
+            if cursor is not None or reports.above:
+                _pacing._warn(
+                    _errors.SESSION_LOG_CHANGED,
+                    target=_log,
+                    old_log_id=counted_in,
+                    new_log_id=log_id,
+                    cursor=cursor if cursor is not None else 0,
+                )
+            self._forget_cursor()
+        self._reports_log_id = log_id
+
     def _forget_cursor(self) -> None:
-        """Forget the report cursor and its term, as at the start: the exchange closed the
-        connection because a term ended, and report numbers start again in the next."""
+        """Forget the report cursor, its term and its log, as at the start: the exchange
+        closed the connection because a term ended, or a new session names another event
+        log, and report numbers start again in either."""
         self._reports.restore((None, frozenset()))
         self._reports_term = None
+        self._reports_log_id = None
         self._chain_halts._new_term()
 
     def _gives_up(self, failure: Exception, failures: int) -> bool:
@@ -928,6 +980,8 @@ class ReconnectingSession:
 
 
 _CLOSED = object()
+
+_log = logging.getLogger(__name__)
 
 # Seconds to spend reading what a connection that a send found closed still holds. The
 # frames it received before closing are already queued, so this is only a bound.
