@@ -1469,6 +1469,175 @@ def test_a_link_another_account_owns_in_a_folder_only_you_can_change_is_not_repo
     assert str(dotenv()) in looked
 
 
+def linked_folder(tmp_path: Path, holder_mode: int, token: str = "") -> tuple[Path, Path, Path]:
+    """A private folder holding a private `.env`, and a folder with `holder_mode` holding
+    `alias`, a link to the private folder. Returns the holder, the private folder and the
+    `.env` as named through the link."""
+    private = tmp_path / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    (private / ".env").write_text(f"QTE_URL={URL}\nQTE_TOKEN={token or synthetic_token()}\n")
+    (private / ".env").chmod(0o600)
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    (holder / "alias").symlink_to(private)
+    os.chmod(holder, holder_mode)
+    return holder, private, holder / "alias" / ".env"
+
+
+@needs_posix
+def test_a_folder_link_in_a_folder_others_can_write_to_warns(tmp_path):
+    holder, private, named = linked_folder(tmp_path, 0o777)
+    found = dotenv_module.open_folders(named)
+    assert found is not None
+    fields = found.fields(0)
+    assert fields is not None
+    assert (
+        f"other users can add or remove files in {holder}, which has no sticky bit, so they "
+        "could replace a link to a folder on the way" in fields["problem"]
+    )
+    assert f"`chmod go-w {shlex.quote(str(holder))}`" in fields["step"]
+    assert str(private) not in fields["problem"]
+
+
+@needs_posix
+def test_a_folder_link_in_a_folder_another_account_owns_warns(tmp_path, monkeypatch):
+    holder, _, named = linked_folder(tmp_path, 0o755)
+    owned_as(monkeypatch, {str(holder): another_account()})
+    found = dotenv_module.open_folders(named)
+    assert found is not None
+    fields = found.fields(0)
+    assert fields is not None
+    assert f"another account owns {holder}, so it could replace" in fields["problem"]
+    assert "Move the .env to a folder you own" in fields["step"]
+
+
+@needs_posix
+def test_a_folder_link_another_account_owns_in_an_open_sticky_folder_warns(tmp_path, monkeypatch):
+    holder, _, named = linked_folder(tmp_path, 0o1777)
+    owned_as(monkeypatch, {str(holder / "alias"): another_account()})
+    found = dotenv_module.open_folders(named)
+    assert found is not None
+    fields = found.fields(0)
+    assert fields is not None
+    assert (
+        f"another account owns {holder / 'alias'}, a link to a folder on the way, and can "
+        "change where it leads" in fields["problem"]
+    )
+
+
+@needs_posix
+def test_a_folder_link_in_a_folder_only_you_can_change_is_not_reported(tmp_path, monkeypatch):
+    holder, _, named = linked_folder(tmp_path, 0o700)
+    looked = owned_as(monkeypatch, {})
+    found = dotenv_module.open_folders(named)
+    assert found is not None
+    assert found.fields(0) is None
+    assert str(holder / "alias") in looked
+
+
+@needs_posix
+def test_a_root_owned_link_to_a_root_owned_folder_is_not_reported(tmp_path, monkeypatch):
+    # As /var, /tmp and /etc are on macOS: links in / that root owns, into /private.
+    holder, private, named = linked_folder(tmp_path, 0o755)
+    os.chmod(private, 0o755)
+    looked = owned_as(monkeypatch, {str(holder): 0, str(holder / "alias"): 0, str(private): 0})
+    found = dotenv_module.open_folders(named)
+    assert found is not None
+    assert found.fields(0) is None
+    assert str(holder / "alias") in looked
+
+
+@needs_posix
+def test_a_dotenv_leading_through_a_folder_link_in_an_open_folder_warns(tmp_path, monkeypatch):
+    token = synthetic_token()
+    holder, _, named = linked_folder(tmp_path, 0o777, token)
+    project(tmp_path, monkeypatch, 0o700)
+    dotenv().symlink_to(named)
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert f"files in {holder}, which has no sticky bit, so they could replace" in message
+    assert_token_absent(token, message)
+
+
+@needs_posix
+def test_a_folder_passed_through_before_dot_dot_is_judged(tmp_path):
+    # .env -> ../shared/pivot/../../private/.env: pivot could be swapped through shared.
+    _, private, _ = linked_folder(tmp_path, 0o700)
+    shared = tmp_path / "shared"
+    (shared / "pivot").mkdir(parents=True)
+    os.chmod(shared, 0o777)
+    project_folder = tmp_path / "project"
+    project_folder.mkdir()
+    os.chmod(project_folder, 0o700)
+    (project_folder / ".env").symlink_to("../shared/pivot/../../private/.env")
+    found = dotenv_module.open_folders(project_folder / ".env")
+    assert found is not None
+    fields = found.fields(0)
+    assert fields is not None
+    assert (
+        f"other users can add or remove files in {shared}, which has no sticky bit, so they "
+        "could replace a folder its path passes through" in fields["problem"]
+    )
+    assert str(private) not in fields["problem"]
+
+
+@needs_posix
+def test_a_folder_another_account_owns_passed_before_dot_dot_in_a_sticky_folder_warns(
+    tmp_path, monkeypatch
+):
+    # .env -> ../sticky/pivot/../../private/.env: pivot's owner may rename it in a sticky folder.
+    linked_folder(tmp_path, 0o700)
+    sticky = tmp_path / "sticky"
+    (sticky / "pivot").mkdir(parents=True)
+    os.chmod(sticky, 0o1777)
+    project_folder = tmp_path / "project"
+    project_folder.mkdir()
+    os.chmod(project_folder, 0o700)
+    (project_folder / ".env").symlink_to("../sticky/pivot/../../private/.env")
+    owned_as(monkeypatch, {str(sticky / "pivot"): another_account()})
+    found = dotenv_module.open_folders(project_folder / ".env")
+    assert found is not None
+    fields = found.fields(0)
+    assert fields is not None
+    assert (
+        f"another account owns {sticky / 'pivot'}, a folder its path passes through, and "
+        "could replace it" in fields["problem"]
+    )
+
+
+@needs_posix
+def test_a_dot_dot_after_a_folder_link_is_judged_above_the_target(tmp_path):
+    # holder/alias/../.env opens unsafe/.env, so unsafe is the folder to judge.
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    os.chmod(holder, 0o700)
+    unsafe = tmp_path / "unsafe"
+    (unsafe / "subdir").mkdir(parents=True)
+    os.chmod(unsafe, 0o777)
+    (holder / "alias").symlink_to(unsafe / "subdir")
+    found = dotenv_module.open_folders(Path(f"{holder}/alias/../.env"))
+    assert found is not None
+    assert found.real == str(unsafe / ".env")
+    fields = found.fields(0)
+    assert fields is not None
+    assert (
+        f"other users can add or remove files in {unsafe}, which has no sticky bit"
+        in (fields["problem"])
+    )
+
+
+@needs_posix
+def test_a_folder_link_loop_is_handled(tmp_path):
+    os.chmod(tmp_path, 0o700)
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    found = dotenv_module.open_folders(tmp_path / "a" / ".env")
+    assert found is not None
+    assert found.fields(0) is None
+
+
 @needs_posix
 def test_a_folder_above_that_others_can_write_to_is_reported(tmp_path, monkeypatch):
     # The reviewer's probe: they could rename me away and make a me of their own.
@@ -1546,7 +1715,8 @@ def test_an_open_folder_the_system_owns_is_reported_with_a_move(tmp_path, monkey
 def normal_places() -> list[Path]:
     import tempfile
 
-    places = [Path(tempfile.gettempdir())]
+    # As named, so /tmp, /etc and the temporary folder lead through /private on macOS.
+    places = [Path(tempfile.gettempdir()), Path("/tmp"), Path("/etc")]
     if POSIX and os.stat(Path.home()).st_uid == os.geteuid():
         places.append(Path.home())
     return places

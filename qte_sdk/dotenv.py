@@ -27,9 +27,9 @@ Four safeguards apply:
   above it is (unless it has the sticky bit and you or the system own it), or another
   account than you or root owns any of them, since whoever can change or replace it can
   point `QTE_URL` at a server of their own and capture the token when you next connect.
-  When the `.env` is a symbolic link, the file it leads to is judged, and each link in
-  the chain that leads to it, the folders that hold them and the folders above those (a
-  link to a folder on the way is not followed).
+  When the `.env` is a symbolic link, or its path leads through a link to a folder, the
+  file it leads to is judged, and each link on the way, the folders that hold them and
+  the folders above those.
   It is a warning, not a refusal: on Linux a umask of 002 with a private group for each
   user makes files group-writable harmlessly. Its code is `QTE-DOTENV-WRITABLE`; it gives
   `chmod go-w` on the paths it names when you own them all, and otherwise says to move
@@ -749,14 +749,17 @@ def open_folders(path: Path) -> OpenFolders | None:
     up to /. Reported are each of them that another account owns (not you, not root),
     whatever its mode, since an owner may change it or anything in it; and each folder
     that its group or others can write to, unless it has the sticky bit (as /tmp has,
-    which lets only a file's owner, or the folder's, remove it). None on Windows. A path
-    that cannot be looked at, or a link that cannot be read, is skipped. A link to a
-    folder on the way is not followed. Takes only the path, so call it before the file
-    is read."""
+    which lets only a file's owner, or the folder's, remove it). Each part of the path is
+    looked at as named, so a link to a folder on the way counts as a link, and its own
+    folder and the folders above it are judged as well as those it leads to. None on
+    Windows. A path that cannot be looked at, or a link that cannot be read, is skipped,
+    and the walk stops after _MAX_LINKS links (the system refuses to open such a path).
+    Takes only the path, so call it before the file is read."""
     if os.name != "posix" or _fileaccess.on_windows():
         return None
     me = os.geteuid()
-    named = os.path.abspath(path)
+    # Not normalised: a .. after a link leads above the link's target, not its own folder.
+    named = os.path.join(os.getcwd(), os.fspath(path))
     real = os.path.realpath(named)
     linked = os.path.islink(named)
     risks: list[tuple[str, str, bool]] = []
@@ -777,31 +780,86 @@ def open_folders(path: Path) -> OpenFolders | None:
             if above not in roles[folder]:
                 roles[folder].append(above)
 
-    current = named
-    for _ in range(_MAX_LINKS):
-        if not os.path.islink(current):
-            break
-        role = "the link" if current == named else "a link it leads through"
-        held(os.path.realpath(os.path.dirname(current)), role)
+    def link_owner(link: str, folder: str, role: str) -> None:
         # A link cannot be changed in place, only removed and made again, so its owner
         # can redirect it only if they can add files to its folder: with the sticky bit,
         # a link's owner may remove it; without, the folder is reported below anyway.
-        status = _owner_and_mode(current, follow=False)
-        holder = _owner_and_mode(os.path.dirname(current))
+        status = _owner_and_mode(link, follow=False)
+        holder = _owner_and_mode(folder)
         if (
             status is not None
             and status[0] not in (me, 0)
             and holder is not None
             and holder[1] & 0o022
         ):
-            what = role if current == named else f"{current}, {role},"
+            what = role if role == "the link" else f"{link}, {role},"
             risks.append(
-                (current, f"another account owns {what} and can change where it leads", False)
+                (link, f"another account owns {what} and can change where it leads", False)
             )
+
+    # Each part of the path is looked at as named, from / down, as the system does when it
+    # opens it: a link, to a folder or to the file, is followed where it is met, after its
+    # own folder (always one with no link in it) and the folders above are noted. Gives up,
+    # keeping what it found, after _MAX_LINKS links or at a part it cannot look at or read.
+    folder = "/"
+    parts = [(part, False) for part in named.split("/")[1:]]
+    if parts:
+        parts[-1] = (parts[-1][0], True)
+    parts.reverse()
+    followed = 0
+    while parts:
+        part, leaf = parts.pop()
+        if part in ("", "."):
+            continue
+        if part == "..":
+            # The folder left behind was passed through, so whoever can replace it, through
+            # the folder that holds it, could redirect the path.
+            parent = os.path.dirname(folder)
+            if parent != folder:
+                held(parent, "a folder its path passes through")
+                # Its owner could rename it, as a link's owner could, if others can write
+                # to the folder that holds it, sticky bit or not.
+                passed = _owner_and_mode(folder)
+                holder = _owner_and_mode(parent)
+                if (
+                    passed is not None
+                    and passed[0] not in (me, 0)
+                    and holder is not None
+                    and holder[1] & 0o022
+                ):
+                    risks.append(
+                        (
+                            folder,
+                            f"another account owns {folder}, a folder its path passes "
+                            "through, and could replace it",
+                            False,
+                        )
+                    )
+            folder = parent
+            continue
+        candidate = os.path.join(folder, part)
+        status = _owner_and_mode(candidate, follow=False)
+        if status is None or not stat.S_ISLNK(status[1]):
+            folder = candidate
+            continue
+        followed += 1
+        if followed > _MAX_LINKS:
+            break
+        if leaf and not parts:
+            role = "the link"
+        elif not parts:
+            role = "a link it leads through"
+        else:
+            role = "a link to a folder on the way"
+        held(folder, role)
+        link_owner(candidate, folder, role)
         try:
-            current = os.path.join(os.path.dirname(current), os.readlink(current))
+            target = os.readlink(candidate)
         except OSError:
             break
+        if target.startswith("/"):
+            folder = "/"
+        parts.extend(reversed([(piece, False) for piece in target.split("/")]))
     it = "the file it links to" if linked else "it"
     status = _owner_and_mode(real)
     real_yours = status is None or status[0] == me
