@@ -17,10 +17,23 @@ escapes and no `$VARIABLE` expansion. An unquoted value ends at whitespace follo
 and may not hold whitespace or quotes. If a name appears more than once, the last line
 wins. Lines for other names are not read, so the rest of the file may use any syntax.
 
-Three safeguards apply:
+Four safeguards apply:
 
 - On POSIX, a `.env` that holds `QTE_TOKEN` and that other users can read is refused, and
   nothing in it is used (`chmod 600 .env` fixes it).
+- On POSIX, a `TokenFileShared` warning, or an `AddressFileShared` one for a file without
+  the token, is issued, once per process for each file, if a `.env` that holds `QTE_TOKEN`
+  or sets `QTE_URL` is writable by its group or by others, or its folder or a folder
+  above it is (unless it has the sticky bit and you or the system own it), or another
+  account than you or root owns any of them, since whoever can change or replace it can
+  point `QTE_URL` at a server of their own and capture the token when you next connect.
+  When the `.env` is a symbolic link, the file it leads to is judged, and each link in
+  the chain that leads to it, the folders that hold them and the folders above those (a
+  link to a folder on the way is not followed).
+  It is a warning, not a refusal: on Linux a umask of 002 with a private group for each
+  user makes files group-writable harmlessly. Its code is `QTE-DOTENV-WRITABLE`; it gives
+  `chmod go-w` on the paths it names when you own them all, and otherwise says to move
+  the `.env` to a folder you own.
 - On Windows, where files have access lists rather than modes, a `TokenFileShared`
   warning is issued, once per process for each file, if the access list of a `.env` that
   holds `QTE_TOKEN` lets a broad group read or change it: Everyone, Authenticated Users,
@@ -63,6 +76,7 @@ import contextvars
 import logging
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -71,6 +85,7 @@ import unicodedata
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from qte_sdk import _fileaccess
 from qte_sdk import errors as _errors
@@ -133,8 +148,9 @@ class FileShared(QteWarning):
     """On Windows, a broad group of users, such as Everyone or Users, may read, change or
     replace a file the SDK reads its setup from, or another account owns it or a folder it
     is in or reached through; or it could not be fully checked, since a link on the way to
-    it could not be followed or an access list could not be seen. Catch this to handle both
-    kinds below."""
+    it could not be followed or an access list could not be seen. On macOS and Linux, other
+    users can change a `.env` that holds the token or sets `QTE_URL`, or replace it (code
+    `QTE-DOTENV-WRITABLE`). Catch this to handle both kinds below."""
 
     code = _errors.TOKEN_SHARED
 
@@ -143,7 +159,8 @@ class TokenFileShared(FileShared):
     """On Windows, a broad group of users may read, change or replace the `.env`, or the
     file named by `QTE_TOKEN_FILE`, that holds the token, or another account owns it or a
     folder it is in (code `QTE-TOKEN-SHARED`), or it could not be fully checked
-    (`QTE-TOKEN-UNCHECKED`)."""
+    (`QTE-TOKEN-UNCHECKED`). On macOS and Linux, other users can change or replace the
+    `.env` that holds the token (`QTE-DOTENV-WRITABLE`)."""
 
     code = _errors.TOKEN_SHARED
 
@@ -153,7 +170,8 @@ class AddressFileShared(FileShared):
     `QTE_URL` but holds no token, or another account owns it or a folder it is in, or it
     could not be fully checked. Whoever changes the address could capture a token kept
     elsewhere. Code `QTE-ADDRESS-SHARED`, or `QTE-ADDRESS-UNCHECKED` when it could only not
-    be fully checked."""
+    be fully checked; on macOS and Linux, `QTE-DOTENV-WRITABLE` when other users can change
+    or replace such a `.env`."""
 
     code = _errors.ADDRESS_SHARED
 
@@ -230,7 +248,9 @@ def read_value(name: str) -> tuple[str | None, str | None]:
     that a broad group may read, change or replace, or a file setting `QTE_URL` that a
     broad group may change or replace, gives a `TokenFileShared` or `AddressFileShared`
     warning and is still used, as does either kind owned by another account, or in a
-    folder another account owns, or that could not be fully checked.
+    folder another account owns, or that could not be fully checked. On POSIX, either kind
+    that other users can change or replace gives the same warnings with the code
+    `QTE-DOTENV-WRITABLE` (see `open_folders`), and is still used.
 
     Never raises for a bad file: a `UnicodeDecodeError` keeps the bytes it rejected, so
     neither it nor an `OSError` may reach the caller's exception as its cause or context.
@@ -242,6 +262,7 @@ def read_value(name: str) -> tuple[str | None, str | None]:
         raise failure
     # Read before the file is, so no frame that holds the token calls the Windows API.
     access = shared_access(path)
+    folders = None
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
         descriptor = os.open(path, flags)
@@ -256,6 +277,8 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             # Checked on the open file, before reading it: a symbolic link is judged by
             # the file it points to, and a FIFO or device is never read.
             mode = os.fstat(file.fileno()).st_mode
+            # Looked at once the file is open, so its folders exist, and before it is read.
+            folders = open_folders(path)
             if not stat.S_ISREG(mode):
                 problem = "is not a regular file"
             else:
@@ -280,14 +303,22 @@ def read_value(name: str) -> tuple[str | None, str | None]:
             "so only you can",
             _errors.TOKEN_SHARED,
         )
+    sets_address = _assigns(text, _URL_NAME)
     warn = access is not None and bool(
-        (holds_token and access)
-        or ((access.changeable or access.incomplete) and _assigns(text, _URL_NAME))
+        (holds_token and access) or ((access.changeable or access.incomplete) and sets_address)
     )
+    writable = None
+    if folders is not None and (holds_token or sets_address):
+        writable = folders.fields(stat.S_IMODE(mode) & 0o022)
     value, problem = _parse(text, name)
     # A path that holds the token is withheld from the warning.
-    withhold = withholding(_parse(text, _TOKEN_NAME)[0] if holds_token else None) if warn else None
+    withhold = None
+    if warn or writable is not None:
+        withhold = withholding(_parse(text, _TOKEN_NAME)[0] if holds_token else None)
     del text  # released before the warning, which runs code that is not the SDK's
+    if writable is not None:
+        assert folders is not None and withhold is not None
+        writable = folders.fields(stat.S_IMODE(mode) & 0o022, withhold)
     if warn:
         assert access is not None
         failure = warn_shared(
@@ -296,6 +327,11 @@ def read_value(name: str) -> tuple[str | None, str | None]:
         if failure is not None:
             # From a frame that no longer holds the token, nor the path, which can hold it.
             del value, path, access
+            raise failure
+    if writable is not None:
+        failure = warn_writable(path, writable, holds_token=holds_token, withhold=withhold)
+        if failure is not None:
+            del value, path, writable, folders, withhold
             raise failure
     if problem is not None:
         return None, problem
@@ -619,6 +655,229 @@ def warn_shared(
         code = shared_code(access, holds_token=holds_token)
         category = TokenFileShared if holds_token else AddressFileShared
         warning = category(message, code=code)
+        try:
+            warnings.warn(warning, stacklevel=_caller_level())
+        except Warning:
+            # Logged without the traceback it was raised with, whose frames hold the path.
+            _log.warning("%s", _detached(warning), extra={"code": code})
+    except Exception:
+        pass
+    except BaseException as error:
+        if key is not None:
+            _shared_warned.discard(key)
+        return _detached(error)
+    return None
+
+
+class OpenFolders(NamedTuple):
+    """What `open_folders` found about a `.env` on macOS or Linux: the file it leads to,
+    whether it is a symbolic link, whether you own that file, and the risks in the chain
+    that leads to it, each as `(path, clause, yours)`: the path to name, the clause that
+    says who could change or replace what through it, and whether you own it, so that
+    `chmod go-w` on it is yours to run."""
+
+    real: str
+    linked: bool
+    real_yours: bool
+    risks: tuple[tuple[str, str, bool], ...]
+
+    def fields(
+        self, file_bits: int, withhold: Callable[[str], bool] | None = None
+    ) -> dict[str, str] | None:
+        """The `problem` and `step` fields of a `QTE-DOTENV-WRITABLE` message, given
+        `file_bits`, the group and other write bits of the file; None if neither they nor
+        a risk let others change or replace it. Looks at no file. The step is a
+        `chmod go-w` command only when you own every path it would name; otherwise it is
+        to move the `.env`. A path `withhold` says yes to (one that holds the token, say),
+        or one with a line break, is put in no command, since quoting it would change the
+        text `withhold` looked at."""
+        if not (file_bits or self.risks):
+            return None
+        problems = []
+        targets = []
+        yours = True
+        if file_bits:
+            who = "its group" if file_bits == 0o020 else "any user of this computer"
+            it = f"{self.real}, the file it links to" if self.linked else "it"
+            problems.append(f"{who} can change {it}")
+            targets.append(self.real)
+            yours = yours and self.real_yours
+        for target, clause, mine in self.risks:
+            problems.append(clause)
+            targets.append(target)
+            yours = yours and mine
+        problem = _join(problems, "; ")
+        if not yours:
+            step = (
+                "Move the .env to a folder you own that only you can change and run chmod 600 "
+                "on it, since chmod go-w cannot fix a path you do not own"
+            )
+            return {"problem": problem, "step": step}
+
+        def unsafe(target: str) -> bool:
+            flat = _errors.one_line(target)
+            return target != flat or (withhold is not None and (withhold(target) or withhold(flat)))
+
+        if any(unsafe(target) for target in targets):
+            command = "chmod go-w on each path named above"
+        else:
+            command = f"`chmod go-w {' '.join(shlex.quote(target) for target in targets)}`"
+        step = (
+            f"Run {command}, or move the file to a folder only you can change and run "
+            "chmod 600 on it"
+        )
+        return {"problem": problem, "step": step}
+
+
+# At most this many links are followed, as the system itself allows, before giving up.
+_MAX_LINKS = 40
+
+
+def _owner_and_mode(path: str, *, follow: bool = True) -> tuple[int, int] | None:
+    """The owner's user id and the mode of `path`, or of the link itself if not `follow`;
+    None if it cannot be looked at."""
+    try:
+        info = os.stat(path) if follow else os.lstat(path)
+    except OSError:
+        return None
+    return info.st_uid, info.st_mode
+
+
+def open_folders(path: Path) -> OpenFolders | None:
+    """On macOS and Linux, what lets others change or replace `path`: a link on the way to
+    the file it leads to, that file, or a folder that holds one of them or is above one,
+    up to /. Reported are each of them that another account owns (not you, not root),
+    whatever its mode, since an owner may change it or anything in it; and each folder
+    that its group or others can write to, unless it has the sticky bit (as /tmp has,
+    which lets only a file's owner, or the folder's, remove it). None on Windows. A path
+    that cannot be looked at, or a link that cannot be read, is skipped. A link to a
+    folder on the way is not followed. Takes only the path, so call it before the file
+    is read."""
+    if os.name != "posix" or _fileaccess.on_windows():
+        return None
+    me = os.geteuid()
+    named = os.path.abspath(path)
+    real = os.path.realpath(named)
+    linked = os.path.islink(named)
+    risks: list[tuple[str, str, bool]] = []
+    roles: dict[str, list[str]] = {}
+
+    def held(folder: str, replaced: str) -> None:
+        # The folder that holds `replaced`, then each folder above it, up to /.
+        roles.setdefault(folder, [])
+        if replaced not in roles[folder]:
+            roles[folder].append(replaced)
+        above = f"a folder on the way to {replaced}"
+        while True:
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                return
+            folder = parent
+            roles.setdefault(folder, [])
+            if above not in roles[folder]:
+                roles[folder].append(above)
+
+    current = named
+    for _ in range(_MAX_LINKS):
+        if not os.path.islink(current):
+            break
+        role = "the link" if current == named else "a link it leads through"
+        held(os.path.realpath(os.path.dirname(current)), role)
+        # A link cannot be changed in place, only removed and made again, so its owner
+        # can redirect it only if they can add files to its folder: with the sticky bit,
+        # a link's owner may remove it; without, the folder is reported below anyway.
+        status = _owner_and_mode(current, follow=False)
+        holder = _owner_and_mode(os.path.dirname(current))
+        if (
+            status is not None
+            and status[0] not in (me, 0)
+            and holder is not None
+            and holder[1] & 0o022
+        ):
+            what = role if current == named else f"{current}, {role},"
+            risks.append(
+                (current, f"another account owns {what} and can change where it leads", False)
+            )
+        try:
+            current = os.path.join(os.path.dirname(current), os.readlink(current))
+        except OSError:
+            break
+    it = "the file it links to" if linked else "it"
+    status = _owner_and_mode(real)
+    real_yours = status is None or status[0] == me
+    if status is not None and status[0] not in (me, 0):
+        which = f"{real}, the file it links to," if linked else "it"
+        risks.append((real, f"another account owns {which} and can change it", False))
+    held(os.path.dirname(real), it)
+    for folder, replaced in roles.items():
+        status = _owner_and_mode(folder)
+        if status is None:
+            continue
+        owner, mode = status
+        what = " or ".join(replaced)
+        if owner not in (me, 0):
+            # Its owner may add or remove any file in it, sticky bit or not.
+            risks.append(
+                (folder, f"another account owns {folder}, so it could replace {what}", False)
+            )
+        elif mode & 0o022 and not mode & stat.S_ISVTX:
+            whose = "" if owner == me else " and the system owns it"
+            risks.append(
+                (
+                    folder,
+                    f"other users can add or remove files in {folder}, which has no sticky "
+                    f"bit{whose}, so they could replace {what}",
+                    owner == me,
+                )
+            )
+    return OpenFolders(real, linked, real_yours, tuple(risks))
+
+
+def writable_message(
+    path: Path,
+    fields: dict[str, str],
+    *,
+    holds_token: bool = True,
+    withhold: Callable[[str], bool] | None = None,
+) -> str:
+    """The `QTE-DOTENV-WRITABLE` message about `path`, from `OpenFolders.fields`, with each
+    field `withhold` says yes to (one that holds the token, say) shown as
+    `errors.WITHHELD`."""
+    every = _writable(path, fields, holds_token)
+    return _errors.render(_errors.DOTENV_WRITABLE, withhold=withhold, **every)
+
+
+def _writable(path: Path, fields: dict[str, str], holds_token: bool) -> dict[str, object]:
+    what = "holds your token" if holds_token else f"sets {_URL_NAME}, the exchange address"
+    return {"path": path, "what": what, **fields}
+
+
+def warn_writable(
+    path: Path,
+    fields: dict[str, str],
+    *,
+    holds_token: bool = True,
+    withhold: Callable[[str], bool] | None = None,
+) -> BaseException | None:
+    """On macOS and Linux, issue a `TokenFileShared` warning, or an `AddressFileShared` one
+    if `path` does not hold the token, with the code `QTE-DOTENV-WRITABLE`: other users can
+    change `path`, or replace it, as `fields` (from `OpenFolders.fields`) say. Once per process
+    for each path, and given and dropped as `warn_shared` gives its warning; `withhold` is
+    as for `writable_message`. The file is still used."""
+    key = None
+    try:
+        if not _afresh.get():
+            key = os.path.abspath(path)
+            if key in _shared_warned:
+                return None
+            _shared_warned.add(key)
+        code = _errors.DOTENV_WRITABLE
+        # Withheld now: the warning keeps its fields and renders them later.
+        shown = _errors.withheld(
+            withhold or (lambda text: False), **_writable(path, fields, holds_token)
+        )
+        category = TokenFileShared if holds_token else AddressFileShared
+        warning = category(code=code, fields=shown)
         try:
             warnings.warn(warning, stacklevel=_caller_level())
         except Warning:

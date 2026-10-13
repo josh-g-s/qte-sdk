@@ -1200,3 +1200,431 @@ def test_check_reports_a_dotenv_git_does_not_ignore(capsys):
     dotenv().write_text(f"QTE_URL={URL}\n")
     run(["check"])
     assert "warning:" in capsys.readouterr().out
+
+
+# On macOS and Linux: a .env other users can change or replace (#171)
+
+WRITABLE = "QTE-DOTENV-WRITABLE"
+
+
+def project(tmp_path: Path, monkeypatch, folder_mode: int) -> Path:
+    """A folder with `folder_mode`, made the working directory."""
+    folder = tmp_path / "project"
+    folder.mkdir()
+    os.chmod(folder, folder_mode)
+    monkeypatch.chdir(folder)
+    return folder
+
+
+def writable_warnings(call: Callable[[], object]) -> list[warnings.WarningMessage]:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        call()
+    return [w for w in caught if getattr(w.message, "code", None) == WRITABLE]
+
+
+@needs_posix
+@pytest.mark.parametrize("file_mode", [0o620, 0o602, 0o622])
+def test_a_dotenv_others_can_write_to_warns_and_is_still_used(tmp_path, monkeypatch, file_mode):
+    project(tmp_path, monkeypatch, 0o700)
+    token = synthetic_token()
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
+    os.chmod(dotenv(), file_mode)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert resolve_token() == token
+    found = [w for w in caught if getattr(w.message, "code", None) == WRITABLE]
+    assert len(found) == 1
+    assert issubclass(found[0].category, dotenv_module.TokenFileShared)
+    message = str(found[0].message)
+    who = "its group" if file_mode == 0o620 else "any user of this computer"
+    assert message.startswith(f"{WRITABLE}: {dotenv()} holds your token, and {who} can change it.")
+    assert f"`chmod go-w {shlex.quote(str(dotenv()))}`" in message
+    assert "sticky" not in message
+    assert_token_absent(token, message)
+
+
+@needs_posix
+def test_an_address_only_dotenv_others_can_write_to_warns(tmp_path, monkeypatch):
+    project(tmp_path, monkeypatch, 0o700)
+    dotenv().write_text(f"QTE_URL={URL}\n")
+    os.chmod(dotenv(), 0o664)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert dotenv_module.read_value("QTE_URL") == (URL, None)
+    found = [w for w in caught if getattr(w.message, "code", None) == WRITABLE]
+    assert len(found) == 1
+    assert issubclass(found[0].category, dotenv_module.AddressFileShared)
+    assert "sets QTE_URL, the exchange address, and its group can change it" in str(
+        found[0].message
+    )
+
+
+@needs_posix
+@pytest.mark.parametrize("folder_mode", [0o770, 0o707, 0o777])
+def test_a_dotenv_in_a_folder_others_can_write_to_warns(tmp_path, monkeypatch, folder_mode):
+    folder = project(tmp_path, monkeypatch, folder_mode)
+    token = synthetic_token()
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
+    dotenv().chmod(0o600)
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert (
+        f"holds your token, and other users can add or remove files in {folder}, which has "
+        "no sticky bit, so they could replace it." in message
+    )
+    assert f"`chmod go-w {shlex.quote(str(folder))}`" in message
+    assert_token_absent(token, message)
+
+
+@needs_posix
+def test_a_writable_dotenv_in_a_writable_folder_names_both(tmp_path, monkeypatch):
+    folder = project(tmp_path, monkeypatch, 0o775)
+    dotenv().write_text(f"QTE_URL={URL}\n")
+    dotenv().chmod(0o664)
+    found = writable_warnings(lambda: dotenv_module.read_value("QTE_URL"))
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert "its group can change it; and other users can add or remove files in" in message
+    assert f"`chmod go-w {shlex.quote(str(dotenv()))} {shlex.quote(str(folder))}`" in message
+
+
+@needs_posix
+@pytest.mark.parametrize("folder_mode", [0o1777, 0o1770])
+def test_a_folder_with_the_sticky_bit_is_not_reported(tmp_path, monkeypatch, folder_mode):
+    project(tmp_path, monkeypatch, folder_mode)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    assert writable_warnings(resolve_token) == []
+
+
+@needs_posix
+def test_a_dotenv_without_the_token_or_the_address_is_not_reported(tmp_path, monkeypatch):
+    project(tmp_path, monkeypatch, 0o777)
+    dotenv().write_text("OTHER=1\n")
+    dotenv().chmod(0o666)
+    assert writable_warnings(lambda: dotenv_module.read_value("QTE_TOKEN")) == []
+    assert writable_warnings(lambda: dotenv_module.read_value("QTE_URL")) == []
+
+
+@needs_posix
+def test_a_private_dotenv_in_a_private_folder_is_not_reported(tmp_path, monkeypatch):
+    project(tmp_path, monkeypatch, 0o755)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    assert writable_warnings(resolve_token) == []
+
+
+@needs_posix
+def test_the_writable_warning_is_given_once_per_process(tmp_path, monkeypatch):
+    project(tmp_path, monkeypatch, 0o770)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    assert len(writable_warnings(resolve_token)) == 1
+    assert writable_warnings(resolve_token) == []
+
+
+@needs_posix
+def test_a_linked_dotenv_is_judged_by_its_file_and_both_folders(tmp_path, monkeypatch):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o770)
+    target = shared / "settings.env"
+    target.write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    target.chmod(0o620)
+    folder = project(tmp_path, monkeypatch, 0o770)
+    dotenv().symlink_to(target)
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    real = os.path.realpath(target)
+    assert f"its group can change {real}, the file it links to;" in message
+    assert f"files in {folder}, which has no sticky bit, so they could replace the link;" in message
+    assert (
+        f"files in {os.path.dirname(real)}, which has no sticky bit, so they could replace "
+        "the file it links to." in message
+    )
+
+
+@needs_posix
+def test_a_link_on_the_way_in_an_open_folder_is_reported(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    target = private / "settings.env"
+    target.write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    target.chmod(0o600)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o777)
+    (shared / "middle").symlink_to(target)
+    project(tmp_path, monkeypatch, 0o700)
+    dotenv().symlink_to(shared / "middle")
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert (
+        f"files in {os.path.realpath(shared)}, which has no sticky bit, so they could replace "
+        "a link it leads through." in message
+    )
+    assert str(private) not in message.replace(str(target), "")
+
+
+def owned_as(monkeypatch, owners: dict[str, int]) -> list[str]:
+    """Look at paths as if `owners` gave their owners' user ids, since only root can chown.
+    Returns the list of paths looked at."""
+    looked: list[str] = []
+    real = getattr(dotenv_module, "_owner_and_mode", None)
+
+    def fake(path, *, follow=True):
+        looked.append(str(path))
+        status = real(path, follow=follow)
+        if status is not None and str(path) in owners:
+            return owners[str(path)], status[1]
+        return status
+
+    # Not raising: against a version without this helper, the tests fail on what they check.
+    monkeypatch.setattr(dotenv_module, "_owner_and_mode", fake, raising=False)
+    return looked
+
+
+def another_account() -> int:
+    return os.geteuid() + 1
+
+
+@needs_posix
+@pytest.mark.parametrize("folder_mode", [0o1777, 0o755], ids=["sticky-1777", "0755"])
+def test_a_folder_another_account_owns_is_reported_whatever_its_mode(
+    tmp_path, monkeypatch, folder_mode
+):
+    folder = project(tmp_path, monkeypatch, folder_mode)
+    token = synthetic_token()
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
+    dotenv().chmod(0o600)
+    # Its owner may add or remove any file in it, and could chmod a sticky folder to 01755.
+    owned_as(monkeypatch, {os.path.realpath(folder): another_account()})
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert f"holds your token, and another account owns {folder}, so it could replace it." in (
+        message
+    )
+    assert "Move the .env to a folder you own that only you can change and run chmod 600" in (
+        message
+    )
+    assert "chmod go-w cannot fix a path you do not own" in message
+    assert "`chmod go-w" not in message
+    assert_token_absent(token, message)
+
+
+@needs_posix
+def test_a_dotenv_another_account_owns_is_reported(tmp_path, monkeypatch):
+    project(tmp_path, monkeypatch, 0o700)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    owned_as(monkeypatch, {os.path.realpath(dotenv()): another_account()})
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert f"{dotenv()} holds your token, and another account owns it and can change it." in (
+        message
+    )
+    assert "Move the .env to a folder you own" in message
+
+
+@needs_posix
+def test_a_link_another_account_owns_in_a_sticky_folder_you_own_is_reported(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    target = private / "settings.env"
+    target.write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    target.chmod(0o600)
+    project(tmp_path, monkeypatch, 0o1777)
+    dotenv().symlink_to(target)
+    owned_as(monkeypatch, {str(dotenv()): another_account()})
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert "another account owns the link and can change where it leads." in message
+    assert "Move the .env to a folder you own" in message
+
+
+@needs_posix
+def test_a_link_another_account_owns_in_a_folder_only_you_can_change_is_not_reported(
+    tmp_path, monkeypatch
+):
+    # Its owner cannot redirect it without adding a file to the folder, which they cannot.
+    private = tmp_path / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    target = private / "settings.env"
+    target.write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    target.chmod(0o600)
+    project(tmp_path, monkeypatch, 0o700)
+    dotenv().symlink_to(target)
+    looked = owned_as(monkeypatch, {str(dotenv()): another_account()})
+    assert writable_warnings(resolve_token) == []
+    assert str(dotenv()) in looked
+
+
+@needs_posix
+def test_a_folder_above_that_others_can_write_to_is_reported(tmp_path, monkeypatch):
+    # The reviewer's probe: they could rename me away and make a me of their own.
+    above = tmp_path / "g"
+    above.mkdir()
+    os.chmod(above, 0o777)
+    me = above / "me"
+    me.mkdir()
+    os.chmod(me, 0o755)
+    monkeypatch.chdir(me)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    g = os.path.realpath(above)
+    assert (
+        f"other users can add or remove files in {g}, which has no sticky bit, so they could "
+        "replace a folder on the way to it." in message
+    )
+    assert f"`chmod go-w {shlex.quote(g)}`" in message
+
+
+@needs_posix
+def test_a_folder_above_another_account_owns_is_reported(tmp_path, monkeypatch):
+    above = tmp_path / "g"
+    above.mkdir()
+    me = above / "me"
+    me.mkdir()
+    monkeypatch.chdir(me)
+    dotenv().write_text(f"QTE_URL={URL}\n")
+    dotenv().chmod(0o600)
+    g = os.path.realpath(above)
+    owned_as(monkeypatch, {g: another_account()})
+    found = writable_warnings(lambda: dotenv_module.read_value("QTE_URL"))
+    assert len(found) == 1
+    assert f"another account owns {g}, so it could replace a folder on the way to it." in str(
+        found[0].message
+    )
+
+
+@needs_posix
+def test_folders_the_system_owns_with_the_sticky_bit_are_not_reported(tmp_path, monkeypatch):
+    # As /tmp and /Users/Shared are: root's, 01777.
+    above = tmp_path / "g"
+    above.mkdir()
+    os.chmod(above, 0o1777)
+    me = above / "me"
+    me.mkdir()
+    os.chmod(me, 0o1777)
+    monkeypatch.chdir(me)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    g, holder = os.path.realpath(above), os.path.realpath(me)
+    looked = owned_as(monkeypatch, {g: 0, holder: 0})
+    assert writable_warnings(resolve_token) == []
+    # Both were looked at, as the system's.
+    assert g in looked and holder in looked
+
+
+@needs_posix
+def test_an_open_folder_the_system_owns_is_reported_with_a_move(tmp_path, monkeypatch):
+    folder = project(tmp_path, monkeypatch, 0o775)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    dotenv().chmod(0o600)
+    owned_as(monkeypatch, {os.path.realpath(folder): 0})
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert f"files in {folder}, which has no sticky bit and the system owns it, so" in message
+    assert "Move the .env to a folder you own" in message
+    assert "`chmod go-w" not in message
+
+
+def normal_places() -> list[Path]:
+    import tempfile
+
+    places = [Path(tempfile.gettempdir())]
+    if POSIX and os.stat(Path.home()).st_uid == os.geteuid():
+        places.append(Path.home())
+    return places
+
+
+@needs_posix
+@pytest.mark.parametrize("where", ["tmp_path", *[str(place) for place in normal_places()]])
+def test_a_dotenv_in_a_normal_place_is_not_reported(tmp_path, monkeypatch, where):
+    # tmp_path, the home folder and the temporary folder (/private/var/folders on macOS).
+    folder = tmp_path if where == "tmp_path" else Path(where)
+    looked = owned_as(monkeypatch, {})
+    found = dotenv_module.open_folders(folder / ".env")
+    assert found is not None
+    assert found.fields(0) is None
+    assert "/" in looked
+
+
+@needs_posix
+def test_no_command_names_a_path_that_holds_the_token(tmp_path, monkeypatch):
+    token = synthetic_token() + "'x"
+    folder = tmp_path / token
+    folder.mkdir()
+    os.chmod(folder, 0o770)
+    monkeypatch.chdir(folder)
+    dotenv().write_text(f'QTE_URL={URL}\nQTE_TOKEN="{token}"\n')
+    dotenv().chmod(0o600)
+    found = writable_warnings(resolve_token)
+    assert len(found) == 1
+    message = str(found[0].message)
+    assert "Run chmod go-w on each path named above, or move the file" in message
+    assert_token_absent(token, message)
+    assert_token_absent(shlex.quote(token), message)
+
+
+@needs_posix
+def test_check_reports_a_dotenv_others_can_write_to(tmp_path, monkeypatch, capsys):
+    project(tmp_path, monkeypatch, 0o770)
+    token = synthetic_token()
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={token}\n")
+    dotenv().chmod(0o600)
+    assert run(["check"]) == 1
+    out = capsys.readouterr().out
+    assert f"warning: {WRITABLE}: {dotenv()} holds your token" in out
+    assert out.count(WRITABLE) == 1
+    assert_token_absent(token, out)
+    assert helper.main(["check", "--json"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert [f["code"] for f in document["findings"]] == [WRITABLE]
+    assert document["findings"][0]["kind"] == "fix"
+    assert "chmod go-w" in document["findings"][0]["next_step"]
+
+
+@needs_posix
+def test_set_reports_a_folder_others_can_write_to(tmp_path, monkeypatch, capsys):
+    folder = project(tmp_path, monkeypatch, 0o770)
+    token = synthetic_token()
+    assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    out, err = capsys.readouterr()
+    assert f"Saved QTE_URL and QTE_TOKEN to {dotenv()}, readable only by you.\n" in out
+    assert (
+        f"Warning: {WRITABLE}: {dotenv()} holds your token, and other users can add or "
+        f"remove files in {folder}, which has no sticky bit" in out
+    )
+    assert_token_absent(token, out + err)
+
+
+@needs_posix
+def test_set_says_nothing_more_in_a_private_folder(tmp_path, monkeypatch, capsys):
+    project(tmp_path, monkeypatch, 0o755)
+    assert run(["set"], ask=answers(URL), ask_secret=answers(synthetic_token())) == 0
+    assert WRITABLE not in capsys.readouterr().out
+
+
+def test_windows_is_unchanged_by_the_writable_check(windows, tmp_path, monkeypatch, capsys):
+    windows(PRIVATE_FILE)
+    project(tmp_path, monkeypatch, 0o777)
+    dotenv().write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    os.chmod(dotenv(), 0o622)
+    assert writable_warnings(resolve_token) == []
+    assert run(["check"]) == 0
+    assert WRITABLE not in capsys.readouterr().out

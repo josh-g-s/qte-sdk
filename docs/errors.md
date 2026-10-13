@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.10
+**Version:** 0.11
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -25,7 +25,7 @@ The last line of a traceback is the class name and then this message. The code i
 
 | Command | 0 | 1 | 2 | Other |
 |---|---|---|---|---|
-| `python -m qte_sdk.token check` | The token and the address are found, the address starts with `ws://` or `wss://`, and nothing needs fixing | Something must be fixed: no token or address (`QTE-TOKEN-*`, `QTE-ADDRESS-*`, `QTE-DOTENV-UNREADABLE`, `QTE-DOTENV-INVALID`), a `.env` git tracks or does not ignore (`QTE-DOTENV-TRACKED`, `QTE-DOTENV-NOT-IGNORED`), or on Windows a file others may read, change or replace (`QTE-TOKEN-SHARED`, `QTE-ADDRESS-SHARED`) | It could not tell: git could not say whether it ignores the `.env` (`QTE-DOTENV-GIT-UNKNOWN`), or Windows would not let it fully check a file (`QTE-TOKEN-UNCHECKED`, `QTE-ADDRESS-UNCHECKED`). Also a usage error | |
+| `python -m qte_sdk.token check` | The token and the address are found, the address starts with `ws://` or `wss://`, and nothing needs fixing | Something must be fixed: no token or address (`QTE-TOKEN-*`, `QTE-ADDRESS-*`, `QTE-DOTENV-UNREADABLE`, `QTE-DOTENV-INVALID`), a `.env` git tracks or does not ignore (`QTE-DOTENV-TRACKED`, `QTE-DOTENV-NOT-IGNORED`), on Windows a file others may read, change or replace (`QTE-TOKEN-SHARED`, `QTE-ADDRESS-SHARED`), or on macOS and Linux a `.env` others can change or replace (`QTE-DOTENV-WRITABLE`) | It could not tell: git could not say whether it ignores the `.env` (`QTE-DOTENV-GIT-UNKNOWN`), or Windows would not let it fully check a file (`QTE-TOKEN-UNCHECKED`, `QTE-ADDRESS-UNCHECKED`). Also a usage error | |
 | `python -m qte_sdk.token set` | Saved | Refused, with `error: <CODE>: ...` on stderr; nothing was changed | Usage error | 130 when stopped with Ctrl+C or end of input |
 | `python -m qte_sdk.update` | The SDK is the latest release | A newer release is out (`QTE-UPDATE-AVAILABLE`) | It cannot tell whether the SDK is current. Also a usage error or a bad `--timeout` | |
 | `python examples/smoke_test.py` | No check failed | A check failed, or the SDK is too old to check itself | No token or no usable address, so it could not connect. Also a usage error | 130 on Ctrl+C; 128 plus the signal's number on SIGTERM or SIGHUP |
@@ -139,6 +139,12 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 - Raised as: `DotenvNotIgnored`; `token check` exits 1. `token set` offers to fix it instead.
 - Cause: The `.env` is in a git working tree and git does not ignore it, so it could be committed with your token.
 - Fix: Add `.env` to `.gitignore`. If you did not create the file, check the exchange address in it before you use it.
+
+### QTE-DOTENV-WRITABLE
+
+- Raised as: on macOS and Linux, the warning `qte_sdk.dotenv.TokenFileShared` (or `AddressFileShared` for a `.env` that sets `QTE_URL` but holds no token), once per process for each file, logged at WARNING instead if a warnings filter makes it an error. `token check` exits 1; `token set` prints it as `Warning:` after saving.
+- Cause: The `.env` holds `QTE_TOKEN` or sets `QTE_URL`, and its group or other users can write to it, or to a folder that holds it or any folder above that, up to `/`, so they could replace it; or another account than you or root owns the file or any of those folders, whatever its mode, since an owner can change the file, or add or remove files in the folder. When the `.env` is a symbolic link, the file it leads to is judged, and each link in the chain of links that leads to it, the folders that hold them and the folders above those (a link to a folder on the way is not followed). A link another account owns is reported when others can write to its folder, sticky bit or not, since its owner could then remove it and make another. A folder with the sticky bit, such as `/tmp` or `/Users/Shared`, is not reported if you or the system own it, since only a file's owner, or the folder's, may remove or rename a file there. Whoever can change the address can point it at a server of their own and capture your token when you next connect. On Linux, a umask of 002 makes new files group-writable; with a private group for each user that is harmless, so this is a warning, not a refusal, and the SDK still uses the file.
+- Fix: When you own every path the message names, it gives a `chmod go-w` command: run it, or move the `.env` to a folder only you can change and run `chmod 600` on it. When another account or the system owns one of them, you cannot chmod it, and the message says to move the `.env` to a folder you own that only you can change and run `chmod 600` on it. Then run `python -m qte_sdk.token check`. A path that holds the token, or has a line break, is left out of the command.
 
 ### QTE-DOTENV-GIT-UNKNOWN
 

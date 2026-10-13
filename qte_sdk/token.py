@@ -622,9 +622,17 @@ def _privacy(path: Path, *, sets_address: bool = True) -> str:
     naming the broad groups that can read, change or replace it, or another owner, or the
     lists it could not see, or that none can; or, if the file's list cannot be read for
     another reason, where to keep the file.
-    `sets_address` says whether the file is a `.env`, which can set the address."""
+    `sets_address` says whether the file is a `.env`, which can set the address. On macOS
+    and Linux, a warning if other users can add or remove files in a `.env`'s folder (the
+    file itself was just made writable only by you)."""
     if not _fileaccess.on_windows():
-        return ", readable only by you."
+        folders = dotenv_module.open_folders(path) if sets_address else None
+        withhold = dotenv_module.withholding()
+        fields = folders.fields(0, withhold) if folders is not None else None
+        if fields is None:
+            return ", readable only by you."
+        message = dotenv_module.writable_message(path, fields, withhold=withhold)
+        return f", readable only by you.\nWarning: {message}"
     access = _fileaccess.broad_access(path)
     if access is None:
         return (
