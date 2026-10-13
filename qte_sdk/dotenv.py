@@ -783,8 +783,17 @@ def open_folders(path: Path) -> OpenFolders | None:
             break
         role = "the link" if current == named else "a link it leads through"
         held(os.path.realpath(os.path.dirname(current)), role)
+        # A link cannot be changed in place, only removed and made again, so its owner
+        # can redirect it only if they can add files to its folder: with the sticky bit,
+        # a link's owner may remove it; without, the folder is reported below anyway.
         status = _owner_and_mode(current, follow=False)
-        if status is not None and status[0] not in (me, 0):
+        holder = _owner_and_mode(os.path.dirname(current))
+        if (
+            status is not None
+            and status[0] not in (me, 0)
+            and holder is not None
+            and holder[1] & 0o022
+        ):
             what = role if current == named else f"{current}, {role},"
             risks.append(
                 (current, f"another account owns {what} and can change where it leads", False)

@@ -1452,6 +1452,24 @@ def test_a_link_another_account_owns_in_a_sticky_folder_you_own_is_reported(tmp_
 
 
 @needs_posix
+def test_a_link_another_account_owns_in_a_folder_only_you_can_change_is_not_reported(
+    tmp_path, monkeypatch
+):
+    # Its owner cannot redirect it without adding a file to the folder, which they cannot.
+    private = tmp_path / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    target = private / "settings.env"
+    target.write_text(f"QTE_URL={URL}\nQTE_TOKEN={synthetic_token()}\n")
+    target.chmod(0o600)
+    project(tmp_path, monkeypatch, 0o700)
+    dotenv().symlink_to(target)
+    looked = owned_as(monkeypatch, {str(dotenv()): another_account()})
+    assert writable_warnings(resolve_token) == []
+    assert str(dotenv()) in looked
+
+
+@needs_posix
 def test_a_folder_above_that_others_can_write_to_is_reported(tmp_path, monkeypatch):
     # The reviewer's probe: they could rename me away and make a me of their own.
     above = tmp_path / "g"
@@ -1529,7 +1547,7 @@ def normal_places() -> list[Path]:
     import tempfile
 
     places = [Path(tempfile.gettempdir())]
-    if os.stat(Path.home()).st_uid == os.geteuid():
+    if POSIX and os.stat(Path.home()).st_uid == os.geteuid():
         places.append(Path.home())
     return places
 
