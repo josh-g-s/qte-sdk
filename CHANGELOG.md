@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.39
+**Version:** 0.40
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- The resting-order view (`qte_sdk.resting.RestingOrders`) now applies only executions of the team's own orders (origin `TEAM`) (#215). An execution with any other origin, including one this SDK does not know yet (such as qte-platform's coming fallback child), can no longer change or remove the entry of an order the team rests at that execution's `order_price`. Cure trades and auto-flattens never could: they are market orders and carry no `order_price`.
 - The option order steps of `tests/test_conformance.py` (c to f) no longer skip when the first listed contract is reducing-only, retained, suspended or halted (#224): they take the first listed contract open to new orders, and skip, naming each contract's reason, only if none is. If another team's sell trades with a step's resting buy, the step is skipped naming the fill (contract, size and price) after market orders flatten the position, rather than failing with "no order_state within 10 s" and leaving the position open; it fails, naming the position, if flattening is not possible.
 - `examples/options_bot.py` follow-ups from review. A Ctrl+C before any order is sent now says "no order was sent" and exits 0, and one while the connection closes keeps the run's printed outcome and exit status; only a second Ctrl+C while an order is being cancelled names the level where it may still rest (status 1). A `DUPLICATE_ORDER_AT_LEVEL` reject now says your team's earlier order still rests at that level and to cancel it yourself, with status 1, instead of "nothing rests". A cancel still waiting out a message-budget reject when `--drain-seconds` ends now names the reject and says to wait a minute and cancel the level yourself (with a `--drain-seconds` above 60 the run waits it out itself before it exits). New tests cover the cancel retry pacing, the SIGINT handler and the room below the asks.
 - `examples/options_bot.py` second follow-ups from review (#226). The budget-reject warning and the module docstring now say that a `--drain-seconds` above 60 lets the run itself wait out the reject before it exits, not that a later run can cancel the order. New tests check that a Ctrl+C after the bot starts but before it sends an order says "no order was sent", names no resting level and exits 0; that a cancel sent again after a message-budget reject clears that reject, so the warning at the end is the plain "not confirmed" one; and that the cancel retry after `MIN_REST_VIOLATION` waits 1, 2 and then 4 grid points.
