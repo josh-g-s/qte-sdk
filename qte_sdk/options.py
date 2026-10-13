@@ -138,7 +138,8 @@ not name its contract, so the session names it from the `new` or `amend` it sent
 for another contract before every send of it was answered, names no chain, and such
 rejects share one minute. Another connection of your team's may read the same reject, so
 use a `request_ref` on one connection only while its order awaits an answer: a session
-cannot tell another connection's order from its own. Each session keeps its own minute
+cannot tell another connection's order from its own, so a `request_ref` reused on another
+connection can name the other order's chain. Each session keeps its own minute
 and record of the orders it sent, and a `ReconnectingSession` one across its connections.
 
 Feed-only residual prints. A `TapePrint` in live `trades` may carry `feed_only`. It is

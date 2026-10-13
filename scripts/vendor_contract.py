@@ -153,9 +153,9 @@ def run(target: Target, platform: Path, check: bool) -> int:
         if existing.name not in expected:
             print(f"refusing to continue: unexpected file {existing}", file=sys.stderr)
             return 1
-    for name in target.allowed:
-        (target.dest / name).write_bytes(git(platform, "show", f"{commit}:{path}/{name}"))
-        print(f"vendored {name}")
+    for file_name in target.allowed:
+        (target.dest / file_name).write_bytes(git(platform, "show", f"{commit}:{path}/{file_name}"))
+        print(f"vendored {file_name}")
     if misapproved:
         print(
             f"{name}: APPROVAL DROPPED: {approved!r} approved {approved_for}, not {commit};"

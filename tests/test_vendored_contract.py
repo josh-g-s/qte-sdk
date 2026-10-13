@@ -217,7 +217,9 @@ def test_vendoring_another_commit_drops_the_approval_and_check_fails(contract_re
     assert f"the approval is for {first}, not the pinned {second}" in capsys.readouterr().err
     # ...and vendoring drops it, loudly, so the pin stands unapproved until it is recorded.
     assert vendor.run(target, upstream, check=False) == 0
-    assert "APPROVAL DROPPED" in capsys.readouterr().err
+    (dropped,) = [x for x in capsys.readouterr().err.splitlines() if "APPROVAL DROPPED" in x]
+    # Named by its manifest, not by the last file vendored.
+    assert dropped.startswith(f"{target.manifest.relative_to(vendor.ROOT)}: APPROVAL DROPPED")
     written = tomllib.loads(target.manifest.read_text())
     assert written["commit"] == second
     assert "approved" not in written and "approved_commit" not in written
