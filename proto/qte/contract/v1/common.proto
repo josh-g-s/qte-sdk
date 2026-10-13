@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.15
+// **Version:** 1.18
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -222,7 +222,10 @@ enum TicketStatus {
   // an increasing ticket, or a cure ticket replacing a reducing one
   // (SPEC 23.3).
   TICKET_CANCELLED_BY_ENGINE = 6;
-  // 7-15 reserved for growth.
+  // The engine cancelled the remainder of an ordinary ticket at the open of
+  // its instrument's split ex-date; committed fills stand (SPEC 12.2).
+  TICKET_SPLIT_CANCELLED = 7;
+  // 8-15 reserved for growth.
 }
 
 // Which inbound ticket message a `ticket_accepted` or `ticket_reject`
@@ -380,7 +383,12 @@ message ReasonCodes {
     // A `new` or `amend` released while its option contract is suspended
     // (SPEC 18.2); a `cancel` still applies.
     CONTRACT_SUSPENDED = 1304;
-    // 1305-1399 reserved for band 1300 growth.
+    // A `new` or `amend` released while a Director's halt of its option
+    // contract's chain is in force, before an underlying's split ex-date in
+    // the Winter term; a `cancel` still applies. Tested ahead of
+    // CONTRACT_SUSPENDED. Proposed: the number is provisional until merge.
+    CONTRACT_HALTED = 1305;
+    // 1306-1399 reserved for band 1300 growth.
 
     // 1400: Order handling
     MIN_REST_VIOLATION = 1400;
@@ -459,17 +467,21 @@ message ReasonCodes {
     // fill (SPEC 18.1, SPEC 18.3, SPEC 18.6).
     CONTRACT_REDUCING_RECHECK_FAILED = 1816;
     // An Execution desk's child cancelled because its parent ticket stopped
-    // by any path other than filling: the pod cancelled it, or the official
-    // mark moved beyond its limit (SPEC 24.1, SPEC 23.2). A term's final close
-    // expiring the ticket cancels none further, since the close has cancelled
-    // the day's children SESSION_CLOSE. The engine's own cancellation of a
-    // ticket (a breach cancelling an increasing ticket, a cure ticket
-    // replacing a reducing one) cancels no child by any code in the engine as
-    // built, since none rests then; the Directors' fallback handover (SPEC
-    // 23.2), which cancels all outstanding children, uses this code too,
-    // though the parent does not stop: the engine goes on executing its
-    // remaining shares.
+    // by any path other than filling: the pod cancelled it, the official
+    // mark moved beyond its limit (SPEC 24.1, SPEC 23.2), or a cure ticket
+    // replaced it, the children cancelled at the cure's acceptance (SPEC
+    // 23.3). A term's final close expiring the ticket cancels none further,
+    // since the close has cancelled the day's children SESSION_CLOSE, nor
+    // does a breach cancelling an increasing ticket, which follows the
+    // close. The Directors' fallback handover (SPEC 23.2), which cancels all
+    // outstanding children, uses this code too, though the parent does not
+    // stop: the engine goes on executing its remaining shares.
     PARENT_STOPPED = 1817;
-    // 1818-1899 reserved for band 1800 growth.
+    // A resting option order cancelled because a Director halted its
+    // contract's chain: every resting order in the chain, by acceptance
+    // sequence, at the halt's start. Nothing is restored when the halt ends.
+    // Proposed: the number is provisional until merge.
+    CHAIN_HALTED = 1818;
+    // 1819-1899 reserved for band 1800 growth.
   }
 }

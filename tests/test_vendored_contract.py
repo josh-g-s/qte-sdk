@@ -2,6 +2,7 @@ import dataclasses
 import hashlib
 import importlib.util
 import re
+import shutil
 import subprocess
 import tomllib
 from pathlib import Path
@@ -111,7 +112,59 @@ def test_write_manifest_reproduces_the_committed_manifest_with_lf(target, tmp_pa
     committed = target.manifest.read_bytes()
     values = tomllib.loads(committed.decode())
     out = dataclasses.replace(target, manifest=tmp_path / "upstream.toml")
-    vendor.write_manifest(out, values["repo"], values["commit"], values["path"], values["blobs"])
+    vendor.write_manifest(
+        out,
+        values["repo"],
+        values["commit"],
+        values["path"],
+        values["blobs"],
+        values.get("approved"),
+    )
     written = out.manifest.read_bytes()
     assert b"\r" not in written
     assert written == committed
+
+
+def test_the_contract_pin_records_its_approval_and_a_rewrite_keeps_it(tmp_path):
+    # Who approved the pin is recorded beside it, and re-running the vendor script, which
+    # rewrites the manifest, must not drop it.
+    assert MANIFEST["approved"].startswith("Head, ")
+    target = dataclasses.replace(vendor.TARGETS[0], manifest=tmp_path / "upstream.toml")
+    vendor.write_manifest(target, "repo", "abc", "path", {"a.proto": "1"}, "Head, 1 Jan 2026")
+    assert tomllib.loads(target.manifest.read_text())["approved"] == "Head, 1 Jan 2026"
+    vendor.write_manifest(target, "repo", "abc", "path", {"a.proto": "1"})
+    assert "approved" not in tomllib.loads(target.manifest.read_text())
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not on the PATH")
+def test_vendoring_keeps_the_approved_line_of_the_manifest(tmp_path, monkeypatch):
+    # run() itself, against a contract repository made here, must carry `approved` over.
+    upstream = tmp_path / "upstream"
+    (upstream / "protos").mkdir(parents=True)
+    (upstream / "protos" / "a.proto").write_text('syntax = "proto3";\n')
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(upstream), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-q", "-m", "contract")
+    commit = git("rev-parse", "HEAD")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    manifest = tmp_path / "upstream.toml"
+    manifest.write_text(
+        f'repo = "r"\ncommit = "{commit}"\napproved = "Head, 12 Oct 2026"\npath = "protos"\n'
+    )
+    target = vendor.Target(manifest=manifest, dest=dest, allowed=("a.proto",), what="a test")
+    monkeypatch.setattr(vendor, "ROOT", tmp_path)  # run() names the manifest from it
+    assert vendor.run(target, upstream, check=False) == 0
+    written = tomllib.loads(manifest.read_text())
+    assert written["approved"] == "Head, 12 Oct 2026"
+    assert written["blobs"] == {"a.proto": git("rev-parse", "HEAD:protos/a.proto")}
+    assert (dest / "a.proto").read_text() == 'syntax = "proto3";\n'

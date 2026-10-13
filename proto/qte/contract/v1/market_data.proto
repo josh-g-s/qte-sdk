@@ -1,6 +1,6 @@
 // Outbound market data.
 //
-// **Version:** 1.13
+// **Version:** 1.14
 //
 // Message types on the envelope `type` field: `book`, `trades`, `mark`,
 // `session_state`, `official_close`, `option_chain`, `option_greeks`. One
@@ -129,6 +129,14 @@ enum OptionTradingState {
   // has never had valid Greeks (SPEC 18.2, SPEC 18.3). Over
   // OPTION_REDUCING_ONLY whenever both apply.
   OPTION_SUSPENDED = 3;
+  // A Director has halted the contract's whole chain, the options on one
+  // underlying, before the underlying's split ex-date in the Winter term: no
+  // wall and no matching, new orders are refused (CONTRACT_HALTED) and a
+  // cancel is accepted; the orders resting when the halt started were
+  // cancelled (CHAIN_HALTED). The mark and Greeks still publish from the
+  // contract's own quote. Lasts until the Director ends the halt. Over every
+  // other state.
+  OPTION_HALTED = 4;
 }
 
 // The adjusted book of one instrument at the end of one 100 ms interval: the

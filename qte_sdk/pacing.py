@@ -887,8 +887,15 @@ def _budget_rejected(event: Event, anchor: tuple[float, int] | None) -> None:
 _SHORT_FIELDS = ("kind", "reason")
 
 
-def _warn(code: str, *, short_what: str | None = None, **fields: Any) -> None:
-    """Log `code`'s message at WARNING through this module's logger, with `code`, its next
+def _warn(
+    code: str,
+    *,
+    short_what: str | None = None,
+    target: logging.Logger | None = None,
+    **fields: Any,
+) -> None:
+    """Log `code`'s message at WARNING through `target`, by default this module's logger
+    (`qte_sdk.options` passes its own), with `code`, its next
     step and `fields` on the record, for a JSON formatter (see `qte_sdk.logs`). Any field
     that holds the token is withheld. Whether the logger is enabled is asked in the
     warning's thread too: asking can wait for logging's lock.
@@ -905,13 +912,16 @@ def _warn(code: str, *, short_what: str | None = None, **fields: Any) -> None:
     withhold = withholding()
     step = _errors.next_step(code, withhold=withhold, **fields)
     what = short_what or _errors.what(code, withhold=withhold, **fields)
+    # The record's own fields too, not only the message: a handler may show them as given.
+    shown = _errors.withheld(withhold, **fields)
     _emit(
         _errors.render(code, withhold=withhold, **fields),
         code,
         next_step=step,
-        fields=fields,
+        fields=shown,
         short=f"{code}: {what}. {step}.",
-        short_fields={name: fields[name] for name in _SHORT_FIELDS if name in fields},
+        short_fields={name: shown[name] for name in _SHORT_FIELDS if name in shown},
+        target=target,
     )
 
 
@@ -923,6 +933,7 @@ def _emit(
     fields: dict[str, Any] | None = None,
     short: str | None = None,
     short_fields: dict[str, Any] | None = None,
+    target: logging.Logger | None = None,
 ) -> None:
     """Write the warning from a thread of its own, never the event loop's: a write to a
     full stderr pipe would stop the loop, and with it market data and orders. It is
@@ -931,7 +942,7 @@ def _emit(
     to write whole."""
     threading.Thread(
         target=_write,
-        args=(message, code, next_step, fields, short, short_fields),
+        args=(message, code, next_step, fields, short, short_fields, target),
         name="qte-sdk pacing warning",
         daemon=True,
     ).start()
@@ -944,13 +955,14 @@ def _write(
     fields: dict[str, Any] | None,
     short: str | None = None,
     short_fields: dict[str, Any] | None = None,
+    target: logging.Logger | None = None,
 ) -> None:
     try:
         _update._log_without_waiting(
             logging.WARNING,
             message,
             code,
-            target=_log,
+            target=target or _log,
             next_step=next_step,
             fields=fields,
             short=short,
