@@ -176,7 +176,12 @@ class FakeExchange:
         instruments: dict[str, Any] | None = None,
         newer: dict[str, Any] | None = None,
         tickets: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
     ) -> None:
+        # With `options`, the first subscribe is answered as for option contracts: its
+        # "chain" as `option_chain`, then each of its "greeks" as `option_greeks`, then on
+        # each tick the session state and each of its "books", in place of the TEST book.
+        self.options = options
         # With `instruments`, an `instruments` message follows the calendar, as the exchange
         # sends it on every authentication.
         self.instruments = instruments
@@ -346,7 +351,8 @@ class FakeExchange:
                         # A reject of something the exchange could not read: no request_ref.
                         stray = {"reason_code": "MALFORMED_MESSAGE", "receipt_time": "1"}
                         await self.send(ws, "reject", stray)
-                    ticker = asyncio.create_task(self.publish(ws))
+                    publish = self.publish if self.options is None else self.publish_options
+                    ticker = asyncio.create_task(publish(ws))
                 else:
                     await self.on_order(ws, message["type"], message["payload"])
         except ConnectionClosed:
@@ -384,6 +390,20 @@ class FakeExchange:
                 await self.send(ws, "book", book)
                 self.books_sent += 1
             published += 1
+            await asyncio.sleep(0.05)
+
+    async def publish_options(self, ws: ServerConnection) -> None:
+        assert self.options is not None
+        await self.send(ws, "option_chain", self.options["chain"])
+        for greeks in self.options["greeks"]:
+            await self.send(ws, "option_greeks", greeks)
+        state = {"state": "OPEN", "session_date": "2026-10-26", "grid_time": "1"}
+        state.update(self.options.get("state", {}))
+        while True:
+            await self.send(ws, "session_state", state)
+            for book in self.options["books"]:
+                await self.send(ws, "book", book)
+                self.books_sent += 1
             await asyncio.sleep(0.05)
 
     async def refuse_unknown(self, ws: ServerConnection, instruments: list[str]) -> list[str]:
@@ -1474,6 +1494,235 @@ async def test_take_liquidity_prints_a_reject_and_exits_cleanly():
     assert code == 0, out + err
     assert "REJECTED: NO_WALL_ON_SIDE" in out
     assert exchange.types().count("new") == 1
+
+
+# The options example's exchange: SPY's chain for 26 October 2026, with a reducing-only
+# expiry, the nearest expiry open to new positions (20 November) and a later one.
+OPTION_TICK = 50_000
+NOV = [f"SPY261120{right}00{strike}000" for strike in (660, 665, 670) for right in "CP"]
+REDUCING = "SPY261113C00665000"
+DEC = "SPY261218C00700000"
+
+
+def option_book(instrument: str, state: str = "OPTION_TRADING") -> dict[str, Any]:
+    return {
+        "instrument": instrument,
+        "grid_time": "1",
+        "bid_levels": [{"price": "4850000", "size": "10"}],
+        "ask_levels": [{"price": "5300000", "size": "10"}],
+        "condition": "LIVE",
+        "trading_state": state,
+    }
+
+
+def option_greeks(instrument: str, forward: int, status: str, grid_time: int) -> dict[str, Any]:
+    return {
+        "instrument": instrument,
+        "grid_time": str(grid_time),
+        "status": status,
+        "calculated_at": str(grid_time),
+        "forward": str(forward),
+        "implied_vol": "18000000",
+        "delta": "500000000000",
+        "gamma": "20000000000",
+        "vega": "741900",
+        "theta": "-310000",
+    }
+
+
+def options_market(suspended: str = NOV[2]) -> dict[str, Any]:
+    """The chain, Greeks and books. The latest valid forward is 666, so the strike nearest
+    it is 665: its call (`suspended`) is passed over and its put is chosen. A later
+    UNAVAILABLE forward of 671 would pick 670, and the December forward 700 another expiry,
+    if either were wrongly relied on."""
+    roles = ["OPTION_ROLE_ACTIVE", "OPTION_ROLE_ACTIVE", "OPTION_ROLE_OBLIGATED"] * 2
+    chain = {
+        "session_date": "2026-10-26",
+        "expiries": [
+            {
+                "underlying": "SPY",
+                "expiry": "2026-11-13",
+                "reducing_only": True,
+                "contracts": [{"instrument": REDUCING, "role": "OPTION_ROLE_RETAINED"}],
+            },
+            {
+                "underlying": "SPY",
+                "expiry": "2026-11-20",
+                "contracts": [
+                    {"instrument": c, "role": r} for c, r in zip(NOV, roles, strict=True)
+                ],
+            },
+            {
+                "underlying": "SPY",
+                "expiry": "2026-12-18",
+                "contracts": [{"instrument": DEC, "role": "OPTION_ROLE_ACTIVE"}],
+            },
+        ],
+    }
+    greeks = [
+        option_greeks(NOV[0], 666_000_000, "OPTION_GREEKS_VALID", 1000),
+        option_greeks(NOV[4], 671_000_000, "OPTION_GREEKS_UNAVAILABLE", 2000),
+        option_greeks(DEC, 700_000_000, "OPTION_GREEKS_VALID", 3000),
+        {
+            **option_greeks(NOV[3], 666_000_000, "OPTION_GREEKS_VALID", 1000),
+            "delta": "-480000000000",
+        },
+    ]
+    books = [
+        option_book(c, "OPTION_SUSPENDED" if c == suspended else "OPTION_TRADING")
+        for c in [REDUCING, *NOV, DEC]
+    ]
+    return {"chain": chain, "greeks": greeks, "books": books}
+
+
+def options_table() -> dict[str, Any]:
+    contracts = sorted([REDUCING, *NOV, DEC])
+    entry = {"kind": "OPTION", "tick_size": str(OPTION_TICK), "lot_size": "1"}
+    return {
+        "instruments": [
+            {"instrument": c, **entry, "status": "INSTRUMENT_TRADING", "tradable": True}
+            for c in contracts
+        ],
+        "option_underlyings": [
+            {"underlying": "SPY", "strike_increment": "5000000", "contracts": contracts},
+            {"underlying": "QQQ", "strike_increment": "5000000"},
+        ],
+    }
+
+
+def options_exchange(**kwargs: Any) -> FakeExchange:
+    return FakeExchange(instruments=options_table(), options=options_market(), **kwargs)
+
+
+async def run_options_bot(exchange: FakeExchange, *args: str) -> tuple[int, str, str]:
+    async with serve_local(exchange) as url:
+        return await run_example(
+            "options_bot.py", url, synthetic_token(), "--strat-id", "opt-test", *args
+        )
+
+
+def payloads(exchange: FakeExchange, type_: str) -> list[dict[str, Any]]:
+    return [m["payload"] for m in exchange.received if m["type"] == type_]
+
+
+async def test_options_bot_rests_one_order_on_the_chosen_contract_and_cancels_it():
+    exchange = options_exchange()
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 0, out + err
+    [sub] = payloads(exchange, "subscribe")
+    assert sorted(sub["instruments"]) == sorted([REDUCING, *NOV, DEC])
+    # The nearest expiry open to new positions, the strike nearest the latest valid
+    # forward, its suspended call passed over: the put, one tick above the wall's bid.
+    [new] = payloads(exchange, "new")
+    assert new["instrument"] == "SPY261120P00665000"
+    assert (new["side"], new["order_type"], new["size"]) == ("BUY", "LIMIT", "1")
+    assert int(new["price"]) == 4_850_000 + OPTION_TICK
+    [cancel] = payloads(exchange, "cancel")
+    assert (cancel["instrument"], cancel["side"]) == ("SPY261120P00665000", "BUY")
+    assert cancel["price"] == new["price"]
+    assert exchange.resting == {}
+    assert "passing over SPY261120C00665000: its trading state is OPTION_SUSPENDED" in out
+    assert "nearest the forward 666.000000 from the Greeks of SPY261120C00660000" in out
+    assert "its Greeks: delta -0.480000000000, implied vol 18.000000 points" in out
+    assert "nothing of the order rests" in out
+
+
+async def test_options_bot_prints_a_reject_by_name_and_stops_without_a_cancel():
+    exchange = options_exchange(reject_new="CONTRACT_SUSPENDED")
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 0, out + err
+    assert "REJECTED: CONTRACT_SUSPENDED" in out
+    assert exchange.types().count("new") == 1
+    assert exchange.types().count("cancel") == 0
+    assert exchange.resting == {}
+
+
+async def test_options_bot_sends_its_cancel_again_after_a_min_rest_reject():
+    exchange = options_exchange(cancel_rejects=["MIN_REST_VIOLATION"])
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 0, out + err
+    assert exchange.types().count("new") == 1
+    assert exchange.types().count("cancel") == 2
+    assert exchange.resting == {}
+
+
+async def test_options_bot_names_the_level_when_it_cannot_confirm_the_cancel():
+    # The cancel is accepted but its order_cancelled never comes.
+    exchange = options_exchange(confirm_cancels=asyncio.Event())
+    code, out, err = await run_options_bot(exchange, "--seconds", "1", "--drain-seconds", "0.5")
+    assert code == 1, out + err
+    assert "WARNING: the cancel was not confirmed" in out
+    assert "may still rest at SPY261120P00665000 BUY @ 4.900000" in out
+    assert exchange.types().count("cancel") == 1
+
+
+async def test_options_bot_sends_nothing_when_every_contract_near_the_forward_is_suspended():
+    market = options_market()
+    for book in market["books"]:
+        book["trading_state"] = "OPTION_SUSPENDED"
+    exchange = FakeExchange(instruments=options_table(), options=market)
+    code, out, err = await run_options_bot(exchange, "--seconds", "1")
+    assert code == 0, out + err
+    assert exchange.types().count("new") == 0
+    assert "no contract could take the order" in out
+
+
+async def test_options_bot_sends_no_order_outside_a_session():
+    # Everything it needs but an open market.
+    market = {**options_market(), "state": {"state": "CLOSED"}}
+    exchange = FakeExchange(instruments=options_table(), options=market)
+    code, out, err = await run_options_bot(exchange, "--seconds", "1")
+    assert code == 0, out + err
+    assert exchange.types() == ["auth", "subscribe"]
+    assert "no contract could take the order" in out
+
+
+async def test_options_bot_follows_its_order_when_an_amend_moves_it():
+    exchange = options_exchange(move_resting_to=(4_950_000,))
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 0, out + err
+    # Its first cancel, sent once it rested, finds the level empty; the next follows it.
+    assert [c["price"] for c in payloads(exchange, "cancel")] == ["4900000", "4950000"]
+    assert exchange.resting == {}
+    assert "moved by an amend to 4.950000" in out
+
+
+async def test_options_bot_cancels_again_when_its_cancel_takes_another_order():
+    # The order moves away, another order of the strategy takes its first level, and the
+    # first cancel takes that one: the example cancels again where its order rests.
+    exchange = options_exchange(move_resting_to=(4_950_000,), refill_level=True)
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 0, out + err
+    assert [c["price"] for c in payloads(exchange, "cancel")] == ["4900000", "4950000"]
+    assert exchange.resting == {}
+
+
+async def test_options_bot_warns_and_fails_when_its_orders_reports_were_missed():
+    # The move is a message the example never receives, so its cancel finds the old level
+    # empty while the order rests elsewhere.
+    exchange = options_exchange(move_resting_to=(4_950_000,), hide_moves=True)
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 1, out + err
+    assert "WARNING: messages from the exchange were missed" in out
+    assert "nothing of the order rests" not in out
+
+
+async def test_options_bot_takes_no_earlier_orders_fill_at_its_level_as_its_own():
+    # An earlier order of the same strategy at the level fills during this one's delay.
+    exchange = options_exchange(teammate_fill_first="opt-test")
+    code, out, err = await run_options_bot(exchange, "--seconds", "10")
+    assert code == 0, out + err
+    assert "FILL" not in out
+    assert exchange.types().count("cancel") == 1
+    assert exchange.resting == {}
+
+
+async def test_options_bot_stops_when_its_underlying_has_no_contract_listed():
+    exchange = FakeExchange(instruments=options_table(), options=options_market())
+    code, out, err = await run_options_bot(exchange, "--underlying", "QQQ", "--seconds", "5")
+    assert code == 0, out + err
+    assert "no option contract is listed on QQQ" in out
+    assert exchange.types() == ["auth"]
 
 
 @pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
