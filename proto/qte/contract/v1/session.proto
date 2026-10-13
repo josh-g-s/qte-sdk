@@ -1,6 +1,6 @@
 // Session and subscription messages.
 //
-// **Version:** 1.11
+// **Version:** 1.12
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `instruments`, `session_reject`, `heartbeat`, `resume`,
@@ -248,8 +248,10 @@ message Heartbeat {
 }
 
 // Outbound, to a Fundamentals pod's session only. How the exchange executes
-// the pod's tickets (SPEC 23.2; epic #2233): sent once after session_ack, and
-// again each time the Directors log an automatic execution control. Routing
+// the pod's tickets (SPEC 23.2, 23.6): sent once on connect, after
+// session_ack and the instrument messages and before the ticket_state
+// messages, and again each time the Directors log an automatic execution
+// control. Routing
 // changes only at a session open, so a ticket sent while routing_in_force is
 // ROUTING_SERVICE is worked by the service, with no desk, and one sent while
 // it is ROUTING_DESK goes to the pod's desk.

@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.21
+// **Version:** 1.22
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -391,11 +391,11 @@ message TicketAccepted {
   optional int64 planned_completion_time = 7; // timestamp
   // Present iff request_kind is TICKET_REQUEST_SUBMIT: the algorithm the
   // ticket was accepted with, TWAP on a desk-routed or cure ticket (SPEC
-  // 23.2; epic #2233).
+  // 23.2).
   optional TicketAlgorithm algorithm = 8;
   // Present iff request_kind is TICKET_REQUEST_SUBMIT: who executes the
   // ticket, DESK or SERVICE, by the automatic execution routing in force at
-  // acceptance (SPEC 23.2; epic #2233).
+  // acceptance (SPEC 23.2).
   optional TicketExecutor executor = 9;
 }
 
@@ -479,11 +479,11 @@ message TicketState {
   // price of the desk's fills, rounded as average_fill_price is. SPEC 24.4
   optional int64 desk_average_fill_price = 30; // int64-micro
   // The algorithm the ticket was accepted with: TWAP on a desk-routed or cure
-  // ticket (SPEC 23.2; epic #2233).
+  // ticket (SPEC 23.2).
   TicketAlgorithm algorithm = 31;
   // What the automatic execution service is doing with the ticket. Set on a
-  // SERVICE ticket only; TICKET_ACTIVITY_UNSPECIFIED on any other (SPEC 23.2;
-  // epic #2233).
+  // SERVICE ticket only; TICKET_ACTIVITY_UNSPECIFIED on any other (SPEC
+  // 23.2).
   TicketActivity activity = 32;
   // SERVICE ticket only: the filled shares were more than one nominal slice
   // behind the schedule's due shares at the service's last assessment.
@@ -501,6 +501,6 @@ message TicketState {
   // The exact sum of quantity times price over the ticket's fills, fees
   // excluded: the notional filled_shares were bought or sold for, so the
   // exact average price is filled_notional / filled_shares. 0 before any
-  // fill. Set on every ticket (SPEC 23.2; epic #2233).
+  // fill. Set on every ticket (SPEC 23.2).
   int64 filled_notional = 37; // int64-micro
 }

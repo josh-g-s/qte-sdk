@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.21
+// **Version:** 1.22
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -56,7 +56,7 @@ enum Origin {
   // to the desk, another team or a Director session.
   FALLBACK = 5;
   // A child of a Fundamentals ticket the automatic execution service works
-  // (SPEC 23.2; epic #2233). Only its executions are sent, to the ticket's pod
+  // (SPEC 23.2). Only its executions are sent, to the ticket's pod
   // only, each naming the ticket in parent_ticket_id; never to a desk, another
   // team or a Director session. Named AUTO_EXECUTION, not SERVICE: enum
   // values share the package's scope, and TicketExecutor has SERVICE.
@@ -254,13 +254,13 @@ enum TicketExecutor {
   // shares, and the desk's further fills are prohibited (SPEC 23.2).
   ENGINE = 2;
   // The exchange's automatic execution service works the ticket, with no desk
-  // (SPEC 23.2; epic #2233). Set at acceptance, by the routing in force.
+  // (SPEC 23.2). Set at acceptance, by the routing in force.
   SERVICE = 3;
 }
 
-// How the exchange executes a Fundamentals pod's ticket (SPEC 23.2; epic
-// #2233): by its desk, or by the automatic execution service, as the
-// Directors' logged automatic execution control sets it. `execution_route`.
+// How the exchange executes a Fundamentals pod's ticket (SPEC 23.2, 23.6):
+// by its desk, or by the automatic execution service, as the Directors'
+// logged automatic execution control sets it. `execution_route`.
 // Values carry the ROUTING_ prefix: enum values share the package's scope,
 // and TicketExecutor has DESK and SERVICE.
 //
@@ -275,7 +275,7 @@ enum ExecutionRouting {
   ROUTING_SERVICE = 2;
 }
 
-// A Fundamentals ticket's execution algorithm (SPEC 23.2; epic #2233).
+// A Fundamentals ticket's execution algorithm (SPEC 23.2).
 // `ticket.algorithm`, `ticket_accepted.algorithm`, `ticket_state.algorithm`.
 //
 // This enum is open to extension: adding a value later is an additive change,
@@ -291,7 +291,7 @@ enum TicketAlgorithm {
 }
 
 // What the automatic execution service is doing with a SERVICE ticket (SPEC
-// 23.2; epic #2233). `ticket_state.activity`.
+// 23.2). `ticket_state.activity`.
 //
 // This enum is open to extension: adding a value later is an additive change,
 // not a breaking one.
@@ -400,7 +400,7 @@ message TicketReasonCodes {
     TICKET_CURE_INVALID = 1712;
     // A ticket routed to the automatic execution service names an algorithm
     // that is not available: VWAP while no VWAP profile is available for the
-    // instrument (SPEC 23.2; epic #2233).
+    // instrument (SPEC 23.2).
     TICKET_ALGORITHM_UNAVAILABLE = 1713;
     // 1714-1799 reserved for band 1700 growth.
   }

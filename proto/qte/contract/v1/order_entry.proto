@@ -1,6 +1,6 @@
 // Inbound order entry.
 //
-// **Version:** 1.9
+// **Version:** 1.10
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`, and, from a Fundamentals pod only, `ticket`, `ticket_cancel`
@@ -188,7 +188,7 @@ message SubmitTicket {
   // SPEC 23.3
   optional bool cure = 11;
   // The execution algorithm the automatic execution service works the ticket
-  // with (SPEC 23.2; epic #2233). TICKET_ALGORITHM_UNSPECIFIED (unset) means
+  // with (SPEC 23.2). TICKET_ALGORITHM_UNSPECIFIED (unset) means
   // TWAP. Read only when the ticket is routed to the service at acceptance:
   // a desk-routed ticket ignores it. A cure ticket is always TWAP, whatever
   // it names. VWAP is refused TICKET_ALGORITHM_UNAVAILABLE while no VWAP
