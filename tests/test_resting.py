@@ -134,12 +134,15 @@ def test_a_market_order_fill_has_no_level_key_and_changes_nothing():
 
 
 @pytest.mark.parametrize(
-    "origin", [CURE_TRADE, AUTO_FLATTEN, HOUSE, 5], ids=["cure", "flatten", "house", "unknown-5"]
+    "origin",
+    [CURE_TRADE, AUTO_FLATTEN, HOUSE, 5, 0],
+    ids=["cure", "flatten", "house", "unknown-5", "unspecified"],
 )
 @pytest.mark.parametrize("remaining", [0, 30])
 def test_an_execution_the_pod_did_not_make_leaves_its_resting_order_alone(origin, remaining):
     # Same instrument, side and order_price as the resting order, but not the pod's own
-    # order (5 is FALLBACK from qte-platform #2066, unknown to this contract).
+    # order (5 is FALLBACK from qte-platform #2066, unknown to this contract; over JSON an
+    # origin name this contract does not know, such as "FALLBACK", decodes as 0).
     view = view_of(rested(size=100), fill(remaining=remaining, size=10, origin=origin))
     assert view.get("AAPL", BUY, PX) == RestingOrder(
         LevelKey("AAPL", BUY, PX), "mm-1", 100, RESTING, None
