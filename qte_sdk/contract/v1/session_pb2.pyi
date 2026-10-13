@@ -163,6 +163,18 @@ class Heartbeat(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
+class ExecutionRoute(_message.Message):
+    __slots__ = ("routing_in_force", "routing_next_open", "config_version", "paused")
+    ROUTING_IN_FORCE_FIELD_NUMBER: _ClassVar[int]
+    ROUTING_NEXT_OPEN_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_VERSION_FIELD_NUMBER: _ClassVar[int]
+    PAUSED_FIELD_NUMBER: _ClassVar[int]
+    routing_in_force: _common_pb2.ExecutionRouting
+    routing_next_open: _common_pb2.ExecutionRouting
+    config_version: int
+    paused: bool
+    def __init__(self, routing_in_force: _Optional[_Union[_common_pb2.ExecutionRouting, str]] = ..., routing_next_open: _Optional[_Union[_common_pb2.ExecutionRouting, str]] = ..., config_version: _Optional[int] = ..., paused: bool = ...) -> None: ...
+
 class Resume(_message.Message):
     __slots__ = ("last_report_seq",)
     LAST_REPORT_SEQ_FIELD_NUMBER: _ClassVar[int]

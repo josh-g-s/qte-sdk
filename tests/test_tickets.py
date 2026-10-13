@@ -202,6 +202,9 @@ async def test_a_ticket_goes_on_the_wire_as_its_canonical_json():
         "shares": "500",
         "limit_price": str(LIMIT_PRICE),
         "urgency": "URGENCY_MEDIUM",
+        # No algorithm given: the unset value, which the exchange reads as TWAP (an
+        # exchange from before the field ignores it, as it ignores any unknown field).
+        "algorithm": "TICKET_ALGORITHM_UNSPECIFIED",
     }
 
 
