@@ -1358,6 +1358,38 @@ def test_an_earlier_connections_answer_is_not_read_again_before_the_term_is_know
     assert halts._counted == {2: ("r", "GOOGL261120C00200000")}
 
 
+@pytest.mark.parametrize("calendar", ["none", "failed"])
+def test_an_earlier_connections_answer_is_not_read_again_unless_its_term_is_named(
+    calendar, monkeypatch
+):
+    # SPY's reject, report 2, was read on a connection whose calendar named the old term.
+    # The next connection's calendar names no term ("none"), or one attempt between read
+    # it again and failed before its calendar ("failed"): GOOGL's report 2, sent with "r"
+    # again, is not taken for SPY's either way.
+    from qte_sdk import options, pacing
+    from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
+
+    caught: list[str] = []
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
+    rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
+    halts = rs._chain_halts
+    halts._connecting()
+    rs._enter_term(("2026-09-01", "2026-12-18"), strict=False)
+    halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
+    halt_reject_read(rs, 2)
+    halts._connecting()
+    if calendar == "failed":
+        halt_reject_read(rs, 2)
+        halts._connecting()
+    else:
+        rs._enter_term(None, strict=False)
+    halts.sent("new", NewOrder(request_ref="r", instrument="GOOGL261120C00200000"))
+    halt_reject_read(rs, 2)
+    assert "halted the options chain on GOOGL" in caught[-1]
+    assert halts._sent == {}
+
+
 def test_an_earlier_connections_answer_is_read_again_once_the_term_is_the_same(monkeypatch):
     # A resume in the same term replays a reject read on the connection before: it counts
     # against no order and logs nothing more within the minute.
@@ -1372,6 +1404,7 @@ def test_an_earlier_connections_answer_is_read_again_once_the_term_is_the_same(m
     rs._reports_term = ("2026-09-01", "2026-12-18")
     halts = rs._chain_halts
     halts._connecting()
+    rs._enter_term(("2026-09-01", "2026-12-18"), strict=True)
     for _ in range(2):
         halts.sent("new", NewOrder(request_ref="r", instrument="SPY261120C00665000"))
     halt_reject_read(rs, 3)
@@ -1386,6 +1419,7 @@ def test_a_cursor_kept_in_its_own_term_keeps_the_answers_counted():
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
     rs._reports.restore((7, frozenset()))
     rs._reports_term = ("2026-09-01", "2026-12-18")
+    rs._chain_halts._term_entered(("2026-09-01", "2026-12-18"))
     counted_answer(rs)
     rs._enter_term(("2026-09-01", "2026-12-18"), strict=True)
     assert rs._reports.cursor == 7

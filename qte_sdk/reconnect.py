@@ -862,10 +862,11 @@ class ReconnectingSession:
             stale = term is None or term != counted_in
         else:
             stale = term is not None and counted_in is not None and term != counted_in
-        forget = stale and reports.resume is None and reports.cursor is not None
-        if forget:
+        if stale and reports.resume is None and reports.cursor is not None:
             reports.restore((None, frozenset()))
-        self._chain_halts._term_entered(new=forget)
+        # The chain halt record keeps a term of its own: it counts answers as they are
+        # read, before they are delivered, so the cursor's term need not be its own.
+        self._chain_halts._term_entered(term)
         if term is not None or reports.cursor is None:
             self._reports_term = term
 

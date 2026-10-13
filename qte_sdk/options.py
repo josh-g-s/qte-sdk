@@ -512,11 +512,13 @@ class _ChainHaltWarnings:
         # read before a reconnect, is not counted twice and names what it named before.
         self._counted: dict[int, tuple[str, str]] = {}
         # The report_seq of the answers counted on the current connection, once a
-        # reconnecting session has started one (see `_connecting`), else None; and whether
-        # that connection's term is known to be the one the earlier answers were counted in.
-        # Until it is, an answer counted on an earlier connection may be another term's.
+        # reconnecting session has started one (see `_connecting`), else None; the term,
+        # as a calendar names it, that every other answer counted was counted in, or None
+        # if unknown; and whether the current connection's calendar named that term. Until
+        # it does, an answer counted on an earlier connection may be another term's.
         self._connection: set[int] | None = None
-        self._same_term = True
+        self._term: tuple[str, str] | None = None
+        self._same_term = False
 
     def sent(self, type_: str, payload: Message) -> None:
         """Remember the instrument of a `new` or `amend` the session is sending. Every one is
@@ -549,19 +551,26 @@ class _ChainHaltWarnings:
 
     def _connecting(self) -> None:
         """A reconnecting session is opening a connection: the answers counted from now on
-        are read on it, in a term not known until its calendar arrives."""
+        are read on it, in a term not known until its calendar names one. Those counted on
+        the last connection are forgotten if its calendar never did."""
         with self._lock:
+            if self._connection is not None and not self._same_term:
+                dropped = self._connection
+                self._counted = {seq: v for seq, v in self._counted.items() if seq not in dropped}
             self._connection = set()
             self._same_term = False
 
-    def _term_entered(self, *, new: bool) -> None:
-        """The current connection's term is known: `new` if the answers counted on earlier
-        connections were counted in another one, when they are forgotten. Those counted on
-        this connection, before its calendar too, are already its term's and are kept."""
+    def _term_entered(self, term: tuple[str, str] | None) -> None:
+        """The current connection's calendar names `term` (None if it names none, which
+        tells nothing). The answers counted on earlier connections in another term are
+        forgotten; those counted on this one, before its calendar too, are its term's."""
+        if term is None:
+            return
         with self._lock:
-            if new:
+            if term != self._term:
                 kept = self._connection or set()
                 self._counted = {seq: v for seq, v in self._counted.items() if seq in kept}
+                self._term = term
             self._same_term = True
 
     def _new_term(self) -> None:
@@ -570,6 +579,8 @@ class _ChainHaltWarnings:
             self._counted.clear()
             if self._connection is not None:
                 self._connection.clear()
+            self._term = None
+            self._same_term = False
 
     def _answer(self, event: Received, ref: str) -> str:
         """Count one answer to `ref`, once however often it is read, and return the option
@@ -582,7 +593,8 @@ class _ChainHaltWarnings:
         if seq is not None:
             with self._lock:
                 counted = self._counted.get(seq)
-                same = self._same_term or (self._connection is not None and seq in self._connection)
+                connection = self._connection
+                same = connection is None or self._same_term or seq in connection
             if counted is not None and counted[0] == ref and same:
                 return counted[1]
         instrument = self._answered(ref)
