@@ -27,9 +27,7 @@
     "version": "1.1.1",
     "recommended": true,
     "why": "on Windows, cancelling a past-data fetch, or an asyncio.timeout running out on one, could freeze the program for up to the fetch's timeout; 1.1.1 ends it at once",
-    "platforms": [
-      "win32"
-    ]
+    "platforms": ["win32"]
   },
   {
     "version": "1.2.0",
