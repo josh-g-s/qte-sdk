@@ -308,6 +308,7 @@ class TicketReasonCodes(_message.Message):
         TICKET_URGENCY_NOT_INCREASED: _ClassVar[TicketReasonCodes.TicketReasonCode]
         TICKET_CURE_INVALID: _ClassVar[TicketReasonCodes.TicketReasonCode]
         TICKET_ALGORITHM_UNAVAILABLE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_SERVICE_OFF: _ClassVar[TicketReasonCodes.TicketReasonCode]
     TICKET_REASON_CODE_UNSPECIFIED: TicketReasonCodes.TicketReasonCode
     NOT_AUTHENTICATED: TicketReasonCodes.TicketReasonCode
     VERSION_MISMATCH: TicketReasonCodes.TicketReasonCode
@@ -336,6 +337,7 @@ class TicketReasonCodes(_message.Message):
     TICKET_URGENCY_NOT_INCREASED: TicketReasonCodes.TicketReasonCode
     TICKET_CURE_INVALID: TicketReasonCodes.TicketReasonCode
     TICKET_ALGORITHM_UNAVAILABLE: TicketReasonCodes.TicketReasonCode
+    TICKET_SERVICE_OFF: TicketReasonCodes.TicketReasonCode
     def __init__(self) -> None: ...
 
 class ReasonCodes(_message.Message):

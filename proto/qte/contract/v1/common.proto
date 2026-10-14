@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.22
+// **Version:** 1.23
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -403,7 +403,12 @@ message TicketReasonCodes {
     // that is not available: VWAP while no VWAP profile is available for the
     // instrument (SPEC 23.2).
     TICKET_ALGORITHM_UNAVAILABLE = 1713;
-    // 1714-1799 reserved for band 1700 growth.
+    // The automatic execution route is off: SERVICE routing is not in force
+    // at the ticket's instant, in a term with no Fundamentals-to-Execution
+    // pairing, so no desk can hold it. A paused service still accepts
+    // tickets, and a cure ticket is refused too (SPEC 23.4).
+    TICKET_SERVICE_OFF = 1714;
+    // 1715-1799 reserved for band 1700 growth.
   }
 }
 

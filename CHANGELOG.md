@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.51
+**Version:** 0.52
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- Amending a Fundamentals ticket while the automatic execution route is off (qte-platform #2315). `send_ticket_cancel` takes `replacing=True` for the cancel that begins an amendment, the replacement (`replaces_ticket_id`) to follow once the cancel's `ticket_state` shows `TICKET_CANCELLED_BY_POD`; the field is sent only when True, so a plain cancel is unchanged, and a value that is not a bool raises `TypeError` and sends nothing. In a term that pairs no pod with an Execution desk, while `ROUTING_SERVICE` is not in force, the exchange refuses such a cancel whole with `TICKET_SERVICE_OFF` (1714), which `ticket_reason_code_name` now names, and the original ticket keeps working: send no replacement, and cancel it plainly to stop it. A new ticket, a cure ticket included, is refused 1714 the same way in such a term. While the route is on, a replacing cancel acts exactly like a plain one. The `qte_sdk.tickets` docstring, docs/automatic-execution.md (a new "Amending a ticket" section), the quickstart and AGENTS.md give the sequence. The vendored contract moves to qte-platform e9d1b7a4 (order_entry.proto 1.11, common.proto 1.23), pending qte-platform #2325's merge (#259).
 
 ## 1.4.0
 
