@@ -135,7 +135,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
 | [`qte_sdk.replay`](qte_sdk/replay.py) | `replay`: a past session's market data in one stream, in time order, to run your loop on; market data only, with no orders or fills |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
-| [`qte_sdk.tickets`](qte_sdk/tickets.py) | `send_ticket`, `send_ticket_cancel`, `send_ticket_urgency`: a Fundamentals pod's tickets to its Execution desk; `is_ticket_event`, `LatestTickets`: the exchange's answers and each ticket's state, for pods and desks |
+| [`qte_sdk.tickets`](qte_sdk/tickets.py) | `send_ticket` (TWAP or VWAP), `send_ticket_cancel`, `send_ticket_urgency`: a Fundamentals pod's tickets, worked by the automatic execution service or the pod's Execution desk; `is_ticket_event`, `LatestTickets`: the exchange's answers and each ticket's state, for pods and desks; `is_execution_route`: where the pod's new tickets go |
 | [`qte_sdk.account`](qte_sdk/account.py) | `send_account_query`, `is_account_state`: your team's positions, cash, equity and limit use; `AccountReports`: count each fill once against a reply |
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |
@@ -152,6 +152,27 @@ The main modules, each documented in its docstrings:
 - **There is no order ID.** Your team's orders are addressed by instrument, side and price, and your team holds at most one resting order at each price.
 - **One market-data feed for everyone.** Market data is published on a fixed 100 ms grid: during a session the market state at every grid point, and an instrument's book only when it has changed, so keep the last book you received for each instrument.
 - **Not every team sends orders.** Teams on the trading arms and Execution teams send orders; an order from a team without market access is rejected with a reason code that says so.
+
+## Fundamentals pods: your position
+
+A Fundamentals pod is sent an `execution` for every fill of its tickets' child orders: the automatic execution service's (origin `AUTO_EXECUTION`) and the engine's after a handover (`FALLBACK`). They name the ticket in `parent_ticket_id` and carry no `strat_id`. Each fill is already counted in the ticket's `ticket_state` (`filled_shares`), so a pod that adds these fills on top of totals it takes from its tickets counts each one twice. A release before this one reads their origin as `ORIGIN_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
+
+Follow each ticket's progress in `LatestTickets`, and take your position from the exchange's own count, `account_state.positions` (`qte_sdk.account`). A reply already includes every fill up to its `as_of_report_seq`; to keep the position between queries, let `qte_sdk.account.AccountReports` sort the fills against the reply, so that each is applied once. Query again from time to time all the same: under automatic execution the engine's own cure ticket and its fills are sent to no one, so only a new `account_state` shows them, and a position carries across terms while tickets do not.
+
+```python
+from qte_sdk.account import is_account_state, send_account_query
+from qte_sdk.tickets import LatestTickets
+
+tickets = LatestTickets()
+positions: dict[str, int] = {}
+ref = await send_account_query(session)
+async for event in session:
+    tickets.update(event)  # each ticket's filled_shares, due_shares and status
+    if is_account_state(event) and event.message.request_ref == ref:
+        positions = {p.instrument: p.quantity for p in event.message.positions}
+    # Do not add an `execution` on top of a ticket's filled_shares. To keep positions
+    # between queries, use AccountReports; ask again after a ticket stops.
+```
 
 ## Status
 
