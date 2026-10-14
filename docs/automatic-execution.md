@@ -23,9 +23,9 @@ A status, activity, origin or reason this SDK does not know decodes as its zero 
 
 The exchange's routing when it accepts a ticket decides who works it, not the pod. With `ROUTING_SERVICE` the service works it (`executor` `SERVICE`, no desk); with `ROUTING_DESK` the pod's desk does (`executor` `DESK`, always TWAP). A ticket keeps its executor: a desk's ticket still working when the routing changes stays with the desk.
 
-The Execution arm is paused, unscored, until the exchange's own house arm is built, so no desk trades, and the 15 October term has no fallback. The service off (`routing_in_force` `ROUTING_DESK`) and the service paused (`paused` true) therefore differ (Jack's answer G-164 A, qte-platform #2310):
+The service off (`routing_in_force` `ROUTING_DESK`) and the service paused (`paused` true) differ:
 
-- **Off:** the exchange is to refuse a new ticket at once, so the pod sees the service is off (planned from the Winter term, 26 October; qte-platform #2315, its reason code not yet fixed). Until then a ticket sent while the service is off is accepted, and nothing works it until the service is on: no child, no fill.
+- **Off:** a ticket goes to the pod's Execution desk as before (`executor` `DESK`). The Execution arm is to pause, unscored, once the service takes over, so do not count on a desk working it, and the 15 October term has no fallback. From the Winter term (26 October) no desk is paired and the exchange is to refuse such a ticket at once, so the pod sees the service is off (Jack's answer G-164 A; qte-platform #2315, its reason code not yet fixed).
 - **Paused:** a new ticket is accepted, and the service catches up when the pause lifts (see "The pause").
 
 Read `routing_in_force` and `paused` before you send.
@@ -98,5 +98,5 @@ The Execution arm is paused, so no desk trades (see "Who works a ticket"). The r
 - Treat any `status` other than `TICKET_WORKING` as a stop, including a name this SDK does not know.
 - Take a pod's position from `account_state.positions`, never adding fills on top of ticket totals; keep it between queries with `AccountReports`, and query again after a ticket stops.
 - On a 1713 reject, resend the ticket as TWAP.
-- Before sending, check `routing_in_force` is `ROUTING_SERVICE`: while the service is off a ticket is accepted and nothing works it, and from the Winter term it is refused. While `paused` is true a ticket is accepted and caught up when the pause lifts.
+- Before sending, check `routing_in_force` is `ROUTING_SERVICE`: while the service is off a ticket goes to the desk, and from the Winter term it is refused. While `paused` is true a ticket is accepted and caught up when the pause lifts.
 - Read `paused` and `activity` before deciding a ticket is stuck.
