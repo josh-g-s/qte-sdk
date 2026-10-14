@@ -37,11 +37,11 @@ async for event in session:
         ...  # a ticket sent now is worked by the service
 ```
 
-## Your position: never add ticket fills
+## Your position
 
-The pod is sent every fill of the service's child orders as an `execution`, with `origin` `AUTO_EXECUTION`, the ticket in `parent_ticket_id` and no `strat_id`. Those fills are already in the ticket's `filled_shares` and in your team's position. A pod that also adds them to a position of its own counts every fill twice.
+The pod is sent every fill of the service's child orders as an `execution`, with `origin` `AUTO_EXECUTION`, the ticket in `parent_ticket_id` and no `strat_id`. Each fill is already in the ticket's `filled_shares`: a pod that adds these fills on top of totals it takes from its tickets counts every fill twice.
 
-Take the position from the exchange's own count, `account_state.positions` (`qte_sdk.account`). Ticket fills are not the whole position anyway: while the service is on, the engine's own cure ticket is worked by the service and nothing of it is sent to anyone, so the pod sees the ticket it replaced stop (`TICKET_CANCELLED_BY_ENGINE`) but never the cure or its fills. And a position carries across terms, while tickets do not.
+Take the position from the exchange's own count, `account_state.positions` (`qte_sdk.account`). A reply includes every fill up to its `as_of_report_seq`, and a fill numbered above it is new. To keep the position between queries, pass every event to `qte_sdk.account.AccountReports`, which sorts the fills against the reply so that each is applied once. Query again after a ticket stops all the same: while the service is on, the engine's own cure ticket is worked by the service and nothing of it is sent to anyone, so the pod sees the ticket it replaced stop (`TICKET_CANCELLED_BY_ENGINE`) but never the cure or its fills, and only a new `account_state` shows them. A position also carries across terms, while tickets do not.
 
 ```python
 from qte_sdk.account import is_account_state, send_account_query
@@ -54,10 +54,11 @@ async for event in session:
     tickets.update(event)  # each ticket's filled_shares, due_shares and status
     if is_account_state(event) and event.message.request_ref == ref:
         positions = {p.instrument: p.quantity for p in event.message.positions}
-    # Never add an `execution` to `positions`. Ask again when you need it.
+    # Do not add an `execution` on top of a ticket's filled_shares. To keep positions
+    # between queries, use AccountReports; ask again after a ticket stops.
 ```
 
-The same holds on 1.3.0, where those fills read `ORIGIN_UNSPECIFIED`: a pod sends no orders, so no `execution` it is sent is one to count.
+On 1.3.0 those fills read `ORIGIN_UNSPECIFIED`, and the same rules hold.
 
 ## What a SERVICE ticket's state says
 
@@ -88,6 +89,6 @@ A desk works only the tickets routed to it (`executor` `DESK`) and is sent nothi
 
 - Pass every event to one `LatestTickets` and read the route from `tickets.route`.
 - Treat any `status` other than `TICKET_WORKING` as a stop, including a name this SDK does not know.
-- Never add an `execution` to a pod's position; take it from `account_state.positions`.
+- Take a pod's position from `account_state.positions`, never adding fills on top of ticket totals; keep it between queries with `AccountReports`, and query again after a ticket stops.
 - On a 1713 reject, resend the ticket as TWAP.
 - Read `paused` and `activity` before deciding a ticket is stuck.

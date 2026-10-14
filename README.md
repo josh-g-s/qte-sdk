@@ -121,7 +121,7 @@ Outside market hours the exchange still accepts the connection and the subscript
 | [Outside session hours](docs/out-of-hours.md) | What works when no session is running, with a runnable walk-through: the calendar, the closed market, an order's reject, past market data |
 | [Developing your algo](docs/developing-your-algo.md) | From an idea to the exchange: explore past market data, run your strategy's loop on a replay of a past session, test its order logic, check your setup, then trade during a session |
 | [Worked examples](examples/) | Runnable programs: check your setup end to end, print the book, quote both sides and manage the quotes, take liquidity with a market order, rest and cancel one option order from the chain and its Greeks, see the closed market outside a session, replay a past session's book |
-| [Automatic execution](docs/automatic-execution.md) | For Fundamentals pods and Execution desks while the exchange's automatic execution service works tickets: what each release shows, who works a ticket, why a pod takes its position from `account_state` and never adds ticket fills, the pause, VWAP |
+| [Automatic execution](docs/automatic-execution.md) | For Fundamentals pods and Execution desks while the exchange's automatic execution service works tickets: what each release shows, who works a ticket, how a pod keeps its position, the pause, VWAP |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
 The main modules, each documented in its docstrings:
@@ -154,11 +154,11 @@ The main modules, each documented in its docstrings:
 - **One market-data feed for everyone.** Market data is published on a fixed 100 ms grid: during a session the market state at every grid point, and an instrument's book only when it has changed, so keep the last book you received for each instrument.
 - **Not every team sends orders.** Teams on the trading arms and Execution teams send orders; an order from a team without market access is rejected with a reason code that says so.
 
-## Fundamentals pods: count your position from the exchange, not from fills
+## Fundamentals pods: your position
 
-A Fundamentals pod is sent an `execution` for every fill of its tickets' child orders: the automatic execution service's (origin `AUTO_EXECUTION`) and the engine's after a handover (`FALLBACK`). They name the ticket in `parent_ticket_id` and carry no `strat_id`. These fills are already counted in the ticket's `ticket_state` (`filled_shares`) and in your team's position, so a pod that also adds them to a position of its own counts each fill twice. A release before this one reads their origin as `ORIGIN_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
+A Fundamentals pod is sent an `execution` for every fill of its tickets' child orders: the automatic execution service's (origin `AUTO_EXECUTION`) and the engine's after a handover (`FALLBACK`). They name the ticket in `parent_ticket_id` and carry no `strat_id`. Each fill is already counted in the ticket's `ticket_state` (`filled_shares`), so a pod that adds these fills on top of totals it takes from its tickets counts each one twice. A release before this one reads their origin as `ORIGIN_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
 
-Follow each ticket's progress in `LatestTickets`, and take your position from the exchange's own count, `account_state.positions` (`qte_sdk.account`). Fills of the ticket alone are not the whole position: under automatic execution the engine's own cure ticket and its fills are sent to no one, and a position carries across terms while tickets do not.
+Follow each ticket's progress in `LatestTickets`, and take your position from the exchange's own count, `account_state.positions` (`qte_sdk.account`). A reply already includes every fill up to its `as_of_report_seq`; to keep the position between queries, let `qte_sdk.account.AccountReports` sort the fills against the reply, so that each is applied once. Query again from time to time all the same: under automatic execution the engine's own cure ticket and its fills are sent to no one, so only a new `account_state` shows them, and a position carries across terms while tickets do not.
 
 ```python
 from qte_sdk.account import is_account_state, send_account_query
@@ -171,8 +171,8 @@ async for event in session:
     tickets.update(event)  # each ticket's filled_shares, due_shares and status
     if is_account_state(event) and event.message.request_ref == ref:
         positions = {p.instrument: p.quantity for p in event.message.positions}
-    # Never add an `execution` to `positions`: it is a fill of one of your tickets,
-    # already counted by the exchange. Ask again with send_account_query when you need it.
+    # Do not add an `execution` on top of a ticket's filled_shares. To keep positions
+    # between queries, use AccountReports; ask again after a ticket stops.
 ```
 
 ## Status
