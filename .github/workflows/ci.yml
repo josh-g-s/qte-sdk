@@ -141,9 +141,12 @@ jobs:
           code=0
           "$python_exe" -m qte_sdk.update --timeout 5 > update-bash.txt || code=$?
           python "$GITHUB_WORKSPACE/scripts/check_student_install.py" update update-bash.txt "$code"
-      # The same from cmd, whose console code page (437 or 1252, which chcp prints) is not
-      # UTF-8. %errorlevel% is read only outside the for loop, where cmd expands it after
-      # the line before has run; inside it, || stops the step at a failed --help.
+      # The same from cmd, in the legacy console code page a student's cmd has (437 in
+      # English); the runner sets 65001, UTF-8, before each step, so the step sets 437 and
+      # stops if it cannot. Python writes redirected output in the ANSI code page (1252),
+      # which the install step prints. %errorlevel% is read only outside the for loop, where
+      # cmd expands it after the line before has run; inside it, || stops the step at a
+      # failed --help.
       - name: Run the examples' --help and the update check from cmd
         if: success() || failure()
         shell: cmd
@@ -151,7 +154,7 @@ jobs:
         env:
           STUDENT_HOME: ${{ runner.temp }}\Student Ü
         run: |
-          chcp
+          chcp 437 || exit /b 1
           for %%f in ("%GITHUB_WORKSPACE%\examples\*.py") do "%STUDENT_HOME%\wheel\Scripts\python.exe" "%%~f" --help > "help-cmd-%%~nf.txt" 2>&1 || (echo %%~nf --help failed & type "help-cmd-%%~nf.txt" & exit /b 1)
           python "%GITHUB_WORKSPACE%\scripts\check_student_install.py" help help-cmd- || exit /b 1
           "%STUDENT_HOME%\wheel\Scripts\python.exe" -m qte_sdk.update --timeout 5 > update-cmd.txt
