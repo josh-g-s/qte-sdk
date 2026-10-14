@@ -38,9 +38,13 @@ is unavailable. Which contracts a session holds is the session's own chain: any 
 symbol is unavailable for that session, even one listed on another day. Before a session
 is rebuilt, a symbol the term could list is pending, and becomes unavailable, not ready,
 if the session's chain turns out not to list it. The service checks every id: the SDK
-sends what you give it. The option channels and `fetch_option_chain` follow the history
+sends what you give it. A contract's `book`, `trades` and `mark` are served wherever a
+session's log carried them. `option_greeks` and `fetch_option_chain` follow the history
 contract of qte-platform #2298, whose server build is not live yet: until it is, the
 service answers them unavailable, and that answer is not permanent, so do not cache it.
+A session with options cached before that build (from 15 October 2026) keeps no Greeks
+and no chain, and only the contracts that published something, until it is rebuilt,
+which is done by hand, not automatically.
 
 A session that has closed but is not ready yet is `pending`: `fetch` waits and asks again
 as the service's `Retry-After` header says, up to `max_wait` seconds in all, then raises
@@ -247,7 +251,8 @@ class HistoryUnavailable(HistoryError):
     equity, an option contract the session's chain did not list, or the option chain of a
     session with none. Do not retry. Code `QTE-HISTORY-UNAVAILABLE`. One exception: until
     the service's options build is live, `option_greeks` and the option chain are answered
-    unavailable for every session, so that answer is not permanent for them yet."""
+    unavailable for every session, and after it for a session cached before it until that
+    session is rebuilt by hand, so that answer is not permanent for them."""
 
     code = _errors.HISTORY_UNAVAILABLE
 

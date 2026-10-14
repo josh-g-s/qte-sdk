@@ -455,10 +455,11 @@ async def test_a_paced_replay_that_falls_behind_catches_up_without_skipping(cloc
         ((20260105, ["AAA"]), {}, TypeError),
         (("5 January 2026", ["AAA"]), {}, ValueError),
         (("2026-02-30", ["AAA"]), {}, ValueError),
-        # Greeks need an option contract: an equity, or a malformed symbol, has none.
-        ((DAY, ["AAA"], ["book", "option_greeks"]), {}, ValueError),
+        # Greeks alone need an option contract: an equity, or a malformed symbol, has none.
+        ((DAY, ["AAA"], ["option_greeks", "session_state"]), {}, ValueError),
         ((DAY, ["SPY261320C00650000"], ["option_greeks"]), {}, ValueError),
         ((DAY, [CALL], ["option_chain"]), {}, ValueError),
+        ((DAY, [], ["option_greeks"]), {}, ValueError),
     ],
 )
 def test_arguments_it_cannot_use_are_refused_before_any_download(arguments, options, error):
@@ -470,6 +471,19 @@ def test_arguments_it_cannot_use_are_refused_before_any_download(arguments, opti
 def test_option_greeks_can_be_merged_but_are_not_by_default():
     assert CHANNELS == ("book", "trades", "mark", "option_greeks", "session_state")
     assert DEFAULT_CHANNELS == ("book", "trades", "mark", "session_state")
+
+
+async def test_instruments_with_only_the_session_state_are_still_accepted():
+    fake = FakeHistory(synthetic_token(), {(DAY, None, "session_state"): state_at(1000)})
+    items = await replayed(fake, DAY, ["AAA"], ["session_state"])
+    assert [label(item) for item in items] == [(1000, "session_state")]
+
+
+async def test_naming_every_channel_over_equities_replays_what_it_did_before():
+    fake = a_session(synthetic_token())
+    items = await replayed(fake, DAY, ["BBB", "AAA"], CHANNELS)
+    assert items and not any(isinstance(item, OptionGreeks) for item in items)
+    assert not any(path.endswith("/option_greeks") for path in requested(fake))
 
 
 async def test_an_option_contract_replays_like_an_equity_without_its_greeks_by_default():

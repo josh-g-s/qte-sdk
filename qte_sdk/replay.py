@@ -47,11 +47,15 @@ Options. An option contract is named by its OCC symbol, such as `SPY261120C00650
 (see `qte_sdk.options`), and replays like an equity. `option_greeks` is not in the default
 `channels`, since a session cached before the history service served Greeks has none and
 would fail the replay; name it to get them. It is fetched only for the instruments that
-are option symbols (`qte_sdk.options.is_option_symbol`), since an equity has no Greeks;
-an id that is not a well-formed option symbol is treated as an equity's. The option chain
-is not part of a replay: fetch it with `HistoryClient.fetch_option_chain`. The option
-channels follow the history contract of qte-platform #2298, whose server build is not
-live yet; until it is, `option_greeks` raises `HistoryUnavailable`.
+are option symbols (`qte_sdk.options.is_option_symbol`), since an equity has no Greeks,
+so `channels=CHANNELS` over equities alone replays what it did before; an id that is not
+a well-formed option symbol is treated as an equity's. Naming `option_greeks` as the only
+per-instrument channel with no option symbol among the instruments is a `ValueError`.
+The option chain is not part of a replay: fetch it with
+`HistoryClient.fetch_option_chain`. The Greeks follow the history contract of
+qte-platform #2298, whose server build is not live yet; until it is, and for a session
+cached before it that has not been rebuilt since, `option_greeks` raises
+`HistoryUnavailable`.
 
 Errors. A stream with no messages, such as an instrument with no trades that day, adds
 nothing. Any other failure of a download is raised from the replay as `fetch` raises it,
@@ -193,7 +197,10 @@ def _checked(
     if not names and _PER_INSTRUMENT & set(wanted):
         raise ValueError("name at least one instrument, or replay only the session_state")
     options = sorted({name for name in names if is_option_symbol(name)})
-    if _OPTION_ONLY & set(wanted) and not options:
+    # Only when nothing per instrument would be fetched: `channels=CHANNELS` over equities
+    # still replays their books, trades and marks.
+    per_instrument = _PER_INSTRUMENT & set(wanted)
+    if per_instrument and per_instrument <= _OPTION_ONLY and not options:
         raise ValueError(
             "option_greeks needs at least one option contract, named by its OCC symbol such "
             "as SPY261120C00650000; an equity has no Greeks"

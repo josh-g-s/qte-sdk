@@ -168,9 +168,9 @@ History. `qte_sdk.history.HistoryClient` serves a past session's option contract
 its equities, by OCC symbol, with each contract's `option_greeks`
 (`fetch(date, symbol, "option_greeks")`, or `fetch_range`) and the session's chain
 (`fetch_option_chain(date)`); `qte_sdk.replay.replay` merges the Greeks when you name
-`option_greeks` in its `channels`. These follow the history contract of qte-platform
-#2298, whose server build is not live yet: until it is, the service answers them
-unavailable.
+`option_greeks` in its `channels`. The Greeks and the chain follow the history contract
+of qte-platform #2298, whose server build is not live yet: until it is, the service
+answers them unavailable.
 """
 
 import logging
