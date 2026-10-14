@@ -255,7 +255,7 @@ async def test_a_status_this_sdk_does_not_know_is_a_stop_named_as_sent():
     assert "position in AAPL after the stop, from account_state: 80" in out
 
 
-async def test_a_paused_route_still_sends_the_ticket_which_is_accepted_and_caught_up_later():
+async def test_a_paused_route_still_sends_the_ticket_and_says_the_service_will_catch_up():
     after = [("ticket_state", state(10, activity="SERVICE_PAUSED"))]
     exchange = PodExchange(route=route_payload(paused=True), accounts=[account(None)], after=after)
     code, out, err = await run_pod(exchange, "--seconds", "1")
