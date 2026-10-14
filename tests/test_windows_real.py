@@ -28,19 +28,24 @@ is not. Three things differ because of that:
 """
 
 import csv
+import http.server
 import io
 import json
+import locale
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import warnings
 from pathlib import Path
 
 import pytest
 
+import qte_sdk
 from qte_sdk import _fileaccess, dotenv
 from qte_sdk import token as token_command
 from qte_sdk.dotenv import AddressFileShared, FileShared, TokenFileShared
@@ -1205,3 +1210,225 @@ async def test_pacing_holds_the_burst_cap_on_the_real_windows_timers():
     assert most <= 160, most
     # And it is not stuck: 500 sends at 160 a second take a little over 3 s.
     assert sent[-1] - sent[0] < 10
+
+
+# The update check behind a newer release. `python -m qte_sdk.update` runs in a child
+# process against a fake latest release served from this machine, so no network is used.
+# Nothing on Windows is replaced: pip's install record is a real `direct_url.json` in a
+# dist-info folder, read by `importlib.metadata`, and the repository's list of references
+# and releases.json are read over real HTTP from 127.0.0.1. Only the two addresses the
+# check reads are changed, since nothing else can point it elsewhere.
+
+SDK_VERSION = qte_sdk.__version__
+INSTALLED_COMMIT = "1" * 40
+LATEST_COMMIT = "4" * 40
+REFS_PATH = "/info/refs?service=git-upload-pack"
+REFS_TYPE = "application/x-git-upload-pack-advertisement"
+# Variables that change how the child encodes its output or what it prints. Without them,
+# its output to a pipe is in the code page `locale.getencoding()` names (cp1252 on the
+# runner), as it is for a student whose agent reads the command's output.
+CHILD_UNSET = ("PYTHONUTF8", "PYTHONIOENCODING", "PYTHONLEGACYWINDOWSSTDIO", "PYTHONPATH")
+PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+# Run as a script in the child: it refuses any connection off this machine, checks that the
+# qte_sdk imported is the copy beside the fake install record, points the check's two
+# addresses at the local server, and runs the command's own `main`. `main` is called rather
+# than run with `runpy`, which would load the module afresh, with its own addresses.
+UPDATE_BOOTSTRAP = """
+import socket, sys
+from pathlib import Path
+
+LOOPBACK = ("127.0.0.1", "localhost")
+real_connect = socket.socket.connect
+real_getaddrinfo = socket.getaddrinfo
+
+
+def connect(self, address):
+    if not isinstance(address, tuple) or address[0] not in LOOPBACK:
+        raise SystemExit("network used: " + repr(address)[:80])
+    return real_connect(self, address)
+
+
+def getaddrinfo(host, *args, **kwargs):
+    if host not in LOOPBACK:
+        raise SystemExit("network used: " + repr(host)[:80])
+    return real_getaddrinfo(host, *args, **kwargs)
+
+
+socket.socket.connect = connect
+socket.getaddrinfo = getaddrinfo
+
+server, site = sys.argv[1], Path(sys.argv[2]).resolve()
+import qte_sdk
+from qte_sdk import update
+
+if not Path(qte_sdk.__file__).resolve().is_relative_to(site):
+    raise SystemExit("imported qte_sdk from " + qte_sdk.__file__)
+update._REFS_URL = server + "/info/refs?service=git-upload-pack"
+update.RELEASES_URL = server + "/releases.json"
+sys.exit(update.main(["--timeout", "10"]))
+"""
+
+
+def next_release(version: str) -> str:
+    """The release after `version`, one patch number on."""
+    major, minor, patch = (int(n) for n in version.split("."))
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def pkt(line: bytes) -> bytes:
+    return b"%04x" % (len(line) + 4) + line
+
+
+def refs_with_release(tag: str) -> bytes:
+    """The repository's list of references as git's smart HTTP service sends it: main at
+    the installed commit and release `tag` at another."""
+    refs = [
+        (INSTALLED_COMMIT, "HEAD"),
+        (INSTALLED_COMMIT, "refs/heads/main"),
+        (LATEST_COMMIT, f"refs/tags/{tag}"),
+    ]
+    body = pkt(b"# service=git-upload-pack\n") + b"0000"
+    for index, (oid, name) in enumerate(refs):
+        line = f"{oid} {name}".encode()
+        if index == 0:
+            line += b"\0multi_ack thin-pack side-band ofs-delta agent=git/github"
+        body += pkt(line + b"\n")
+    return body + b"0000"
+
+
+class FakeRepository(http.server.BaseHTTPRequestHandler):
+    """Answers the request for the list of references with `refs`, as GitHub does, and any
+    other (releases.json) with 404, so the check says nothing of a recommended update."""
+
+    refs = b""
+    requests: list[str] = []
+
+    def do_GET(self) -> None:
+        self.requests.append(self.path)
+        if self.path != REFS_PATH:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", REFS_TYPE)
+        self.send_header("Content-Length", str(len(self.refs)))
+        self.end_headers()
+        self.wfile.write(self.refs)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def repository_with_release():
+    """A local server whose list of references has release `tag`, given by calling the
+    fixture's value, which returns the server's address and its record of requests."""
+    servers = []
+
+    def serve(tag: str) -> tuple[str, list[str]]:
+        class Handler(FakeRepository):
+            refs = refs_with_release(tag)
+            requests: list[str] = []
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return f"http://127.0.0.1:{server.server_address[1]}", Handler.requests
+
+    yield serve
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def install_with_record(site: Path, record: dict) -> None:
+    """A copy of the qte_sdk under test in `site`, with a dist-info folder beside it whose
+    `direct_url.json` is `record`, as pip leaves after an install. With `site` first on the
+    child's path, it is the qte_sdk imported and the install `importlib.metadata` finds,
+    ahead of the editable install the job made."""
+    shutil.copytree(
+        Path(qte_sdk.__file__).parent,
+        site / "qte_sdk",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    info = site / f"qte_sdk-{SDK_VERSION}.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: qte-sdk\nVersion: {SDK_VERSION}\n", encoding="utf-8"
+    )
+    (info / "direct_url.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def run_update_check(tmp_path: Path, server: str, site: Path) -> tuple[int, str, str]:
+    """Run the bootstrap in a new process with `site` first on its path, and return its exit
+    status, and its output and errors decoded strictly in the code page Python gives a pipe.
+    Fails the test if it has not finished within `TIMEOUT` seconds."""
+    script = tmp_path / "update_check.py"
+    script.write_text(UPDATE_BOOTSTRAP, encoding="utf-8")
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k.upper() not in CHILD_UNSET + PROXY_VARIABLES and not k.upper().startswith("QTE_")
+    }
+    env["PYTHONPATH"] = str(site)
+    # No proxy for this machine, whatever the runner's settings say.
+    env["NO_PROXY"] = "127.0.0.1,localhost"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), server, str(site)],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            timeout=TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"python -m qte_sdk.update was still running after {TIMEOUT} s")
+    encoding = locale.getencoding()
+    return (
+        result.returncode,
+        result.stdout.decode(encoding, "strict"),
+        result.stderr.decode(encoding, "strict"),
+    )
+
+
+LATEST = f"v{next_release(SDK_VERSION)}"
+UPDATE_CASES = {
+    "release zip": (
+        {
+            "url": f"https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v{SDK_VERSION}.zip",
+            "archive_info": {},
+        },
+        f"qte-sdk {SDK_VERSION}, from the v{SDK_VERSION} release archive",
+        f"pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/{LATEST}.zip",
+    ),
+    "git": (
+        {
+            "url": "https://github.com/josh-g-s/qte-sdk",
+            "vcs_info": {"vcs": "git", "commit_id": INSTALLED_COMMIT},
+        },
+        f"qte-sdk {SDK_VERSION}, commit {INSTALLED_COMMIT[:12]}, following main",
+        'pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"',
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(UPDATE_CASES))
+def test_the_update_check_names_a_newer_release_and_its_update_command(
+    tmp_path, repository_with_release, case
+):
+    record, installed, command = UPDATE_CASES[case]
+    site = tmp_path / "site"
+    install_with_record(site, record)
+    server, requests = repository_with_release(LATEST)
+    status, out, err = run_update_check(tmp_path, server, site)
+    assert status == 1, out + err
+    assert err == ""
+    # One line saying what is installed, then exactly one QTE-UPDATE-AVAILABLE line with
+    # the command for this kind of install.
+    assert out.splitlines() == [
+        f"installed: {installed}",
+        f"QTE-UPDATE-AVAILABLE: qte-sdk {SDK_VERSION} is behind {LATEST.removeprefix('v')}. "
+        f"Update with {command}.",
+    ], out
+    assert out.count("QTE-UPDATE-AVAILABLE") == 1
+    # The check read the list of references and asked for releases.json, both from here.
+    assert requests == [REFS_PATH, "/releases.json"]
