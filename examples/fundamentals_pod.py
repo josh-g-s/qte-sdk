@@ -14,8 +14,8 @@ What it does, in order:
    --instrument from `account_state.positions`.
 3. It waits at most ROUTE_SECONDS (or --seconds, if less) for `execution_route` and
    prints `routing_in_force` (`ROUTING_SERVICE`: the service works a ticket sent now;
-   `ROUTING_DESK`: it goes to your desk, and since the Execution arm is paused no desk
-   trades, so nothing works it) and `paused`. Only a pod is sent a route: a desk
+   `ROUTING_DESK`: the service is off, and since no desk trades nothing works it) and
+   `paused`. Only a pod is sent a route: a desk
    never is, so with no route it says so, sends nothing and exits with status 1. This is
    a pod's example.
 4. It sends one ticket (`send_ticket`) for --shares of --instrument at the hard limit
@@ -44,12 +44,13 @@ The rules it follows, which a pod program should follow too:
   which applies each fill once against the reply. Under the service the engine's own
   cure ticket and its fills are sent to no one, so ask for `account_state` again after a
   ticket stops, as this example does.
-- Route off or paused: the Execution arm is paused and no desk trades, so with
-  `routing_in_force` `ROUTING_DESK` a new ticket is accepted and nothing works it. With
-  `execution_route.paused` true a ticket is still accepted, but no child is placed while
-  the pause lasts, and its `activity` can read
-  `SERVICE_PAUSED`. What becomes of a ticket accepted while either holds is an open point of
-  the contract: follow it in `ticket_state` and do not assume it catches up.
+- Off or paused (Jack's answer G-164 A, qte-platform #2310): no desk trades, so with
+  `routing_in_force` `ROUTING_DESK` the service is off, and a new ticket is accepted and
+  nothing works it until the service is on; from the Winter term (26 October) the
+  exchange is to refuse it at once instead (qte-platform #2315). With
+  `execution_route.paused` true a ticket is still accepted, no child is placed and
+  resting children are cancelled, and the service catches up when the pause lifts; its
+  `activity` can read `SERVICE_PAUSED`.
 - 1713 (`TICKET_ALGORITHM_UNAVAILABLE`) refuses VWAP only: send the ticket again as TWAP,
   or later. A desk's ticket is always TWAP, whatever it names: read
   `ticket_accepted.algorithm`.
@@ -419,13 +420,12 @@ async def follow(session: Session, args: argparse.Namespace) -> int:
     if route.routing_in_force == ROUTING_DESK:
         print(
             "a ticket sent now goes to your desk (executor DESK, always TWAP), not the service; "
-            "the Execution arm is paused, so nothing works it"
+            "the service is off and no desk trades, so nothing works it until the service is on"
         )
     if route.paused:
         print(
             "the service is paused: a ticket is still accepted, but no child is "
-            "placed while the pause lasts; following the ticket's state, not assuming it "
-            "catches up"
+            "placed while the pause lasts; the service catches up when it lifts"
         )
 
     await pod.send()
