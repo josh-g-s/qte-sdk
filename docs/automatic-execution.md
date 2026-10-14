@@ -1,6 +1,6 @@
 # Automatic execution
 
-**Version:** 0.1
+**Version:** 0.2
 
 The exchange can work a Fundamentals pod's tickets itself, with its automatic execution service, instead of sending them to the pod's Execution desk. This page says what changes for a pod and a desk while the service is on, what each SDK release shows of it, and the one mistake to avoid: adding ticket fills to a position of your own. The rules in full are in the [`qte_sdk.tickets`](../qte_sdk/tickets.py) docstring.
 
@@ -22,6 +22,8 @@ A status, activity, origin or reason this SDK does not know decodes as its zero 
 ## Who works a ticket
 
 The exchange's routing when it accepts a ticket decides who works it, not the pod. With `ROUTING_SERVICE` the service works it (`executor` `SERVICE`, no desk); with `ROUTING_DESK` the pod's desk does (`executor` `DESK`, always TWAP). A ticket keeps its executor: a desk's ticket still working when the routing changes stays with the desk.
+
+The Execution arm is paused, unscored, until the exchange's own house arm is built, so no desk trades. While the routing is `ROUTING_DESK`, or the service is paused, a new ticket is still accepted and nothing works it: no child is placed and no fill comes, and the 15 October term has no fallback to take it over. What then becomes of such a ticket is an open point of the exchange's contract. Read `routing_in_force` and `paused` before you send: a ticket sent while either holds waits, and may not be worked at all.
 
 The routing changes only at a session's open. The pod is sent `execution_route` once on each connection, after the `session_ack`, the calendar and the instruments table and before the ticket states, and again whenever the exchange logs an automatic execution control or a pending one comes into force. It says `routing_in_force`, `routing_next_open` when the routing changes at the next open, `config_version`, and `paused`. A desk is never sent it.
 
@@ -71,7 +73,7 @@ The service's passive child rests as a limit order of the pod for a short wait, 
 
 ## The pause
 
-When the Directors pause the service, `execution_route.paused` is true, and a working `SERVICE` ticket's `activity` can read `SERVICE_PAUSED`. A `SERVICE` ticket is still accepted, and no child is placed for it while the pause lasts. What then becomes of a ticket accepted during the pause is an open point of the exchange's contract: follow it in `ticket_state`, and do not assume it catches up.
+When the Directors pause the service, `execution_route.paused` is true, and a working `SERVICE` ticket's `activity` can read `SERVICE_PAUSED`. A ticket is still accepted, and no child is placed for it while the pause lasts. What then becomes of a ticket accepted during the pause is an open point of the exchange's contract: follow it in `ticket_state`, and do not assume it catches up. (A pause because an equity's mark is frozen is different: the service catches up once the mark is no longer frozen.)
 
 ## VWAP
 
@@ -83,7 +85,7 @@ In a term whose configuration provides a fallback, the Directors can hand a desk
 
 ## Execution desks
 
-A desk works only the tickets routed to it (`executor` `DESK`) and is sent nothing about a ticket the service works: no `ticket_state`, no fills. Its own children's fills name their ticket in `parent_ticket_id`, and the orders the service places never appear in a desk's `RestingOrders`.
+The Execution arm is paused, so no desk trades (see "Who works a ticket"). The rules below are those of the exchange's contract for when desks work: a desk works only the tickets routed to it (`executor` `DESK`) and is sent nothing about a ticket the service works: no `ticket_state`, no fills. Its own children's fills name their ticket in `parent_ticket_id`, and the orders the service places never appear in a desk's `RestingOrders`.
 
 ## A checklist for your agent
 
@@ -91,4 +93,5 @@ A desk works only the tickets routed to it (`executor` `DESK`) and is sent nothi
 - Treat any `status` other than `TICKET_WORKING` as a stop, including a name this SDK does not know.
 - Take a pod's position from `account_state.positions`, never adding fills on top of ticket totals; keep it between queries with `AccountReports`, and query again after a ticket stops.
 - On a 1713 reject, resend the ticket as TWAP.
+- Before sending, check `routing_in_force` is `ROUTING_SERVICE` and `paused` is false: otherwise the ticket is accepted and nothing works it.
 - Read `paused` and `activity` before deciding a ticket is stuck.
