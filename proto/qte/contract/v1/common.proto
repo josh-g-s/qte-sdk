@@ -51,7 +51,8 @@ enum Origin {
   // Director sessions only, never to a team's connection.
   HOUSE = 4;
   // An engine child of a Fundamentals ticket the Directors handed over to
-  // engine execution (SPEC 23.2). Only its executions are sent, to
+  // engine execution, a legacy path inert unless the term enables
+  // execution_fallback. Only its executions are sent, to
   // the ticket's pod only, each naming the ticket in parent_ticket_id; never
   // to the desk, another team or a Director session.
   FALLBACK = 5;
@@ -239,8 +240,8 @@ enum TicketStatus {
   // 8-15 reserved for growth.
 }
 
-// Who executes a Fundamentals ticket's remaining shares (SPEC 23.2,
-// "Director-authorised execution fallback"): its assigned Execution desk,
+// Who executes a Fundamentals ticket's remaining shares (legacy,
+// inert unless the term enables execution_fallback; absent under Draft 8): its assigned Execution desk,
 // until the Directors hand the ticket over to engine execution, and the
 // engine from then on. A handover is never undone. `ticket_state.executor`.
 //
@@ -251,14 +252,14 @@ enum TicketExecutor {
   // The assigned Execution desk works the ticket with its child orders.
   DESK = 1;
   // The Directors handed the ticket over: the engine executes its remaining
-  // shares, and the desk's further fills are prohibited (SPEC 23.2).
+  // shares, and the desk's further fills are prohibited.
   ENGINE = 2;
   // The exchange's automatic execution service works the ticket, with no desk
   // (SPEC 23.2). Set at acceptance, by the routing in force.
   SERVICE = 3;
 }
 
-// How the exchange executes a Fundamentals pod's ticket (SPEC 23.2, 23.6):
+// How the exchange executes a Fundamentals pod's ticket (SPEC 23.2, 23.4):
 // by its desk, or by the automatic execution service, as the Directors'
 // logged automatic execution control sets it. `execution_route`.
 // Values carry the ROUTING_ prefix: enum values share the package's scope,

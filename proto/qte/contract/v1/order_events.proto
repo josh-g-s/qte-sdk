@@ -62,7 +62,7 @@ message Reject {
 // carries that ticket's id in parent_ticket_id below. The report goes to the
 // desk whose order was filled; the originating pod follows its ticket's
 // fills in TicketState. A fill of the engine's own child of a ticket the
-// Directors handed over (origin FALLBACK, SPEC 23.2) goes to the originating
+// Directors handed over (origin FALLBACK) goes to the originating
 // pod instead, with parent_ticket_id and no strat_id.
 message Execution {
   string exec_id = 1;  // id. Fill report identity. SPEC 8.2. Its format is not yet specified
@@ -465,14 +465,14 @@ message TicketState {
   // connection for the state sent on connecting.
   int64 update_time = 25;
   // Who executes the remaining shares: DESK, or ENGINE once the Directors
-  // have handed the ticket over to engine execution (SPEC 23.2). A handed-over
+  // have handed the ticket over to engine execution. A handed-over
   // ticket stays TICKET_WORKING until it completes or stops.
   TicketExecutor executor = 26;
   // Present iff executor is ENGINE: the effective handover time.
   optional int64 handover_time = 27; // timestamp
   // Present iff executor is ENGINE: the shares and the net fee of the desk's
   // fills before the handover, which it froze. filled_shares and net_fee stay
-  // the totals; the engine's share is the totals less the desk's. SPEC 23.2
+  // the totals; the engine's share is the totals less the desk's.
   optional int64 desk_filled_shares = 28; // int64-qty
   optional int64 desk_net_fee = 29; // int64-micro
   // Present iff desk_filled_shares is above zero: the volume-weighted average
