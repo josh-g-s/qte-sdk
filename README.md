@@ -121,6 +121,7 @@ Outside market hours the exchange still accepts the connection and the subscript
 | [Outside session hours](docs/out-of-hours.md) | What works when no session is running, with a runnable walk-through: the calendar, the closed market, an order's reject, past market data |
 | [Developing your algo](docs/developing-your-algo.md) | From an idea to the exchange: explore past market data, run your strategy's loop on a replay of a past session, test its order logic, check your setup, then trade during a session |
 | [Worked examples](examples/) | Runnable programs: check your setup end to end, print the book, quote both sides and manage the quotes, take liquidity with a market order, rest and cancel one option order from the chain and its Greeks, see the closed market outside a session, replay a past session's book |
+| [Automatic execution](docs/automatic-execution.md) | For Fundamentals pods and Execution desks while the exchange's automatic execution service works tickets: what each release shows, who works a ticket, how a pod keeps its position, the pause, VWAP |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
 The main modules, each documented in its docstrings:
