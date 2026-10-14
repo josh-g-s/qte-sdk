@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.12
+**Version:** 0.13
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -267,7 +267,7 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 ### QTE-HISTORY-PENDING
 
 - Raised as: `qte_sdk.history.HistoryPending`, a `HistoryError`, with `retry_after`.
-- Cause: The session has closed but its data is not ready yet (HTTP 202), and waiting longer would have passed `max_wait` or `max_retries`. It will be ready.
+- Cause: The session has closed but its data is not ready yet (HTTP 202), and waiting longer would have passed `max_wait` or `max_retries`. It will be ready, except an option contract or option chain asked for before its session is rebuilt, which becomes unavailable instead if the session's chain does not list it.
 - Fix: Ask again later, after `retry_after` seconds if it is set, or raise `max_wait`.
 
 ### QTE-HISTORY-RATE-LIMITED
@@ -279,8 +279,8 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 ### QTE-HISTORY-UNAVAILABLE
 
 - Raised as: `qte_sdk.history.HistoryUnavailable`, a `HistoryError`.
-- Cause: The data will never exist (HTTP 404): a date before the service's coverage, a day with no session, or an instrument or channel the service does not know. Asking again does not change that.
-- Fix: Check the date against the calendar, and the instrument and channel against the instruments the exchange lists.
+- Cause: The data will never exist (HTTP 404): a date before the service's coverage, a day with no session, an instrument or channel the service does not know, `option_greeks` of an equity, an option contract the session's chain did not list, or the option chain of a session with none. Asking again does not change that, with one exception: until the service's options build is live (qte-platform #2298), `option_greeks` and `fetch_option_chain` are unavailable for every session, so do not treat that answer as permanent for them yet.
+- Fix: Check the date against the calendar, and the instrument and channel against the instruments the exchange lists; for an option contract, check it is in that session's chain (`fetch_option_chain`), and ask for `option_greeks` only of an option contract.
 
 ### QTE-HISTORY-NOT-CLOSED
 
