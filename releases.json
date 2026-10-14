@@ -27,7 +27,9 @@
     "version": "1.1.1",
     "recommended": true,
     "why": "on Windows, cancelling a past-data fetch, or an asyncio.timeout running out on one, could freeze the program for up to the fetch's timeout; 1.1.1 ends it at once",
-    "platforms": ["win32"]
+    "platforms": [
+      "win32"
+    ]
   },
   {
     "version": "1.2.0",
@@ -39,6 +41,12 @@
     "version": "1.3.0",
     "recommended": true,
     "why": "rejected messages count toward your team's message budget, so a bot that sends too fast locks itself out; 1.3.0's opt-in pacer helps keep a bot under its share of the team's budget",
+    "platforms": []
+  },
+  {
+    "version": "1.4.0",
+    "recommended": true,
+    "why": "Fundamentals pods can read tickets the exchange works under automatic execution and must take their position from account_state, a reconnect after a new event log no longer skips its first reports, and a halted options chain is named",
     "platforms": []
   }
 ]
