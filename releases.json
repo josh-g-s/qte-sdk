@@ -46,7 +46,7 @@
   {
     "version": "1.4.0",
     "recommended": true,
-    "why": "Fundamentals pods can read tickets the exchange works under automatic execution and must take their position from account_state, a reconnect after a new event log no longer skips its first reports, and a halted options chain is named",
+    "why": "Fundamentals pods can read tickets under automatic execution and must take positions from account_state; a reconnect after a new event log no longer skips reports; a halted options chain is named",
     "platforms": []
   }
 ]
