@@ -117,10 +117,10 @@ replay it. It says:
 - `config_version`, the configuration a `SERVICE` ticket accepted now is stamped with;
 - `paused`: the Directors paused the service. A `SERVICE` ticket is still accepted, no
   child is placed for it while the pause lasts and its resting children are cancelled,
-  and the service catches up when the pause lifts (Jack's answer G-164 A, qte-platform
-  #2310). While the routing is `ROUTING_DESK` no desk trades, so a ticket sent then is
-  accepted and nothing works it until the service is on; from the Winter term the
-  exchange is to refuse it at once (qte-platform #2315).
+  and the service catches up when the pause lifts. While the routing is `ROUTING_DESK`,
+  a ticket goes to the pod's Execution desk as before (`executor` `DESK`); from the
+  Winter term no desk is paired and the exchange is to refuse it at once (qte-platform
+  #2315).
 
 `LatestTickets.route` keeps the newest one, and forgets it on a `Disconnected`. A desk is
 never sent `execution_route`.
