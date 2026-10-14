@@ -133,8 +133,8 @@ entry in a resume's `order_snapshot`. They never rest in `qte_sdk.resting.Restin
 Under `SERVICE` the engine's own cure ticket is worked by the service and
 nothing of it is sent to anyone: no `ticket_accepted`, `ticket_state` or `execution` of
 it or its children. The pod sees the ticket it replaced stop (`TICKET_CANCELLED_BY_ENGINE`)
-but not the cure, so take the team's position from `account_state` (`qte_sdk.account`),
-never by adding fills. Follow the ticket itself in `ticket_state`. A desk is sent its
+but not the cure, so only a new `account_state` (`qte_sdk.account`) shows the cure's
+effect on the team's position. Follow the ticket itself in `ticket_state`. A desk is sent its
 own children's fills, which name the ticket the same way. What becomes of the desk's
 child orders still resting when a desk's ticket stops depends on why it stopped:
 
