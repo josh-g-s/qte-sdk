@@ -56,9 +56,9 @@ The rules it follows, which a pod program should follow too:
   `TICKET_WORKING` does.
 
 It sends one ticket, and a second only for the 1713 resend. A ticket is an instruction
-the exchange keeps working after this program exits: if --seconds pass, or you press
-Ctrl+C, before the ticket stops, the example says the ticket is still working and names
-it, and you can cancel it with `qte_sdk.tickets.send_ticket_cancel`. It does not
+the exchange keeps working after this program exits: if --seconds pass before the ticket
+stops, the example says the ticket is still working and names it (on Ctrl+C it says a
+ticket sent may still be working; its id is on the `accepted` line), and you can cancel it with `qte_sdk.tickets.send_ticket_cancel`. It does not
 reconnect; a pod program that runs for a session should use
 `qte_sdk.reconnect.ReconnectingSession`, whose `Disconnected` makes `LatestTickets`
 forget what it held so the next connection's ticket states rebuild it.
