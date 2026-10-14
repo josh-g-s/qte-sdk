@@ -1384,7 +1384,7 @@ _ERRORS: dict[int, tuple[type[HistoryError], str]] = {
     400: (HistoryRequestRejected, "the request was rejected as malformed"),
     401: (HistoryUnauthenticated, "the token is missing or not recognised"),
     403: (HistoryForbidden, "the token may not read this data"),
-    404: (HistoryUnavailable, "the data is unavailable and will never exist"),
+    404: (HistoryUnavailable, "the data is unavailable"),
     409: (HistoryNotClosed, "the session has not closed yet"),
     501: (HistoryNotImplemented, "the service does not serve this yet"),
     429: (HistoryRateLimited, "too many requests"),

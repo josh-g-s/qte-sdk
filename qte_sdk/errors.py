@@ -375,7 +375,8 @@ CODES: dict[str, Entry] = {
     ),
     HISTORY_UNAVAILABLE: Entry(
         "{what}",
-        "Asking again will not change that",
+        "Asking again will not change that, except for option Greeks and option chains "
+        "until the service's options build is live (see docs/errors.md)",
         "Check the date, instrument and channel against the calendar and the instruments "
         "the exchange lists",
         "A date before the service's coverage, a day with no session, or an instrument or "
