@@ -816,9 +816,9 @@ NOT_SHOWN = "Windows would not let this check see who may"
 def hide_list(path: Path, user_sid: str) -> None:
     """Deny the user READ_CONTROL on `path`, and give it to SYSTEM, so the user may still
     open it (and what is in it, if it is a folder) but not see its owner or list. It is
-    given to SYSTEM first: icacls reads the list before it changes the owner, and once
-    READ_CONTROL is denied only the owner's implied rights would let it, which a folder made
-    by Python 3.12 or later on Windows does not give (CI's 3.12 and 3.14 runs showed it)."""
+    given to SYSTEM first: icacls reads the list before it changes the owner, and with
+    READ_CONTROL already denied, `/setowner` on a folder was refused ("Access is denied") in
+    CI's Python 3.12 and 3.14 runs, though not in its 3.11 run."""
     set_owner(path, SYSTEM)
     icacls(path, "/deny", f"*{user_sid}:(RC)")
     assert _fileaccess._read_sddl(str(path)) is _fileaccess.DENIED
