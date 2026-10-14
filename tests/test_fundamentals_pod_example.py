@@ -4,11 +4,14 @@ scripted local exchange that serves a Fundamentals pod under automatic execution
 import json
 from typing import Any
 
+import pytest
 from fake_exchange import CONTRACT_VERSION, serve_local
-from test_examples import run_example, synthetic_token
+from test_examples import load_example, run_example, synthetic_token
 from test_tickets import accepted_payload, route_payload, service_state_payload
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
+
+from qte_sdk.connection import LivenessTimeout
 
 INSTRUMENT = "AAPL"
 ARGS = (
@@ -81,7 +84,10 @@ class PodExchange:
         accounts: list[dict[str, Any]],
         after: list[tuple[str, dict[str, Any]]],
         refuse_vwap: bool = False,
+        reject: str | None = None,
     ) -> None:
+        # With `reject`, every ticket is refused with that reason.
+        self.reject = reject
         self.route = route
         self.accounts = list(accounts)
         self.after = after
@@ -131,11 +137,14 @@ class PodExchange:
 
     async def answer_ticket(self, ws: ServerConnection, payload: dict[str, Any]) -> None:
         algorithm = payload.get("algorithm", "TWAP")
+        reason = self.reject
         if algorithm == "VWAP" and self.refuse_vwap:
+            reason = "TICKET_ALGORITHM_UNAVAILABLE"
+        if reason is not None:
             reject = {
                 "request_ref": payload["request_ref"],
                 "request_kind": "TICKET_REQUEST_SUBMIT",
-                "reason_code": "TICKET_ALGORITHM_UNAVAILABLE",
+                "reason_code": reason,
                 "receipt_time": "1",
             }
             await self.send(ws, "ticket_reject", reject)
@@ -254,3 +263,38 @@ async def test_a_session_with_no_route_is_not_a_pods_and_sends_no_ticket():
     assert code == 1, out + err
     assert "no execution_route arrived" in out
     assert exchange.tickets() == []
+
+
+async def test_another_reject_is_printed_by_name_and_says_nothing_stopped():
+    # 1713 only is resent; TWAP refused 1713, or any other reason, is printed and the
+    # example stops. A ticket already working in the instrument keeps working.
+    exchange = PodExchange(
+        route=route_payload(),
+        accounts=[account(None)],
+        after=[],
+        reject="TICKET_INSTRUMENT_WORKING",
+    )
+    code, out, err = await run_pod(exchange, "--algorithm", "vwap")
+    assert code == 0, out + err
+    assert len(exchange.tickets()) == 1
+    assert "REJECTED: TICKET_INSTRUMENT_WORKING; any ticket already working is unaffected" in out
+    assert "no ticket is working" not in out
+
+
+class DeadLink:
+    """A session whose link is presumed dead: iterating it raises LivenessTimeout."""
+
+    def __aiter__(self) -> "DeadLink":
+        return self
+
+    async def __anext__(self) -> Any:
+        raise LivenessTimeout(5.0)
+
+
+async def test_a_dead_link_is_not_mistaken_for_the_watch_running_out():
+    # LivenessTimeout is a TimeoutError: it must not read as --seconds being up.
+    example = load_example("fundamentals_pod.py")
+    args = example.parse_args(["--shares", "1", "--limit", "1"])
+    pod = example.Pod(DeadLink(), args)
+    with pytest.raises(LivenessTimeout):
+        await example.drive(DeadLink(), pod, lambda: False, 600)

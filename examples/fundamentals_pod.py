@@ -79,7 +79,14 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.account import is_account_state, send_account_query
-from qte_sdk.connection import DecodeFailed, Event, Received, SeqGap, SessionRejected
+from qte_sdk.connection import (
+    DecodeFailed,
+    Event,
+    LivenessTimeout,
+    Received,
+    SeqGap,
+    SessionRejected,
+)
 from qte_sdk.contract.v1.common_pb2 import (
     AUTO_EXECUTION,
     BUY,
@@ -268,7 +275,11 @@ class Pod:
             reason = ticket_reason_code_name(message.reason_code)
             unknown = event.unknown_enum_names().get("reason_code")
             detail = f" ({message.reason_detail})" if message.HasField("reason_detail") else ""
-            print(f"REJECTED: {unknown or reason}{detail}; no ticket is working")
+            # A reject refuses this one message and stops nothing: a ticket sent earlier
+            # (TICKET_INSTRUMENT_WORKING, say) is still working.
+            print(
+                f"REJECTED: {unknown or reason}{detail}; any ticket already working is unaffected"
+            )
             self.rejected = True
         elif isinstance(message, TicketAccepted) and ref is not None and ref == self.ticket_ref:
             self.ticket_id = message.ticket_id
@@ -339,14 +350,19 @@ async def drive(session: Session, pod: Pod, until: Callable[[], bool], seconds: 
     exchange closes the connection ("closed")."""
     if until():
         return "done"
+    deadline = asyncio.timeout(seconds)
     try:
-        async with asyncio.timeout(seconds):
+        async with deadline:
             async for event in session:
                 await pod.on_event(event)
                 if until():
                     return "done"
     except TimeoutError:
-        return "time"
+        # Only this wait's own deadline is "time". A LivenessTimeout (no heartbeat, the
+        # link presumed dead) is a TimeoutError too, and must not read as one.
+        if deadline.expired():
+            return "time"
+        raise
     return "closed"
 
 
@@ -466,6 +482,11 @@ def main(argv: list[str] | None = None) -> int:
         return fail(f"not sent: {error}")
     except SessionRejected as error:
         return fail(f"the exchange refused the session: {error}")
+    except LivenessTimeout as error:
+        return fail(
+            f"{error}. This example does not reconnect. A ticket sent may still be "
+            "working: reconnect and read its ticket_state"
+        )
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosedError:
