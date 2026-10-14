@@ -96,12 +96,15 @@ RELEASED: frozenset[str] = frozenset()
 FIELD_VALUES: dict[str, object] = {
     "action": "write",
     "command": "`git rm --cached .env` in /home/student/algo",
+    "cursor": 3,
     "fix": "Choose another path with --file PATH",
     "instrument": "SPY261120C00450000",
     "kind": "InvalidStatus",
     "latest": "1.2.0",
     "line": 3,
     "name": ".env",
+    "new_log_id": "fedcba9876543210",
+    "old_log_id": "0123456789abcdef",
     "path": "/home/student/algo/.env",
     "problem": "is not UTF-8 text",
     "reason": "NOT_AUTHENTICATED: unknown credentials",
@@ -1057,6 +1060,21 @@ def options_chain_halted(token: str, ctx: Context) -> str:
     return "\n".join(caught)
 
 
+def session_log_changed(token: str, ctx: Context) -> str:
+    from qte_sdk.reconnect import ReconnectingSession
+
+    caught = caught_warnings(ctx)
+    ctx.monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    session = ReconnectingSession(URL, token)
+    # A cursor of 3 counted in one log, then a session_ack naming another.
+    session._reports.restore((3, frozenset()))
+    session._reports_log_id = "0123456789abcdef"
+    session._enter_log("fedcba9876543210")
+    assert session.last_report_seq is None
+    assert len(caught) == 1
+    return caught[0]
+
+
 SPY_CALL = "SPY261120C00450000"
 
 
@@ -1087,6 +1105,7 @@ CASES: dict[str, Case] = {
     errors.SESSION_RESUME_REJECTED: session_resume_rejected,
     errors.SESSION_RESUME_NOT_ACKNOWLEDGED: session_resume_not_acknowledged,
     errors.SESSION_RESUME_TIMEOUT: session_resume_timeout,
+    errors.SESSION_LOG_CHANGED: session_log_changed,
     errors.CONNECT_HANDSHAKE_FAILED: connect_handshake_failed,
     errors.CONNECT_LIVENESS_TIMEOUT: connect_liveness_timeout,
     errors.CONNECT_NO_SESSION: connect_no_session,

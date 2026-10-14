@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.45
+**Version:** 0.46
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- `ReconnectingSession` forgets its report cursor when a new session's `session_ack` names a different event log (`log_id`, qte-platform contract 01 at 2.28) from the one the cursor was counted under, as at a term change, and logs `QTE-SESSION-LOG-CHANGED`: the resume then asks from 0 and gets a snapshot, so a new log's first reports are not skipped. As contract 01 asks, the cursor is kept only under a known, equal `log_id`, so an absent or malformed one forgets it too, without a warning. `SessionInfo.log_id` exposes it, so a cursor you save for `Session.resume` can carry the log it belongs to. The vendored contract moves to qte-platform e1eec821 (session.proto 1.12), the commit that also brings the automatic execution fields; a ticket now carries `algorithm` unset, which the exchange reads as TWAP (#233).
 - Options docs: the Greeks' `status` no longer says what an option contract may send; its book's `trading_state` does (#232). Since qte-platform contract 05 at 2.21, a contract whose Greeks are `OPTION_GREEKS_UNAVAILABLE` is suspended, not reducing-only, until a calculation succeeds for it this session, and a contract whose quote is not two-sided is suspended while its `condition` is `LIVE`. `qte_sdk.options.trading_state` already reads only the book's field, so no code changes.
 
 - On macOS and Linux, the `QTE-DOTENV-WRITABLE` check now looks at each part of the `.env`'s path as named, so a link to a folder on the way is judged like any other link: the folder that holds it and the folders above it are checked, as well as those it leads to, and a link another account owns is reported when others can write to its folder. Root-owned links such as `/tmp`, `/var` and `/etc` on macOS are not reported (#238).
