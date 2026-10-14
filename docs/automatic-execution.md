@@ -6,7 +6,7 @@ The exchange can work a Fundamentals pod's tickets itself, with its automatic ex
 
 ## What each release shows
 
-Both releases keep working while the service is on: nothing raises, disconnects or is delivered twice after a reconnect. 1.4.0 can read everything the service sends; 1.3.0 can read the tickets' totals and status but not the service's own fields. Check yours with `python -m qte_sdk.update`.
+Both releases keep working while the service is on: nothing raises, disconnects or is delivered twice after a reconnect. 1.4.0 can read everything the service sends; 1.3.0 can read the tickets' totals and status but not the service's own fields. Check yours with `python -m qte_sdk.update`. 1.4.0 is the next release: until that command names it as the latest, it is not yet released, and only `main` has what this page says of it.
 
 | What the exchange sends | 1.4.0 | 1.3.0 |
 |---|---|---|
