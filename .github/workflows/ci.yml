@@ -133,14 +133,15 @@ jobs:
           STUDENT_HOME: ${{ runner.temp }}\Student Ü
         run: |
           python_exe="$(cygpath -u "$STUDENT_HOME")/wheel/Scripts/python.exe"
-          for example in "$GITHUB_WORKSPACE"/examples/*.py; do
+          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
+          for example in "$workspace"/examples/*.py; do
             name=$(basename "$example" .py)
             "$python_exe" "$example" --help > "help-bash-$name.txt" 2>&1 || { echo "$name --help exited $?"; cat "help-bash-$name.txt"; exit 1; }
           done
-          python "$GITHUB_WORKSPACE/scripts/check_student_install.py" help help-bash-
+          python "$workspace/scripts/check_student_install.py" help help-bash-
           code=0
           "$python_exe" -m qte_sdk.update --timeout 5 > update-bash.txt || code=$?
-          python "$GITHUB_WORKSPACE/scripts/check_student_install.py" update update-bash.txt "$code"
+          python "$workspace/scripts/check_student_install.py" update update-bash.txt "$code"
       # The same from cmd, in the legacy console code page a student's cmd has (437 in
       # English); the runner sets 65001, UTF-8, before each step, so the step sets 437 and
       # stops if it cannot. Python writes redirected output in the ANSI code page (1252),

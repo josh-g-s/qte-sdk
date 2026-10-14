@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.45
+**Version:** 0.46
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- CI tests the student install on Windows in a new `windows-install` job (#248, #249): the wheel, the sdist and a zip of the source tree as the release download is, each installed into a fresh virtualenv in a folder whose path has a space and a non-ASCII character, then `python -m qte_sdk.update --json`, `python -m qte_sdk.agents` and `python -m qte_sdk.token check` run from outside the checkout, and each example's `--help` and the update check run from Git Bash and from cmd in code page 437. A new Windows test checks that the background update warning never holds up a program whose stderr is a pipe nobody reads. Tests and CI only, no change to the SDK itself.
 
 - Options docs: the Greeks' `status` no longer says what an option contract may send; its book's `trading_state` does (#232). Since qte-platform contract 05 at 2.21, a contract whose Greeks are `OPTION_GREEKS_UNAVAILABLE` is suspended, not reducing-only, until a calculation succeeds for it this session, and a contract whose quote is not two-sided is suspended while its `condition` is `LIVE`. `qte_sdk.options.trading_state` already reads only the book's field, so no code changes.
 
