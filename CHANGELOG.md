@@ -1,12 +1,16 @@
 # Changelog
 
-**Version:** 0.50
+**Version:** 0.51
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+## 1.4.0
+
+**Fundamentals pods: take your position from the exchange.** Under automatic execution the exchange works your tickets itself and sends each fill of its child orders as an `execution` (origin `AUTO_EXECUTION`) that is already in the ticket's `filled_shares`, so a pod that adds those fills to its ticket totals counts them twice. Take the position from `account_state.positions` and keep it between queries with `qte_sdk.account.AccountReports`; query again after a ticket stops. Read where new tickets go from `LatestTickets.route`. `send_ticket(..., algorithm=VWAP)` asks for a volume-weighted schedule; until the instrument has a VWAP profile it is refused `TICKET_ALGORITHM_UNAVAILABLE` (1713), so send it again as TWAP, the default. **Every bot:** a reconnect after the exchange starts a new event log, as at a term change, now forgets the old log's report cursor and asks for a snapshot, instead of resuming at the old number and skipping the new log's first reports. **Options:** a Director's halt of a chain reads `OPTION_HALTED`; send only cancels in it until its book shows another state. **Check one change:** on macOS and Linux, `python -m qte_sdk.token check` now exits 1 when others can write to the `.env` that holds your token, or to a folder above it; run the command it prints. Update with `python -m qte_sdk.update` and follow what it prints.
 
 - A new worked example, `examples/fundamentals_pod.py`, for a Fundamentals pod while the exchange's automatic execution service is on. It passes every event to one `LatestTickets`, prints the `execution_route` (`routing_in_force`, `paused`), sends one ticket with `--algorithm twap` or `vwap` and, on a VWAP refused `TICKET_ALGORITHM_UNAVAILABLE` (1713), sends it once more as TWAP. It prints the ticket's `algorithm` and `executor`, then each `ticket_state` (`filled_shares`, `due_shares`, `activity`, `behind_schedule`) until the ticket stops, a status this SDK does not know included, and the service's and the engine's fills as information only, since they are already in the ticket's `filled_shares`. It takes the position from `account_state.positions`, at the start and again after the stop, treating a missing summary as unknown. It sends nothing and exits 1 with no route (a desk's session) or with `routing_in_force` `ROUTING_DESK`, since a ticket would then go to the pod's Execution desk, which is paused and does not trade this term (#245).
 - New page, [docs/automatic-execution.md](docs/automatic-execution.md), for Fundamentals pods and Execution desks while the exchange's automatic execution service is on (#244): what 1.4.0 and 1.3.0 each show, who works a ticket and when the routing changes, how a pod keeps its position (from `account_state`, never adding ticket fills on top of ticket totals, and why the engine's own cure means querying again), the pause, VWAP and 1713, and the handover. Linked from the README and AGENTS.md.
