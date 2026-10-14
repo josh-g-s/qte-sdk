@@ -153,6 +153,27 @@ The main modules, each documented in its docstrings:
 - **One market-data feed for everyone.** Market data is published on a fixed 100 ms grid: during a session the market state at every grid point, and an instrument's book only when it has changed, so keep the last book you received for each instrument.
 - **Not every team sends orders.** Teams on the trading arms and Execution teams send orders; an order from a team without market access is rejected with a reason code that says so.
 
+## Fundamentals pods: count your position from the exchange, not from fills
+
+A Fundamentals pod is sent an `execution` for every fill of its tickets' child orders: the automatic execution service's (origin `AUTO_EXECUTION`) and the engine's after a handover (`FALLBACK`). They name the ticket in `parent_ticket_id` and carry no `strat_id`. These fills are already counted in the ticket's `ticket_state` (`filled_shares`) and in your team's position, so a pod that also adds them to a position of its own counts each fill twice. A release before this one reads their origin as `ORIGIN_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
+
+Follow each ticket's progress in `LatestTickets`, and take your position from the exchange's own count, `account_state.positions` (`qte_sdk.account`). Fills of the ticket alone are not the whole position: under automatic execution the engine's own cure ticket and its fills are sent to no one, and a position carries across terms while tickets do not.
+
+```python
+from qte_sdk.account import is_account_state, send_account_query
+from qte_sdk.tickets import LatestTickets
+
+tickets = LatestTickets()
+positions: dict[str, int] = {}
+ref = await send_account_query(session)
+async for event in session:
+    tickets.update(event)  # each ticket's filled_shares, due_shares and status
+    if is_account_state(event) and event.message.request_ref == ref:
+        positions = {p.instrument: p.quantity for p in event.message.positions}
+    # Never add an `execution` to `positions`: it is a fill of one of your tickets,
+    # already counted by the exchange. Ask again with send_account_query when you need it.
+```
+
 ## Status
 
 Working today: session authentication, the market calendar, market data, order entry and order events, the resting-order view, reconnect with heartbeats and session resume, past market data from the history service and its replay through your loop, a query for your team's positions, cash and limit use (it needs an exchange that serves the query), the closed market's official close price, the quickstart and the worked examples. Progress is tracked in [the issues](https://github.com/josh-g-s/qte-sdk/issues).
