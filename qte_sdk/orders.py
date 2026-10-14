@@ -39,7 +39,8 @@ the same way, a fill or cancellation whose `origin` is `HOUSE`, of one of the ex
 own house orders, goes only to those sessions: a team's connection never receives one.
 
 An `execution`'s `origin` says whose order filled. `TEAM` is the team's own order. The
-others are orders the exchange placed: `CURE_TRADE` and `AUTO_FLATTEN` from the team's
+others are orders the exchange placed (a service's passive child rests as a limit order
+of the pod): `CURE_TRADE` and `AUTO_FLATTEN` from the team's
 account; `AUTO_EXECUTION`, a child of a Fundamentals ticket the automatic execution
 service works, and `FALLBACK`, the engine's child of a ticket the Directors handed over
 from its desk. A fill of an `AUTO_EXECUTION` or `FALLBACK` child goes to the ticket's pod

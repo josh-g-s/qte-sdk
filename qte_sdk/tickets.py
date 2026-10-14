@@ -11,7 +11,8 @@ or sell, and the exchange has it executed by one of two executors, which the pod
 - `DESK`: the pod's assigned Execution desk works the ticket with child orders that name
   it in `parent_ticket_id` (see `qte_sdk.orders.send_new`). The Directors may later hand
   a desk's ticket over to the exchange to execute: its `executor` then turns `ENGINE`,
-  which is never undone.
+  which is never undone. A term whose configuration provides no fallback has no
+  handover; the 15 October term has none.
 
 Which executor a new ticket gets is the exchange's routing at acceptance, a switch the
 Directors set (`execution_route`, below), not the pod's choice. A ticket keeps its
@@ -60,8 +61,10 @@ A `ticket_state` carries the ticket's totals on every executor: `filled_shares`,
 `remaining_shares`, `average_fill_price`, `net_fee` and `filled_notional`, the exact sum
 of quantity times price over its fills, fees excluded (`filled_notional /
 filled_shares` is the exact average price). `due_shares` is what the schedule asks to be
-filled by now, and `planned_completion_time` the completion estimate at acceptance. A
-`SERVICE` ticket also says what the service is doing with it:
+filled by now; a `SERVICE` ticket's is the figure at the service's last assessment, 0
+before the first, which moves only when the service assesses again, on connect too.
+`planned_completion_time` is the completion estimate at acceptance. A `SERVICE` ticket
+also says what the service is doing with it:
 
 - `activity`, a `TicketActivity`: `WORKING`, `POSTING` (a passive child rests),
   `TAKING` (a child crosses the spread), `WAITING_LIQUIDITY`, `WAITING_LIMIT` (the
@@ -70,7 +73,8 @@ filled by now, and `planned_completion_time` the completion estimate at acceptan
   (the Directors paused the service) or `MESSAGE_BUDGET`. A name this SDK does not know
   decodes as `TICKET_ACTIVITY_UNSPECIFIED`, which is also what any other ticket carries;
 - `behind_schedule`, True when the fills were more than one slice behind `due_shares` at
-  the service's last assessment, `last_assessment_time`;
+  the service's last assessment, `last_assessment_time`, or the schedule had reached its
+  planned completion (revised for halts and outages) with shares unfilled;
 - `revised_completion_time`, present once a trading suspension has shifted the
   schedule: the new completion estimate. `planned_completion_time` does not change;
 - `config_version`, the service's configuration version the ticket was accepted under.
@@ -100,8 +104,10 @@ missing from it is no longer one to follow. `LatestTickets` forgets every ticket
 A pod's session is also sent `execution_route` (an `ExecutionRoute`; pick it out with
 `is_execution_route`), once on each connection after the `session_ack`, the calendar
 and the instruments table and before that connection's ticket states, so the routing is
-known before the states are read and before a ticket is sent, and again whenever the
-Directors change the automatic execution control. It carries no `report_seq` and a resume does not
+known before the states are read and before a ticket is sent. It is sent again, whole,
+each time an automatic execution control is logged (a Director's, or the one the exchange
+logs as it starts) and at a session open that puts a pending control in force, whether
+that changes the routing or only `config_version`. It carries no `report_seq` and a resume does not
 replay it. It says:
 
 - `routing_in_force`, an `ExecutionRouting`: `ROUTING_SERVICE` while a ticket you send
@@ -109,21 +115,28 @@ replay it. It says:
 - `routing_next_open`, present only when the routing changes at the next session's
   open: the routing from then. Routing never changes mid-session;
 - `config_version`, the configuration a `SERVICE` ticket accepted now is stamped with;
-- `paused`: the Directors paused the service. A `SERVICE` ticket is still accepted, but
-  no child is placed for it until the service resumes.
+- `paused`: the Directors paused the service. A `SERVICE` ticket is still accepted, and
+  no child is placed for it while the pause lasts. What then becomes of a ticket accepted
+  during the pause is an open point of the contract: follow it in `ticket_state`.
 
 `LatestTickets.route` keeps the newest one, and forgets it on a `Disconnected`. A desk is
 never sent `execution_route`.
 
-The service's and the engine's children are the exchange's orders, not yours: the pod is
+The service's and the engine's children are placed by the exchange, not by you (the
+service's passive child rests as a limit order of the pod, which any team's order may
+fill): the pod is
 sent each of their fills as an `execution` that names the ticket in `parent_ticket_id`
 (`parent_ticket_of`), with `origin` `AUTO_EXECUTION` for the service's and `FALLBACK`
 for the engine's after a handover, and no `strat_id`. Nothing else of
 those orders is sent to anyone: no `accepted`, `order_state` or `order_cancelled`, and no
 entry in a resume's `order_snapshot`. They never rest in `qte_sdk.resting.RestingOrders`.
-Follow the ticket itself in `ticket_state`. A desk is sent its own children's fills,
-which name the ticket the same way. What becomes of the desk's child orders still
-resting when a desk's ticket stops depends on why it stopped:
+Under `SERVICE` the engine's own cure ticket is worked by the service and
+nothing of it is sent to anyone: no `ticket_accepted`, `ticket_state` or `execution` of
+it or its children. The pod sees the ticket it replaced stop (`TICKET_CANCELLED_BY_ENGINE`)
+but not the cure, so take the team's position from `account_state` (`qte_sdk.account`),
+never by adding fills. Follow the ticket itself in `ticket_state`. A desk is sent its
+own children's fills, which name the ticket the same way. What becomes of the desk's
+child orders still resting when a desk's ticket stops depends on why it stopped:
 
 - the pod cancelled it, or the mark moved beyond its limit: each child is cancelled with
   an `order_cancelled` whose reason is `PARENT_STOPPED`;

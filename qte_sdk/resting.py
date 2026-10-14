@@ -277,8 +277,8 @@ class RestingOrders:
 
     def _on_execution(self, msg: Execution) -> None:
         if msg.origin != TEAM:
-            # Not the team's own resting order, even with a price where that order rests:
-            # a ticket's AUTO_EXECUTION child may be a limit order with an order_price.
+            # Not the team's own resting order, even at a price where that order rests:
+            # an AUTO_EXECUTION or FALLBACK child is the exchange's, whatever it carries.
             return
         if not msg.HasField("order_price"):
             return  # a market order, which never rests
