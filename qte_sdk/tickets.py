@@ -28,10 +28,13 @@ A pod sends three messages:
   and once its `ticket_state` shows `TICKET_CANCELLED_BY_POD`, send the new one naming it
   in `replaces_ticket_id`. If that cancel is refused `TICKET_SERVICE_OFF` (1714), send no
   replacement: the original ticket is still working, with its fills and its children. To
-  stop it, cancel it plainly (`replacing` left False). Apart from that refusal the two
-  messages are not atomic: a replacement refused for any other reason leaves the old
-  ticket cancelled. `algorithm` (`TWAP` or `VWAP`, TWAP when left out) is read only
-  for a ticket the service works; a desk's ticket and a cure ticket are always TWAP.
+  stop it, cancel it plainly (`replacing` left False). The flag protects the amendment
+  only at the cancel's instant: once the cancel is taken the two messages are not
+  atomic, and a replacement refused for any reason leaves the old ticket cancelled,
+  `TICKET_SERVICE_OFF` included if the route is off by the time it arrives (for example,
+  `ROUTING_DESK` comes into force at the next open first). `algorithm` (`TWAP` or
+  `VWAP`, TWAP when left out) is read only for a ticket the service works; a desk's
+  ticket and a cure ticket are always TWAP.
 - `ticket_cancel` (`send_ticket_cancel`): cancel a working ordinary ticket the pod sent.
   The pod can never cancel a cure ticket. `replacing=True` marks the cancel as the first
   half of an amendment. In a term with no Fundamentals-to-Execution pairing, while

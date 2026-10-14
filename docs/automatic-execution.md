@@ -92,7 +92,7 @@ There is no amend message. To change a ticket, send its cancel with `send_ticket
 
 In a term that pairs no pod with an Execution desk, while `ROUTING_SERVICE` is not in force, the replacement would be refused 1714, so the replacing cancel is refused whole: a `ticket_reject` with `request_kind` `TICKET_REQUEST_CANCEL`, reason `TICKET_SERVICE_OFF` (1714), your `request_ref`, and the detail "the automatic execution route is off: an amendment would lose the ticket, so its cancel is refused". Nothing is logged and the original ticket keeps working, its fills and children standing. Send no replacement. To stop the ticket, cancel it plainly (`replacing` left False), which is never refused for the route. The route check comes last, after the ticket's own checks, so a replacing cancel of no ticket is still `TICKET_NOT_FOUND`.
 
-Apart from that refusal the cancel and the replacement are not atomic: if the replacement is refused for any other reason, the old ticket stays cancelled.
+The flag protects the amendment only at the cancel's instant. Once the cancel is taken, the cancel and the replacement are not atomic: if the replacement is refused for any reason, the old ticket stays cancelled. That includes `TICKET_SERVICE_OFF` (1714) when the route is off by the time the replacement arrives, for example because `ROUTING_DESK` comes into force at the next open first, so send the replacement as soon as the cancel is taken.
 
 ## Handover
 
