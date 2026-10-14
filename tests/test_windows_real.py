@@ -7,6 +7,12 @@ through `ctypes`, as it does on a student's computer: nothing in `qte_sdk._filea
 
 The tokens here are fakes. The SIDs are worked out when the tests run, from `whoami`.
 
+The last tests run `python -m qte_sdk.update` behind a newer release, against a fake
+repository on 127.0.0.1, and read its output in the code page Windows gives a pipe. The job
+installs the SDK editable, which the check cannot trace to a release, so each test puts a
+copy of the package, beside the install record of a release zip or of git, first on the
+child's path.
+
 CI's hosted runner runs the tests as an elevated administrator, which a student usually
 is not. Three things differ because of that:
 
