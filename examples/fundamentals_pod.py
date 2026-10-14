@@ -13,10 +13,12 @@ What it does, in order:
 2. It asks for the team's account (`send_account_query`) and prints the position in
    --instrument from `account_state.positions`.
 3. It waits at most ROUTE_SECONDS (or --seconds, if less) for `execution_route` and
-   prints `routing_in_force` (`ROUTING_SERVICE`: the service works a ticket sent now;
-   `ROUTING_DESK`: the service is off and it goes to your desk) and `paused`. Only a pod is sent a route: a desk
-   never is, so with no route it says so, sends nothing and exits with status 1. This is
-   a pod's example.
+   prints `routing_in_force` and `paused`. With `ROUTING_SERVICE` the service works a
+   ticket sent now. With `ROUTING_DESK` the service is off and a ticket sent now would go
+   to the pod's Execution desk (`executor` `DESK`), which is paused and does not trade
+   this term, so the example says so, sends nothing and exits with status 1. Only a pod
+   is sent a route: a desk never is, so with no route it says so, sends nothing and
+   exits with status 1. This is a pod's example.
 4. It sends one ticket (`send_ticket`) for --shares of --instrument at the hard limit
    --limit, with --algorithm twap or vwap (default twap). If the exchange refuses a VWAP
    ticket with `TICKET_ALGORITHM_UNAVAILABLE` (1713, no VWAP profile for the
@@ -44,11 +46,11 @@ The rules it follows, which a pod program should follow too:
   cure ticket and its fills are sent to no one, so ask for `account_state` again after a
   ticket stops, as this example does.
 - Off or paused: with `routing_in_force` `ROUTING_DESK` the service is off and a new
-  ticket goes to your desk as before (`executor` `DESK`); from the Winter term (26
-  October) the exchange is to refuse it at once instead (Jack's answer G-164 A,
-  qte-platform #2315). With `execution_route.paused` true a ticket is still accepted, no
-  child is placed and resting children are cancelled, and the service catches up when
-  the pause lifts; its `activity` can read `SERVICE_PAUSED`.
+  ticket would go to the pod's Execution desk (`executor` `DESK`), which is paused and
+  does not trade this term, so do not send one; from the Winter term (26 October) the
+  exchange is to refuse it at once instead. With `execution_route.paused` true a ticket
+  is still accepted, no child is placed and resting children are cancelled, and the
+  service catches up when the pause lifts; its `activity` can read `SERVICE_PAUSED`.
 - 1713 (`TICKET_ALGORITHM_UNAVAILABLE`) refuses VWAP only: send the ticket again as TWAP,
   or later. A desk's ticket is always TWAP, whatever it names: read
   `ticket_accepted.algorithm`.
@@ -58,10 +60,11 @@ The rules it follows, which a pod program should follow too:
 It sends one ticket, and a second only for the 1713 resend. A ticket is an instruction
 the exchange keeps working after this program exits: if --seconds pass before the ticket
 stops, the example says the ticket is still working and names it (on Ctrl+C it says a
-ticket sent may still be working; its id is on the `accepted` line), and you can cancel it with `qte_sdk.tickets.send_ticket_cancel`. It does not
-reconnect; a pod program that runs for a session should use
-`qte_sdk.reconnect.ReconnectingSession`, whose `Disconnected` makes `LatestTickets`
-forget what it held so the next connection's ticket states rebuild it.
+ticket sent may still be working; its id is on the `accepted` line), and you can cancel
+it with `qte_sdk.tickets.send_ticket_cancel`. It does not reconnect; a pod program that
+runs for a session should use `qte_sdk.reconnect.ReconnectingSession`, whose
+`Disconnected` makes `LatestTickets` forget what it held so the next connection's ticket
+states rebuild it.
 
 An opening or increasing ticket names the filed thesis that covers it with --thesis-id
 and --thesis-version; a reducing ticket may leave both out. Whether a ticket is accepted
@@ -179,6 +182,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.limit_price = to_micros(args.limit)
     except (ValueError, ArithmeticError):
         parser.error(f"--limit must be a price in dollars, such as 201.50, not {args.limit!r}")
+    if not args.seconds > 0:  # NaN too
+        parser.error(f"--seconds must be above 0, not {args.seconds:g}")
     if (args.thesis_id is None) != (args.thesis_version is None):
         parser.error("--thesis-id and --thesis-version go together: give both or neither")
     return args
@@ -332,6 +337,10 @@ class Pod:
             print(f"the account query was refused: {reason_code_name(message.reason_code)}")
             self.account_answered = True
 
+    def warn_if_missed(self) -> None:
+        if self.missed:
+            print("messages were missed, so the ticket's states printed may be incomplete")
+
     def print_position(self, when: str) -> None:
         if self.account is None:
             print(f"position {when}: unknown (no account_state)")
@@ -417,8 +426,10 @@ async def follow(session: Session, args: argparse.Namespace) -> int:
         print(f"from the next open: {ExecutionRouting.Name(route.routing_next_open)}")
     if route.routing_in_force == ROUTING_DESK:
         print(
-            "a ticket sent now goes to your desk (executor DESK, always TWAP), not the service"
+            "the service is off: a ticket sent now would go to the pod's Execution desk "
+            "(executor DESK), which is paused and does not trade this term; no ticket was sent"
         )
+        return 1
     if route.paused:
         print(
             "the service is paused: a ticket is still accepted, but no child is "
@@ -433,6 +444,7 @@ async def follow(session: Session, args: argparse.Namespace) -> int:
         print("the exchange closed the connection")
         if pod.ticket_ref is not None and not pod.stopped:
             print("WARNING: the ticket may still be working; reconnect and read its state")
+        pod.warn_if_missed()
         return 1
     if why == "time":
         if pod.ticket_id is None:
@@ -443,14 +455,14 @@ async def follow(session: Session, args: argparse.Namespace) -> int:
                 "is still working on the exchange; cancel it with send_ticket_cancel if "
                 "you do not want it to continue"
             )
+        pod.warn_if_missed()
         return 0
 
     # The ticket stopped. Ask again: the engine's cure fills, if any, show only here.
     await pod.query_account()
     await drive(session, pod, lambda: pod.account_answered, ACCOUNT_SECONDS)
     pod.print_position("after the stop")
-    if pod.missed:
-        print("messages were missed, so the ticket's states printed may be incomplete")
+    pod.warn_if_missed()
     return 0
 
 

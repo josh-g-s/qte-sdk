@@ -5,9 +5,9 @@ import json
 from typing import Any
 
 import pytest
-from fake_exchange import CONTRACT_VERSION, serve_local
+from fake_exchange import CONTRACT_VERSION, frame, serve_local
 from test_examples import load_example, run_example, synthetic_token
-from test_tickets import accepted_payload, route_payload, service_state_payload
+from test_tickets import accepted_payload, received, route_payload, service_state_payload
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
@@ -85,9 +85,17 @@ class PodExchange:
         after: list[tuple[str, dict[str, Any]]],
         refuse_vwap: bool = False,
         reject: str | None = None,
+        before: list[tuple[str, dict[str, Any]]] | None = None,
+        stray_account: dict[str, Any] | None = None,
     ) -> None:
         # With `reject`, every ticket is refused with that reason.
         self.reject = reject
+        # `before` is sent ahead of the ticket_accepted. A frame of type "gap" sends
+        # nothing but skips a seq, as a message lost on the way would.
+        self.before = before or []
+        # With `stray_account`, an account_state answering someone else's query is sent
+        # straight after the route.
+        self.stray_account = stray_account
         self.route = route
         self.accounts = list(accounts)
         self.after = after
@@ -98,6 +106,8 @@ class PodExchange:
 
     async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
         self._seq += 1
+        if type_ == "gap":
+            return
         env: dict[str, Any] = {
             "version": CONTRACT_VERSION,
             "type": type_,
@@ -121,6 +131,8 @@ class PodExchange:
         await self.send(ws, "session_ack", ack)
         if self.route is not None:
             await self.send(ws, "execution_route", self.route)
+        if self.stray_account is not None:
+            await self.send(ws, "account_state", self.stray_account)
         try:
             async for raw in ws:
                 message = json.loads(raw)
@@ -152,9 +164,11 @@ class PodExchange:
         accepted = accepted_payload(
             request_ref=payload["request_ref"], algorithm=algorithm, executor="SERVICE"
         )
+        for type_, frame_ in self.before:
+            await self.send(ws, type_, frame_)
         await self.send(ws, "ticket_accepted", accepted)
-        for type_, frame in self.after:
-            await self.send(ws, type_, frame)
+        for type_, frame_ in self.after:
+            await self.send(ws, type_, frame_)
 
     def tickets(self) -> list[dict[str, Any]]:
         return [m["payload"] for m in self.received if m["type"] == "ticket"]
@@ -241,13 +255,15 @@ async def test_a_status_this_sdk_does_not_know_is_a_stop_named_as_sent():
     assert "position in AAPL after the stop, from account_state: 80" in out
 
 
-async def test_a_paused_route_is_named_and_the_ticket_is_followed_not_assumed_to_catch_up():
+async def test_a_paused_route_still_sends_the_ticket_which_is_accepted_and_caught_up_later():
     after = [("ticket_state", state(10, activity="SERVICE_PAUSED"))]
     exchange = PodExchange(route=route_payload(paused=True), accounts=[account(None)], after=after)
     code, out, err = await run_pod(exchange, "--seconds", "1")
     assert code == 0, out + err
     assert "routing_in_force ROUTING_SERVICE, paused True" in out
     assert "the service is paused" in out
+    assert "the service catches up when it lifts" in out
+    assert "accepted: ticket 17, algorithm TWAP, executor SERVICE" in out
     assert "activity SERVICE_PAUSED" in out
     assert "ticket 17 is still working on the exchange" in out
     assert len(exchange.tickets()) == 1
@@ -298,3 +314,102 @@ async def test_a_dead_link_is_not_mistaken_for_the_watch_running_out():
     pod = example.Pod(DeadLink(), args)
     with pytest.raises(LivenessTimeout):
         await example.drive(DeadLink(), pod, lambda: False, 600)
+
+
+async def test_a_desk_route_sends_nothing_since_the_desk_does_not_trade_this_term():
+    exchange = PodExchange(
+        route=route_payload(routing_in_force="ROUTING_DESK"), accounts=[account(None)], after=[]
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert "routing_in_force ROUTING_DESK, paused False" in out
+    assert "would go to the pod's Execution desk (executor DESK), which is paused" in out
+    assert "no ticket was sent" in out
+    assert exchange.tickets() == []
+
+
+async def test_a_twap_ticket_refused_1713_is_not_sent_again():
+    exchange = PodExchange(
+        route=route_payload(),
+        accounts=[account(None)],
+        after=[],
+        reject="TICKET_ALGORITHM_UNAVAILABLE",
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    assert [t["algorithm"] for t in exchange.tickets()] == ["TWAP"]
+    assert "REJECTED: TICKET_ALGORITHM_UNAVAILABLE" in out
+    assert "sending the ticket again" not in out
+
+
+async def test_a_state_that_comes_before_the_acceptance_is_applied_once_it_is_accepted():
+    before = [("ticket_state", state(30, status="TICKET_COMPLETE", filled_shares="500"))]
+    exchange = PodExchange(
+        route=route_payload(), accounts=[account(None), account(500)], after=[], before=before
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "5")
+    assert code == 0, out + err
+    assert out.index("accepted: ticket 17") < out.index("ticket 17: TICKET_COMPLETE")
+    assert "the ticket stopped: TICKET_COMPLETE" in out
+    assert "position in AAPL after the stop, from account_state: 500" in out
+
+
+async def test_a_state_older_than_the_one_held_is_not_applied():
+    # The stale TICKET_COMPLETE (update_time 10) comes after a newer working state.
+    after = [
+        ("ticket_state", state(20, activity="TAKING")),
+        ("ticket_state", state(10, status="TICKET_COMPLETE", filled_shares="500")),
+    ]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 0, out + err
+    assert "TICKET_COMPLETE" not in out
+    assert "ticket 17 is still working on the exchange" in out
+
+
+async def test_an_account_state_answering_another_query_is_not_taken():
+    stray = {**account(999), "request_ref": "someone-else"}
+    exchange = PodExchange(
+        route=route_payload(),
+        accounts=[account(None), account(500)],
+        after=HAPPY,
+        stray_account=stray,
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    assert "position in AAPL at the start, from account_state: 0" in out
+    assert "999" not in out
+
+
+async def test_a_refused_account_query_ends_the_wait_for_its_answer():
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(DeadLink(), example.parse_args(["--shares", "1", "--limit", "1"]))
+    pod.account_ref = "a-1"
+    refusal = {
+        "request_ref": "a-1",
+        "request_type": "ACCOUNT_QUERY",
+        "reason_code": "MALFORMED_MESSAGE",
+        "receipt_time": "1",
+    }
+    [event] = await received(frame("reject", refusal, 1))
+    await pod.on_event(event)
+    assert pod.account_answered
+    assert pod.account is None
+
+
+async def test_missed_messages_are_named_when_the_watch_runs_out():
+    after = [("gap", {}), ("ticket_state", state(10, activity="TAKING"))]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 0, out + err
+    assert "ticket 17 is still working on the exchange" in out
+    assert "messages were missed, so the ticket's states printed may be incomplete" in out
+
+
+@pytest.mark.parametrize("seconds", ["0", "-5", "nan"])
+def test_seconds_must_be_above_zero(seconds, capsys):
+    example = load_example("fundamentals_pod.py")
+    with pytest.raises(SystemExit) as exit_:
+        example.parse_args(["--shares", "1", "--limit", "1", "--seconds", seconds])
+    assert exit_.value.code == 2
+    assert "--seconds must be above 0" in capsys.readouterr().err
