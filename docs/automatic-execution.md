@@ -23,7 +23,12 @@ A status, activity, origin or reason this SDK does not know decodes as its zero 
 
 The exchange's routing when it accepts a ticket decides who works it, not the pod. With `ROUTING_SERVICE` the service works it (`executor` `SERVICE`, no desk); with `ROUTING_DESK` the pod's desk does (`executor` `DESK`, always TWAP). A ticket keeps its executor: a desk's ticket still working when the routing changes stays with the desk.
 
-The Execution arm is paused, unscored, until the exchange's own house arm is built, so no desk trades. While the routing is `ROUTING_DESK`, or the service is paused, a new ticket is still accepted and nothing works it: no child is placed and no fill comes, and the 15 October term has no fallback to take it over. What then becomes of such a ticket is an open point of the exchange's contract. Read `routing_in_force` and `paused` before you send: a ticket sent while either holds waits, and may not be worked at all.
+The Execution arm is paused, unscored, until the exchange's own house arm is built, so no desk trades, and the 15 October term has no fallback. The service off (`routing_in_force` `ROUTING_DESK`) and the service paused (`paused` true) therefore differ (Jack's answer G-164 A, qte-platform #2310):
+
+- **Off:** the exchange is to refuse a new ticket at once, so the pod sees the service is off (planned from the Winter term, 26 October; qte-platform #2315, its reason code not yet fixed). Until then a ticket sent while the service is off is accepted, and nothing works it until the service is on: no child, no fill.
+- **Paused:** a new ticket is accepted, and the service catches up when the pause lifts (see "The pause").
+
+Read `routing_in_force` and `paused` before you send.
 
 The routing changes only at a session's open. The pod is sent `execution_route` once on each connection, after the `session_ack`, the calendar and the instruments table and before the ticket states, and again whenever the exchange logs an automatic execution control or a pending one comes into force. It says `routing_in_force`, `routing_next_open` when the routing changes at the next open, `config_version`, and `paused`. A desk is never sent it.
 
@@ -73,7 +78,7 @@ The service's passive child rests as a limit order of the pod for a short wait, 
 
 ## The pause
 
-When the Directors pause the service, `execution_route.paused` is true, and a working `SERVICE` ticket's `activity` can read `SERVICE_PAUSED`. A ticket is still accepted, and no child is placed for it while the pause lasts. What then becomes of a ticket accepted during the pause is an open point of the exchange's contract: follow it in `ticket_state`, and do not assume it catches up. (A pause because an equity's mark is frozen is different: the service catches up once the mark is no longer frozen.)
+When the Directors pause the service, `execution_route.paused` is true, and a working `SERVICE` ticket's `activity` can read `SERVICE_PAUSED`. No child is placed and the resting children are cancelled, but no ticket is cancelled, and a new ticket is still accepted. When the pause lifts, the service catches up on what fell due during it, so a long pause ends in a burst of child orders; `due_shares` and `behind_schedule` show how far behind a ticket is. (A pause because an equity's mark is frozen is different: the service catches up once the mark is no longer frozen.)
 
 ## VWAP
 
@@ -93,5 +98,5 @@ The Execution arm is paused, so no desk trades (see "Who works a ticket"). The r
 - Treat any `status` other than `TICKET_WORKING` as a stop, including a name this SDK does not know.
 - Take a pod's position from `account_state.positions`, never adding fills on top of ticket totals; keep it between queries with `AccountReports`, and query again after a ticket stops.
 - On a 1713 reject, resend the ticket as TWAP.
-- Before sending, check `routing_in_force` is `ROUTING_SERVICE` and `paused` is false: otherwise the ticket is accepted and nothing works it.
+- Before sending, check `routing_in_force` is `ROUTING_SERVICE`: while the service is off a ticket is accepted and nothing works it, and from the Winter term it is refused. While `paused` is true a ticket is accepted and caught up when the pause lifts.
 - Read `paused` and `activity` before deciding a ticket is stuck.
