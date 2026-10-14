@@ -120,7 +120,7 @@ Outside market hours the exchange still accepts the connection and the subscript
 | [Quickstart](docs/quickstart.md) | Step by step: connect, read the calendar and market data, place and cancel an order, read order events, what each reject means, and fetch past market data |
 | [Outside session hours](docs/out-of-hours.md) | What works when no session is running, with a runnable walk-through: the calendar, the closed market, an order's reject, past market data |
 | [Developing your algo](docs/developing-your-algo.md) | From an idea to the exchange: explore past market data, run your strategy's loop on a replay of a past session, test its order logic, check your setup, then trade during a session |
-| [Worked examples](examples/) | Runnable programs: check your setup end to end, print the book, quote both sides and manage the quotes, take liquidity with a market order, rest and cancel one option order from the chain and its Greeks, see the closed market outside a session, replay a past session's book |
+| [Worked examples](examples/) | Runnable programs: check your setup end to end, print the book, quote both sides and manage the quotes, take liquidity with a market order, rest and cancel one option order from the chain and its Greeks, send and follow a Fundamentals pod's ticket under automatic execution, see the closed market outside a session, replay a past session's book |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
 The main modules, each documented in its docstrings:
@@ -173,6 +173,8 @@ async for event in session:
     # Do not add an `execution` on top of a ticket's filled_shares. To keep positions
     # between queries, use AccountReports; ask again after a ticket stops.
 ```
+
+The worked example [`examples/fundamentals_pod.py`](examples/fundamentals_pod.py) runs all of this against the exchange: it reads the route and the pause, sends one ticket (resending a VWAP refused 1713 as TWAP), follows its state to a stop and takes the position from `account_state` before and after.
 
 ## Status
 
