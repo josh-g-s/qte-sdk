@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.60
+**Version:** 0.61
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -694,6 +694,7 @@ Run the examples from your project folder, with the `examples` folder copied int
 | `examples/options_bot.py` | Read an option underlying's chain from the instruments table and the subscribe, keep the latest Greeks with `LatestGreeks`, pick the contract nearest the forward in the nearest expiry, passing over one that is not trading, and rest one limit buy of one contract one tick above the wall's bid. Cancels it once it rests, and on `--seconds` or Ctrl+C, and names the level if the cancel is not confirmed. Prints a reject by name and never retries the order. |
 | `examples/out_of_hours.py` | Outside a session: read the calendar, subscribe, and print the closed market's session state and the wait until the next open. Sends no orders, and stops at once if a session is under way. The runnable part of [Using the SDK outside session hours](out-of-hours.md). Stops after `--seconds`. |
 | `examples/replay_book.py` | Replay one instrument's book from a past session with `qte_sdk.replay` and print the best bid and ask each time it changes. It reads the history service, so it needs `QTE_HISTORY_URL` and your token but not `QTE_URL`, and works at any hour for a session that has closed. Sends no orders. Stops after `--max-books`, `--seconds` or the end of the session's data. |
+| `examples/fundamentals_pod.py` | For a Fundamentals pod's token, while the exchange's automatic execution service is on. Print the `execution_route` and the position from `account_state`, send one ticket of `--shares` at the hard limit `--limit` (a VWAP ticket refused 1713 is sent once more as TWAP), and print its states until it stops, then the position again. With `ROUTING_DESK` or no route it sends nothing and exits with status 1. Stops following the ticket after `--seconds`; a ticket still working keeps working on the exchange. |
 
 ```sh
 python examples/smoke_test.py --instruments AAPL MSFT
@@ -703,6 +704,7 @@ python examples/take_liquidity.py --instrument AAPL --strat-id my-strategy --sid
 python examples/options_bot.py --underlying SPY --strat-id my-strategy --seconds 30
 python examples/out_of_hours.py --instrument AAPL
 python examples/replay_book.py --date 2026-01-05 --instrument AAPL
+python examples/fundamentals_pod.py --instrument AAPL --side buy --shares 500 --limit 201.50 --thesis-id t-aapl --thesis-version 1
 ```
 
 The examples are for learning the SDK, not strategies: they make no attempt to make money. When you are ready to build your own, [Developing your algo](developing-your-algo.md) walks through the path from past market data to the exchange.

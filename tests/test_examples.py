@@ -1980,9 +1980,14 @@ async def test_options_bot_names_the_level_on_a_second_ctrl_c_while_cancelling()
     )
 
 
+# The arguments an example needs to get as far as connecting, beyond QTE_STRAT_ID.
+REQUIRED_ARGS = {"fundamentals_pod.py": ("--shares", "100", "--limit", "200")}
+
+
 @pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
 async def test_each_example_refuses_to_start_without_an_exchange_url(path: Path):
-    code, out, err = await run_example(path.name, None, synthetic_token(), QTE_STRAT_ID="x")
+    args = REQUIRED_ARGS.get(path.name, ())
+    code, out, err = await run_example(path.name, None, synthetic_token(), *args, QTE_STRAT_ID="x")
     assert code == 2
     assert "QTE_URL" in err
 
@@ -1990,7 +1995,8 @@ async def test_each_example_refuses_to_start_without_an_exchange_url(path: Path)
 @pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
 async def test_each_example_refuses_to_start_without_a_token(path: Path):
     async with serve_local(FakeExchange()) as url:
-        code, out, err = await run_example(path.name, url, None, QTE_STRAT_ID="x")
+        args = REQUIRED_ARGS.get(path.name, ())
+        code, out, err = await run_example(path.name, url, None, *args, QTE_STRAT_ID="x")
     assert code == 2
     assert "QTE_TOKEN" in err
 
