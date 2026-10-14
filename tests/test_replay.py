@@ -7,13 +7,13 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
-from test_history import DAY, FakeHistory, line, serve_history, synthetic_token
+from test_history import CALL, DAY, FakeHistory, greeks, line, serve_history, synthetic_token
 
 from qte_sdk import history, replay, update
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.history import HistoryClient, HistoryInterrupted, HistoryUnavailable
-from qte_sdk.market_data import Book, Mark, SessionState, Trades
-from qte_sdk.replay import CHANNELS
+from qte_sdk.market_data import Book, Mark, OptionGreeks, SessionState, Trades
+from qte_sdk.replay import CHANNELS, DEFAULT_CHANNELS
 
 
 def book_at(t: int, instrument: str, bid: str = "99950000") -> bytes:
@@ -67,6 +67,8 @@ def label(item: Any) -> tuple[Any, ...]:
             return (item.grid_time, "trades", item.instrument)
         case Mark():
             return (item.sampled_at, "mark", item.instrument)
+        case OptionGreeks():
+            return (item.grid_time, "option_greeks", item.instrument)
         case SessionState():
             return (item.grid_time, "session_state")
     return (type(item).__name__,)
@@ -453,12 +455,75 @@ async def test_a_paced_replay_that_falls_behind_catches_up_without_skipping(cloc
         ((20260105, ["AAA"]), {}, TypeError),
         (("5 January 2026", ["AAA"]), {}, ValueError),
         (("2026-02-30", ["AAA"]), {}, ValueError),
+        # Greeks alone need an option contract: an equity, or a malformed symbol, has none.
+        ((DAY, ["AAA"], ["option_greeks", "session_state"]), {}, ValueError),
+        ((DAY, ["SPY261320C00650000"], ["option_greeks"]), {}, ValueError),
+        ((DAY, [CALL], ["option_chain"]), {}, ValueError),
+        ((DAY, [], ["option_greeks"]), {}, ValueError),
     ],
 )
 def test_arguments_it_cannot_use_are_refused_before_any_download(arguments, options, error):
     client = HistoryClient("http://127.0.0.1:9", synthetic_token())
     with pytest.raises(error):
         replay.replay(client, *arguments, **options)
+
+
+def test_option_greeks_can_be_merged_but_are_not_by_default():
+    assert CHANNELS == ("book", "trades", "mark", "option_greeks", "session_state")
+    assert DEFAULT_CHANNELS == ("book", "trades", "mark", "session_state")
+
+
+async def test_instruments_with_only_the_session_state_are_still_accepted():
+    fake = FakeHistory(synthetic_token(), {(DAY, None, "session_state"): state_at(1000)})
+    items = await replayed(fake, DAY, ["AAA"], ["session_state"])
+    assert [label(item) for item in items] == [(1000, "session_state")]
+
+
+async def test_naming_every_channel_over_equities_replays_what_it_did_before():
+    fake = a_session(synthetic_token())
+    items = await replayed(fake, DAY, ["BBB", "AAA"], CHANNELS)
+    assert items and not any(isinstance(item, OptionGreeks) for item in items)
+    assert not any(path.endswith("/option_greeks") for path in requested(fake))
+
+
+async def test_an_option_contract_replays_like_an_equity_without_its_greeks_by_default():
+    objects = {
+        (DAY, CALL, "book"): book_at(1000, CALL),
+        (DAY, CALL, "trades"): b"",
+        (DAY, CALL, "mark"): b"",
+        (DAY, CALL, "option_greeks"): greeks(1),
+        (DAY, None, "session_state"): state_at(1000),
+    }
+    fake = FakeHistory(synthetic_token(), objects)
+    items = await replayed(fake, DAY, [CALL])
+    assert grid_points(items) == [point((1000, "book", CALL), (1000, "session_state"))]
+    assert requested(fake) == sorted(
+        [f"/v1/history/{DAY}/{CALL}/{c}" for c in ("book", "trades", "mark")]
+        + [f"/v1/history/{DAY}/session_state"]
+    )
+
+
+async def test_greeks_are_merged_in_time_order_for_the_option_contracts_only():
+    bad = "SPY261320C00650000"  # month 13: not an option symbol, so taken as an equity's id
+    objects = {
+        (DAY, "AAA", "book"): book_at(1000, "AAA") + book_at(301_000, "AAA"),
+        (DAY, CALL, "book"): book_at(1000, CALL),
+        (DAY, bad, "book"): b"",
+        # At the first grid publication and the first 300 s snapshot.
+        (DAY, CALL, "option_greeks"): greeks(1) + greeks(301),
+    }
+    fake = FakeHistory(synthetic_token(), objects)
+    fake.status_override[(DAY, bad, "book")] = "ready"
+    items = await replayed(fake, DAY, ["AAA", bad, CALL], ["book", "option_greeks"])
+    assert grid_points(items) == [
+        point((1000, "book", "AAA"), (1000, "book", CALL), (1000, "option_greeks", CALL)),
+        point((301_000, "book", "AAA"), (301_000, "option_greeks", CALL)),
+    ]
+    # Greeks are asked for only of the option contract.
+    assert requested(fake) == sorted(
+        [f"/v1/history/{DAY}/{i}/book" for i in ("AAA", bad, CALL)]
+        + [f"/v1/history/{DAY}/{CALL}/option_greeks"]
+    )
 
 
 @pytest.mark.parametrize("day", [date(2026, 1, 5), "2026-01-05"], ids=["date", "text"])
