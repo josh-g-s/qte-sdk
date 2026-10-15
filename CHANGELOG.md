@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.52
+**Version:** 0.53
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- CI tests the student install on Windows in a new `windows-install` job (#248, #249): the wheel, the sdist and a zip of the source tree as the release download is, each installed into a fresh virtualenv in a folder whose path has a space and a non-ASCII character, then `python -m qte_sdk.update --json`, `python -m qte_sdk.agents` and `python -m qte_sdk.token check` run from outside the checkout, and each example's `--help` and the update check run from Git Bash and from cmd in code page 437. A new Windows test checks that the background update warning never holds up a program whose stderr is a pipe nobody reads. Tests and CI only, no change to the SDK itself.
 - Amending a Fundamentals ticket while the automatic execution route is off (qte-platform #2315). `send_ticket_cancel` takes `replacing=True` for the cancel that begins an amendment, the replacement (`replaces_ticket_id`) to follow once the cancel's `ticket_state` shows `TICKET_CANCELLED_BY_POD`; the field is sent only when True, so a plain cancel is unchanged, and a value that is not a bool raises `TypeError` and sends nothing. In a term that pairs no pod with an Execution desk, while `ROUTING_SERVICE` is not in force, the exchange refuses such a cancel whole with `TICKET_SERVICE_OFF` (1714), which `ticket_reason_code_name` now names, and the original ticket keeps working: send no replacement, and cancel it plainly to stop it. A new ticket, a cure ticket included, is refused 1714 the same way in such a term. While the route is on, a replacing cancel acts exactly like a plain one. The `qte_sdk.tickets` docstring, docs/automatic-execution.md (a new "Amending a ticket" section), the quickstart and AGENTS.md give the sequence. The vendored contract moves to qte-platform c622dff8 (order_entry.proto 1.11, common.proto 1.23), pending qte-platform #2325's merge (#259).
 
 ## 1.4.0
