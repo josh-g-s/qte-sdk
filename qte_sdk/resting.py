@@ -15,9 +15,10 @@ sends changes the view; only what the exchange reports does:
   either price.
 - `execution` with an `order_price` sets the entry's remaining size from
   `remaining_size`, and removes the entry when that reaches 0. Only an execution of the
-  team's own order (origin `TEAM`) counts: an execution with any other origin, including
-  one this SDK does not know (such as a fallback child), changes nothing, even with an
-  `order_price` at a level the team rests at.
+  team's own order (origin `TEAM`) counts: an execution with any other origin (a cure
+  trade, an auto-flatten, a Fundamentals ticket's `AUTO_EXECUTION` or `FALLBACK` child,
+  or one this SDK does not know) changes nothing, even with an `order_price` at a level
+  the team rests at.
 - `order_cancelled` with a `price` removes the entry, whatever the reason: a cancel, a
   mass-cancel (one `order_cancelled` per order), the purge of a STALE order, the close.
 - `accepted` and `reject` change nothing. `accepted` carries no level key, and a rejected
@@ -276,9 +277,8 @@ class RestingOrders:
 
     def _on_execution(self, msg: Execution) -> None:
         if msg.origin != TEAM:
-            # Not the pod's own resting order, even with a price where that order rests:
-            # an origin added later (such as a fallback child) may carry order_price.
-            # Cure trades and auto-flattens are market orders and carry none.
+            # Not the team's own resting order, even at a price where that order rests:
+            # an AUTO_EXECUTION or FALLBACK child is the exchange's, whatever it carries.
             return
         if not msg.HasField("order_price"):
             return  # a market order, which never rests

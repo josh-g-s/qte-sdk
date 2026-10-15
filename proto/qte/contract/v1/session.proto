@@ -1,14 +1,15 @@
 // Session and subscription messages.
 //
-// **Version:** 1.10
+// **Version:** 1.12
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `instruments`, `session_reject`, `heartbeat`, `resume`,
-// `resume_ack`, `order_snapshot`, `subscribe`, `unsubscribe`, `account_query`.
+// `resume_ack`, `order_snapshot`, `subscribe`, `unsubscribe`, `account_query`,
+// `execution_route`.
 //
 // Status: PROVISIONAL. The session layer is partly specified. Auth.token,
-// Calendar, Instruments, Heartbeat, Resume, ResumeAck and OrderSnapshot are
-// decided. The other messages are a working proposal, so clients have
+// SessionAck.log_id, Calendar, Instruments, Heartbeat, Resume, ResumeAck and
+// OrderSnapshot are decided. The other messages are a working proposal, so clients have
 // something to build against; their shape may change.
 //
 // Every `timestamp` field is a signed 64-bit count of milliseconds since the
@@ -48,6 +49,16 @@ message SessionAck {
   // what a team is told and what is scored cannot differ. SPEC 4.2. The
   // field's name and number are provisional.
   bool unscored = 5;
+  // string, optional. The identity of the event log this exchange writes:
+  // the first 16 hex digits, lowercase, of the SHA-256 of the log's first
+  // frame, the bytes from offset 16 of the log file to the end of the first
+  // frame's checksum, exactly as stored. The same after every restart that
+  // resumes the log; different for each new log. A team's report_seq belongs
+  // to one log, so a client keeps its cursor only when log_id is present and
+  // equal to the one the cursor was saved under, and otherwise resets it to 0
+  // before resume. Absent only while the log holds no durable record.
+  // Compare it for equality only; never parse it.
+  optional string log_id = 6;
 }
 
 // One trading session's date and hours (SPEC 13.1, 13.2), an entry of
@@ -234,6 +245,32 @@ message SessionReject {
 // has received no message of any kind for 45 seconds treats the link as dead
 // and reconnects.
 message Heartbeat {
+}
+
+// Outbound, to a Fundamentals pod's session only. How the exchange executes
+// the pod's tickets (SPEC 23.2, 23.4): sent once on connect, after
+// session_ack and the instrument messages and before the ticket_state
+// messages, and again each time an automatic execution control is logged
+// (a Director's, or a start's STARTUP control) and at a session open that
+// puts a pending control in force (a routing or only a config_version
+// change). Routing changes only at a session open, so a ticket sent while routing_in_force is
+// ROUTING_SERVICE is worked by the service, with no desk, and one sent while
+// it is ROUTING_DESK goes to the pod's desk.
+message ExecutionRoute {
+  // The routing in force. ROUTING_DESK while no control is in force.
+  ExecutionRouting routing_in_force = 1;
+  // Present iff a control logged since the last session open changes the
+  // routing at the next open: the routing from then.
+  optional ExecutionRouting routing_next_open = 2;
+  // The automatic execution configuration's version in force, the one a
+  // SERVICE ticket accepted now is stamped with (`ticket_state.
+  // config_version`). 0 while no control is in force.
+  uint32 config_version = 3;
+  // Whether the Directors have paused the service. A pause applies at once:
+  // a SERVICE ticket is still accepted, and no child is placed for it while
+  // the pause lasts. What should happen to a ticket accepted while the
+  // service is paused is OPEN (SPEC 23.4, Table 22a row 14).
+  bool paused = 4;
 }
 
 // Inbound. Optional. Sent once on a connection, after `auth`, to ask for the

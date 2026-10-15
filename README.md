@@ -120,7 +120,8 @@ Outside market hours the exchange still accepts the connection and the subscript
 | [Quickstart](docs/quickstart.md) | Step by step: connect, read the calendar and market data, place and cancel an order, read order events, what each reject means, and fetch past market data |
 | [Outside session hours](docs/out-of-hours.md) | What works when no session is running, with a runnable walk-through: the calendar, the closed market, an order's reject, past market data |
 | [Developing your algo](docs/developing-your-algo.md) | From an idea to the exchange: explore past market data, run your strategy's loop on a replay of a past session, test its order logic, check your setup, then trade during a session |
-| [Worked examples](examples/) | Runnable programs: check your setup end to end, print the book, quote both sides and manage the quotes, take liquidity with a market order, rest and cancel one option order from the chain and its Greeks, see the closed market outside a session, replay a past session's book |
+| [Worked examples](examples/) | Runnable programs: check your setup end to end, print the book, quote both sides and manage the quotes, take liquidity with a market order, rest and cancel one option order from the chain and its Greeks, send and follow a Fundamentals pod's ticket under automatic execution, see the closed market outside a session, replay a past session's book |
+| [Automatic execution](docs/automatic-execution.md) | For Fundamentals pods and Execution desks while the exchange's automatic execution service works tickets: what each release shows, who works a ticket, how a pod keeps its position, the pause, VWAP |
 | [Development guide](docs/development.md) | Working on the SDK itself: setup, checks and CI, the vendored contract |
 
 The main modules, each documented in its docstrings:
@@ -135,7 +136,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
 | [`qte_sdk.replay`](qte_sdk/replay.py) | `replay`: a past session's market data in one stream, in time order, to run your loop on; market data only, with no orders or fills |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
-| [`qte_sdk.tickets`](qte_sdk/tickets.py) | `send_ticket`, `send_ticket_cancel`, `send_ticket_urgency`: a Fundamentals pod's tickets to its Execution desk; `is_ticket_event`, `LatestTickets`: the exchange's answers and each ticket's state, for pods and desks |
+| [`qte_sdk.tickets`](qte_sdk/tickets.py) | `send_ticket` (TWAP or VWAP), `send_ticket_cancel`, `send_ticket_urgency`: a Fundamentals pod's tickets, worked by the automatic execution service or the pod's Execution desk; `is_ticket_event`, `LatestTickets`: the exchange's answers and each ticket's state, for pods and desks; `is_execution_route`: where the pod's new tickets go |
 | [`qte_sdk.account`](qte_sdk/account.py) | `send_account_query`, `is_account_state`: your team's positions, cash, equity and limit use; `AccountReports`: count each fill once against a reply |
 | [`qte_sdk.resting`](qte_sdk/resting.py) | `RestingOrders`: your team's resting orders, built only from exchange events |
 | [`qte_sdk.reconnect`](qte_sdk/reconnect.py) | `ReconnectingSession`: reconnects and resubscribes after a dropped connection |
@@ -152,6 +153,29 @@ The main modules, each documented in its docstrings:
 - **There is no order ID.** Your team's orders are addressed by instrument, side and price, and your team holds at most one resting order at each price.
 - **One market-data feed for everyone.** Market data is published on a fixed 100 ms grid: during a session the market state at every grid point, and an instrument's book only when it has changed, so keep the last book you received for each instrument.
 - **Not every team sends orders.** Teams on the trading arms and Execution teams send orders; an order from a team without market access is rejected with a reason code that says so.
+
+## Fundamentals pods: your position
+
+A Fundamentals pod is sent an `execution` for every fill of its tickets' child orders: the automatic execution service's (origin `AUTO_EXECUTION`) and the engine's after a handover (`FALLBACK`). They name the ticket in `parent_ticket_id` and carry no `strat_id`. Each fill is already counted in the ticket's `ticket_state` (`filled_shares`), so a pod that adds these fills on top of totals it takes from its tickets counts each one twice. A release before this one reads their origin as `ORIGIN_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
+
+Follow each ticket's progress in `LatestTickets`, and take your position from the exchange's own count, `account_state.positions` (`qte_sdk.account`). A reply already includes every fill up to its `as_of_report_seq`; to keep the position between queries, let `qte_sdk.account.AccountReports` sort the fills against the reply, so that each is applied once. Query again from time to time all the same: under automatic execution the engine's own cure ticket and its fills are sent to no one, so only a new `account_state` shows them, and a position carries across terms while tickets do not.
+
+```python
+from qte_sdk.account import is_account_state, send_account_query
+from qte_sdk.tickets import LatestTickets
+
+tickets = LatestTickets()
+positions: dict[str, int] = {}
+ref = await send_account_query(session)
+async for event in session:
+    tickets.update(event)  # each ticket's filled_shares, due_shares and status
+    if is_account_state(event) and event.message.request_ref == ref:
+        positions = {p.instrument: p.quantity for p in event.message.positions}
+    # Do not add an `execution` on top of a ticket's filled_shares. To keep positions
+    # between queries, use AccountReports; ask again after a ticket stops.
+```
+
+The worked example [`examples/fundamentals_pod.py`](examples/fundamentals_pod.py) runs all of this against the exchange: it reads the route and the pause, sends one ticket (resending a VWAP refused 1713 as TWAP), follows its state to a stop and takes the position from `account_state` before and after.
 
 ## Status
 

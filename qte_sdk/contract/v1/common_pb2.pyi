@@ -36,6 +36,8 @@ class Origin(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     CURE_TRADE: _ClassVar[Origin]
     AUTO_FLATTEN: _ClassVar[Origin]
     HOUSE: _ClassVar[Origin]
+    FALLBACK: _ClassVar[Origin]
+    AUTO_EXECUTION: _ClassVar[Origin]
 
 class Liquidity(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -127,6 +129,39 @@ class TicketStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     TICKET_CANCELLED_BY_ENGINE: _ClassVar[TicketStatus]
     TICKET_SPLIT_CANCELLED: _ClassVar[TicketStatus]
 
+class TicketExecutor(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    TICKET_EXECUTOR_UNSPECIFIED: _ClassVar[TicketExecutor]
+    DESK: _ClassVar[TicketExecutor]
+    ENGINE: _ClassVar[TicketExecutor]
+    SERVICE: _ClassVar[TicketExecutor]
+
+class ExecutionRouting(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    EXECUTION_ROUTING_UNSPECIFIED: _ClassVar[ExecutionRouting]
+    ROUTING_DESK: _ClassVar[ExecutionRouting]
+    ROUTING_SERVICE: _ClassVar[ExecutionRouting]
+
+class TicketAlgorithm(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    TICKET_ALGORITHM_UNSPECIFIED: _ClassVar[TicketAlgorithm]
+    TWAP: _ClassVar[TicketAlgorithm]
+    VWAP: _ClassVar[TicketAlgorithm]
+
+class TicketActivity(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    TICKET_ACTIVITY_UNSPECIFIED: _ClassVar[TicketActivity]
+    WORKING: _ClassVar[TicketActivity]
+    POSTING: _ClassVar[TicketActivity]
+    TAKING: _ClassVar[TicketActivity]
+    WAITING_LIQUIDITY: _ClassVar[TicketActivity]
+    WAITING_LIMIT: _ClassVar[TicketActivity]
+    PARTICIPATION_LIMIT: _ClassVar[TicketActivity]
+    MARKET_CLOSED: _ClassVar[TicketActivity]
+    TRADING_UNAVAILABLE: _ClassVar[TicketActivity]
+    SERVICE_PAUSED: _ClassVar[TicketActivity]
+    MESSAGE_BUDGET: _ClassVar[TicketActivity]
+
 class TicketRequestKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     TICKET_REQUEST_KIND_UNSPECIFIED: _ClassVar[TicketRequestKind]
@@ -153,6 +188,8 @@ TEAM: Origin
 CURE_TRADE: Origin
 AUTO_FLATTEN: Origin
 HOUSE: Origin
+FALLBACK: Origin
+AUTO_EXECUTION: Origin
 LIQUIDITY_UNSPECIFIED: Liquidity
 MAKER: Liquidity
 TAKER: Liquidity
@@ -213,6 +250,27 @@ TICKET_LIMIT_CANCELLED: TicketStatus
 TICKET_CANCELLED_BY_POD: TicketStatus
 TICKET_CANCELLED_BY_ENGINE: TicketStatus
 TICKET_SPLIT_CANCELLED: TicketStatus
+TICKET_EXECUTOR_UNSPECIFIED: TicketExecutor
+DESK: TicketExecutor
+ENGINE: TicketExecutor
+SERVICE: TicketExecutor
+EXECUTION_ROUTING_UNSPECIFIED: ExecutionRouting
+ROUTING_DESK: ExecutionRouting
+ROUTING_SERVICE: ExecutionRouting
+TICKET_ALGORITHM_UNSPECIFIED: TicketAlgorithm
+TWAP: TicketAlgorithm
+VWAP: TicketAlgorithm
+TICKET_ACTIVITY_UNSPECIFIED: TicketActivity
+WORKING: TicketActivity
+POSTING: TicketActivity
+TAKING: TicketActivity
+WAITING_LIQUIDITY: TicketActivity
+WAITING_LIMIT: TicketActivity
+PARTICIPATION_LIMIT: TicketActivity
+MARKET_CLOSED: TicketActivity
+TRADING_UNAVAILABLE: TicketActivity
+SERVICE_PAUSED: TicketActivity
+MESSAGE_BUDGET: TicketActivity
 TICKET_REQUEST_KIND_UNSPECIFIED: TicketRequestKind
 TICKET_REQUEST_SUBMIT: TicketRequestKind
 TICKET_REQUEST_CANCEL: TicketRequestKind
@@ -249,6 +307,7 @@ class TicketReasonCodes(_message.Message):
         TICKET_NOT_CURE: _ClassVar[TicketReasonCodes.TicketReasonCode]
         TICKET_URGENCY_NOT_INCREASED: _ClassVar[TicketReasonCodes.TicketReasonCode]
         TICKET_CURE_INVALID: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_ALGORITHM_UNAVAILABLE: _ClassVar[TicketReasonCodes.TicketReasonCode]
     TICKET_REASON_CODE_UNSPECIFIED: TicketReasonCodes.TicketReasonCode
     NOT_AUTHENTICATED: TicketReasonCodes.TicketReasonCode
     VERSION_MISMATCH: TicketReasonCodes.TicketReasonCode
@@ -276,6 +335,7 @@ class TicketReasonCodes(_message.Message):
     TICKET_NOT_CURE: TicketReasonCodes.TicketReasonCode
     TICKET_URGENCY_NOT_INCREASED: TicketReasonCodes.TicketReasonCode
     TICKET_CURE_INVALID: TicketReasonCodes.TicketReasonCode
+    TICKET_ALGORITHM_UNAVAILABLE: TicketReasonCodes.TicketReasonCode
     def __init__(self) -> None: ...
 
 class ReasonCodes(_message.Message):
@@ -326,6 +386,7 @@ class ReasonCodes(_message.Message):
         PARENT_MISMATCH: _ClassVar[ReasonCodes.ReasonCode]
         PARENT_QUANTITY_EXCEEDED: _ClassVar[ReasonCodes.ReasonCode]
         CONTRACT_REDUCING_ONLY: _ClassVar[ReasonCodes.ReasonCode]
+        PARENT_HANDED_OVER: _ClassVar[ReasonCodes.ReasonCode]
         CANCEL_REQUEST: _ClassVar[ReasonCodes.ReasonCode]
         MASS_CANCEL: _ClassVar[ReasonCodes.ReasonCode]
         SELF_TRADE: _ClassVar[ReasonCodes.ReasonCode]
@@ -389,6 +450,7 @@ class ReasonCodes(_message.Message):
     PARENT_MISMATCH: ReasonCodes.ReasonCode
     PARENT_QUANTITY_EXCEEDED: ReasonCodes.ReasonCode
     CONTRACT_REDUCING_ONLY: ReasonCodes.ReasonCode
+    PARENT_HANDED_OVER: ReasonCodes.ReasonCode
     CANCEL_REQUEST: ReasonCodes.ReasonCode
     MASS_CANCEL: ReasonCodes.ReasonCode
     SELF_TRADE: ReasonCodes.ReasonCode

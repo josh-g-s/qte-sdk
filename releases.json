@@ -40,5 +40,11 @@
     "recommended": true,
     "why": "rejected messages count toward your team's message budget, so a bot that sends too fast locks itself out; 1.3.0's opt-in pacer helps keep a bot under its share of the team's budget",
     "platforms": []
+  },
+  {
+    "version": "1.4.0",
+    "recommended": true,
+    "why": "Fundamentals pods can read tickets under automatic execution and must take positions from account_state; a reconnect after a new event log no longer skips reports; a halted options chain is named",
+    "platforms": []
   }
 ]

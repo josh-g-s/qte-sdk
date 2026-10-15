@@ -65,6 +65,7 @@ SESSION_TIMEOUT = "QTE-SESSION-TIMEOUT"
 SESSION_RESUME_REJECTED = "QTE-SESSION-RESUME-REJECTED"
 SESSION_RESUME_NOT_ACKNOWLEDGED = "QTE-SESSION-RESUME-NOT-ACKNOWLEDGED"
 SESSION_RESUME_TIMEOUT = "QTE-SESSION-RESUME-TIMEOUT"
+SESSION_LOG_CHANGED = "QTE-SESSION-LOG-CHANGED"
 # CONNECT
 CONNECT_HANDSHAKE_FAILED = "QTE-CONNECT-HANDSHAKE-FAILED"
 CONNECT_LIVENESS_TIMEOUT = "QTE-CONNECT-LIVENESS-TIMEOUT"
@@ -319,6 +320,20 @@ CODES: dict[str, Entry] = {
         "Open a new session and resume again, or raise timeout",
         "No answer to resume arrived within its timeout",
         "Resume again on a new session",
+    ),
+    SESSION_LOG_CHANGED: Entry(
+        "the exchange's event log changed (log_id {old_log_id} is now {new_log_id}), so "
+        "report cursor "
+        "{cursor} belongs to another log",
+        "The cursor was reset, as at a term change: with a resume the session asks from 0 "
+        "and gets a snapshot of your resting orders, and without one it counts the new "
+        "log's reports from the first it reads",
+        "Treat the resting orders you track as unknown until a snapshot (with resume=False, "
+        "until you resume(0) on a session of your own), and check your positions with "
+        "send_account_query before you trade",
+        "A ReconnectingSession's new session_ack named a different event log (log_id) from "
+        "the one its report cursor was counted under",
+        "Wait for the snapshot, then check positions",
     ),
     CONNECT_HANDSHAKE_FAILED: Entry(
         "the opening handshake failed ({kind}{status}); details withheld",
@@ -591,12 +606,15 @@ FIELDS = frozenset(
     {
         "action",
         "command",
+        "cursor",
         "fix",
         "instrument",
         "kind",
         "latest",
         "line",
         "name",
+        "new_log_id",
+        "old_log_id",
         "path",
         "problem",
         "reason",

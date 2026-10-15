@@ -573,6 +573,9 @@ class Session:
         snapshot of the team's resting orders instead. Report numbers start again each
         term, so pass the earlier number only if this session's calendar names the same
         term (`term_start` and `term_end`) as the session that counted it, and 0 otherwise.
+        They also belong to one event log: pass the earlier number only if this session's
+        `info.log_id` is known and equal to that session's, and 0 otherwise, including when
+        either is None (see `SessionInfo.log_id`).
         Calling `wait_for_calendar` first is fine, since it keeps what it reads.
 
         The exchange then does one of two things, both delivered by iterating the session,
