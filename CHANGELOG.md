@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.52
+**Version:** 0.53
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- `examples/options_bot.py` takes `--watch-only` (or `QTE_WATCH_ONLY=1`) (#263): it reads the chain, Greeks and books and chooses a contract exactly as before, printing why it passed over each other contract, then prints the order it would send as one `WOULD SEND (watch-only, not sent):` line (OCC symbol, side, size, price) and sends nothing, no order and no cancel. On `--seconds` or Ctrl+C it exits 0 with a last line starting `watch-only: chose`, or 1 with `watch-only: NO CONTRACT CHOSEN:` and the reason. Without the flag the example is unchanged.
 - CI tests the student install on Windows in a new `windows-install` job (#248, #249): the wheel, the sdist and a zip of the source tree as the release download is, each installed into a fresh virtualenv in a folder whose path has a space and a non-ASCII character, then `python -m qte_sdk.update --json`, `python -m qte_sdk.agents` and `python -m qte_sdk.token check` run from outside the checkout, and each example's `--help` and the update check run from Git Bash and from cmd in code page 437. A new Windows test checks that the background update warning never holds up a program whose stderr is a pipe nobody reads. Tests and CI only, no change to the SDK itself.
 
 ## 1.4.0

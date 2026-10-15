@@ -1762,6 +1762,55 @@ async def test_options_bot_names_a_budget_reject_its_drain_is_too_short_to_wait_
     assert exchange.types().count("cancel") == 1
 
 
+async def test_options_bot_watch_only_prints_the_order_it_would_send_and_sends_nothing():
+    exchange = options_exchange()
+    code, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "1")
+    assert code == 0, out + err
+    # It reads and subscribes as usual, but no order and no cancel reach the exchange.
+    assert exchange.types() == ["auth", "subscribe"]
+    assert exchange.resting == {}
+    assert "passing over SPY261120C00665000: its trading state is OPTION_SUSPENDED" in out
+    assert (
+        "WOULD SEND (watch-only, not sent): LIMIT BUY 1 contract(s) of SPY261120P00665000 "
+        "@ 4.900000"
+    ) in out
+    assert out.count("WOULD SEND") == 1
+    assert "watch-only: chose SPY261120P00665000" in out
+    assert "sending" not in out and "cancelling" not in out
+
+
+async def test_options_bot_watch_only_from_the_environment_sends_nothing():
+    exchange = options_exchange()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "options_bot.py",
+            url,
+            synthetic_token(),
+            "--strat-id",
+            "opt-test",
+            "--seconds",
+            "1",
+            QTE_WATCH_ONLY="1",
+        )
+    assert code == 0, out + err
+    assert exchange.types() == ["auth", "subscribe"]
+    assert "WOULD SEND (watch-only, not sent)" in out
+
+
+async def test_options_bot_watch_only_fails_with_a_reason_when_no_contract_can_be_chosen():
+    market = options_market()
+    for book in market["books"]:
+        book["trading_state"] = "OPTION_SUSPENDED"
+    exchange = FakeExchange(instruments=options_table(), options=market)
+    code, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "1")
+    assert code == 1, out + err
+    assert exchange.types() == ["auth", "subscribe"]
+    assert (
+        "watch-only: NO CONTRACT CHOSEN: every contract in the nearest expiry was passed over"
+    ) in out
+    assert "WOULD SEND" not in out
+
+
 class RecordingSender:
     """A session that records each message sent."""
 

@@ -64,6 +64,16 @@ strategy's buy orders in the contract while it runs (another program, or an amen
 fills at once), its reports may be misread, so use a strategy nothing else is using. If
 messages from the exchange are missed after the order is sent, it still cancels, but then
 exits with status 1 and a warning to check your orders and fills.
+
+Watching only. With --watch-only (or QTE_WATCH_ONLY=1) it reads the table, subscribes, keeps
+the chain, Greeks and books, and chooses a contract exactly as above, printing the reason for
+each contract it passes over. It then prints the order it would send, as one line starting
+`WOULD SEND (watch-only, not sent):` with the contract's OCC symbol, side, size and price,
+and sends nothing at all: no order and no cancel. It keeps reading until --seconds are up or
+Ctrl+C, then exits with status 0 and a last line starting `watch-only: chose`, or, if no
+contract could be chosen, with status 1 and a last line starting `watch-only: NO CONTRACT
+CHOSEN:` that names why. --drain-seconds has no use then, since there is nothing to cancel.
+--strat-id is still required, since the session needs it.
 """
 
 import argparse
@@ -164,7 +174,8 @@ WAIT = "wait"
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Rest one limit order on an option contract and cancel it."
+        description="Rest one limit order on an option contract and cancel it, or with "
+        "--watch-only print the order it would send and send nothing."
     )
     parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
     parser.add_argument(
@@ -188,6 +199,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="the longest wait, at the end, for the cancel to be confirmed (default 10; "
         "a cancel rejected for a message budget is sent again only after 60)",
     )
+    parser.add_argument(
+        "--watch-only",
+        action="store_true",
+        default=os.environ.get("QTE_WATCH_ONLY", "").strip().lower() in ("1", "true", "yes", "on"),
+        help="read and choose a contract as usual, print the order it would send, and send "
+        "nothing: no order, no cancel. Exits 0 if a contract was chosen, else 1 with the "
+        "reason (default: off, or on if $QTE_WATCH_ONLY is 1, true, yes or on)",
+    )
     args = parser.parse_args(argv)
     if not args.strat_id:
         parser.error(
@@ -202,7 +221,12 @@ def price_text(price: int) -> str:
 
 class OptionsBot:
     def __init__(
-        self, session: Session, table: Instruments, underlying: str, strat_id: str
+        self,
+        session: Session,
+        table: Instruments,
+        underlying: str,
+        strat_id: str,
+        watch_only: bool = False,
     ) -> None:
         self.session = session
         self.table = table
@@ -239,6 +263,11 @@ class OptionsBot:
         self.cancel_failed: str | None = None
         self.stopping = False  # no new order; cancel the one sent, if any
         self.missed = False  # whether any message from the exchange was missed
+        # --watch-only: no message is ever sent, so `ref` stays None. `would_send` is the
+        # order it would have sent, once chosen; `why_none` why no contract is chosen yet.
+        self.watch_only = watch_only
+        self.would_send: str | None = None
+        self.why_none = "no contract was chosen yet"
 
     @property
     def finished(self) -> bool:
@@ -312,7 +341,11 @@ class OptionsBot:
     def choose(self) -> tuple[str, int, int, OptionGreeks] | None:
         """The contract to order, its price and size, and the Greeks its forward came
         from; None while there is none."""
-        if self.chain is None or not self.market_open():
+        if self.chain is None:
+            self.why_none = "no option chain was received"
+            return None
+        if not self.market_open():
+            self.why_none = "the market is not open"
             return None
         entries = [
             entry
@@ -320,6 +353,7 @@ class OptionsBot:
             if entry.underlying == self.underlying and not entry.reducing_only
         ]
         if not entries:
+            self.why_none = f"the chain lists no expiry of {self.underlying} open to new positions"
             return None
         nearest = min(expiry_date(entry) for entry in entries)
         contracts = [
@@ -329,6 +363,7 @@ class OptionsBot:
         ]
         found = self.forward(contracts)
         if found is None:
+            self.why_none = "no valid Greeks with a forward for the nearest expiry"
             return None  # no valid Greeks yet for this expiry
         forward = found[1].forward
         # Nearest strike first; the chain's order breaks a tie.
@@ -336,12 +371,14 @@ class OptionsBot:
         for contract in contracts:
             outcome = self.order_price(contract)
             if outcome == WAIT:
+                self.why_none = f"no current book of {contract} yet"
                 return None
             if isinstance(outcome, str):
                 self.pass_over(contract, outcome)
                 continue
             price, size = outcome
             return contract, price, size, found[1]
+        self.why_none = "every contract in the nearest expiry was passed over"
         return None
 
     # Sending
@@ -350,7 +387,9 @@ class OptionsBot:
         if self.finished:
             return
         if self.ref is None:
-            if not self.stopping and not self.missed:
+            if self.missed and self.would_send is None:
+                self.why_none = "a message from the exchange was missed before a choice"
+            if not self.stopping and not self.missed and self.would_send is None:
                 await self.send_order()
             return
         if (self.resting or self.stopping) and self.cancel_ref is None:
@@ -377,6 +416,11 @@ class OptionsBot:
             vol = vol_to_decimal(own.implied_vol) if own.HasField("implied_vol") else "none"
             print(f"its Greeks: delta {delta}, implied vol {vol} points")
         self.contract, self.price = contract, price
+        if self.watch_only:
+            # Nothing is sent: `ref` stays None, so no cancel can follow either.
+            self.would_send = f"LIMIT BUY {size} contract(s) of {contract} @ {price_text(price)}"
+            print(f"WOULD SEND (watch-only, not sent): {self.would_send}")
+            return
         print(f"sending a LIMIT buy of {size} contract(s): {self.where}")
         self.ref = new_request_ref()
         self.sent_at = time.monotonic()
@@ -592,12 +636,24 @@ def stopped_at_once(progress: Progress) -> int:
         print("interrupted while closing; the connection is dropped as the example exits")
         return progress.status
     bot = progress.bot
+    if bot is not None and bot.watch_only:
+        return watch_only_outcome(bot)
     if bot is None or bot.ref is None:
         print("interrupted: no order was sent")
         return 0
     return fail(
         f"interrupted: this example's order may still rest at {bot.where}; check and cancel it"
     )
+
+
+def watch_only_outcome(bot: OptionsBot) -> int:
+    """The last line and exit status of a --watch-only run: 0 once a contract was chosen,
+    else 1 with the reason none was."""
+    if bot.would_send is not None:
+        print(f"watch-only: chose {bot.contract}; would send {bot.would_send}; nothing was sent")
+        return 0
+    print(f"watch-only: NO CONTRACT CHOSEN: {bot.why_none}; nothing was sent")
+    return 1
 
 
 async def run(url: str, args: argparse.Namespace, progress: Progress) -> int:
@@ -641,12 +697,15 @@ async def trade(
         return 1
     contracts = listed_contracts(table, underlying)
     if not contracts:
+        if args.watch_only:
+            print(f"watch-only: NO CONTRACT CHOSEN: no option contract is listed on {underlying}")
+            return 1
         print(f"no option contract is listed on {underlying}; no order was sent")
         return 0
     print(f"{len(contracts)} contract(s) listed on {underlying}; subscribing to them")
     await subscribe(session, contracts)
 
-    bot = OptionsBot(session, table, underlying, args.strat_id)
+    bot = OptionsBot(session, table, underlying, args.strat_id, args.watch_only)
     progress.bot = bot
     interrupted = False
 
@@ -665,6 +724,10 @@ async def trade(
         if not absorb_first_interrupt():
             raise
         why = "interrupted"
+    if why == "closed" and bot.watch_only:
+        print("the exchange closed the connection")
+        watch_only_outcome(bot)
+        return 1
     if why == "closed":
         print("the exchange closed the connection")
         if bot.ref is not None and not bot.finished:
@@ -682,6 +745,8 @@ async def trade(
                 if not absorb_first_interrupt():
                     raise
                 print("interrupted: still cancelling; press Ctrl+C again to stop at once")
+    if bot.watch_only:
+        return watch_only_outcome(bot)
     if bot.cancel_failed is not None:
         print(
             f"WARNING: the cancel was rejected ({bot.cancel_failed}), so the order may "
