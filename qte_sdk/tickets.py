@@ -106,6 +106,15 @@ and `stopped_mark`, the official mark when it stopped; read them with `stopped_t
 and `stopped_mark_of`. A stop with no valid mark to record sends a mark of 0, which
 `stopped_mark_of` returns as None, the same as a mark that is absent.
 
+A Director may cancel a `SERVICE` ticket: it stops `TICKET_CANCELLED_BY_DIRECTOR`, its
+fills standing, and the pod is told neither the reason nor the Director. A Director's
+cancel logged between sessions takes effect at the next session's open: until then the
+ticket stays `TICKET_WORKING` and its state carries `director_stop_pending_time`, the
+cancel's entry stamp. A cure ticket's state carries `cure_deadline_date`, the session
+date (as the calendar's `session_date`) whose official close is the deadline of the
+breach it cures: before that close, if no cure works, the engine queues its own cure.
+Both are optional fields: check `state.HasField(...)` before reading them.
+
 None of the three answers carries a `report_seq`, and a resume replays none of them.
 Instead, once on each connection of the pod or desk, straight after the `session_ack`,
 the calendar and the instruments table, the exchange sends one whole `ticket_state` for
