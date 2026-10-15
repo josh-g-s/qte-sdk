@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.23
+// **Version:** 1.24
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -512,6 +512,16 @@ message TicketState {
   // on every ticket_state, the connect-time set included. Empty when the
   // exchange holds no history for the ticket.
   repeated TicketProgressPoint progress = 38;
+  // Present iff a Director's cancel of the ticket was logged outside a
+  // session and has not yet taken effect: the cancel's entry stamp. The
+  // ticket stays TICKET_WORKING, to stop TICKET_CANCELLED_BY_DIRECTOR at the
+  // next session open; absent once it has stopped (SPEC 23.4).
+  optional int64 director_stop_pending_time = 39; // timestamp
+  // Present iff cure is true: the session date (ISO 8601, as the calendar's
+  // session_date) whose official close is the cure deadline of the breach the
+  // cure answers. Before that close, if no cure works, the engine queues its
+  // own cure at it; after it, nothing steps in again (SPEC 23.6, Table 22).
+  optional string cure_deadline_date = 40;
 }
 
 // One point of a ticket's progress: the shares due by the schedule and the
