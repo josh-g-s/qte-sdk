@@ -456,6 +456,95 @@ def test_token_set_refuses_at_once_without_a_console(tmp_path, command, stdin):
     assert not (tmp_path / ".env").exists()
 
 
+# The background update warning, with stderr a pipe nobody reads
+
+# A program that starts the real automatic update check, with its result made "behind" so
+# it warns, and stderr an anonymous pipe its parent never reads: empty, or first filled to
+# the room Windows reports. It exits 3 if the pipe could not be filled, 4 if the check was
+# not started, 5 if it was still running after its time, and 6 if the check did not get as
+# far as asking for the result, or recorded no day, so a pass means the warning was tried.
+UNREAD_PIPE_CHILD = r"""
+import logging, os, sys
+from qte_sdk import update
+
+state, setup, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
+if setup == "basicConfig":
+    logging.basicConfig()
+if state == "full":
+    room = update._pipe_write_quota(2)
+    if not room:
+        sys.exit(3)
+    os.write(2, b"x" * room)
+    if update._pipe_write_quota(2) != 0:
+        sys.exit(3)
+asked = []
+
+
+def behind(*args, **kwargs):
+    asked.append(True)
+    return update.UpdateCheck(
+        status=update.Status.BEHIND,
+        installed_version="1.0.0",
+        installed_commit=None,
+        installed_revision=None,
+        latest_release="v9.0.0",
+        main_commit=None,
+        main_ahead=False,
+        command="pip install qte-sdk-9.0.0",
+        message=MESSAGE,
+    )
+
+
+update.check_for_update = behind
+thread = update.check_in_background()
+if thread is None:
+    sys.exit(4)
+thread.join(timeout)
+if thread.is_alive():
+    sys.exit(5)
+stamp = os.path.join(os.environ["LOCALAPPDATA"], "qte-sdk", "update-check")
+if not asked or not os.path.exists(stamp):
+    sys.exit(6)
+"""
+UNREAD_PIPE_MESSAGE = (
+    "QTE-UPDATE-AVAILABLE: qte-sdk 1.0.0 is behind 9.0.0. Update with pip install qte-sdk-9.0.0"
+)
+
+
+@pytest.mark.parametrize("setup", ["no logging", "basicConfig"])
+@pytest.mark.parametrize("state", ["empty", "full"])
+def test_the_update_warning_never_waits_on_a_stderr_pipe_nobody_reads(tmp_path, state, setup):
+    # The parent reads neither pipe until the child has exited, so no read is waiting on
+    # stderr (which would lower the room Windows reports). An empty pipe takes the line
+    # whole; a full one gets nothing, and the check and the program still finish at once.
+    unset = (*QTE_VARIABLES, "QTE_UPDATE_CHECK")
+    env = {k: v for k, v in os.environ.items() if k.upper() not in unset}
+    env["LOCALAPPDATA"] = str(tmp_path)
+    code = UNREAD_PIPE_CHILD.replace("MESSAGE", repr(UNREAD_PIPE_MESSAGE))
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, state, setup, str(TIMEOUT / 2)],
+        cwd=tmp_path,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        returncode = child.wait(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.communicate()
+        pytest.fail(f"the program was still running after {TIMEOUT} s, with stderr {state}")
+    stdout, stderr = child.communicate()
+    assert returncode == 0, (returncode, stdout, stderr[-300:])
+    prefix = "WARNING:qte_sdk.update:" if setup == "basicConfig" else ""
+    line = f"{prefix}{UNREAD_PIPE_MESSAGE}\r\n".encode()
+    if state == "empty":
+        assert stderr == line
+    else:
+        assert stderr and set(stderr) == {ord("x")}, stderr[-300:]
+
+
 # Links: a symbolic link to the file, and a junction on the way to it. The runner is an
 # elevated administrator, so it may make symbolic links; a junction needs no such right.
 
