@@ -115,8 +115,9 @@ cancel logged between sessions takes effect at the next session's open: until th
 ticket stays `TICKET_WORKING` and its state carries `director_stop_pending_time`, the
 cancel's entry stamp. A cure ticket's state carries `cure_deadline_date`, the session
 date (as the calendar's `session_date`) whose official close is the deadline of the
-breach it cures: before that close, if no cure works, the engine queues its own cure.
-Both are optional fields: check `state.HasField(...)` before reading them.
+breach it cures: if no cure is working by then, the engine queues its own cure at that
+close, and after it nothing steps in again. Both are optional fields: check
+`state.HasField(...)` before reading them.
 
 None of the three answers carries a `report_seq`, and a resume replays none of them.
 Instead, once on each connection of the pod or desk, straight after the `session_ack`,
