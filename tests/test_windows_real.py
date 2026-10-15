@@ -806,18 +806,22 @@ def test_a_junction_to_a_volumes_guid_name_warns_with_the_open_folder_before_it(
     assert path.exists()
 
 
-# Lists the check is not shown, and folders another account owns. A list is hidden by an
-# entry that denies the user READ_CONTROL; since an owner may always read the list, the
-# object is then given to SYSTEM. Each is put back afterwards, so the folder can be removed.
+# Lists the check is not shown, and folders another account owns. Since an owner may always
+# read the list, a list is hidden by giving the object to SYSTEM and then adding an entry
+# that denies the user READ_CONTROL. Each is put back afterwards, so the folder can be
+# removed.
 
 NOT_SHOWN = "Windows would not let this check see who may"
 
 
 def hide_list(path: Path, user_sid: str) -> None:
     """Deny the user READ_CONTROL on `path`, and give it to SYSTEM, so the user may still
-    open it (and what is in it, if it is a folder) but not see its owner or list."""
-    icacls(path, "/deny", f"*{user_sid}:(RC)")
+    open it (and what is in it, if it is a folder) but not see its owner or list. It is
+    given to SYSTEM first: icacls reads the list before it changes the owner, and with
+    READ_CONTROL already denied, `/setowner` on a folder was refused ("Access is denied") in
+    CI's Python 3.12 and 3.14 runs, though not in its 3.11 run."""
     set_owner(path, SYSTEM)
+    icacls(path, "/deny", f"*{user_sid}:(RC)")
     assert _fileaccess._read_sddl(str(path)) is _fileaccess.DENIED
 
 
