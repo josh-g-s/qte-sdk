@@ -7,6 +7,12 @@ through `ctypes`, as it does on a student's computer: nothing in `qte_sdk._filea
 
 The tokens here are fakes. The SIDs are worked out when the tests run, from `whoami`.
 
+The last tests run `python -m qte_sdk.update` behind a newer release, against a fake
+repository on 127.0.0.1, and read its output in the code page Windows gives a pipe. The job
+installs the SDK editable, which the check cannot trace to a release, so each test puts a
+copy of the package, pointed at the fake repository, beside the install record of a release
+zip or of git, first on the child's path.
+
 CI's hosted runner runs the tests as an elevated administrator, which a student usually
 is not. Three things differ because of that:
 
@@ -28,19 +34,24 @@ is not. Three things differ because of that:
 """
 
 import csv
+import http.server
 import io
 import json
+import locale
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import warnings
 from pathlib import Path
 
 import pytest
 
+import qte_sdk
 from qte_sdk import _fileaccess, dotenv
 from qte_sdk import token as token_command
 from qte_sdk.dotenv import AddressFileShared, FileShared, TokenFileShared
@@ -456,6 +467,95 @@ def test_token_set_refuses_at_once_without_a_console(tmp_path, command, stdin):
     assert not (tmp_path / ".env").exists()
 
 
+# The background update warning, with stderr a pipe nobody reads
+
+# A program that starts the real automatic update check, with its result made "behind" so
+# it warns, and stderr an anonymous pipe its parent never reads: empty, or first filled to
+# the room Windows reports. It exits 3 if the pipe could not be filled, 4 if the check was
+# not started, 5 if it was still running after its time, and 6 if the check did not get as
+# far as asking for the result, or recorded no day, so a pass means the warning was tried.
+UNREAD_PIPE_CHILD = r"""
+import logging, os, sys
+from qte_sdk import update
+
+state, setup, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
+if setup == "basicConfig":
+    logging.basicConfig()
+if state == "full":
+    room = update._pipe_write_quota(2)
+    if not room:
+        sys.exit(3)
+    os.write(2, b"x" * room)
+    if update._pipe_write_quota(2) != 0:
+        sys.exit(3)
+asked = []
+
+
+def behind(*args, **kwargs):
+    asked.append(True)
+    return update.UpdateCheck(
+        status=update.Status.BEHIND,
+        installed_version="1.0.0",
+        installed_commit=None,
+        installed_revision=None,
+        latest_release="v9.0.0",
+        main_commit=None,
+        main_ahead=False,
+        command="pip install qte-sdk-9.0.0",
+        message=MESSAGE,
+    )
+
+
+update.check_for_update = behind
+thread = update.check_in_background()
+if thread is None:
+    sys.exit(4)
+thread.join(timeout)
+if thread.is_alive():
+    sys.exit(5)
+stamp = os.path.join(os.environ["LOCALAPPDATA"], "qte-sdk", "update-check")
+if not asked or not os.path.exists(stamp):
+    sys.exit(6)
+"""
+UNREAD_PIPE_MESSAGE = (
+    "QTE-UPDATE-AVAILABLE: qte-sdk 1.0.0 is behind 9.0.0. Update with pip install qte-sdk-9.0.0"
+)
+
+
+@pytest.mark.parametrize("setup", ["no logging", "basicConfig"])
+@pytest.mark.parametrize("state", ["empty", "full"])
+def test_the_update_warning_never_waits_on_a_stderr_pipe_nobody_reads(tmp_path, state, setup):
+    # The parent reads neither pipe until the child has exited, so no read is waiting on
+    # stderr (which would lower the room Windows reports). An empty pipe takes the line
+    # whole; a full one gets nothing, and the check and the program still finish at once.
+    unset = (*QTE_VARIABLES, "QTE_UPDATE_CHECK")
+    env = {k: v for k, v in os.environ.items() if k.upper() not in unset}
+    env["LOCALAPPDATA"] = str(tmp_path)
+    code = UNREAD_PIPE_CHILD.replace("MESSAGE", repr(UNREAD_PIPE_MESSAGE))
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, state, setup, str(TIMEOUT / 2)],
+        cwd=tmp_path,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        returncode = child.wait(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.communicate()
+        pytest.fail(f"the program was still running after {TIMEOUT} s, with stderr {state}")
+    stdout, stderr = child.communicate()
+    assert returncode == 0, (returncode, stdout, stderr[-300:])
+    prefix = "WARNING:qte_sdk.update:" if setup == "basicConfig" else ""
+    line = f"{prefix}{UNREAD_PIPE_MESSAGE}\r\n".encode()
+    if state == "empty":
+        assert stderr == line
+    else:
+        assert stderr and set(stderr) == {ord("x")}, stderr[-300:]
+
+
 # Links: a symbolic link to the file, and a junction on the way to it. The runner is an
 # elevated administrator, so it may make symbolic links; a junction needs no such right.
 
@@ -806,18 +906,22 @@ def test_a_junction_to_a_volumes_guid_name_warns_with_the_open_folder_before_it(
     assert path.exists()
 
 
-# Lists the check is not shown, and folders another account owns. A list is hidden by an
-# entry that denies the user READ_CONTROL; since an owner may always read the list, the
-# object is then given to SYSTEM. Each is put back afterwards, so the folder can be removed.
+# Lists the check is not shown, and folders another account owns. Since an owner may always
+# read the list, a list is hidden by giving the object to SYSTEM and then adding an entry
+# that denies the user READ_CONTROL. Each is put back afterwards, so the folder can be
+# removed.
 
 NOT_SHOWN = "Windows would not let this check see who may"
 
 
 def hide_list(path: Path, user_sid: str) -> None:
     """Deny the user READ_CONTROL on `path`, and give it to SYSTEM, so the user may still
-    open it (and what is in it, if it is a folder) but not see its owner or list."""
-    icacls(path, "/deny", f"*{user_sid}:(RC)")
+    open it (and what is in it, if it is a folder) but not see its owner or list. It is
+    given to SYSTEM first: icacls reads the list before it changes the owner, and with
+    READ_CONTROL already denied, `/setowner` on a folder was refused ("Access is denied") in
+    CI's Python 3.12 and 3.14 runs, though not in its 3.11 run."""
     set_owner(path, SYSTEM)
+    icacls(path, "/deny", f"*{user_sid}:(RC)")
     assert _fileaccess._read_sddl(str(path)) is _fileaccess.DENIED
 
 
@@ -1205,3 +1309,249 @@ async def test_pacing_holds_the_burst_cap_on_the_real_windows_timers():
     assert most <= 160, most
     # And it is not stuck: 500 sends at 160 a second take a little over 3 s.
     assert sent[-1] - sent[0] < 10
+
+
+# The update check behind a newer release. `python -m qte_sdk.update` runs in a child
+# process against a fake latest release served from this machine, so no network is used.
+# Nothing on Windows is replaced: pip's install record is a real `direct_url.json` in a
+# dist-info folder, read by `importlib.metadata`, and the repository's list of references
+# and releases.json are read over real HTTP from 127.0.0.1. Only the two addresses the
+# check reads are changed, in the copy of the package the child imports, since nothing
+# else can point the check elsewhere.
+
+SDK_VERSION = qte_sdk.__version__
+LATEST = "v{}.{}.{}".format(*(int(n) + (i == 2) for i, n in enumerate(SDK_VERSION.split("."))))
+INSTALLED_COMMIT = "1" * 40
+LATEST_COMMIT = "4" * 40
+REFS_PATH = "/info/refs?service=git-upload-pack"
+REFS_TYPE = "application/x-git-upload-pack-advertisement"
+# The addresses as `qte_sdk/update.py` sets them, each replaced in the copy by the local
+# server's.
+REFS_LINE = '_REFS_URL = f"https://{REPOSITORY}.git/info/refs?service=git-upload-pack"\n'
+RELEASES_LINE = (
+    'RELEASES_URL = "https://raw.githubusercontent.com/josh-g-s/qte-sdk/main/releases.json"\n'
+)
+# Why the latest release is recommended, with a letter outside ASCII: in the code page of a
+# pipe (cp1252 on the runner) it is one byte, in UTF-8 two, so output in the wrong
+# encoding does not read back as it.
+WHY = "it fixes a freeze after a résumé"
+# Variables that change how the child encodes its output or what it prints. Without them,
+# its output to a pipe is in the code page `locale.getencoding()` names, as it is for a
+# student whose agent reads the command's output.
+CHILD_UNSET = ("PYTHONUTF8", "PYTHONIOENCODING", "PYTHONLEGACYWINDOWSSTDIO", "PYTHONPATH")
+PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+# Put beside the copy as `sitecustomize.py`, which Python imports as the child starts. Any
+# connection off this machine is refused and written to the file `QTE_TEST_NETWORK_LOG`
+# names, since the check catches every error a read raises; the file is made at once, so
+# the test can tell the guard ran.
+NETWORK_GUARD = """
+import os, socket
+
+LOG = os.environ.pop("QTE_TEST_NETWORK_LOG")
+LOOPBACK = ("127.0.0.1", "localhost")
+open(LOG, "w").close()
+real_connect = socket.socket.connect
+real_getaddrinfo = socket.getaddrinfo
+
+
+def refuse(what):
+    with open(LOG, "a") as log:
+        log.write(repr(what)[:80] + "\\n")
+    raise OSError("network used")
+
+
+def connect(self, address):
+    if not isinstance(address, tuple) or address[0] not in LOOPBACK:
+        refuse(address)
+    return real_connect(self, address)
+
+
+def getaddrinfo(host, *args, **kwargs):
+    if host not in LOOPBACK:
+        refuse(host)
+    return real_getaddrinfo(host, *args, **kwargs)
+
+
+socket.socket.connect = connect
+socket.getaddrinfo = getaddrinfo
+"""
+
+
+def pkt(line: bytes) -> bytes:
+    return b"%04x" % (len(line) + 4) + line
+
+
+def refs_with_release(tag: str) -> bytes:
+    """The repository's list of references as git's smart HTTP service sends it: main at
+    the installed commit and release `tag` at another."""
+    refs = [
+        (INSTALLED_COMMIT, "HEAD"),
+        (INSTALLED_COMMIT, "refs/heads/main"),
+        (LATEST_COMMIT, f"refs/tags/{tag}"),
+    ]
+    body = pkt(b"# service=git-upload-pack\n") + b"0000"
+    for index, (oid, name) in enumerate(refs):
+        line = f"{oid} {name}".encode()
+        if index == 0:
+            line += b"\0multi_ack thin-pack side-band ofs-delta agent=git/github"
+        body += pkt(line + b"\n")
+    return body + b"0000"
+
+
+class FakeRepository(http.server.BaseHTTPRequestHandler):
+    """Answers the request for the list of references with `refs`, as GitHub does, and
+    the one for releases.json with `releases`; anything else with 404. Records each path
+    asked for in `requests`."""
+
+    refs = b""
+    releases = b""
+    requests: list[str] = []
+
+    def do_GET(self) -> None:
+        self.requests.append(self.path)
+        if self.path == REFS_PATH:
+            self.answer(self.refs, REFS_TYPE)
+        elif self.path == "/releases.json":
+            self.answer(self.releases, "text/plain")
+        else:
+            self.send_error(404)
+
+    def answer(self, body: bytes, content_type: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def fake_repository():
+    """A local server whose latest release is `LATEST`, recommended for every platform
+    because of `WHY`. The value is its address and its record of requests."""
+
+    class Handler(FakeRepository):
+        refs = refs_with_release(LATEST)
+        releases = json.dumps(
+            [
+                {
+                    "version": LATEST.removeprefix("v"),
+                    "recommended": True,
+                    "why": WHY,
+                    "platforms": [],
+                }
+            ]
+        ).encode()
+        requests: list[str] = []
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", Handler.requests
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def install_with_record(site: Path, record: dict, server: str) -> None:
+    """A copy of the qte_sdk under test in `site`, reading the repository from `server`,
+    with a dist-info folder beside it whose `direct_url.json` is `record`, as pip leaves
+    after an install, and the network guard. With `site` first on the child's path, it is
+    the qte_sdk imported and the install `importlib.metadata` finds, ahead of the editable
+    install the job made."""
+    package = site / "qte_sdk"
+    shutil.copytree(
+        Path(qte_sdk.__file__).parent, package, ignore=shutil.ignore_patterns("__pycache__")
+    )
+    source = (package / "update.py").read_text(encoding="utf-8")
+    assert source.count(REFS_LINE) == 1 and source.count(RELEASES_LINE) == 1
+    source = source.replace(REFS_LINE, f'_REFS_URL = "{server}{REFS_PATH}"\n')
+    source = source.replace(RELEASES_LINE, f'RELEASES_URL = "{server}/releases.json"\n')
+    (package / "update.py").write_text(source, encoding="utf-8")
+    info = site / f"qte_sdk-{SDK_VERSION}.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: qte-sdk\nVersion: {SDK_VERSION}\n", encoding="utf-8"
+    )
+    (info / "direct_url.json").write_text(json.dumps(record), encoding="utf-8")
+    (site / "sitecustomize.py").write_text(NETWORK_GUARD, encoding="utf-8")
+
+
+def run_update_check(tmp_path: Path, site: Path) -> tuple[int, str, str]:
+    """Run `python -m qte_sdk.update` in a new process in `tmp_path`, with `site` first on
+    its path, and return its exit status, and its output and errors decoded strictly in the
+    code page Python gives a pipe. Fails the test if it has not finished within `TIMEOUT`
+    seconds, or if it tried to use the network."""
+    network_log = tmp_path / "network.log"
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k.upper() not in CHILD_UNSET + PROXY_VARIABLES and not k.upper().startswith("QTE_")
+    }
+    env["PYTHONPATH"] = str(site)
+    env["QTE_TEST_NETWORK_LOG"] = str(network_log)
+    # No proxy for this machine, whatever the runner's settings say.
+    env["NO_PROXY"] = "127.0.0.1,localhost"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "qte_sdk.update", "--timeout", "10"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            timeout=TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"python -m qte_sdk.update was still running after {TIMEOUT} s")
+    assert network_log.exists(), "the network guard did not run in the child"
+    assert network_log.read_text() == "", "the child tried to use the network"
+    encoding = locale.getencoding()
+    return (
+        result.returncode,
+        result.stdout.decode(encoding, "strict"),
+        result.stderr.decode(encoding, "strict"),
+    )
+
+
+UPDATE_CASES = {
+    "release zip": (
+        {
+            "url": f"https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v{SDK_VERSION}.zip",
+            "archive_info": {},
+        },
+        f"qte-sdk {SDK_VERSION}, from the v{SDK_VERSION} release archive",
+        f"pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/{LATEST}.zip",
+    ),
+    "git": (
+        {
+            "url": "https://github.com/josh-g-s/qte-sdk",
+            "vcs_info": {"vcs": "git", "commit_id": INSTALLED_COMMIT},
+        },
+        f"qte-sdk {SDK_VERSION}, commit {INSTALLED_COMMIT[:12]}, following main",
+        'pip install --upgrade "git+https://github.com/josh-g-s/qte-sdk"',
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(UPDATE_CASES))
+def test_the_update_check_names_a_newer_release_and_its_update_command(
+    tmp_path, fake_repository, case
+):
+    record, installed, command = UPDATE_CASES[case]
+    server, requests = fake_repository
+    site = tmp_path / "site"
+    install_with_record(site, record, server)
+    status, out, err = run_update_check(tmp_path, site)
+    assert status == 1, out + err
+    assert err == ""
+    # One line saying what is installed, then exactly one QTE-UPDATE-AVAILABLE line with
+    # the reason the update is recommended and the command for this kind of install.
+    assert out.splitlines() == [
+        f"installed: {installed}",
+        f"QTE-UPDATE-AVAILABLE: qte-sdk {SDK_VERSION} is behind {LATEST.removeprefix('v')}, "
+        f"a recommended update: {WHY}. Update with {command}.",
+    ], out
+    assert out.count("QTE-UPDATE-AVAILABLE") == 1
+    # The check read the list of references and releases.json, both from here.
+    assert requests == [REFS_PATH, "/releases.json"]

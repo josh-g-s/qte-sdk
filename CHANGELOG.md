@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.52
+**Version:** 0.53
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- CI tests the student install on Windows in a new `windows-install` job (#248, #249): the wheel, the sdist and a zip of the source tree as the release download is, each installed into a fresh virtualenv in a folder whose path has a space and a non-ASCII character, then `python -m qte_sdk.update --json`, `python -m qte_sdk.agents` and `python -m qte_sdk.token check` run from outside the checkout, and each example's `--help` and the update check run from Git Bash and from cmd in code page 437. A new Windows test checks that the background update warning never holds up a program whose stderr is a pipe nobody reads. Tests and CI only, no change to the SDK itself.
 - Fundamentals tickets: `ticket_state` carries `progress`, the ticket's history of shares due against shares filled (qte-platform contract 11, choice 18). Each point is a `TicketProgressPoint` with `time` (an exchange timestamp in milliseconds), `due_shares` and `filled_shares`, cumulative from the ticket's start, in strictly ascending `time`: one at each session's open, every 30 minutes after it inside the session and the session's close while the ticket works, and an end point at `stopped_time`. Every `ticket_state`, the connect-time set included, carries the whole list, so each replaces the list `LatestTickets` holds and is never appended to; it is empty when the exchange holds no history for the ticket. The `qte_sdk.tickets` docstring, docs/automatic-execution.md, the quickstart and AGENTS.md say so, and `examples/fundamentals_pod.py` prints the newest point with each state. The vendored contract is qte-platform 3ae39523 (order_events.proto 1.23), pending the merge of qte-platform #2349; the field number may change at that merge (#261).
 
 ## 1.4.0

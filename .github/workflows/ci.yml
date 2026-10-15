@@ -43,8 +43,16 @@ jobs:
     # lists, owners and consoles, so they run only here. The rest of the suite runs too; the
     # few tests that cannot run on Windows skip themselves and say why. The contract code is
     # regenerated as well. See "Windows" in docs/development.md.
+    # Students mostly install 3.12, and qte_sdk/update.py treats pipes differently on Windows
+    # from 3.12, so 3.12 and 3.14 run too. The 3.11 entry keeps the job name `windows`, the
+    # required check; the others report as `windows (3.12)` and `windows (3.14)`.
+    name: windows${{ matrix.python-version != '3.11' && format(' ({0})', matrix.python-version) || '' }}
     runs-on: windows-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.14"]
     steps:
       # Checked out with the runner's default core.autocrlf: .gitattributes keeps the
       # vendored contract's bytes exact, and the tests hash them, and checks the generated
@@ -52,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev,codegen]"
       - name: Run the tests marked windows
         run: pytest -m windows --junitxml=windows-tests.xml
@@ -79,6 +87,87 @@ jobs:
           git status --porcelain qte_sdk/contract
           git diff --exit-code qte_sdk/contract
           test -z "$(git status --porcelain qte_sdk/contract)"
+
+  windows-install:
+    # The install students are told to use on Windows, tested as they do it: the wheel, the
+    # sdist and a zip of the source tree as the release download is, each installed into a
+    # fresh virtualenv in a folder whose path has a space and a non-ASCII character, and the
+    # SDK run from outside the checkout, from Git Bash and cmd as well as PowerShell. CI's
+    # own temp folder is a short ASCII name, so without this no path like a student's ever
+    # occurs. Not a required check. See "Windows" in docs/development.md.
+    #
+    # STUDENT_HOME, the student's folder, is set on each step that needs it (the runner
+    # context, which gives the temp folder, is not available to a job's env) and is read
+    # from the environment, never written in a step's script: cmd reads its script in the
+    # console's code page, which cannot hold the Ü, but expands a variable as it is.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install build
+      - run: python -m build
+      # GitHub's release download is a zip of the tree at the tag, in one folder named after
+      # it, which pip installs with no git. git archive makes the same zip of this commit.
+      - name: Make a zip of the source tree, as the release download is
+        shell: bash
+        run: git archive --format=zip --prefix=qte-sdk-main/ -o dist/qte-sdk-main.zip HEAD
+      # For each of the three: a fresh virtualenv in "Student Ü", installed with its own pip,
+      # and then, from a folder outside the checkout: the qte_sdk imported is the installed
+      # one; `python -m qte_sdk.update --json` exits 0, 1 or 2 (it may have no network) with
+      # one JSON document; `python -m qte_sdk.agents` exits 0 and prints AGENTS.md; and
+      # `python -m qte_sdk.token check` with no token exits 1 with QTE-TOKEN-MISSING. The
+      # script sets nothing that changes how Python encodes its output, and prints the
+      # encodings each run used.
+      - name: Install the wheel, the sdist and the zip in a folder with a space and a Ü
+        shell: bash
+        env:
+          STUDENT_HOME: ${{ runner.temp }}\Student Ü
+        run: |
+          python scripts/check_student_install.py install wheel dist/*.whl
+          python scripts/check_student_install.py install sdist dist/*.tar.gz
+          python scripts/check_student_install.py install zip dist/qte-sdk-main.zip
+      # From Git Bash, as students who use it run the SDK, with the wheel's virtualenv: each
+      # example's --help must exit 0 with a usage: line, and `python -m qte_sdk.update` exit
+      # 0, 1 or 2 with its result on one line (the QTE-UPDATE-AVAILABLE line when behind).
+      # The shell starts the SDK itself; the script only reads what it wrote.
+      - name: Run the examples' --help and the update check from Git Bash
+        if: success() || failure()
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        env:
+          STUDENT_HOME: ${{ runner.temp }}\Student Ü
+        run: |
+          python_exe="$(cygpath -u "$STUDENT_HOME")/wheel/Scripts/python.exe"
+          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
+          for example in "$workspace"/examples/*.py; do
+            name=$(basename "$example" .py)
+            "$python_exe" "$example" --help > "help-bash-$name.txt" 2>&1 || { echo "$name --help exited $?"; cat "help-bash-$name.txt"; exit 1; }
+          done
+          python "$workspace/scripts/check_student_install.py" help help-bash-
+          code=0
+          "$python_exe" -m qte_sdk.update --timeout 5 > update-bash.txt || code=$?
+          python "$workspace/scripts/check_student_install.py" update update-bash.txt "$code"
+      # The same from cmd, in the legacy console code page a student's cmd has (437 in
+      # English); the runner sets 65001, UTF-8, before each step, so the step sets 437 and
+      # stops if it cannot. Python writes redirected output in the ANSI code page (1252),
+      # which the install step prints. %errorlevel% is read only outside the for loop, where
+      # cmd expands it after the line before has run; inside it, || stops the step at a
+      # failed --help.
+      - name: Run the examples' --help and the update check from cmd
+        if: success() || failure()
+        shell: cmd
+        working-directory: ${{ runner.temp }}
+        env:
+          STUDENT_HOME: ${{ runner.temp }}\Student Ü
+        run: |
+          chcp 437 || exit /b 1
+          for %%f in ("%GITHUB_WORKSPACE%\examples\*.py") do "%STUDENT_HOME%\wheel\Scripts\python.exe" "%%~f" --help > "help-cmd-%%~nf.txt" 2>&1 || (echo %%~nf --help failed & type "help-cmd-%%~nf.txt" & exit /b 1)
+          python "%GITHUB_WORKSPACE%\scripts\check_student_install.py" help help-cmd- || exit /b 1
+          "%STUDENT_HOME%\wheel\Scripts\python.exe" -m qte_sdk.update --timeout 5 > update-cmd.txt
+          python "%GITHUB_WORKSPACE%\scripts\check_student_install.py" update update-cmd.txt %errorlevel%
 
   test-websockets-floor:
     runs-on: ubuntu-latest
