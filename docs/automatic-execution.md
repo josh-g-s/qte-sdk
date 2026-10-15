@@ -75,7 +75,11 @@ On 1.3.0 those fills read `ORIGIN_UNSPECIFIED`, and the same rules hold.
 - `behind_schedule`: the fills were more than one slice behind `due_shares` at the last assessment, or the schedule reached its planned completion with shares unfilled.
 - `filled_notional`: the exact sum of quantity times price over the fills; `filled_notional / filled_shares` is the exact average price.
 
-Every ticket's state, whoever works it, also carries `progress` (`main` only until the next release; see "What each release shows"): the ticket's history of shares due against shares filled, so a program can show how far ahead or behind the schedule a ticket has been, and rebuild it after a reconnect. Each point is a `TicketProgressPoint` with `time` (an exchange timestamp in milliseconds, like `update_time`), `due_shares` and `filled_shares`, both cumulative from the ticket's start. The points are in strictly ascending `time`: one at each tick at or after `accepted_time` while the ticket works (every session's open, every 30 minutes after it inside the session, and the session's close), and an end point at `stopped_time` when the ticket stops, whatever the status. A point's `due_shares` is by the rule of the ticket's own `due_shares` as of its `time` (for a `SERVICE` ticket, the figure of the service's latest step), and its `filled_shares` counts every fill stamped at or before it. Every `ticket_state` carries the whole list, the connect-time set included: each one replaces the list held and is never appended to. The list is empty when the exchange holds no history for the ticket.
+The service's passive child rests as a limit order of the pod for a short wait, and any team's order may fill it. It never appears in `RestingOrders`: follow the ticket in `ticket_state`.
+
+## A ticket's progress
+
+Every ticket's state, whoever works it, carries `progress` (`main` only until the next release; see "What each release shows"): the ticket's history of shares due against shares filled, so a program can show how far ahead or behind the schedule a ticket has been, and rebuild it after a reconnect. Each point is a `TicketProgressPoint` with `time` (an exchange timestamp in milliseconds, like `update_time`), `due_shares` and `filled_shares`, both cumulative from the ticket's start. The points are in strictly ascending `time`: one at each tick at or after `accepted_time` while the ticket works (every session's open, every 30 minutes after it inside the session, and the session's close), and an end point at `stopped_time` when the ticket stops, whatever the status. A point's `due_shares` is by the rule of the ticket's own `due_shares` as of its `time` (for a `SERVICE` ticket, the figure of the service's latest step), and its `filled_shares` counts every fill stamped at or before it. Every `ticket_state` carries the whole list, the connect-time set included: each one replaces the list held and is never appended to. The list is empty when the exchange holds no history for the ticket.
 
 ```python
 state = tickets.get(ticket_id)
@@ -83,8 +87,6 @@ if state is not None and state.progress:
     point = state.progress[-1]  # the newest point
     ahead = point.filled_shares - point.due_shares  # below 0: behind the schedule
 ```
-
-The service's passive child rests as a limit order of the pod for a short wait, and any team's order may fill it. It never appears in `RestingOrders`: follow the ticket in `ticket_state`.
 
 ## The pause
 
