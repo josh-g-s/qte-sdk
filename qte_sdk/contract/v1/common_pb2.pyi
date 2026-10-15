@@ -128,6 +128,7 @@ class TicketStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     TICKET_CANCELLED_BY_POD: _ClassVar[TicketStatus]
     TICKET_CANCELLED_BY_ENGINE: _ClassVar[TicketStatus]
     TICKET_SPLIT_CANCELLED: _ClassVar[TicketStatus]
+    TICKET_CANCELLED_BY_DIRECTOR: _ClassVar[TicketStatus]
 
 class TicketExecutor(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -250,6 +251,7 @@ TICKET_LIMIT_CANCELLED: TicketStatus
 TICKET_CANCELLED_BY_POD: TicketStatus
 TICKET_CANCELLED_BY_ENGINE: TicketStatus
 TICKET_SPLIT_CANCELLED: TicketStatus
+TICKET_CANCELLED_BY_DIRECTOR: TicketStatus
 TICKET_EXECUTOR_UNSPECIFIED: TicketExecutor
 DESK: TicketExecutor
 ENGINE: TicketExecutor
@@ -308,6 +310,9 @@ class TicketReasonCodes(_message.Message):
         TICKET_URGENCY_NOT_INCREASED: _ClassVar[TicketReasonCodes.TicketReasonCode]
         TICKET_CURE_INVALID: _ClassVar[TicketReasonCodes.TicketReasonCode]
         TICKET_ALGORITHM_UNAVAILABLE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_SERVICE_OFF: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_NOT_SERVICE: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        TICKET_STOP_PENDING: _ClassVar[TicketReasonCodes.TicketReasonCode]
     TICKET_REASON_CODE_UNSPECIFIED: TicketReasonCodes.TicketReasonCode
     NOT_AUTHENTICATED: TicketReasonCodes.TicketReasonCode
     VERSION_MISMATCH: TicketReasonCodes.TicketReasonCode
@@ -336,6 +341,9 @@ class TicketReasonCodes(_message.Message):
     TICKET_URGENCY_NOT_INCREASED: TicketReasonCodes.TicketReasonCode
     TICKET_CURE_INVALID: TicketReasonCodes.TicketReasonCode
     TICKET_ALGORITHM_UNAVAILABLE: TicketReasonCodes.TicketReasonCode
+    TICKET_SERVICE_OFF: TicketReasonCodes.TicketReasonCode
+    TICKET_NOT_SERVICE: TicketReasonCodes.TicketReasonCode
+    TICKET_STOP_PENDING: TicketReasonCodes.TicketReasonCode
     def __init__(self) -> None: ...
 
 class ReasonCodes(_message.Message):

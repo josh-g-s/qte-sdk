@@ -1,6 +1,6 @@
 # Automatic execution
 
-**Version:** 0.2
+**Version:** 0.21
 
 The exchange can work a Fundamentals pod's tickets itself, with its automatic execution service, instead of sending them to the pod's Execution desk. This page says what changes for a pod and a desk while the service is on, what each SDK release shows of it, and the one mistake to avoid: adding ticket fills to a position of your own. The rules in full are in the [`qte_sdk.tickets`](../qte_sdk/tickets.py) docstring.
 
@@ -17,6 +17,8 @@ Both releases keep working while the service is on: nothing raises, disconnects 
 | Reason 1713, a VWAP ticket refused | `TICKET_ALGORITHM_UNAVAILABLE` | unnamed; the name is in `event.unknown_enum_names()` |
 | `send_ticket` | `algorithm=TWAP` (the default) or `algorithm=VWAP` | no `algorithm`: the exchange reads it as TWAP |
 
+Only `main`, not yet any release, names reason 1714, `TICKET_SERVICE_OFF` (a ticket or a replacing cancel refused while the route is off), and has `send_ticket_cancel(..., replacing=True)` for the cancel that begins an amendment (see "Amending a ticket"). 1.4.0 and 1.3.0 show 1714 unnamed, with the name in `event.unknown_enum_names()`, and send only plain cancels.
+
 A status, activity, origin or reason this SDK does not know decodes as its zero value, never as an error, and keeps the name the exchange sent in `event.unknown_enum_names()`. A ticket whose `status` is anything but `TICKET_WORKING` has stopped.
 
 ## Who works a ticket
@@ -25,7 +27,7 @@ The exchange's routing when it accepts a ticket decides who works it, not the po
 
 The service off (`routing_in_force` `ROUTING_DESK`) and the service paused (`paused` true) differ:
 
-- **Off:** a ticket goes to the pod's Execution desk as before (`executor` `DESK`). The Execution arm is to pause, unscored, once the service takes over, so do not count on a desk working it, and the 15 October term has no fallback. From the Winter term (26 October) no desk is paired and the exchange is to refuse such a ticket at once, so the pod sees the service is off (Jack's answer G-164 A; qte-platform #2315, its reason code not yet fixed).
+- **Off:** a ticket goes to the pod's Execution desk as before (`executor` `DESK`). The Execution arm is to pause, unscored, once the service takes over, so do not count on a desk working it, and the 15 October term has no fallback. From the Winter term (26 October) no desk is paired: in a term that pairs no pod with an Execution desk, a ticket received while `ROUTING_SERVICE` is not in force, a cure ticket included, is refused `TICKET_SERVICE_OFF` (1714) with the detail "the automatic execution route is off: no ticket is accepted until it is on", and nothing is logged (Jack's answer G-164 A; qte-platform #2315). A `SERVICE` ticket still working when the route goes off is worked by the service to completion, and a plain cancel of it is taken.
 - **Paused:** a new ticket is accepted, and the service catches up when the pause lifts (see "The pause").
 
 Read `routing_in_force` and `paused` before you send.
@@ -84,6 +86,14 @@ When the Directors pause the service, `execution_route.paused` is true, and a wo
 
 Under the service, `send_ticket(..., algorithm=VWAP)` asks for a volume-weighted schedule. While the instrument has no VWAP profile the ticket is refused `TICKET_ALGORITHM_UNAVAILABLE` (1713): send it again as TWAP. A ticket that goes to a desk, and a cure ticket, are TWAP whatever they name.
 
+## Amending a ticket
+
+There is no amend message. To change a ticket, send its cancel with `send_ticket_cancel(..., replacing=True)`, wait for its `ticket_state` to show `TICKET_CANCELLED_BY_POD`, and only then send the new ticket with `replaces_ticket_id` naming the old one. While the route is on, a replacing cancel acts exactly like a plain one.
+
+In a term that pairs no pod with an Execution desk, while `ROUTING_SERVICE` is not in force, the replacement would be refused 1714, so the replacing cancel is refused whole: a `ticket_reject` with `request_kind` `TICKET_REQUEST_CANCEL`, reason `TICKET_SERVICE_OFF` (1714), your `request_ref`, and the detail "the automatic execution route is off: an amendment would lose the ticket, so its cancel is refused". Nothing is logged and the original ticket keeps working, its fills and children standing. Send no replacement. To stop the ticket, cancel it plainly (`replacing` left False), which is never refused for the route. The route check comes last, after the ticket's own checks, so a replacing cancel of no ticket is still `TICKET_NOT_FOUND`.
+
+The flag protects the amendment only at the cancel's instant. Once the cancel is taken, the cancel and the replacement are not atomic: if the replacement is refused for any reason, the old ticket stays cancelled. That includes `TICKET_SERVICE_OFF` (1714) when the route is off by the time the replacement arrives, for example because `ROUTING_DESK` comes into force at the next open first, so send the replacement as soon as the cancel is taken.
+
 ## Handover
 
 In a term whose configuration provides a fallback, the Directors can hand a desk's ticket over to the exchange: its `executor` turns `ENGINE` and its fills come with `origin` `FALLBACK`, treated like the service's above. The 15 October term has no fallback, so no ticket is handed over in it.
@@ -98,5 +108,6 @@ The Execution arm is paused, so no desk trades (see "Who works a ticket"). The r
 - Treat any `status` other than `TICKET_WORKING` as a stop, including a name this SDK does not know.
 - Take a pod's position from `account_state.positions`, never adding fills on top of ticket totals; keep it between queries with `AccountReports`, and query again after a ticket stops.
 - On a 1713 reject, resend the ticket as TWAP.
-- Before sending, check `routing_in_force` is `ROUTING_SERVICE`: while the service is off a ticket goes to the desk, and from the Winter term it is refused. While `paused` is true a ticket is accepted and caught up when the pause lifts.
+- Amend with a cancel sent `replacing=True`, then the replacement once the cancel's `ticket_state` shows `TICKET_CANCELLED_BY_POD`. On a 1714 reject of that cancel, send no replacement: the ticket is still working; cancel it plainly to stop it.
+- Before sending, check `routing_in_force` is `ROUTING_SERVICE`: while the service is off a ticket goes to the desk, and from the Winter term it is refused `TICKET_SERVICE_OFF` (1714). While `paused` is true a ticket is accepted and caught up when the pause lifts.
 - Read `paused` and `activity` before deciding a ticket is stuck.
