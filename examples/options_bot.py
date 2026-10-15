@@ -75,6 +75,8 @@ contract could be chosen, with status 1 and a last line starting `watch-only: NO
 CHOSEN:` that names why. If the exchange closes or drops the connection, it prints that
 and the same last line, with the same status. --drain-seconds has no use then, since there
 is nothing to cancel. --strat-id is still required, as for any run of this example.
+QTE_WATCH_ONLY takes 1, true, yes or on, or 0, false, no or off; any other value stops the
+example with status 2 before it connects, so a mistyped value never sends an order.
 """
 
 import argparse
@@ -173,6 +175,11 @@ BUDGET_WAIT_SECONDS = 60.0
 WAIT = "wait"
 
 
+# The values of QTE_WATCH_ONLY, after stripping and lower-casing; any other is an error.
+WATCH_OFF = ("", "0", "false", "no", "off")
+WATCH_ON = ("1", "true", "yes", "on")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Rest one limit order on an option contract and cancel it, or with "
@@ -200,13 +207,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="the longest wait, at the end, for the cancel to be confirmed (default 10; "
         "a cancel rejected for a message budget is sent again only after 60)",
     )
+    # A value not recognised is an error, never read as off: off sends a real order.
+    watch_env = os.environ.get("QTE_WATCH_ONLY", "").strip().lower()
+    if watch_env not in WATCH_OFF + WATCH_ON:
+        parser.error(
+            "QTE_WATCH_ONLY must be unset, empty, or one of 0, false, no, off (off) or "
+            "1, true, yes, on (on)"
+        )
     parser.add_argument(
         "--watch-only",
         action="store_true",
-        default=os.environ.get("QTE_WATCH_ONLY", "").strip().lower() in ("1", "true", "yes", "on"),
+        default=watch_env in WATCH_ON,
         help="read and choose a contract as usual, print the order it would send, and send "
         "nothing: no order, no cancel. Exits 0 if a contract was chosen, else 1 with the "
-        "reason (default: off, or on if $QTE_WATCH_ONLY is 1, true, yes or on)",
+        "reason (default: off, or on if $QTE_WATCH_ONLY is 1, true, yes or on; any value "
+        "but those and 0, false, no or off is refused)",
     )
     args = parser.parse_args(argv)
     if not args.strat_id:
