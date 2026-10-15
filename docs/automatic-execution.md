@@ -1,12 +1,12 @@
 # Automatic execution
 
-**Version:** 0.2
+**Version:** 0.21
 
 The exchange can work a Fundamentals pod's tickets itself, with its automatic execution service, instead of sending them to the pod's Execution desk. This page says what changes for a pod and a desk while the service is on, what each SDK release shows of it, and the one mistake to avoid: adding ticket fills to a position of your own. The rules in full are in the [`qte_sdk.tickets`](../qte_sdk/tickets.py) docstring.
 
 ## What each release shows
 
-Both releases keep working while the service is on: nothing raises, disconnects or is delivered twice after a reconnect. 1.4.0 can read everything the service sends; 1.3.0 can read the tickets' totals and status but not the service's own fields. Check yours with `python -m qte_sdk.update`. 1.4.0 is the next release: until that command names it as the latest, it is not yet released, and only `main` has what this page says of it.
+Both releases keep working while the service is on: nothing raises, disconnects or is delivered twice after a reconnect. 1.4.0 can read everything the service sends except a ticket's `progress`; 1.3.0 can read the tickets' totals and status but not the service's own fields. Check yours with `python -m qte_sdk.update`. A ticket's `progress` is newer than 1.4.0: until that command names a later release as the latest, only `main` reads it, and the exchange sends it only once qte-platform #2349 is merged and running.
 
 | What the exchange sends | 1.4.0 | 1.3.0 |
 |---|---|---|
@@ -16,6 +16,7 @@ Both releases keep working while the service is on: nothing raises, disconnects 
 | A fill of the service's child order (`execution`) | `origin` `AUTO_EXECUTION`, `parent_ticket_id` set, no `strat_id` | `origin` `ORIGIN_UNSPECIFIED`, with `event.unknown_enum_names() == {"origin": "AUTO_EXECUTION"}` |
 | Reason 1713, a VWAP ticket refused | `TICKET_ALGORITHM_UNAVAILABLE` | unnamed; the name is in `event.unknown_enum_names()` |
 | `send_ticket` | `algorithm=TWAP` (the default) or `algorithm=VWAP` | no `algorithm`: the exchange reads it as TWAP |
+| `ticket_state.progress`, a ticket's shares due against shares filled | not shown (`main` only, until the next release) | not shown |
 
 A status, activity, origin or reason this SDK does not know decodes as its zero value, never as an error, and keeps the name the exchange sent in `event.unknown_enum_names()`. A ticket whose `status` is anything but `TICKET_WORKING` has stopped.
 
@@ -76,6 +77,17 @@ On 1.3.0 those fills read `ORIGIN_UNSPECIFIED`, and the same rules hold.
 
 The service's passive child rests as a limit order of the pod for a short wait, and any team's order may fill it. It never appears in `RestingOrders`: follow the ticket in `ticket_state`.
 
+## A ticket's progress
+
+Every ticket's state, whoever works it, carries `progress` (`main` only until the next release; see "What each release shows"): the ticket's history of shares due against shares filled, so a program can show how far ahead or behind the schedule a ticket has been, and rebuild it after a reconnect. Each point is a `TicketProgressPoint` with `time` (an exchange timestamp in milliseconds, like `update_time`), `due_shares` and `filled_shares`, both cumulative from the ticket's start. The points are in strictly ascending `time`: one at each tick at or after `accepted_time` while the ticket works (every session's open, every 30 minutes after it inside the session, and the session's close), and an end point at `stopped_time` when the ticket stops, whatever the status. A point's `due_shares` is by the rule of the ticket's own `due_shares` as of its `time` (for a `SERVICE` ticket, the figure of the service's latest step), and its `filled_shares` counts every fill stamped at or before it. Every `ticket_state` carries the whole list, the connect-time set included: each one replaces the list held and is never appended to. The list is empty when the exchange holds no history for the ticket.
+
+```python
+state = tickets.get(ticket_id)
+if state is not None and state.progress:
+    point = state.progress[-1]  # the newest point
+    ahead = point.filled_shares - point.due_shares  # below 0: behind the schedule
+```
+
 ## The pause
 
 When the Directors pause the service, `execution_route.paused` is true, and a working `SERVICE` ticket's `activity` can read `SERVICE_PAUSED`. No child is placed and the resting children are cancelled, but no ticket is cancelled, and a new ticket is still accepted. When the pause lifts, the service catches up on what fell due during it, so a long pause ends in a burst of child orders; `due_shares` and `behind_schedule` show how far behind a ticket is. (A pause because an equity's mark is frozen is different: the service catches up once the mark is no longer frozen.)
@@ -96,6 +108,7 @@ The Execution arm is paused, so no desk trades (see "Who works a ticket"). The r
 
 - Pass every event to one `LatestTickets` and read the route from `tickets.route`.
 - Treat any `status` other than `TICKET_WORKING` as a stop, including a name this SDK does not know.
+- Read a ticket's `progress` from the newest state only: each `ticket_state` carries the whole list, so never append one to another.
 - Take a pod's position from `account_state.positions`, never adding fills on top of ticket totals; keep it between queries with `AccountReports`, and query again after a ticket stops.
 - On a 1713 reject, resend the ticket as TWAP.
 - Before sending, check `routing_in_force` is `ROUTING_SERVICE`: while the service is off a ticket goes to the desk, and from the Winter term it is refused. While `paused` is true a ticket is accepted and caught up when the pause lifts.

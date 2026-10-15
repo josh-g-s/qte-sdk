@@ -1,6 +1,6 @@
 // Inbound order entry.
 //
-// **Version:** 1.10
+// **Version:** 1.11
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`, and, from a Fundamentals pod only, `ticket`, `ticket_cancel`
@@ -204,6 +204,13 @@ message SubmitTicket {
 message CancelTicket {
   string request_ref = 1; // id, 1 to 32 bytes. Client correlation id, echoed on the response
   string ticket_id = 2;   // id, decimal digits only. The ticket to cancel
+  // Present and true when this cancel is the first half of an amendment, the
+  // pod's replacement ticket to follow; absent means false, a plain cancel.
+  // In a term with no Fundamentals-to-Execution pairing, while SERVICE
+  // routing is not in force, the replacement would be refused, so a
+  // replacing cancel is refused TICKET_SERVICE_OFF and the ticket keeps
+  // working. Not logged. SPEC 23.2, SPEC 23.4
+  optional bool replacing = 3;
 }
 
 // Raises the urgency of the pod's working cure ticket. A cure ticket's

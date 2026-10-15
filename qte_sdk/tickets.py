@@ -83,12 +83,41 @@ also says what the service is doing with it:
 `state.HasField(...)` before reading them. Every other ticket carries `activity`
 `TICKET_ACTIVITY_UNSPECIFIED`, `behind_schedule` False and `config_version` 0.
 
+A `ticket_state` on every executor also carries `progress`, the ticket's history of shares
+due against shares filled, a list of `TicketProgressPoint` (order_events.proto 1.23). Each
+point has a `time`, an exchange timestamp in milliseconds like `update_time`, and
+`due_shares` and `filled_shares`, whole numbers of shares, both cumulative from the
+ticket's start. The points are in strictly ascending `time`, no two at one time: one at
+each tick at or after `accepted_time` while the ticket works, the ticks being every
+session's open, every 30 minutes after it inside the session, and the session's close;
+and an end point at `stopped_time` when the ticket stops, whatever the status. A close or
+an end point on a tick is one point. A point's `due_shares` is by the rule of the ticket's
+own `due_shares` as of its `time`: the desk schedule's for a `DESK` or handed-over
+ticket, and for a `SERVICE` ticket the figure of the service's latest step as of `time`.
+A tick's `filled_shares` counts the fills stamped at or before it, and an end point's is
+the ticket's final `filled_shares`. Every `ticket_state` carries the whole list, the
+connect-time set included, so each one replaces the list held and is never appended to:
+read `state.progress` from the state `LatestTickets` holds. The list is empty when the
+exchange holds no history for the ticket, and from a split adjustment of the ticket on,
+which no ticket sent today has. An exchange that does not send it yet (qte-platform
+#2349) reads the same: empty.
+
 A `ticket_reject` refuses one message and changes nothing: it never stops a ticket. A
 ticket stops only by a `ticket_state` whose `status` is not `TICKET_WORKING`, and a
 stopped ticket never works again. Only a stopped ticket's state carries `stopped_time`
 and `stopped_mark`, the official mark when it stopped; read them with `stopped_time_of`
 and `stopped_mark_of`. A stop with no valid mark to record sends a mark of 0, which
 `stopped_mark_of` returns as None, the same as a mark that is absent.
+
+A Director may cancel a `SERVICE` ticket: it stops `TICKET_CANCELLED_BY_DIRECTOR`, its
+fills standing, and the pod is told neither the reason nor the Director. A Director's
+cancel logged between sessions takes effect at the next session's open: until then the
+ticket stays `TICKET_WORKING` and its state carries `director_stop_pending_time`, the
+cancel's entry stamp. A cure ticket's state carries `cure_deadline_date`, the session
+date (as the calendar's `session_date`) whose official close is the deadline of the
+breach it cures: if no cure is working by then, the engine queues its own cure at that
+close, and after it nothing steps in again. Both are optional fields: check
+`state.HasField(...)` before reading them.
 
 None of the three answers carries a `report_seq`, and a resume replays none of them.
 Instead, once on each connection of the pod or desk, straight after the `session_ack`,
