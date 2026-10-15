@@ -1879,6 +1879,8 @@ async def test_options_bot_watch_only_fails_with_a_reason_when_the_connection_en
     status, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "10")
     assert status == 1, out + err
     assert exchange.types() == ["auth", "subscribe"]
+    ended = "closed the connection" if code == 1000 else "the connection dropped"
+    assert ended in out
     assert out.splitlines()[-1] == (
         "watch-only: NO CONTRACT CHOSEN: no option chain was received; nothing was sent"
     )

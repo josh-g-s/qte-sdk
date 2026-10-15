@@ -75,8 +75,9 @@ contract could be chosen, with status 1 and a last line starting `watch-only: NO
 CHOSEN:` that names why. If the exchange closes or drops the connection, it prints that
 and the same last line, with the same status. --drain-seconds has no use then, since there
 is nothing to cancel. --strat-id is still required, as for any run of this example.
-QTE_WATCH_ONLY takes 1, true, yes or on, or 0, false, no or off; any other value stops the
-example with status 2 before it connects, so a mistyped value never sends an order.
+QTE_WATCH_ONLY, read without case or surrounding spaces, turns it on with 1, true, yes or on,
+and leaves it off when unset, empty, 0, false, no or off; any other value stops the example
+with status 2 before it connects, so a mistyped value never sends an order.
 """
 
 import argparse
@@ -220,8 +221,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=watch_env in WATCH_ON,
         help="read and choose a contract as usual, print the order it would send, and send "
         "nothing: no order, no cancel. Exits 0 if a contract was chosen, else 1 with the "
-        "reason (default: off, or on if $QTE_WATCH_ONLY is 1, true, yes or on; any value "
-        "but those and 0, false, no or off is refused)",
+        "reason (default: on if $QTE_WATCH_ONLY is 1, true, yes or on; off if it is unset, "
+        "empty, 0, false, no or off; any other value is refused)",
     )
     args = parser.parse_args(argv)
     if not args.strat_id:
