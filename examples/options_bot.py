@@ -72,8 +72,9 @@ each contract it passes over. It then prints the order it would send, as one lin
 and sends nothing at all: no order and no cancel. It keeps reading until --seconds are up or
 Ctrl+C, then exits with status 0 and a last line starting `watch-only: chose`, or, if no
 contract could be chosen, with status 1 and a last line starting `watch-only: NO CONTRACT
-CHOSEN:` that names why. --drain-seconds has no use then, since there is nothing to cancel.
---strat-id is still required, since the session needs it.
+CHOSEN:` that names why. If the exchange closes or drops the connection, it prints that
+and the same last line, with the same status. --drain-seconds has no use then, since there
+is nothing to cancel. --strat-id is still required, as for any run of this example.
 """
 
 import argparse
@@ -627,6 +628,7 @@ class Progress:
     order may still rest."""
 
     bot: OptionsBot | None = None
+    watch_only: bool = False
     status: int | None = None  # the exit status, once the run has printed its outcome
 
 
@@ -638,6 +640,9 @@ def stopped_at_once(progress: Progress) -> int:
     bot = progress.bot
     if bot is not None and bot.watch_only:
         return watch_only_outcome(bot)
+    if progress.watch_only:
+        print("watch-only: NO CONTRACT CHOSEN: interrupted before the chain was read")
+        return 1
     if bot is None or bot.ref is None:
         print("interrupted: no order was sent")
         return 0
@@ -688,11 +693,19 @@ async def trade(
     print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
     table = await session.wait_for_instrument_table(timeout=TABLE_SECONDS)
     if table is None:
+        if args.watch_only:
+            print("watch-only: NO CONTRACT CHOSEN: no instruments table from this exchange")
+            return 1
         print("no instruments table from this exchange, so no listed option contract to use")
         return 1
     underlyings = option_underlyings(table)
     underlying = args.underlying or (underlyings[0] if underlyings else None)
     if underlying is None:
+        if args.watch_only:
+            print(
+                "watch-only: NO CONTRACT CHOSEN: the instruments table names no option underlying"
+            )
+            return 1
         print("the instruments table names no option underlying")
         return 1
     contracts = listed_contracts(table, underlying)
@@ -726,8 +739,7 @@ async def trade(
         why = "interrupted"
     if why == "closed" and bot.watch_only:
         print("the exchange closed the connection")
-        watch_only_outcome(bot)
-        return 1
+        return watch_only_outcome(bot)
     if why == "closed":
         print("the exchange closed the connection")
         if bot.ref is not None and not bot.finished:
@@ -802,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
     except MissingURL as error:
         fail(f"{error}; for example ws://127.0.0.1:8080/ws (see docs/quickstart.md)")
         return 2
-    progress = Progress()
+    progress = Progress(watch_only=args.watch_only)
     try:
         return asyncio.run(run(url, args, progress))
     except MissingToken as error:
@@ -816,6 +828,14 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosed:
+        if progress.watch_only:
+            print("the connection dropped, and this example does not reconnect")
+            if progress.bot is not None:
+                return watch_only_outcome(progress.bot)
+            print(
+                "watch-only: NO CONTRACT CHOSEN: the connection dropped before the chain was read"
+            )
+            return 1
         return fail(
             "the connection dropped, and this example does not reconnect. Your order may "
             "still rest: reconnect and cancel it"

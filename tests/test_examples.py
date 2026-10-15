@@ -2004,6 +2004,26 @@ async def interrupt_options_bot(
 
 
 @SENDS_SIGINT
+async def test_options_bot_watch_only_fails_with_a_reason_on_ctrl_c_before_the_table():
+    code, out, err = await interrupt_options_bot(
+        FakeExchange(), ("--watch-only", "--seconds", "10"), [b"connected:"]
+    )
+    assert code == 1, out + err
+    assert "watch-only: NO CONTRACT CHOSEN: interrupted before the chain was read" in out
+    assert "may still rest" not in out + err
+
+
+@SENDS_SIGINT
+async def test_options_bot_watch_only_exits_0_on_ctrl_c_once_a_contract_is_chosen():
+    code, out, err = await interrupt_options_bot(
+        options_exchange(), ("--watch-only", "--seconds", "10"), [b"WOULD SEND"]
+    )
+    assert code == 0, out + err
+    assert "watch-only: chose SPY261120P00665000" in out
+    assert "may still rest" not in out + err
+
+
+@SENDS_SIGINT
 async def test_options_bot_says_no_order_was_sent_on_ctrl_c_before_it_could_send_one():
     # No instruments table comes, so the Ctrl+C lands while the example waits for it.
     code, out, err = await interrupt_options_bot(
