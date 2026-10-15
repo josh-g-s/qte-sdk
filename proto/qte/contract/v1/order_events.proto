@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.22
+// **Version:** 1.23
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -503,4 +503,23 @@ message TicketState {
   // exact average price is filled_notional / filled_shares. 0 before any
   // fill. Set on every ticket (SPEC 23.2).
   int64 filled_notional = 37; // int64-micro
+  // The ticket's scheduled-against-filled history, in strictly ascending
+  // time, no two points at one time (SPEC 23.3, SPEC 23.5): a point at each
+  // tick at or after accepted_time while the ticket works, the ticks being
+  // every session's open and every 30 minutes after it inside the session,
+  // and the session's close; and an end point at stopped_time when the
+  // ticket stops. A close or end point on a tick is one point. Sent in full
+  // on every ticket_state, the connect-time set included. Empty when the
+  // exchange holds no history for the ticket.
+  repeated TicketProgressPoint progress = 38;
+}
+
+// One point of a ticket's progress: the shares due by the schedule and the
+// shares filled, both cumulative from the ticket's start, at time. A tick's
+// filled_shares counts every fill stamped at or before the tick; an end
+// point's is the ticket's final filled_shares.
+message TicketProgressPoint {
+  int64 time = 1;          // timestamp. The tick, or stopped_time for the end point
+  int64 due_shares = 2;    // int64-qty. due_shares's rule, as of time
+  int64 filled_shares = 3; // int64-qty
 }

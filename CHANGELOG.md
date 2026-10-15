@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.51
+**Version:** 0.52
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- Fundamentals tickets: `ticket_state` carries `progress`, the ticket's history of shares due against shares filled (qte-platform contract 11, choice 18). Each point is a `TicketProgressPoint` with `time` (an exchange timestamp in milliseconds), `due_shares` and `filled_shares`, cumulative from the ticket's start, in strictly ascending `time`: one at each session's open, every 30 minutes after it inside the session and the session's close while the ticket works, and an end point at `stopped_time`. Every `ticket_state`, the connect-time set included, carries the whole list, so each replaces the list `LatestTickets` holds and is never appended to; it is empty when the exchange holds no history for the ticket. The `qte_sdk.tickets` docstring, docs/automatic-execution.md, the quickstart and AGENTS.md say so, and `examples/fundamentals_pod.py` prints the newest point with each state. The vendored contract is qte-platform 3ae39523 (order_events.proto 1.23), pending the merge of qte-platform #2349; the field number may change at that merge (#261).
 
 ## 1.4.0
 

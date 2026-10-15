@@ -83,6 +83,25 @@ also says what the service is doing with it:
 `state.HasField(...)` before reading them. Every other ticket carries `activity`
 `TICKET_ACTIVITY_UNSPECIFIED`, `behind_schedule` False and `config_version` 0.
 
+A `ticket_state` on every executor also carries `progress`, the ticket's history of shares
+due against shares filled, a list of `TicketProgressPoint` (order_events.proto 1.23). Each
+point has a `time`, an exchange timestamp in milliseconds like `update_time`, and
+`due_shares` and `filled_shares`, whole numbers of shares, both cumulative from the
+ticket's start. The points are in strictly ascending `time`, no two at one time: one at
+each tick at or after `accepted_time` while the ticket works, the ticks being every
+session's open, every 30 minutes after it inside the session, and the session's close;
+and an end point at `stopped_time` when the ticket stops, whatever the status. A close or
+an end point on a tick is one point. A point's `due_shares` is by the rule of the ticket's
+own `due_shares` as of its `time`: the desk schedule's for a `DESK` or handed-over
+ticket, and for a `SERVICE` ticket the figure of the service's latest step as of `time`.
+A tick's `filled_shares` counts the fills stamped at or before it, and an end point's is
+the ticket's final `filled_shares`. Every `ticket_state` carries the whole list, the
+connect-time set included, so each one replaces the list held and is never appended to:
+read `state.progress` from the state `LatestTickets` holds. The list is empty when the
+exchange holds no history for the ticket, and from a split adjustment of the ticket on,
+which no ticket sent today has. An exchange that does not send it yet (qte-platform
+#2349) reads the same: empty.
+
 A `ticket_reject` refuses one message and changes nothing: it never stops a ticket. A
 ticket stops only by a `ticket_state` whose `status` is not `TICKET_WORKING`, and a
 stopped ticket never works again. Only a stopped ticket's state carries `stopped_time`

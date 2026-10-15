@@ -214,6 +214,36 @@ async def test_a_pod_follows_its_service_ticket_to_complete_and_counts_no_fill()
     assert exchange.types()[-1] == "account_query"
 
 
+def point(time: int, due: int, filled: int) -> dict[str, str]:
+    return {"time": str(time), "due_shares": str(due), "filled_shares": str(filled)}
+
+
+async def test_each_state_prints_its_newest_progress_point_and_none_without_progress():
+    after = [
+        ("ticket_state", state(10, activity="TAKING")),
+        ("ticket_state", state(20, activity="POSTING", progress=[point(15, 100, 0)])),
+        (
+            "ticket_state",
+            state(
+                30,
+                status="TICKET_COMPLETE",
+                filled_shares="500",
+                progress=[point(15, 100, 0), point(25, 300, 200), point(30, 500, 500)],
+            ),
+        ),
+    ]
+    exchange = PodExchange(
+        route=route_payload(), accounts=[account(None), account(500)], after=after
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    # A state with no progress prints no progress line; each other prints its last point.
+    assert out.count("  progress at ") == 2
+    assert "  progress at 15: due 100, filled 0" in out
+    assert "  progress at 30: due 500, filled 500" in out
+    assert "progress at 25" not in out
+
+
 async def test_the_position_comes_from_account_state_not_from_the_fills():
     # The reply after the stop says 120 (a cure the pod never saw, say): that is printed.
     exchange = PodExchange(
