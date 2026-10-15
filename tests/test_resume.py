@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+import threading
 import time
 import traceback
 import typing
@@ -20,6 +22,7 @@ from websockets.frames import Close
 import qte_sdk.connection
 import qte_sdk.reconnect
 import qte_sdk.session
+from qte_sdk import errors
 from qte_sdk.connection import (
     DEFAULT_LIVENESS_TIMEOUT,
     HEARTBEAT_TIMEOUT_CLOSE_CODE,
@@ -136,8 +139,14 @@ def resume_reject(detail: str = "a second resume") -> str:
     return frame("reject", payload)
 
 
+# The event log every scripted connection names unless its script says otherwise: the
+# contract keeps a cursor only under a known, equal log_id ("log_id": None sends none).
+SCRIPTED_LOG = "00000000000000aa"
+
+
 class Scripted:
-    """Answers auth with an ack, then the calendar of `term` (start, end) if given, and
+    """Answers auth with an ack, carrying `log_id` if given, then the calendar of `term`
+    (start, end) if given, and
     sends `before_resume`; then, if `answer` is given,
     receives `resume` and sends `answer`; then sends `after` and holds the connection
     open, unless `drop` is set, when it drops the connection, or `close` (a code and a
@@ -154,7 +163,7 @@ class Scripted:
         script = self.scripts[min(self.connections, len(self.scripts) - 1)]
         self.connections += 1
         self.received.append(json.loads(await ws.recv()))
-        await ws.send(ack())
+        await ws.send(ack(log_id=script.get("log_id", SCRIPTED_LOG)))
         if script.get("term") is not None:
             # The calendar the exchange sends straight after the ack, naming the term.
             start, end = script["term"]
@@ -1247,7 +1256,7 @@ async def test_a_term_change_close_that_cuts_off_a_reconnect_forgets_the_cursor(
             return
         exchange.received.append(json.loads(await ws.recv()))
         if cut_off == "resume_ack":
-            await ws.send(ack())
+            await ws.send(ack(log_id=SCRIPTED_LOG))
             await ws.send(
                 calendar_frame(
                     None, {**CALENDAR_PAYLOAD, "term_start": TERM[0], "term_end": TERM[1]}
@@ -1797,7 +1806,7 @@ async def test_a_session_rejected_while_waiting_for_the_calendar_is_not_retried(
         nonlocal connections
         connections += 1
         await ws.recv()
-        await ws.send(ack())
+        await ws.send(ack(log_id=SCRIPTED_LOG))
         if connections > 1:
             await ws.send(session_reject("TEAM_DISABLED"))
             await ws.close()
@@ -2051,7 +2060,7 @@ async def test_a_term_change_close_that_arrives_while_a_failed_attempt_closes_co
             await scripted(ws)
             return
         scripted.received.append(json.loads(await ws.recv()))  # auth
-        await ws.send(ack())
+        await ws.send(ack(log_id=SCRIPTED_LOG))
         await ws.send(calendar)
         scripted.received.append(json.loads(await ws.recv()))  # resume
         await ws.send(frame("resume_ack", {"as_of_report_seq": "not a number"}))
@@ -2464,7 +2473,7 @@ async def test_an_attempt_cancelled_after_its_resume_puts_the_cursor_back(
         nonlocal connections
         connections += 1
         await ws.recv()
-        await ws.send(ack())
+        await ws.send(ack(log_id=SCRIPTED_LOG))
         await ws.send(term_calendar(TERM))
         if connections == 1:
             await ws.recv()
@@ -2578,3 +2587,206 @@ async def test_a_calendar_read_ahead_is_never_replaced_by_an_older_one():
                         break
     assert seen[0] == newer
     assert all(c == newer for c in seen)
+
+
+# The event log a cursor belongs to (session_ack's log_id)
+
+LOG_A = "0123456789abcdef"
+LOG_B = "fedcba9876543210"
+
+
+async def resumes_over(exchange: "Scripted", connections: int) -> list[dict]:
+    """The `resume` messages a ReconnectingSession sends over `connections` connections."""
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                if isinstance(event, ResumeComplete) and exchange.connections >= connections:
+                    break
+    return [e for e in exchange.received if e["type"] == "resume"]
+
+
+def log_changed_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    for thread in threading.enumerate():
+        if thread.name == "qte-sdk pacing warning":
+            thread.join(5)
+    return [r for r in caplog.records if getattr(r, "code", None) == errors.SESSION_LOG_CHANGED]
+
+
+async def test_a_cursor_is_kept_in_the_same_known_log(caplog):
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"log_id": LOG_A, "term": TERM, "answer": [resume_ack(True, 1)]},
+    )
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        assert await resumes_over(exchange, 2) == [resume(0), resume(1)]
+        assert log_changed_records(caplog) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (LOG_A, None),  # missing on the new ack
+        (None, LOG_B),  # missing on the old
+        (None, None),  # missing on both
+        (LOG_A, "FEDCBA9876543210"),  # malformed: uppercase
+        (LOG_A, "0123456789ABCDEF"),  # malformed: the same log in uppercase
+        (LOG_A, "fedcba987654321"),  # malformed: 15 characters
+        (LOG_A, ""),  # malformed: empty
+    ],
+)
+async def test_a_cursor_under_an_unknown_log_is_reset_without_a_warning(
+    old: str | None, new: str | None, caplog
+):
+    # Contract 01 (DL-116): a cursor is kept only when log_id is present and equal to the
+    # saved one, since an empty log can gain its first reports before the resume.
+    exchange = Scripted(
+        {"log_id": old, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"log_id": new, "term": TERM, "answer": [EMPTY]},
+    )
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        assert await resumes_over(exchange, 2) == [resume(0), resume(0)]
+        assert log_changed_records(caplog) == []
+
+
+async def test_a_cursor_of_another_log_is_reset_and_the_reconnect_takes_a_snapshot(caplog):
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        # The same term by its calendar, but a new event log: its numbering starts again.
+        {
+            "log_id": LOG_B,
+            "term": TERM,
+            "answer": [resume_ack(False, 2, 1), snapshot("AAPL", "BUY", PRICE, 60)],
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        assert await resumes_over(exchange, 2) == [resume(0), resume(0)]
+        records = log_changed_records(caplog)
+    assert len(records) == 1
+    assert records[0].name == "qte_sdk.reconnect"
+    assert records[0].levelno == logging.WARNING
+    assert records[0].fields == {"old_log_id": LOG_A, "new_log_id": LOG_B, "cursor": 1}
+    assert records[0].getMessage().startswith("QTE-SESSION-LOG-CHANGED: ")
+
+
+async def test_a_log_first_seen_on_a_new_ack_is_recorded_for_the_next_one():
+    exchange = Scripted(
+        {"term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        # No log was saved with the cursor, so it is reset; log A is saved from here on.
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"log_id": LOG_A, "term": TERM, "answer": [resume_ack(True, 1)]},
+    )
+    assert await resumes_over(exchange, 3) == [resume(0), resume(0), resume(1)]
+
+
+async def test_a_failed_attempt_in_another_log_still_resets_the_cursor_next_time():
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        # Acknowledged in another log, then dropped before the resume is answered: the
+        # cursor it gave back is still log A's.
+        {"log_id": LOG_B, "term": TERM, "answer": [], "drop": True},
+        {"log_id": LOG_B, "term": TERM, "answer": [EMPTY]},
+    )
+    assert await resumes_over(exchange, 3) == [resume(0), resume(0), resume(0)]
+
+
+@pytest.mark.parametrize("failed_log", [None, LOG_B], ids=["absent", "other"])
+async def test_a_failed_attempt_that_reset_the_cursor_keeps_it_reset_back_in_the_old_log(
+    failed_log: str | None,
+) -> None:
+    # The second ack resets the cursor, then the attempt fails before the resume is
+    # answered: giving back what it read must not give back log A's cursor too, or the
+    # third ack, naming log A again, would resume from it.
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY], "after": [order_state(1)], "drop": True},
+        {"log_id": failed_log, "term": TERM, "answer": [], "drop": True},
+        {"log_id": LOG_A, "term": TERM, "answer": [EMPTY]},
+    )
+    assert await resumes_over(exchange, 3) == [resume(0), resume(0), resume(0)]
+
+
+async def test_a_term_change_close_forgets_the_log_with_the_cursor():
+    exchange = Scripted(
+        {
+            "log_id": LOG_A,
+            "term": TERM,
+            "answer": [EMPTY],
+            "after": [order_state(1)],
+            "close": (TERM_CHANGE_CLOSE_CODE, "term change"),
+        },
+        {"log_id": LOG_B, "term": NEXT_TERM, "answer": [EMPTY]},
+    )
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                if isinstance(event, ResumeComplete) and exchange.connections >= 2:
+                    break
+            assert rs._reports_log_id == LOG_B
+    resumes = [e for e in exchange.received if e["type"] == "resume"]
+    assert resumes == [resume(0), resume(0)]
+
+
+async def test_after_a_log_reset_a_lower_snapshot_cursor_counts_on_and_resumes_again():
+    exchange = Scripted(
+        {
+            "log_id": LOG_A,
+            "term": TERM,
+            "answer": [EMPTY],
+            "after": [order_state(1), execution(2, 90), execution(3, 80)],
+            "drop": True,
+        },
+        # A new log whose head is 1: the snapshot's cursor is below the old one, and live
+        # report 2 follows it.
+        {
+            "log_id": LOG_B,
+            "term": TERM,
+            "answer": [resume_ack(False, 1, 1), snapshot("AAPL", "BUY", PRICE, 60)],
+            "after": [execution(2, 40)],
+            "drop": True,
+        },
+        {"log_id": LOG_B, "term": TERM, "answer": [resume_ack(True, 2)]},
+    )
+    delivered: list[str] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        async with rs, asyncio.timeout(5):
+            async for event in rs:
+                delivered.extend(kinds([event]))
+                if isinstance(event, ResumeComplete) and exchange.connections >= 3:
+                    break
+    resumes = [e for e in exchange.received if e["type"] == "resume"]
+    # The old log's 3 is never sent into log B; B's own 2 is, on the next reconnect.
+    assert resumes == [resume(0), resume(0), resume(2)]
+    # The new log's report 2 is below the old cursor and still delivered.
+    assert delivered.count("execution:2") == 2
+
+
+async def test_without_resume_a_log_change_starts_the_count_afresh(caplog):
+    # The same term and no close code: only log_id says the numbering started again, so
+    # without the reset the new log's reports 1 and 2 would be dropped as duplicates of 7.
+    exchange = Scripted(
+        {"log_id": LOG_A, "term": TERM, "after": [order_state(6), order_state(7)], "drop": True},
+        {"log_id": LOG_B, "term": TERM, "after": [order_state(1), execution(2, 90)]},
+    )
+    events = []
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        async with serve_local(exchange) as url:
+            rs = ReconnectingSession(url, synthetic_token(), resume=False, sleep=Clock().sleep)
+            async with rs, asyncio.timeout(5):
+                async for event in rs:
+                    events.append(event)
+                    if isinstance(event, Received) and event.report_seq == 2:
+                        break
+                assert rs.last_report_seq == 2
+        assert len(log_changed_records(caplog)) == 1
+    assert [k for k in kinds(events) if not k.startswith("calendar")] == [
+        "Connected",
+        "order_state:6",
+        "order_state:7",
+        "Disconnected",
+        "Retrying",
+        "Connected",
+        "order_state:1",
+        "execution:2",
+    ]

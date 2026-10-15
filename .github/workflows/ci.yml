@@ -43,8 +43,16 @@ jobs:
     # lists, owners and consoles, so they run only here. The rest of the suite runs too; the
     # few tests that cannot run on Windows skip themselves and say why. The contract code is
     # regenerated as well. See "Windows" in docs/development.md.
+    # Students mostly install 3.12, and qte_sdk/update.py treats pipes differently on Windows
+    # from 3.12, so 3.12 and 3.14 run too. The 3.11 entry keeps the job name `windows`, the
+    # required check; the others report as `windows (3.12)` and `windows (3.14)`.
+    name: windows${{ matrix.python-version != '3.11' && format(' ({0})', matrix.python-version) || '' }}
     runs-on: windows-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.14"]
     steps:
       # Checked out with the runner's default core.autocrlf: .gitattributes keeps the
       # vendored contract's bytes exact, and the tests hash them, and checks the generated
@@ -52,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev,codegen]"
       - name: Run the tests marked windows
         run: pytest -m windows --junitxml=windows-tests.xml

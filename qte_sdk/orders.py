@@ -37,6 +37,17 @@ A Fundamentals pod's tickets are in `qte_sdk.tickets`, not here. The contract's
 sessions only; a team session that sends it is refused, so no function here sets it. In
 the same way, a fill or cancellation whose `origin` is `HOUSE`, of one of the exchange's
 own house orders, goes only to those sessions: a team's connection never receives one.
+
+An `execution`'s `origin` says whose order filled. `TEAM` is the team's own order. The
+others are orders the exchange placed (a service's passive child rests as a limit order
+of the pod): `CURE_TRADE` and `AUTO_FLATTEN` from the team's
+account; `AUTO_EXECUTION`, a child of a Fundamentals ticket the automatic execution
+service works, and `FALLBACK`, the engine's child of a ticket the Directors handed over
+from its desk. A fill of an `AUTO_EXECUTION` or `FALLBACK` child goes to the ticket's pod
+only, naming the ticket in `parent_ticket_id`, with a `report_seq` (a resume replays it)
+and with no `strat_id` and no `order_price`; nothing else of those orders (no
+`accepted`, `order_state` or `order_cancelled`) is sent. An origin this SDK does not know
+decodes as `ORIGIN_UNSPECIFIED` (0), its name kept in `unknown_enum_names()`.
 """
 
 import uuid
@@ -169,7 +180,9 @@ async def send_new(
     assigned to the desk. When the parent ticket stops, a child still resting is
     cancelled, with `PARENT_STOPPED` for some stops but not all, and `PARENT_STOPPED` can
     also come while the ticket keeps working: `qte_sdk.tickets` says which reason each
-    case gives.
+    case gives. A desk child sent after the Directors handed its ticket over to the
+    exchange, or still in its order delay then, is rejected `PARENT_HANDED_OVER`. A ticket
+    the automatic execution service works has no desk and takes no desk children.
     """
     ref = _ref(request_ref)
     _id("strat_id", strat_id)
