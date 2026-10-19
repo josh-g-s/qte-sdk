@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.22
+// **Version:** 1.24
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -237,7 +237,12 @@ enum TicketStatus {
   // The engine cancelled the remainder of an ordinary ticket at the open of
   // its instrument's split ex-date; committed fills stand (SPEC 12.2).
   TICKET_SPLIT_CANCELLED = 7;
-  // 8-15 reserved for growth.
+  // A Director cancelled it: an automatic ticket, one the automatic execution
+  // service works, cancelled by a Director's director_ticket_cancel; committed
+  // fills stand (SPEC 23.4). The pod is told only that a Director
+  // cancelled it, never the reason or the Director.
+  TICKET_CANCELLED_BY_DIRECTOR = 8;
+  // 9-15 reserved for growth.
 }
 
 // Who executes a Fundamentals ticket's remaining shares (legacy,
@@ -384,7 +389,9 @@ message TicketReasonCodes {
     // replaces_ticket_id names no cancelled ticket of this pod in this
     // instrument (SPEC 23.2).
     TICKET_REPLACES_INVALID = 1706;
-    // No ticket with that id belongs to this pod.
+    // No ticket with that id belongs to this pod. On a Director's cancel: no
+    // ticket has that id, or it is the engine's own (an engine-queued cure or
+    // a house ticket).
     TICKET_NOT_FOUND = 1707;
     // The ticket is already stopped.
     TICKET_NOT_WORKING = 1708;
@@ -403,7 +410,20 @@ message TicketReasonCodes {
     // that is not available: VWAP while no VWAP profile is available for the
     // instrument (SPEC 23.2).
     TICKET_ALGORITHM_UNAVAILABLE = 1713;
-    // 1714-1799 reserved for band 1700 growth.
+    // The automatic execution route is off: SERVICE routing is not in force
+    // at the ticket's instant, in a term with no Fundamentals-to-Execution
+    // pairing, so no desk can hold it. A paused service still accepts
+    // tickets, and a cure ticket is refused too (SPEC 23.4).
+    TICKET_SERVICE_OFF = 1714;
+    // The two below answer a Director's director_ticket_cancel, named at the
+    // head of a reject's reason_detail (contract 10), never on ticket_reject.
+    // The ticket is not worked by the automatic execution service: its
+    // executor is DESK or ENGINE (SPEC 23.4).
+    TICKET_NOT_SERVICE = 1715;
+    // A Director's cancel of the ticket is logged already and takes effect
+    // at the next session open (SPEC 23.4).
+    TICKET_STOP_PENDING = 1716;
+    // 1717-1799 reserved for band 1700 growth.
   }
 }
 

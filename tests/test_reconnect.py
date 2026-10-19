@@ -200,7 +200,12 @@ class Clock:
 
 
 def auth(token: str) -> dict:
-    return {"version": "0.x", "type": "auth", "payload": {"token": token}}
+    # A Director's request; the SDK leaves it False, printed as a no-presence zero value.
+    return {
+        "version": "0.x",
+        "type": "auth",
+        "payload": {"token": token, "subscribe_tickets": False},
+    }
 
 
 def subscription(*instruments: str) -> dict:

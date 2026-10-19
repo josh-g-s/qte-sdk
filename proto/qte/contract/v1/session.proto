@@ -1,6 +1,6 @@
 // Session and subscription messages.
 //
-// **Version:** 1.12
+// **Version:** 1.13
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `instruments`, `session_reject`, `heartbeat`, `resume`,
@@ -30,6 +30,14 @@ option go_package = "qte-platform/schemas/gen/go/qte/contract/v1;contractv1";
 // send orders, request_ref and exec_id, subscription) is not yet specified.
 message Auth {
   string token = 1; // string. The account's token.
+  // bool, optional. A Director session's request to be sent `ticket_state`
+  // for every pod's SERVICE tickets, read-only: on connect, after the
+  // instruments, and live on each change, never replayed by `resume`. DESK
+  // and handed-over tickets, and the engine's own cure and its children, are
+  // never sent. The gateway logs each subscription (SPEC 23.2: every read of
+  // a ticket is logged). Ignored on a team's session and on a read-only
+  // Director credential's; unset or false sends nothing new.
+  bool subscribe_tickets = 2;
 }
 
 // Outbound.

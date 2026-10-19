@@ -24,11 +24,25 @@ A pod sends three messages:
 - `ticket` (`send_ticket`): a new ticket in one instrument. An ordinary ticket carries a
   hard execution limit price; a cure ticket carries none and is flagged `cure`. There is
   one working ticket per instrument, and a ticket never takes the position across zero.
-  There is no amend: to change a ticket, cancel it, then send a new one naming it in
-  `replaces_ticket_id`. `algorithm` (`TWAP` or `VWAP`, TWAP when left out) is read only
-  for a ticket the service works; a desk's ticket and a cure ticket are always TWAP.
+  There is no amend message: to change a ticket, send its cancel with `replacing=True`,
+  and once its `ticket_state` shows `TICKET_CANCELLED_BY_POD`, send the new one naming it
+  in `replaces_ticket_id`. If that cancel is refused `TICKET_SERVICE_OFF` (1714), send no
+  replacement: the original ticket is still working, with its fills and its children. To
+  stop it, cancel it plainly (`replacing` left False). The flag protects the amendment
+  only at the cancel's instant: once the cancel is taken the two messages are not
+  atomic, and a replacement refused for any reason leaves the old ticket cancelled,
+  `TICKET_SERVICE_OFF` included if the route is off by the time it arrives (for example,
+  `ROUTING_DESK` comes into force at the next open first). `algorithm` (`TWAP` or
+  `VWAP`, TWAP when left out) is read only for a ticket the service works; a desk's
+  ticket and a cure ticket are always TWAP.
 - `ticket_cancel` (`send_ticket_cancel`): cancel a working ordinary ticket the pod sent.
-  The pod can never cancel a cure ticket.
+  The pod can never cancel a cure ticket. `replacing=True` marks the cancel as the first
+  half of an amendment. In a term with no Fundamentals-to-Execution pairing, while
+  `ROUTING_SERVICE` is not in force, the replacement would be refused, so such a cancel is
+  refused whole `TICKET_SERVICE_OFF` (1714) and the ticket keeps working; that check comes
+  last, after the ticket's own (`TICKET_NOT_FOUND`, `TICKET_NOT_WORKING`,
+  `TICKET_CURE_NOT_CANCELLABLE`). Anywhere else a replacing cancel acts exactly like a
+  plain one, and a plain cancel is never refused for the route.
 - `ticket_urgency` (`send_ticket_urgency`): raise the urgency of the pod's working cure
   ticket. It may only go up.
 
@@ -51,7 +65,9 @@ ticket's state in `ticket_state`:
   `TicketReasonCodes.TicketReasonCode`, a separate set from the order reasons. Name one
   with `ticket_reason_code_name`. `TICKET_ALGORITHM_UNAVAILABLE` (1713) refuses a
   `VWAP` ticket for the service while no VWAP profile is available for the instrument:
-  send it again as `TWAP`, or later.
+  send it again as `TWAP`, or later. `TICKET_SERVICE_OFF` (1714) refuses a ticket, a cure
+  ticket included, or a replacing cancel, while the automatic execution route is off in
+  a term with no Fundamentals-to-Execution pairing (see `execution_route` below).
 - `ticket_state` is the whole state of one ticket. It is sent to the pod that originated
   it whenever the ticket changes, and to its desk too while it has one (`DESK` or
   `ENGINE`). A pod is sent its own tickets only. `LatestTickets` keeps the newest state
@@ -90,6 +106,16 @@ and `stopped_mark`, the official mark when it stopped; read them with `stopped_t
 and `stopped_mark_of`. A stop with no valid mark to record sends a mark of 0, which
 `stopped_mark_of` returns as None, the same as a mark that is absent.
 
+A Director may cancel a `SERVICE` ticket: it stops `TICKET_CANCELLED_BY_DIRECTOR`, its
+fills standing, and the pod is told neither the reason nor the Director. A Director's
+cancel logged between sessions takes effect at the next session's open: until then the
+ticket stays `TICKET_WORKING` and its state carries `director_stop_pending_time`, the
+cancel's entry stamp. A cure ticket's state carries `cure_deadline_date`, the session
+date (as the calendar's `session_date`) whose official close is the deadline of the
+breach it cures: if no cure is working by then, the engine queues its own cure at that
+close, and after it nothing steps in again. Both are optional fields: check
+`state.HasField(...)` before reading them.
+
 None of the three answers carries a `report_seq`, and a resume replays none of them.
 Instead, once on each connection of the pod or desk, straight after the `session_ack`,
 the calendar and the instruments table, the exchange sends one whole `ticket_state` for
@@ -118,9 +144,13 @@ replay it. It says:
 - `paused`: the Directors paused the service. A `SERVICE` ticket is still accepted, no
   child is placed for it while the pause lasts and its resting children are cancelled,
   and the service catches up when the pause lifts. While the routing is `ROUTING_DESK`,
-  a ticket goes to the pod's Execution desk as before (`executor` `DESK`); from the
-  Winter term no desk is paired and the exchange is to refuse it at once (qte-platform
-  #2315).
+  a ticket goes to the pod's Execution desk as before (`executor` `DESK`), but in a term
+  that pairs no pod with an Execution desk (from the Winter term), a ticket received while
+  `ROUTING_SERVICE` is not in force, a cure ticket included, is refused
+  `TICKET_SERVICE_OFF` (1714), "the automatic execution route is off: no ticket is
+  accepted until it is on", and nothing is logged. A paused service is on: its tickets
+  are accepted. A `SERVICE` ticket still working when `ROUTING_DESK` comes into force is
+  worked by the service to completion, and a plain cancel of it is taken.
 
 `LatestTickets.route` keeps the newest one, and forgets it on a `Disconnected`. A desk is
 never sent `execution_route`.
@@ -171,7 +201,8 @@ Every send checks what it can before sending, and raises `ValueError` or `TypeEr
 and sends nothing if a check fails: `request_ref` is 1 to 32 bytes of UTF-8, `instrument`
 and `thesis_id` at most 32 bytes, none containing NUL; a ticket id is a string of decimal
 digits; `notes` is at most 280 characters with no NUL; an ordinary ticket has a
-`limit_price` and a cure ticket has none; `algorithm` is `TWAP` or `VWAP`. Whether a
+`limit_price` and a cure ticket has none; `algorithm` is `TWAP` or `VWAP`; `cure` and
+`replacing` are bools. Whether a
 ticket is accepted (its thesis, its size against the position, its limit against the
 wall, the schedule against the term, a VWAP profile) is for the exchange to judge. Prices
 are integers in micro-dollars, and `shares` is a whole number of shares.
@@ -339,13 +370,28 @@ async def send_ticket(
 
 
 async def send_ticket_cancel(
-    conn: Sender, *, ticket_id: str, request_ref: str | None = None
+    conn: Sender,
+    *,
+    ticket_id: str,
+    request_ref: str | None = None,
+    replacing: bool = False,
 ) -> str:
     """Send `ticket_cancel`: cancel a working ordinary ticket this pod sent. Returns
     its `request_ref`. Its child orders, the desk's or the exchange's, are cancelled with
-    it; fills stand."""
+    it; fills stand.
+
+    Pass `replacing=True` when the cancel is the first half of an amendment, the
+    replacement ticket (`replaces_ticket_id`) to follow once the cancel is taken. In a
+    term with no Fundamentals-to-Execution pairing, while `ROUTING_SERVICE` is not in
+    force, it is refused `TICKET_SERVICE_OFF` (1714) and the ticket keeps working: then
+    send no replacement. The field is sent only when True, so a plain cancel is the same
+    message as before."""
     ref = _ref(request_ref)
+    if not isinstance(replacing, bool):
+        raise TypeError("replacing must be a bool")
     msg = CancelTicket(request_ref=ref, ticket_id=_ticket_id("ticket_id", ticket_id))
+    if replacing:
+        msg.replacing = True
     await conn.send("ticket_cancel", msg)
     return ref
 

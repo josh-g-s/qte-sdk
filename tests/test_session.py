@@ -115,8 +115,13 @@ async def test_an_acknowledged_session_exposes_every_ack_field(unscored: bool):
     async with serve_local(server) as url:
         async with await open_session(url, token) as session:
             info = session.info
+    # A Director's request; the SDK leaves it False, printed as a no-presence zero value.
     assert server.received == [
-        {"version": CONTRACT_VERSION, "type": "auth", "payload": {"token": token}}
+        {
+            "version": CONTRACT_VERSION,
+            "type": "auth",
+            "payload": {"token": token, "subscribe_tickets": False},
+        }
     ]
     assert info == SessionInfo(
         session_id="s-1",
@@ -155,7 +160,7 @@ async def test_the_token_is_read_from_the_environment_when_not_passed(monkeypatc
     async with serve_local(server) as url:
         async with await open_session(url):
             pass
-    assert server.received[0]["payload"] == {"token": token}
+    assert server.received[0]["payload"] == {"token": token, "subscribe_tickets": False}
 
 
 async def test_a_token_argument_takes_precedence_over_the_environment(monkeypatch):
@@ -165,7 +170,7 @@ async def test_a_token_argument_takes_precedence_over_the_environment(monkeypatc
     async with serve_local(server) as url:
         async with await open_session(url, token):
             pass
-    assert server.received[0]["payload"] == {"token": token}
+    assert server.received[0]["payload"] == {"token": token, "subscribe_tickets": False}
 
 
 async def test_iterating_the_session_delivers_events_around_the_ack_but_no_heartbeat():
@@ -242,7 +247,7 @@ async def test_a_session_opens_with_the_token_from_the_file(monkeypatch, tmp_pat
     async with serve_local(server) as url:
         async with await open_session(url):
             pass
-    assert server.received[0]["payload"] == {"token": token}
+    assert server.received[0]["payload"] == {"token": token, "subscribe_tickets": False}
 
 
 @pytest.mark.parametrize("source", ["argument", "empty argument", "environment"])
