@@ -310,6 +310,48 @@ async def test_a_ticket_cancel_names_the_ticket():
     ref, type_, msg = await one_sent(lambda c: send_ticket_cancel(c, ticket_id="17"))
     assert type_ == "ticket_cancel"
     assert msg == CancelTicket(request_ref=ref, ticket_id="17")
+    assert not msg.HasField("replacing")
+
+
+async def test_a_plain_ticket_cancel_carries_no_replacing_field():
+    ref, _, msg = await one_sent(lambda c: send_ticket_cancel(c, ticket_id="17", replacing=False))
+    assert msg == CancelTicket(request_ref=ref, ticket_id="17")
+    assert not msg.HasField("replacing")
+
+
+async def test_a_replacing_ticket_cancel_sets_the_field():
+    ref, type_, msg = await one_sent(
+        lambda c: send_ticket_cancel(c, ticket_id="17", replacing=True, request_ref="t-2a")
+    )
+    assert (ref, type_) == ("t-2a", "ticket_cancel")
+    assert msg.HasField("replacing") and msg.replacing is True
+
+
+@pytest.mark.parametrize("bad", [1, 0, "true", None, 1.0])
+async def test_a_replacing_that_is_not_a_bool_is_refused_before_sending(bad):
+    conn = Recorder()
+    with pytest.raises(TypeError, match="^replacing must be a bool"):
+        await send_ticket_cancel(conn, ticket_id="17", replacing=bad)
+    assert conn.sent == []
+
+
+@pytest.mark.parametrize("replacing", [False, True])
+async def test_the_replacing_flag_goes_on_the_wire_only_when_true(replacing):
+    inbox: list[str] = []
+    async with exchange([], inbox) as url:
+        async with Connection(url) as conn:
+            await send_ticket_cancel(
+                conn, ticket_id="48211", replacing=replacing, request_ref="t-2a"
+            )
+            async for _ in conn:
+                pass
+    [raw] = inbox
+    payload = json.loads(raw)["payload"]
+    assert payload["ticket_id"] == "48211"
+    if replacing:
+        assert payload["replacing"] is True
+    else:
+        assert "replacing" not in payload
 
 
 async def test_an_urgency_change_names_the_ticket_and_the_new_urgency():
@@ -935,6 +977,11 @@ def test_the_algorithms_are_the_contracts_twap_and_vwap():
 def test_the_vwap_refusal_is_named():
     assert ticket_reason_code_name(1713) == "TICKET_ALGORITHM_UNAVAILABLE"
     assert TicketReasonCodes.TICKET_ALGORITHM_UNAVAILABLE == 1713
+
+
+def test_the_route_off_refusal_is_named():
+    assert ticket_reason_code_name(1714) == "TICKET_SERVICE_OFF"
+    assert TicketReasonCodes.TICKET_SERVICE_OFF == 1714
 
 
 def service_state_payload(update_time: int, **extra: Any) -> dict:
