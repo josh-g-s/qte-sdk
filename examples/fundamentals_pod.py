@@ -29,6 +29,9 @@ What it does, in order:
    shares, `due_shares`, `activity` and `behind_schedule`, until the status is anything
    but `TICKET_WORKING`, which is a stop, a status this SDK does not know included. It
    prints the stop reason (the status's name, or the unknown name the exchange sent).
+   When the state carries `progress` (on `main` only until the next release), it also
+   prints the newest point: its `time`, `due_shares` and `filled_shares`. Each state
+   carries the whole list, so the newest point is always the list's last.
 6. It prints each fill of the exchange's child orders (an `execution` with `origin`
    `AUTO_EXECUTION`, or `FALLBACK` after a handover) as information only.
 7. After the stop it asks for the account again and prints the position from that reply.
@@ -314,6 +317,11 @@ class Pod:
             f"{state.shares}, due {state.due_shares}, activity {activity}, "
             f"behind_schedule {state.behind_schedule}"
         )
+        if state.progress:  # the whole history, in ascending time: the last is the newest
+            point = state.progress[-1]
+            print(
+                f"  progress at {point.time}: due {point.due_shares}, filled {point.filled_shares}"
+            )
         # Any status but TICKET_WORKING is a stop, one this SDK does not know included.
         if state.status != TICKET_WORKING:
             print(f"the ticket stopped: {status}")

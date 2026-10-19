@@ -797,10 +797,11 @@ async def test_print_book_stops_after_its_message_count():
     assert out.count("market session 2026-01-05: OPEN") == 1
     # The fake sends the same book again at the same grid time: it is printed once.
     assert out.count("book   TEST") == 1
+    # A Director's request; the SDK leaves it False, printed as a no-presence zero value.
     assert exchange.received[0] == {
         "version": CONTRACT_VERSION,
         "type": "auth",
-        "payload": {"token": token},
+        "payload": {"token": token, "subscribe_tickets": False},
     }
     assert exchange.types() == ["auth", "subscribe"]
     assert token not in out + err
@@ -817,7 +818,7 @@ async def test_an_example_reads_the_address_and_token_from_dotenv_in_its_working
             "print_book.py", None, None, "--instrument", INSTRUMENT, "--max-messages", "2"
         )
     assert code == 0, err
-    assert exchange.received[0]["payload"] == {"token": token}
+    assert exchange.received[0]["payload"] == {"token": token, "subscribe_tickets": False}
     assert token not in out + err
 
 

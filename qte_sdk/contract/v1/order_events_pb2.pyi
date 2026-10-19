@@ -262,7 +262,7 @@ class TicketReject(_message.Message):
     def __init__(self, request_ref: _Optional[str] = ..., request_kind: _Optional[_Union[_common_pb2.TicketRequestKind, str]] = ..., reason_code: _Optional[_Union[_common_pb2.TicketReasonCodes.TicketReasonCode, str]] = ..., reason_detail: _Optional[str] = ..., receipt_time: _Optional[int] = ...) -> None: ...
 
 class TicketState(_message.Message):
-    __slots__ = ("ticket_id", "pod", "desk", "instrument", "side", "shares", "limit_price", "urgency", "decision_price", "accepted_time", "planned_completion_time", "due_shares", "filled_shares", "remaining_shares", "average_fill_price", "net_fee", "status", "stopped_time", "stopped_mark", "thesis_id", "thesis_version", "replaces_ticket_id", "cure", "notes", "update_time", "executor", "handover_time", "desk_filled_shares", "desk_net_fee", "desk_average_fill_price", "algorithm", "activity", "behind_schedule", "revised_completion_time", "config_version", "last_assessment_time", "filled_notional")
+    __slots__ = ("ticket_id", "pod", "desk", "instrument", "side", "shares", "limit_price", "urgency", "decision_price", "accepted_time", "planned_completion_time", "due_shares", "filled_shares", "remaining_shares", "average_fill_price", "net_fee", "status", "stopped_time", "stopped_mark", "thesis_id", "thesis_version", "replaces_ticket_id", "cure", "notes", "update_time", "executor", "handover_time", "desk_filled_shares", "desk_net_fee", "desk_average_fill_price", "algorithm", "activity", "behind_schedule", "revised_completion_time", "config_version", "last_assessment_time", "filled_notional", "progress", "director_stop_pending_time", "cure_deadline_date")
     TICKET_ID_FIELD_NUMBER: _ClassVar[int]
     POD_FIELD_NUMBER: _ClassVar[int]
     DESK_FIELD_NUMBER: _ClassVar[int]
@@ -300,6 +300,9 @@ class TicketState(_message.Message):
     CONFIG_VERSION_FIELD_NUMBER: _ClassVar[int]
     LAST_ASSESSMENT_TIME_FIELD_NUMBER: _ClassVar[int]
     FILLED_NOTIONAL_FIELD_NUMBER: _ClassVar[int]
+    PROGRESS_FIELD_NUMBER: _ClassVar[int]
+    DIRECTOR_STOP_PENDING_TIME_FIELD_NUMBER: _ClassVar[int]
+    CURE_DEADLINE_DATE_FIELD_NUMBER: _ClassVar[int]
     ticket_id: str
     pod: str
     desk: str
@@ -337,4 +340,17 @@ class TicketState(_message.Message):
     config_version: int
     last_assessment_time: int
     filled_notional: int
-    def __init__(self, ticket_id: _Optional[str] = ..., pod: _Optional[str] = ..., desk: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., limit_price: _Optional[int] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ..., decision_price: _Optional[int] = ..., accepted_time: _Optional[int] = ..., planned_completion_time: _Optional[int] = ..., due_shares: _Optional[int] = ..., filled_shares: _Optional[int] = ..., remaining_shares: _Optional[int] = ..., average_fill_price: _Optional[int] = ..., net_fee: _Optional[int] = ..., status: _Optional[_Union[_common_pb2.TicketStatus, str]] = ..., stopped_time: _Optional[int] = ..., stopped_mark: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., replaces_ticket_id: _Optional[str] = ..., cure: bool = ..., notes: _Optional[str] = ..., update_time: _Optional[int] = ..., executor: _Optional[_Union[_common_pb2.TicketExecutor, str]] = ..., handover_time: _Optional[int] = ..., desk_filled_shares: _Optional[int] = ..., desk_net_fee: _Optional[int] = ..., desk_average_fill_price: _Optional[int] = ..., algorithm: _Optional[_Union[_common_pb2.TicketAlgorithm, str]] = ..., activity: _Optional[_Union[_common_pb2.TicketActivity, str]] = ..., behind_schedule: bool = ..., revised_completion_time: _Optional[int] = ..., config_version: _Optional[int] = ..., last_assessment_time: _Optional[int] = ..., filled_notional: _Optional[int] = ...) -> None: ...
+    progress: _containers.RepeatedCompositeFieldContainer[TicketProgressPoint]
+    director_stop_pending_time: int
+    cure_deadline_date: str
+    def __init__(self, ticket_id: _Optional[str] = ..., pod: _Optional[str] = ..., desk: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., limit_price: _Optional[int] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ..., decision_price: _Optional[int] = ..., accepted_time: _Optional[int] = ..., planned_completion_time: _Optional[int] = ..., due_shares: _Optional[int] = ..., filled_shares: _Optional[int] = ..., remaining_shares: _Optional[int] = ..., average_fill_price: _Optional[int] = ..., net_fee: _Optional[int] = ..., status: _Optional[_Union[_common_pb2.TicketStatus, str]] = ..., stopped_time: _Optional[int] = ..., stopped_mark: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., replaces_ticket_id: _Optional[str] = ..., cure: bool = ..., notes: _Optional[str] = ..., update_time: _Optional[int] = ..., executor: _Optional[_Union[_common_pb2.TicketExecutor, str]] = ..., handover_time: _Optional[int] = ..., desk_filled_shares: _Optional[int] = ..., desk_net_fee: _Optional[int] = ..., desk_average_fill_price: _Optional[int] = ..., algorithm: _Optional[_Union[_common_pb2.TicketAlgorithm, str]] = ..., activity: _Optional[_Union[_common_pb2.TicketActivity, str]] = ..., behind_schedule: bool = ..., revised_completion_time: _Optional[int] = ..., config_version: _Optional[int] = ..., last_assessment_time: _Optional[int] = ..., filled_notional: _Optional[int] = ..., progress: _Optional[_Iterable[_Union[TicketProgressPoint, _Mapping]]] = ..., director_stop_pending_time: _Optional[int] = ..., cure_deadline_date: _Optional[str] = ...) -> None: ...
+
+class TicketProgressPoint(_message.Message):
+    __slots__ = ("time", "due_shares", "filled_shares")
+    TIME_FIELD_NUMBER: _ClassVar[int]
+    DUE_SHARES_FIELD_NUMBER: _ClassVar[int]
+    FILLED_SHARES_FIELD_NUMBER: _ClassVar[int]
+    time: int
+    due_shares: int
+    filled_shares: int
+    def __init__(self, time: _Optional[int] = ..., due_shares: _Optional[int] = ..., filled_shares: _Optional[int] = ...) -> None: ...

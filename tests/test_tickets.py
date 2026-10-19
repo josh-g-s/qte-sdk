@@ -310,6 +310,48 @@ async def test_a_ticket_cancel_names_the_ticket():
     ref, type_, msg = await one_sent(lambda c: send_ticket_cancel(c, ticket_id="17"))
     assert type_ == "ticket_cancel"
     assert msg == CancelTicket(request_ref=ref, ticket_id="17")
+    assert not msg.HasField("replacing")
+
+
+async def test_a_plain_ticket_cancel_carries_no_replacing_field():
+    ref, _, msg = await one_sent(lambda c: send_ticket_cancel(c, ticket_id="17", replacing=False))
+    assert msg == CancelTicket(request_ref=ref, ticket_id="17")
+    assert not msg.HasField("replacing")
+
+
+async def test_a_replacing_ticket_cancel_sets_the_field():
+    ref, type_, msg = await one_sent(
+        lambda c: send_ticket_cancel(c, ticket_id="17", replacing=True, request_ref="t-2a")
+    )
+    assert (ref, type_) == ("t-2a", "ticket_cancel")
+    assert msg.HasField("replacing") and msg.replacing is True
+
+
+@pytest.mark.parametrize("bad", [1, 0, "true", None, 1.0])
+async def test_a_replacing_that_is_not_a_bool_is_refused_before_sending(bad):
+    conn = Recorder()
+    with pytest.raises(TypeError, match="^replacing must be a bool"):
+        await send_ticket_cancel(conn, ticket_id="17", replacing=bad)
+    assert conn.sent == []
+
+
+@pytest.mark.parametrize("replacing", [False, True])
+async def test_the_replacing_flag_goes_on_the_wire_only_when_true(replacing):
+    inbox: list[str] = []
+    async with exchange([], inbox) as url:
+        async with Connection(url) as conn:
+            await send_ticket_cancel(
+                conn, ticket_id="48211", replacing=replacing, request_ref="t-2a"
+            )
+            async for _ in conn:
+                pass
+    [raw] = inbox
+    payload = json.loads(raw)["payload"]
+    assert payload["ticket_id"] == "48211"
+    if replacing:
+        assert payload["replacing"] is True
+    else:
+        assert "replacing" not in payload
 
 
 async def test_an_urgency_change_names_the_ticket_and_the_new_urgency():
@@ -686,8 +728,10 @@ def test_a_sequence_gap_leaves_the_tickets_held():
     assert latest.get("17") is not None
 
 
-def ticket_frame(ticket_id: str, update_time: int, status: str = "TICKET_WORKING") -> str:
-    payload = {**state_payload(update_time, status), "ticket_id": ticket_id}
+def ticket_frame(
+    ticket_id: str, update_time: int, status: str = "TICKET_WORKING", **extra: Any
+) -> str:
+    payload = {**state_payload(update_time, status, **extra), "ticket_id": ticket_id}
     if status != "TICKET_WORKING":
         payload.update(stopped_time=str(update_time), stopped_mark="200050000")
     return frame("ticket_state", payload)
@@ -935,6 +979,11 @@ def test_the_vwap_refusal_is_named():
     assert TicketReasonCodes.TICKET_ALGORITHM_UNAVAILABLE == 1713
 
 
+def test_the_route_off_refusal_is_named():
+    assert ticket_reason_code_name(1714) == "TICKET_SERVICE_OFF"
+    assert TicketReasonCodes.TICKET_SERVICE_OFF == 1714
+
+
 def service_state_payload(update_time: int, **extra: Any) -> dict:
     fields = {
         "algorithm": "VWAP",
@@ -1160,3 +1209,124 @@ async def test_a_reconnect_delivers_each_connections_route_before_its_replay(fir
     ]
     assert latest.route == routes[-1]
     assert latest.get("17").update_time == 50
+
+
+# Progress (qte-platform contract 11, choice 18).
+
+
+def point(time: int, due: int, filled: int) -> dict[str, str]:
+    return {"time": str(time), "due_shares": str(due), "filled_shares": str(filled)}
+
+
+def points(state: TicketState) -> list[tuple[int, int, int]]:
+    return [(p.time, p.due_shares, p.filled_shares) for p in state.progress]
+
+
+OPEN = 1_791_207_000_000  # a session's open, in milliseconds
+HALF_HOUR = 30 * 60 * 1000
+
+
+async def test_a_tickets_progress_is_decoded_point_by_point_in_ascending_time():
+    progress = [
+        point(OPEN, 9_800, 8_000),
+        point(OPEN + HALF_HOUR, 19_600, 17_500),
+        point(OPEN + 2 * HALF_HOUR, 29_400, 26_500),
+    ]
+    [event] = await received(frame("ticket_state", state_payload(10, progress=progress), 1))
+    assert is_ticket_event(event)
+    assert points(event.message) == [
+        (OPEN, 9_800, 8_000),
+        (OPEN + HALF_HOUR, 19_600, 17_500),
+        (OPEN + 2 * HALF_HOUR, 29_400, 26_500),
+    ]
+    assert all(isinstance(value, int) for row in points(event.message) for value in row)
+    assert event.unknown_enum_names() == {}
+
+
+async def test_a_stopped_tickets_progress_ends_at_its_stop_time():
+    stop = OPEN + HALF_HOUR + 1_000
+    progress = [point(OPEN, 100, 80), point(stop, 120, 500)]
+    [event] = await received(
+        frame(
+            "ticket_state",
+            state_payload(
+                20,
+                "TICKET_COMPLETE",
+                filled_shares="500",
+                stopped_time=str(stop),
+                progress=progress,
+            ),
+            1,
+        )
+    )
+    end = event.message.progress[-1]
+    assert end.time == stopped_time_of(event.message)
+    assert end.filled_shares == event.message.filled_shares == 500
+
+
+@pytest.mark.parametrize("progress", [None, []], ids=["absent", "empty"])
+async def test_a_ticket_with_no_history_has_an_empty_progress(progress):
+    extra = {} if progress is None else {"progress": progress}
+    [event] = await received(frame("ticket_state", state_payload(10, **extra), 1))
+    latest = LatestTickets()
+    assert latest.update(event)
+    held = latest.get("17")
+    assert len(held.progress) == 0
+    assert list(held.progress) == []
+
+
+async def test_each_state_replaces_the_progress_held_and_never_appends_to_it():
+    events = await received(
+        frame("ticket_state", state_payload(10, progress=[point(OPEN, 100, 80)]), 1),
+        frame(
+            "ticket_state",
+            state_payload(20, progress=[point(OPEN, 100, 80), point(OPEN + HALF_HOUR, 200, 150)]),
+            2,
+        ),
+        # The exchange dropped the history (a split adjustment): the list held empties.
+        frame("ticket_state", state_payload(30, progress=[]), 3),
+    )
+    latest = LatestTickets()
+    assert latest.update(events[0])
+    assert points(latest.get("17")) == [(OPEN, 100, 80)]
+    assert latest.update(events[1])
+    assert points(latest.get("17")) == [(OPEN, 100, 80), (OPEN + HALF_HOUR, 200, 150)]
+    assert latest.update(events[2])
+    assert points(latest.get("17")) == []
+    # An older state does not bring an older list back.
+    assert not latest.update(events[0])
+    assert points(latest.get("17")) == []
+
+
+async def test_the_connect_time_set_carries_each_tickets_whole_progress():
+    first = [point(OPEN, 100, 80), point(OPEN + HALF_HOUR, 200, 150)]
+    second = [*first, point(OPEN + 2 * HALF_HOUR, 300, 290)]
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "before_resume": connect_group(
+                ticket_frame("17", 10, progress=first), ticket_frame("18", 10)
+            ),
+            "answer": [resume_ack()],
+            "after": [order_state(1)],
+            "drop": True,
+        },
+        {
+            "term": TERM,
+            # The new connection's set: each ticket's whole list again, not what is new.
+            "before_resume": connect_group(
+                ticket_frame("17", 50, progress=second), ticket_frame("18", 50)
+            ),
+            "answer": [resume_ack(True, 1)],
+            "after": [book(7)],
+        },
+    )
+    events, latest, _ = await read_until_book(exchange)
+    states = [e.message for e in events if isinstance(e, Received) and e.type == "ticket_state"]
+    assert [len(s.progress) for s in states if s.ticket_id == "17"] == [2, 3]
+    assert points(latest.get("17")) == [
+        (OPEN, 100, 80),
+        (OPEN + HALF_HOUR, 200, 150),
+        (OPEN + 2 * HALF_HOUR, 300, 290),
+    ]
+    assert points(latest.get("18")) == []

@@ -38,10 +38,12 @@ CALL: OptionRight
 PUT: OptionRight
 
 class Auth(_message.Message):
-    __slots__ = ("token",)
+    __slots__ = ("token", "subscribe_tickets")
     TOKEN_FIELD_NUMBER: _ClassVar[int]
+    SUBSCRIBE_TICKETS_FIELD_NUMBER: _ClassVar[int]
     token: str
-    def __init__(self, token: _Optional[str] = ...) -> None: ...
+    subscribe_tickets: bool
+    def __init__(self, token: _Optional[str] = ..., subscribe_tickets: bool = ...) -> None: ...
 
 class SessionAck(_message.Message):
     __slots__ = ("session_id", "team", "server_time", "contract_version", "unscored", "log_id")
