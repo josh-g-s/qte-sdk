@@ -285,6 +285,52 @@ async def test_a_status_this_sdk_does_not_know_is_a_stop_named_as_sent():
     assert "position in AAPL after the stop, from account_state: 80" in out
 
 
+async def test_a_directors_amend_is_not_a_stop_and_the_replacement_is_followed():
+    replacement = {"ticket_id": "18", "replaces_ticket_id": "17", "shares": "700"}
+    after = [
+        ("ticket_state", state(10, activity="TAKING")),
+        ("ticket_state", state(20, status="TICKET_AMENDED_BY_DIRECTOR", filled_shares="80")),
+        ("ticket_state", state(20, activity="TAKING", **replacement)),
+        (
+            "ticket_state",
+            state(30, status="TICKET_COMPLETE", filled_shares="620", **replacement),
+        ),
+    ]
+    exchange = PodExchange(
+        route=route_payload(), accounts=[account(None), account(700)], after=after
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "5")
+    assert code == 0, out + err
+    assert "a Director amended the ticket: following its replacement" in out
+    assert "ticket 17 was replaced by ticket 18" in out
+    assert "ticket 18: TICKET_WORKING, filled 0 of 700" in out
+    assert "the ticket stopped: TICKET_AMENDED_BY_DIRECTOR" not in out
+    assert "the ticket stopped: TICKET_COMPLETE" in out
+    assert out.index("ticket 17 was replaced") < out.index("ticket 18: TICKET_COMPLETE")
+    assert "position in AAPL after the stop, from account_state: 700" in out
+    # The replacement came with no ticket_accepted, and the pod sent only its own ticket.
+    assert len(exchange.tickets()) == 1
+
+
+async def test_a_replacement_held_before_the_amend_is_followed_at_the_amend():
+    replacement = {"ticket_id": "18", "replaces_ticket_id": "17", "shares": "700"}
+    before = [("ticket_state", state(20, activity="TAKING", **replacement))]
+    after = [
+        ("ticket_state", state(20, status="TICKET_AMENDED_BY_DIRECTOR")),
+        ("ticket_state", state(30, status="TICKET_COMPLETE", **replacement)),
+    ]
+    exchange = PodExchange(
+        route=route_payload(),
+        accounts=[account(None), account(700)],
+        after=after,
+        before=before,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "5")
+    assert code == 0, out + err
+    assert out.index("a Director amended") < out.index("ticket 17 was replaced by ticket 18")
+    assert "the ticket stopped: TICKET_COMPLETE" in out
+
+
 async def test_a_paused_route_still_sends_the_ticket_and_says_the_service_will_catch_up():
     after = [("ticket_state", state(10, activity="SERVICE_PAUSED"))]
     exchange = PodExchange(route=route_payload(paused=True), accounts=[account(None)], after=after)
