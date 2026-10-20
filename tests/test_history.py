@@ -18,8 +18,9 @@ from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -27,7 +28,18 @@ import pytest
 
 from qte_sdk import history
 from qte_sdk.connection import DecodeFailed, Unknown
-from qte_sdk.contract.v1.market_data_pb2 import Book, SessionState, Trades
+from qte_sdk.contract.v1.market_data_pb2 import (
+    OPTION_GREEKS_UNAVAILABLE,
+    OPTION_GREEKS_VALID,
+    OPTION_ROLE_ACTIVE,
+    OPTION_ROLE_OBLIGATED,
+    OPTION_WINDOW_COMPUTED,
+    Book,
+    OptionChain,
+    OptionGreeks,
+    SessionState,
+    Trades,
+)
 from qte_sdk.history import (
     HistoryChanged,
     HistoryClient,
@@ -44,10 +56,16 @@ from qte_sdk.history import (
     Manifest,
     MissingHistoryURL,
 )
+from qte_sdk.options import is_option_symbol
 from qte_sdk.session import MissingToken
 
 DAY = "2026-01-05"
 CHANNELS = ("book", "trades", "mark")
+# A range manifest's fixed channel order (contract 09); other tokens follow in byte order.
+RANGE_CHANNELS = (*CHANNELS, "option_greeks")
+# Option contracts, named by their unpadded OCC symbols, served like the fake's equities.
+CALL = "SPY261120C00650000"
+PUT = "GOOGL261120P00172500"
 # The fake service's instrument universe: anything else is unavailable, whatever the date.
 UNIVERSE = frozenset({"TEST", "AAA", "BBB"})
 # The longest the fake service, or a test's gate, holds anything before going on alone: a
@@ -107,7 +125,9 @@ class FakeHistory:
     """A history service that follows the contract, for a fixed set of objects.
 
     Objects are keyed by (session date, instrument, channel), `session_state` under
-    (session date, None, "session_state"). A key in `pending` answers `pending` that many
+    (session date, None, "session_state") and `option_chain` under (session date, None,
+    "option_chain"). An option contract is any well-formed OCC symbol, with the equities'
+    channels plus `option_greeks`. A key in `pending` answers `pending` that many
     times first. `drop_after` makes the next whole-object response for a path stop after
     that many bytes, as a dropped connection would.
     """
@@ -164,8 +184,8 @@ class FakeHistory:
             date.fromisoformat(segments[0])
         except ValueError:
             return self.json(handler, 400, "malformed_request")
-        if len(segments) == 2 and segments[1] == "session_state":
-            key: tuple[str, str | None, str] = (segments[0], None, "session_state")
+        if len(segments) == 2 and segments[1] in ("session_state", "option_chain"):
+            key: tuple[str, str | None, str] = (segments[0], None, segments[1])
         elif len(segments) == 3:
             key = (segments[0], segments[1], segments[2])
         else:
@@ -191,7 +211,9 @@ class FakeHistory:
             return self.status_override[key]
         _, instrument, channel = key
         if instrument is None:
-            known = channel == "session_state"
+            known = channel in ("session_state", "option_chain")
+        elif is_option_symbol(instrument):
+            known = channel in RANGE_CHANNELS
         else:
             known = instrument in UNIVERSE and channel in CHANNELS
         if not known:
@@ -211,11 +233,12 @@ class FakeHistory:
         held = {d for d, _, _ in self.objects} | self.open_dates
         dates = sorted(d for d in held if query["from"][0] <= d <= query["to"][0])
         entries, blobs, offset = [], [], 0
+        requested = query["channels"][0].split(",")
+        others = sorted(set(requested) - set(RANGE_CHANNELS))
+        channels = [c for c in RANGE_CHANNELS if c in requested] + others
         for day in dict.fromkeys(dates):
-            for instrument in query["instruments"][0].split(","):
-                for channel in CHANNELS:
-                    if channel not in query["channels"][0].split(","):
-                        continue
+            for instrument in sorted(set(query["instruments"][0].split(","))):
+                for channel in channels:
                     key = (day, instrument, channel)
                     status = self.status(key)
                     entry = {"session_date": day, "instrument": instrument, "channel": channel}
@@ -423,6 +446,192 @@ async def test_session_state_has_its_own_endpoint():
         items = await collect(HistoryClient(url, token).fetch_session_state(DAY))
     assert [type(item) for item in items] == [SessionState]
     assert fake.requests[0][0] == f"/v1/history/{DAY}/session_state"
+
+
+def greeks(
+    seq: int,
+    instrument: str = CALL,
+    status: str = "OPTION_GREEKS_VALID",
+    calculated_at: int | None = None,
+) -> bytes:
+    """Greeks at grid time `1000 * seq`, calculated then unless `calculated_at` says when."""
+    payload = {
+        "instrument": instrument,
+        "grid_time": str(1000 * seq),
+        "status": status,
+        "calculated_at": str(1000 * seq if calculated_at is None else calculated_at),
+        "forward": "665200000",
+        "implied_vol": "18000000",
+        "delta": "500000000000",
+        "gamma": "20000000000",
+        "vega": "741900",
+        "theta": "-310000",
+    }
+    return line("option_greeks", seq, payload, str(1000 * seq))
+
+
+def chain(session_date: str = DAY) -> bytes:
+    expiry = {
+        "underlying": "SPY",
+        "expiry": "2026-11-20",
+        "window_status": "OPTION_WINDOW_COMPUTED",
+        "reducing_only": False,
+        "contracts": [{"instrument": CALL, "role": "OPTION_ROLE_OBLIGATED"}],
+    }
+    payload = {"session_date": session_date, "expiries": [expiry]}
+    return line("option_chain", 1, payload)
+
+
+async def test_an_option_contract_has_its_greeks_and_the_equity_channels():
+    token = synthetic_token()
+    objects = {
+        (DAY, CALL, "option_greeks"): greeks(1) + greeks(301, status="OPTION_GREEKS_UNAVAILABLE"),
+        (DAY, CALL, "book"): book(1, CALL),
+    }
+    fake = FakeHistory(token, objects)
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch(DAY, CALL, "option_greeks"))
+        books = await collect(client.fetch(date(2026, 1, 5), CALL, "book"))
+    assert [type(item) for item in items] == [OptionGreeks, OptionGreeks]
+    assert (items[0].instrument, items[0].grid_time, items[0].delta) == (
+        CALL,
+        1000,
+        500_000_000_000,
+    )
+    assert items[0].status == OPTION_GREEKS_VALID
+    assert (items[1].grid_time, items[1].status) == (301_000, OPTION_GREEKS_UNAVAILABLE)
+    assert [(type(b), b.instrument) for b in books] == [(Book, CALL)]
+    assert [path for path, _ in fake.requests] == [
+        f"/v1/history/{DAY}/{CALL}/option_greeks",
+        f"/v1/history/{DAY}/{CALL}/book",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("instrument", "channel"),
+    [
+        ("TEST", "option_greeks"),  # an equity has no Greeks
+        ("SPY261320C00650000", "option_greeks"),  # month 13: not an OCC symbol
+        ("SPY   261120C00650000", "book"),  # the padded form is not used on this wire
+        (PUT, "option_greeks"),  # well formed, but the session holds nothing for it
+        (CALL, "option_chain"),  # the chain is not a per-instrument channel
+    ],
+    ids=["equity-greeks", "bad-occ", "padded-occ", "unlisted", "chain-as-channel"],
+)
+async def test_an_option_object_the_session_does_not_hold_is_unavailable(
+    instrument, channel, waits
+):
+    token = synthetic_token()
+    fake = FakeHistory(token, {(DAY, CALL, "option_greeks"): greeks(1)})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryUnavailable) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, instrument, channel))
+    assert caught.value.http_status == 404
+    assert len(fake.requests) == 1
+    assert waits == []
+
+
+async def test_the_option_chain_has_its_own_endpoint():
+    token = synthetic_token()
+    fake = FakeHistory(token, {(DAY, None, "option_chain"): chain()})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch_option_chain(DAY))
+        again = await collect(client.fetch_option_chain(date(2026, 1, 5)))
+    assert [type(item) for item in items] == [OptionChain]
+    assert items[0].session_date == DAY
+    assert [c.instrument for c in items[0].expiries[0].contracts] == [CALL]
+    assert [type(item) for item in again] == [OptionChain]
+    assert [path for path, _ in fake.requests] == [f"/v1/history/{DAY}/option_chain"] * 2
+
+
+# Lines the platform's history rebuild writes, copied from qte-platform #2317 at dcd707d8
+# (backtester/historyrebuild/testdata/option-history/); see tests/data/option-history.
+PLATFORM_FIXTURES = Path(__file__).parent / "data" / "option-history"
+FIXTURE_DAY = "2026-10-27"
+FIXTURE_CALL = "SPY261120C00665000"
+
+
+async def test_the_platform_fixture_chain_decodes_through_fetch_option_chain():
+    token = synthetic_token()
+    body = (PLATFORM_FIXTURES / f"{FIXTURE_DAY}-option_chain.ndjson").read_bytes()
+    fake = FakeHistory(token, {(FIXTURE_DAY, None, "option_chain"): body})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch_option_chain(FIXTURE_DAY))
+    assert [type(item) for item in items] == [OptionChain]
+    assert items[0].session_date == FIXTURE_DAY
+    [expiry] = items[0].expiries
+    assert (expiry.underlying, expiry.expiry, expiry.reducing_only) == ("SPY", "2026-11-20", False)
+    assert expiry.window_status == OPTION_WINDOW_COMPUTED
+    roles = {c.instrument: c.role for c in expiry.contracts}
+    assert list(roles) == [
+        "SPY261120C00660000",
+        "SPY261120C00665000",
+        "SPY261120C00670000",
+        "SPY261120P00660000",
+        "SPY261120P00665000",
+        "SPY261120P00670000",
+    ]
+    assert all(is_option_symbol(instrument) for instrument in roles)
+    assert roles[FIXTURE_CALL] == OPTION_ROLE_OBLIGATED
+    assert roles["SPY261120C00660000"] == OPTION_ROLE_ACTIVE
+    assert fake.requests[0][0] == f"/v1/history/{FIXTURE_DAY}/option_chain"
+
+
+async def test_the_platform_fixture_greeks_decode_through_the_option_greeks_channel():
+    token = synthetic_token()
+    name = f"{FIXTURE_DAY}-{FIXTURE_CALL}-option_greeks.ndjson"
+    body = (PLATFORM_FIXTURES / name).read_bytes()
+    fake = FakeHistory(token, {(FIXTURE_DAY, FIXTURE_CALL, "option_greeks"): body})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch(FIXTURE_DAY, FIXTURE_CALL, "option_greeks"))
+    assert [type(item) for item in items] == [OptionGreeks] * 3
+    first = items[0]
+    assert first.instrument == FIXTURE_CALL
+    assert first.status == OPTION_GREEKS_VALID
+    assert (first.grid_time, first.calculated_at) == (1_793_107_800_000, 1_793_107_800_000)
+    assert (first.forward, first.implied_vol) == (665_000_000, 20_478_077)
+    assert (first.delta, first.gamma, first.vega, first.theta) == (
+        509_031_907_257,
+        11_388_393_054,
+        678_130,
+        -287_673,
+    )
+    # One calculation every five minutes from the open.
+    assert [item.grid_time - first.grid_time for item in items] == [0, 300_000, 600_000]
+    path = f"/v1/history/{FIXTURE_DAY}/{FIXTURE_CALL}/option_greeks"
+    assert fake.requests[0][0] == path
+
+
+async def test_the_option_chain_follows_the_session_rules(waits):
+    token = synthetic_token()
+    later = "2026-01-06"
+    fake = FakeHistory(
+        token,
+        {(DAY, None, "option_chain"): chain(), (later, None, "option_chain"): chain(later)},
+        pending={(later, None, "option_chain"): Pending(1, "3")},
+        open_dates={"2026-01-07"},
+    )
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        # Pending is waited on as for any stream, then served.
+        assert [type(i) for i in await collect(client.fetch_option_chain(later))] == [OptionChain]
+        with pytest.raises(HistoryNotClosed):
+            await collect(client.fetch_option_chain("2026-01-07"))
+        with pytest.raises(HistoryUnavailable):  # a session with no chain
+            await collect(client.fetch_option_chain("2026-01-08"))
+        with pytest.raises(HistoryRequestRejected) as caught:
+            await collect(client.fetch_option_chain("2026-13-01"))
+        assert caught.value.status == "malformed_request"
+    assert waits == [3.0]
+
+
+async def test_a_datetime_is_refused_for_the_option_chain():
+    client = HistoryClient("http://127.0.0.1:1", synthetic_token())
+    with pytest.raises(TypeError, match="not a datetime"):
+        await collect(client.fetch_option_chain(datetime(2026, 1, 5, 12)))
 
 
 async def test_unknown_types_and_bad_lines_are_reported_in_place_never_dropped():
@@ -744,6 +953,46 @@ async def test_a_range_marks_a_session_not_closed_and_includes_only_ready_entrie
     closed = manifest.not_closed[0]
     assert (closed.byte_offset, closed.length, closed.sha256) == (None, None, None)
     assert [type(item) for item in items[1:]] == [Book]
+
+
+async def test_a_range_mixes_option_contracts_and_equities_in_the_contract_order():
+    token = synthetic_token()
+    bad = "SPY261320C00650000"
+    objects = {
+        (DAY, "AAA", "book"): book(1, "AAA"),
+        (DAY, CALL, "book"): book(1, CALL),
+        (DAY, CALL, "option_greeks"): greeks(1) + greeks(2),
+    }
+    fake = FakeHistory(token, objects)
+    instruments = [CALL, "AAA", bad, CALL]
+    channels = ["option_greeks", "option_chain", "book"]
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch_range(DAY, DAY, instruments, channels))
+    manifest = items[0]
+    assert isinstance(manifest, Manifest)
+    assert [(e.instrument, e.channel, e.status) for e in manifest.entries] == [
+        ("AAA", "book", "ready"),
+        ("AAA", "option_greeks", "unavailable"),  # an equity has no Greeks
+        ("AAA", "option_chain", "unavailable"),  # never a range channel
+        (CALL, "book", "ready"),
+        (CALL, "option_greeks", "ready"),
+        (CALL, "option_chain", "unavailable"),
+        (bad, "book", "unavailable"),  # the service checks the id, not the SDK
+        (bad, "option_greeks", "unavailable"),
+        (bad, "option_chain", "unavailable"),
+    ]
+    assert [(type(i).__name__, i.instrument) for i in items[1:]] == [
+        ("Book", "AAA"),
+        ("Book", CALL),
+        ("OptionGreeks", CALL),
+        ("OptionGreeks", CALL),
+    ]
+    # Sent as given, in the caller's order: the service sorts and checks.
+    assert fake.requests[0][0] == (
+        f"/v1/history/range?from={DAY}&to={DAY}&instruments={CALL},AAA,{bad},{CALL}"
+        "&channels=option_greeks,option_chain,book"
+    )
 
 
 async def test_a_dropped_range_download_resumes_inside_an_entry():

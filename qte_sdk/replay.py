@@ -11,7 +11,8 @@
 
 `replay` fetches one closed session's `book`, `trades` and `mark` streams for each
 instrument you name, and the session's `session_state` stream, from the history service
-(`qte_sdk.history`), and merges them into one stream in time order. The items are the
+(`qte_sdk.history`), and merges them into one stream in time order. Name
+`option_greeks` in `channels` to add each option contract's published Greeks too. The items are the
 same generated classes that `qte_sdk.market_data.market_data` yields, so a loop that
 handles market data from a live session runs on a replay unchanged. The one addition is
 `Unknown`, a message of a type this SDK does not know, which `fetch` reports and the live
@@ -25,14 +26,14 @@ done.
 
 Order. Grid points come in order: every message of one grid point comes before any
 message of the next, as on a live connection. A message's grid point is its `grid_time`
-(`Book`, `Trades`, `SessionState`), or its `sampled_at` for a `Mark`, which is published
-on its own one-second grid. The messages of one grid point (books, trades, marks and the
-session state, across instruments) come in no promised order, live or in a replay: treat
-them as a set, and do not rely on any order within it. A replay of the same data comes
-out the same way each time, so a run can be repeated, but the order it uses within a grid
-point is not part of this API and may change. Within one stream, the history service's
-publication order is kept: an `Unknown` or a `DecodeFailed` stays where it was in its
-stream, right after the message before it there.
+(`Book`, `Trades`, `OptionGreeks`, `SessionState`), or its `sampled_at` for a `Mark`,
+which is published on its own one-second grid. The messages of one grid point (books,
+trades, marks, Greeks and the session state, across instruments) come in no promised
+order, live or in a replay: treat them as a set, and do not rely on any order within it.
+A replay of the same data comes out the same way each time, so a run can be repeated, but
+the order it uses within a grid point is not part of this API and may change. Within one
+stream, the history service's publication order is kept: an `Unknown` or a `DecodeFailed`
+stays where it was in its stream, right after the message before it there.
 
 Memory. Each (instrument, channel) is its own download, plus one for the session state,
 and all of them stay open while the replay runs: each is read only as far as the merge
@@ -42,18 +43,40 @@ yields anything. `HistoryClient.fetch_range` is not used: a range response holds
 entries one after another, so merging them by time would mean holding all but the last
 in memory.
 
-Errors. A stream with no messages, such as an instrument with no trades that day, adds
-nothing. Any other failure of a download is raised from the replay as `fetch` raises it,
-after the items before it: `HistoryUnavailable` for an instrument or channel the service
-does not know or a day with no session, `HistoryNotClosed` for a session that has not
-closed, `HistoryPending` if the data is still not ready after the client's `max_wait`,
-and so on (see `qte_sdk.history`). A stream whose times go back, one message earlier
-than the one before it, raises `ReplayOutOfOrder` (a `ValueError`, code
-`QTE-REPLAY-OUT-OF-ORDER`) naming the stream and both times, after the items before it,
-since the replay cannot merge it in order. The other downloads are closed when any of
-these is raised. docs/errors.md says what each code means and how to fix it. An error
-leaves the replay without the traceback it gathered inside it, whose frames hold the
-messages read, as one from `fetch` does.
+Options. An option contract is named by its OCC symbol, such as `SPY261120C00650000` (see
+`qte_sdk.options`), and its `book`, `trades` and `mark` are merged as an equity's are.
+`option_greeks` is not in the default `channels`, since a session cached before the
+history service served Greeks has none and would fail the replay; name it to get them. A
+session with options cached before that build (from 15 October 2026) also holds a
+contract's object only for a channel on which it published something: a contract that
+quoted but never traded has no `trades`, and that channel answers `HistoryUnavailable`,
+which fails a default replay. Pass `skip_unavailable=True` to skip such a channel, or
+name in `channels` only those the contracts published on. `option_greeks` is fetched only
+for the instruments that are option symbols (`qte_sdk.options.is_option_symbol`), since
+an equity has no Greeks, so `channels=CHANNELS` over equities alone replays what it did
+before; an id that is not a well-formed option symbol is treated as an equity's. Naming
+`option_greeks` as the only per-instrument channel with no option symbol among the
+instruments is a `ValueError`. The option chain is not part of a replay: fetch it with
+`HistoryClient.fetch_option_chain`. The Greeks follow the history contract of
+qte-platform #2298, whose server build is not live yet; until it is, and for a session
+cached before it that has not been upgraded since, `option_greeks` raises
+`HistoryUnavailable`.
+
+Errors. A stream the service holds with no messages, such as an equity with no trades
+that day, adds nothing. A per-instrument channel the service answers unavailable when it
+is opened raises `HistoryUnavailable`, unless `skip_unavailable=True`, which skips that
+one (instrument, channel) and replays the rest; `session_state` raises either way, as
+does a channel that fails once it has started. Any other failure of a download is raised
+from the replay as `fetch` raises it, after the items before it: `HistoryUnavailable` for
+an instrument or channel the service does not know or a day with no session,
+`HistoryNotClosed` for a session that has not closed, `HistoryPending` if the data is
+still not ready after the client's `max_wait`, and so on (see `qte_sdk.history`). A
+stream whose times go back, one message earlier than the one before it, raises
+`ReplayOutOfOrder` (a `ValueError`, code `QTE-REPLAY-OUT-OF-ORDER`) naming the stream and
+both times, after the items before it, since the replay cannot merge it in order. The
+other downloads are closed when any of these is raised. docs/errors.md says what each
+code means and how to fix it. An error leaves the replay without the traceback it
+gathered inside it, whose frames hold the messages read, as one from `fetch` does.
 
 Stopping. Use the replay inside `aclosing`, as above: leaving the block, by `break`, an
 error or the end of the session, closes every download.
@@ -75,17 +98,23 @@ from contextlib import AsyncExitStack, aclosing
 from datetime import date
 
 from qte_sdk import errors as _errors
-from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, SessionState, Trades
+from qte_sdk.contract.v1.market_data_pb2 import Book, Mark, OptionGreeks, SessionState, Trades
 from qte_sdk.errors import QteError, token_shaped
-from qte_sdk.history import HistoryClient, HistoryItem, _date_text, _Guarded
+from qte_sdk.history import HistoryClient, HistoryItem, HistoryUnavailable, _date_text, _Guarded
+from qte_sdk.options import is_option_symbol
 from qte_sdk.session import _detached, _text_holds_token
 
-__all__ = ["CHANNELS", "ReplayOutOfOrder", "replay"]
+__all__ = ["CHANNELS", "DEFAULT_CHANNELS", "ReplayOutOfOrder", "replay"]
 
-CHANNELS: tuple[str, ...] = ("book", "trades", "mark", "session_state")
+CHANNELS: tuple[str, ...] = ("book", "trades", "mark", "option_greeks", "session_state")
 """The channels a replay can merge."""
 
-_PER_INSTRUMENT = frozenset({"book", "trades", "mark"})
+DEFAULT_CHANNELS: tuple[str, ...] = ("book", "trades", "mark", "session_state")
+"""The channels a replay merges unless you name others: every channel but `option_greeks`."""
+
+_PER_INSTRUMENT = frozenset({"book", "trades", "mark", "option_greeks"})
+# Per-instrument channels only an option contract has.
+_OPTION_ONLY = frozenset({"option_greeks"})
 # Before any timestamp, for an unusable message at the start of its stream.
 _EARLIEST = -(2**63)
 
@@ -98,19 +127,27 @@ def replay(
     client: HistoryClient,
     session_date: date | str,
     instruments: Iterable[str],
-    channels: Iterable[str] = CHANNELS,
+    channels: Iterable[str] = DEFAULT_CHANNELS,
     *,
     speed: float | None = None,
+    skip_unavailable: bool = False,
 ) -> AsyncGenerator[HistoryItem, None]:
     """Yield one closed session's market data for `instruments`, merged in time order.
 
     `session_date` is the session's date, a `datetime.date` or `"YYYY-MM-DD"`.
     `instruments` is a list of instrument ids; each is replayed once, whatever the order
-    or repeats. `channels` are drawn from `CHANNELS`: `book`, `trades` and `mark` for each
-    instrument, and `session_state` for the session. `speed` paces the replay: None (the
+    or repeats; an option contract is named by its OCC symbol. `channels` are drawn from
+    `CHANNELS`: `book`, `trades` and `mark` for each instrument, `option_greeks` for each
+    instrument that is an option symbol, and `session_state` for the session; the default,
+    `DEFAULT_CHANNELS`, is all but `option_greeks`. `speed` paces the replay: None (the
     default) for as fast as you read it, or a positive number, 1.0 for the pace the
-    session ran at. Raises `TypeError` or `ValueError` at once, before any download, for
-    arguments it cannot use, a date that does not parse included. `ReplayOutOfOrder`, also
+    session ran at. `skip_unavailable=True` skips a per-instrument channel of an
+    instrument that the service answers `HistoryUnavailable` (such as a contract's
+    `trades` on a session cached before the options build, if it never traded) instead
+    of raising, so an instrument id the service does not know then adds nothing rather
+    than failing; `session_state` still raises. Raises `TypeError` or `ValueError` at
+    once, before any download, for arguments it cannot use, a date that does not parse
+    included. `ReplayOutOfOrder`, also
     a `ValueError`, comes later, while the replay runs, if a stream's times go back.
     Whether the session and the instruments exist only the history service can say, as
     the replay runs. See the module docstring for the order and the errors.
@@ -119,14 +156,16 @@ def replay(
     # a frame that no longer holds them, without the frames that checked them.
     failure: Exception
     try:
-        day, streams = _checked(client, session_date, instruments, channels, speed)
+        day, streams = _checked(
+            client, session_date, instruments, channels, speed, skip_unavailable
+        )
     except Exception as error:
         failure = _detached(error)
     else:
         # Errors leave without the traceback gathered inside the replay, whose frames hold
         # the messages it read and the instruments asked for.
-        return _Guarded(_replay(client, day, streams, speed))
-    del session_date, instruments, channels
+        return _Guarded(_replay(client, day, streams, speed, skip_unavailable))
+    del session_date, instruments, channels, skip_unavailable
     raise failure
 
 
@@ -136,6 +175,7 @@ def _checked(
     instruments: Iterable[str],
     channels: Iterable[str],
     speed: float | None,
+    skip_unavailable: bool,
 ) -> tuple[str, list[tuple[int, str]]]:
     """The session date as text and the streams to merge, or the error for arguments the
     replay cannot use. A date or channel it names is withheld if it holds the client's
@@ -173,13 +213,30 @@ def _checked(
         raise ValueError(f"name at least one channel from {list(CHANNELS)}")
     if not names and _PER_INSTRUMENT & set(wanted):
         raise ValueError("name at least one instrument, or replay only the session_state")
+    options = sorted({name for name in names if is_option_symbol(name)})
+    # Only when nothing per instrument would be fetched: `channels=CHANNELS` over equities
+    # still replays their books, trades and marks.
+    per_instrument = _PER_INSTRUMENT & set(wanted)
+    if per_instrument and per_instrument <= _OPTION_ONLY and not options:
+        raise ValueError(
+            "option_greeks needs at least one option contract, named by its OCC symbol such "
+            "as SPY261120C00650000; an equity has no Greeks"
+        )
     if speed is not None and not (math.isfinite(speed) and speed > 0):
         raise ValueError("speed must be a positive number, or None for as fast as possible")
+    if not isinstance(skip_unavailable, bool):
+        raise TypeError("skip_unavailable must be a bool")
+
+    def instruments_of(channel: str) -> list[str]:
+        if channel in _OPTION_ONLY:
+            return options
+        return sorted(set(names)) if channel in _PER_INSTRUMENT else [""]
+
     streams = [
         (rank, instrument)
         for rank, channel in enumerate(CHANNELS)
         if channel in wanted
-        for instrument in (sorted(set(names)) if channel in _PER_INSTRUMENT else [""])
+        for instrument in instruments_of(channel)
     ]
     # _date_text refuses a datetime, which is also a date.
     return _date_text(session_date), streams
@@ -218,6 +275,7 @@ async def _replay(
     session_date: str,
     streams: list[tuple[int, str]],
     speed: float | None,
+    skip_unavailable: bool,
 ) -> AsyncGenerator[HistoryItem, None]:
     heap: list[_Entry] = []
     counter = itertools.count()
@@ -245,7 +303,14 @@ async def _replay(
             else:
                 fetched = client.fetch(session_date, instrument, channel)
             items = await downloads.enter_async_context(aclosing(fetched))
-            await advance(_Stream(items, rank, instrument))
+            try:
+                await advance(_Stream(items, rank, instrument))
+            except HistoryUnavailable as error:
+                # A per-instrument channel the service does not hold, such as a contract's
+                # trades on a session cached before the options build: skipped if asked.
+                # One answered unavailable only on a resume, after data came, still raises.
+                if not (skip_unavailable and error._at_open and channel in _PER_INSTRUMENT):
+                    raise
         start: tuple[float, int] | None = None  # (clock, message time) at the first message
         while heap:
             moment, _, _, _, item, stream = heapq.heappop(heap)
@@ -285,7 +350,7 @@ def _out_of_order(
 
 def _time_of(item: HistoryItem) -> int | None:
     """When a message belongs, in milliseconds since the epoch, or None if it has no time."""
-    if isinstance(item, Book | Trades | SessionState):
+    if isinstance(item, Book | Trades | OptionGreeks | SessionState):
         return item.grid_time
     if isinstance(item, Mark):
         return item.sampled_at

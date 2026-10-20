@@ -133,7 +133,7 @@ The main modules, each documented in its docstrings:
 | [`qte_sdk.books`](qte_sdk/books.py) | `LatestBooks`: the latest book of each instrument, since a book is sent only when it changes |
 | [`qte_sdk.calendar`](qte_sdk/calendar.py) | `next_open`, `next_close`: when the market next opens and closes, from the exchange's calendar |
 | [`qte_sdk.instruments`](qte_sdk/instruments.py) | `instrument_info`, `can_trade`, `tradable_instruments`, `on_tick`, `sector_of`: the exchange's table of instruments, with each one's tick and lot size, its sector, and whether your team may trade it |
-| [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed |
+| [`qte_sdk.history`](qte_sdk/history.py) | `HistoryClient`: the published market data of sessions that have closed, option contracts' Greeks and chain included |
 | [`qte_sdk.replay`](qte_sdk/replay.py) | `replay`: a past session's market data in one stream, in time order, to run your loop on; market data only, with no orders or fills |
 | [`qte_sdk.orders`](qte_sdk/orders.py) | `send_new`, `send_cancel`, `send_amend`, `send_mass_cancel`, and helpers for order events |
 | [`qte_sdk.tickets`](qte_sdk/tickets.py) | `send_ticket` (TWAP or VWAP), `send_ticket_cancel`, `send_ticket_urgency`: a Fundamentals pod's tickets, worked by the automatic execution service or the pod's Execution desk; `is_ticket_event`, `LatestTickets`: the exchange's answers and each ticket's state, for pods and desks; `is_execution_route`: where the pod's new tickets go |

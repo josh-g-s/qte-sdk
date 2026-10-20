@@ -1314,7 +1314,7 @@ async def test_a_history_message_that_flattens_into_the_token_is_withheld(betwee
             await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
     assert caught.value.message is None and caught.value.status is None
     assert str(caught.value).startswith(
-        "QTE-HISTORY-UNAVAILABLE: the data is unavailable and will never exist (HTTP 404). "
+        "QTE-HISTORY-UNAVAILABLE: the data is unavailable (HTTP 404). "
     )
     assert_no_form_of(token, shown(caught.value))
 

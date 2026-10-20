@@ -18,12 +18,39 @@ session, nothing to subscribe to and nothing to close. The service's address com
 the `url` argument or the `QTE_HISTORY_URL` environment variable; there is no default.
 
 - `fetch(session_date, instrument, channel)`: one session's `book`, `trades` or `mark`
-  messages for one instrument, in publication order.
+  messages for one instrument, or an option contract's `option_greeks`, in publication
+  order.
 - `fetch_session_state(session_date)`: one session's `session_state` messages.
+- `fetch_option_chain(session_date)`: the option chain in force for one session, as one
+  `OptionChain`.
 - `fetch_range(from_date, to_date, instruments, channels)`: several instruments and
   channels over a span of session dates in one response. It yields a `Manifest` first,
   which says which (session date, instrument, channel) entries are included, and then
   the messages of each included entry in the manifest's order.
+
+Options. An option contract is an instrument, named by its unpadded OCC symbol (such as
+`SPY261120C00650000`, see `qte_sdk.options`), in `fetch` and in `fetch_range`'s
+`instruments` alike, mixed with equities if you like. It has the `book`, `trades` and
+`mark` channels of an equity, plus `option_greeks`: every Greeks message the exchange
+published for it, one at each calculation that included it, so the Greeks in force at a
+time are the last ones at or before it. An equity has no `option_greeks`: asking for it
+is unavailable. Which contracts a session holds is the session's own chain: any other
+symbol is unavailable for that session, even one listed on another day. Before a session
+is rebuilt, a symbol the term could list is pending, and becomes unavailable, not ready,
+if the session's chain turns out not to list it. The service checks every id: the SDK
+sends what you give it. A contract's `book`, `trades` and `mark` are served wherever a
+session's log carried them. `option_greeks` and `fetch_option_chain` follow the history
+contract of qte-platform #2298, whose server build is not live yet: until it is, the
+service answers them unavailable, and an option contract's `book`, `trades` and `mark`
+can be unavailable for a session not yet rebuilt; none of those answers is permanent, so
+do not cache them.
+They are built with the session's `book`, so they are ready when its `book` is. A
+session with options cached before that build (from 15 October 2026) keeps no Greeks
+and no chain, and nothing for any channel on which a listed contract published nothing
+(a contract that quoted but never traded has no `trades`): once the build is live,
+treat its unavailable answer as final unless an upgrade of that session is announced.
+An upgrade is run by hand, never automatically: it adds the missing objects and leaves
+every object already cached, and its `ETag`, unchanged.
 
 A session that has closed but is not ready yet is `pending`: `fetch` waits and asks again
 as the service's `Retry-After` header says, up to `max_wait` seconds in all, then raises
@@ -208,6 +235,8 @@ class HistoryError(QteError, Exception):
     """
 
     code = _errors.HISTORY_REQUEST_FAILED
+    # True for the error of a download's first answer, not of a resume after data came.
+    _at_open = False
 
     def __init__(
         self,
@@ -226,8 +255,14 @@ class HistoryError(QteError, Exception):
 
 class HistoryUnavailable(HistoryError):
     """The data will never exist: a date before the service's coverage, a day with no
-    session, or an instrument or channel the service does not know. Do not retry. Code
-    `QTE-HISTORY-UNAVAILABLE`."""
+    session, an instrument or channel the service does not know, `option_greeks` of an
+    equity, an option contract the session's chain did not list, or the option chain of a
+    session with none. Do not retry. Code `QTE-HISTORY-UNAVAILABLE`. One exception: until
+    the service's options build is live, `option_greeks` and the option chain are answered
+    unavailable for every session, and an option contract's `book`, `trades` and `mark`
+    can be for a session not yet rebuilt, so those answers are not permanent. After it, a
+    session cached before it answers its Greeks and chain unavailable for good, unless an
+    upgrade of that session is announced."""
 
     code = _errors.HISTORY_UNAVAILABLE
 
@@ -252,7 +287,9 @@ class HistoryNotClosed(HistoryError):
 class HistoryPending(HistoryError):
     """The session has closed but its data is not ready yet, and waiting for it would have
     gone past `max_wait` or `max_retries`. It will become ready: ask again later. Code
-    `QTE-HISTORY-PENDING`.
+    `QTE-HISTORY-PENDING`. The one exception is an option contract, or the option chain,
+    asked for before its session is rebuilt: it becomes unavailable instead if the
+    session's chain does not list it.
 
     `retry_after` is the service's suggested wait in seconds, or None if it gave none.
     """
@@ -450,11 +487,15 @@ class HistoryClient:
     def fetch(
         self, session_date: date | str, instrument: str, channel: str
     ) -> AsyncGenerator[HistoryItem, None]:
-        """Yield one session's `book`, `trades` or `mark` messages for one instrument, in
-        the order they were published.
+        """Yield one session's `book`, `trades` or `mark` messages for one instrument, or
+        an option contract's `option_greeks`, in the order they were published.
 
-        A day with nothing published yields nothing. Raises `HistoryUnavailable` if the
-        data will never exist, and `HistoryPending` if it is still not ready after waiting.
+        `instrument` is an equity's id or an option contract's OCC symbol. A day with
+        nothing published yields nothing, except that a session with options cached before
+        the options build answers `HistoryUnavailable` for a channel on which a listed
+        contract published nothing (see the module docstring). Raises `HistoryUnavailable`
+        if the data will never exist (`option_greeks` of an equity included), and
+        `HistoryPending` if it is still not ready after waiting.
         """
         return _Guarded(self._fetch(session_date, instrument, channel))
 
@@ -480,6 +521,26 @@ class HistoryClient:
                 assert isinstance(line, bytes)
                 yield _decode_line(line)
 
+    def fetch_option_chain(self, session_date: date | str) -> AsyncGenerator[HistoryItem, None]:
+        """Yield the option chain in force for one session, as one `OptionChain`.
+
+        It is the last chain the exchange published for that session's date, which teams
+        received before the open, but it is served only after the session's close, like
+        the session's other data (`HistoryNotClosed` before it). A session with no chain,
+        one on which no options were listed, raises `HistoryUnavailable`. The chain is not
+        a `fetch_range` channel.
+        """
+        return _Guarded(self._fetch_option_chain(session_date))
+
+    async def _fetch_option_chain(
+        self, session_date: date | str
+    ) -> AsyncGenerator[HistoryItem, None]:
+        target = self._target(_date_text(session_date), "option_chain")
+        async with aclosing(self._download(target, framed=False)) as lines:
+            async for line in lines:
+                assert isinstance(line, bytes)
+                yield _decode_line(line)
+
     def fetch_range(
         self,
         from_date: date | str,
@@ -489,11 +550,15 @@ class HistoryClient:
     ) -> AsyncGenerator[Manifest | HistoryItem, None]:
         """Yield a `Manifest`, then the messages of each included entry in its order.
 
-        `from_date` and `to_date` are session dates, both included. `channels` are drawn
-        from `book`, `trades` and `mark`; `session_state` is only served by
-        `fetch_session_state`. Entries are ordered by session date, then instrument, then
-        channel. A message's own `seq` restarts at 1 for each entry. This does not wait
-        for pending entries: check `Manifest.pending` and ask again later for those.
+        `from_date` and `to_date` are session dates, both included. `instruments` may mix
+        equities and option contracts (OCC symbols). `channels` are drawn from `book`,
+        `trades`, `mark` and `option_greeks`; `session_state` is only served by
+        `fetch_session_state`, and `option_chain` only by `fetch_option_chain`. Any other
+        channel, and `option_greeks` for an equity, is an `unavailable` entry, not an
+        error. Entries are ordered by session date, then instrument in byte order, then
+        channel (`book`, `trades`, `mark`, `option_greeks`, then any other). A message's
+        own `seq` restarts at 1 for each entry. This does not wait for pending entries:
+        check `Manifest.pending` and ask again later for those.
         """
         return _Guarded(self._fetch_range(from_date, to_date, instruments, channels))
 
@@ -624,7 +689,11 @@ class HistoryClient:
                 waited += wait
                 retries += 1
                 continue
-            raise _error_for(reply, self._secret)
+            failure = _error_for(reply, self._secret)
+            # The first answer, not a resume's: `replay(skip_unavailable=True)` skips only
+            # a stream the service did not hold from the start.
+            failure._at_open = True
+            raise failure
 
     async def _resume(
         self, target: str, offset: int, etag: "_Validator", total: int | None
@@ -1331,7 +1400,7 @@ _ERRORS: dict[int, tuple[type[HistoryError], str]] = {
     400: (HistoryRequestRejected, "the request was rejected as malformed"),
     401: (HistoryUnauthenticated, "the token is missing or not recognised"),
     403: (HistoryForbidden, "the token may not read this data"),
-    404: (HistoryUnavailable, "the data is unavailable and will never exist"),
+    404: (HistoryUnavailable, "the data is unavailable"),
     409: (HistoryNotClosed, "the session has not closed yet"),
     501: (HistoryNotImplemented, "the service does not serve this yet"),
     429: (HistoryRateLimited, "too many requests"),
