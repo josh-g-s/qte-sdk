@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.24
+// **Version:** 1.26
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -61,8 +61,8 @@ message Reject {
 // ticket in NewOrder.parent_ticket_id (SPEC 24.1), and a fill of a child
 // carries that ticket's id in parent_ticket_id below. The report goes to the
 // desk whose order was filled; the originating pod follows its ticket's
-// fills in TicketState. A fill of the engine's own child of a ticket the
-// Directors handed over (origin FALLBACK) goes to the originating
+// fills in TicketState. A fill of a child of a ticket the automatic
+// execution service works (origin AUTO_EXECUTION) goes to the originating
 // pod instead, with parent_ticket_id and no strat_id.
 message Execution {
   string exec_id = 1;  // id. Fill report identity. SPEC 8.2. Its format is not yet specified
@@ -158,7 +158,7 @@ message LimitUtilisation {
   // filled gross alone (no unfilled ticket enters it, as at the ticket check).
   // LIMIT_GAMMA_DOLLAR is whole-book, sum of
   // abs(g_i); LIMIT_VEGA_UNDERLYING_AGGREGATE is abs(summed signed vega) of
-  // an underlying against the longest live tenor's cap. SPEC 11.1, 18.7, 23.3
+  // an underlying against the longest live tenor's cap. SPEC 11.1, 18.7, 23.6
   int64 used = 3;
   int64 cap = 4;  // int64-micro. The limit's cap, fixed by the arm's equity in Table 3, not by live equity. SPEC 11.1
 }
@@ -337,7 +337,7 @@ message AccountState {
   // valued at 0. Outside a session it is absent only before the competition's
   // first session, when the book is empty. Positions and `summary` are valued
   // at the same latest official close. SPEC 7.1, SPEC 13.1, SPEC 13.4,
-  // SPEC 23.4
+  // SPEC 23.7
   optional string session_date = 5;
   // timestamp. The exchange's own timestamp of the state this reply reads, the
   // same instant as `summary.timestamp`. It does not order the reply against
@@ -387,7 +387,7 @@ message TicketAccepted {
   optional int64 accepted_time = 6; // timestamp. SPEC 23.2
   // Present iff request_kind is TICKET_REQUEST_SUBMIT: the first time the
   // schedule's due shares reach the ticket's quantity, which is not a
-  // promise and not a deadline (SPEC 23.2).
+  // promise and not a deadline (SPEC 23.2, SPEC 23.3).
   optional int64 planned_completion_time = 7; // timestamp
   // Present iff request_kind is TICKET_REQUEST_SUBMIT: the algorithm the
   // ticket was accepted with, TWAP on a desk-routed or cure ticket (SPEC
@@ -395,7 +395,7 @@ message TicketAccepted {
   optional TicketAlgorithm algorithm = 8;
   // Present iff request_kind is TICKET_REQUEST_SUBMIT: who executes the
   // ticket, DESK or SERVICE, by the automatic execution routing in force at
-  // acceptance (SPEC 23.2).
+  // acceptance (SPEC 23.4).
   optional TicketExecutor executor = 9;
 }
 
@@ -420,22 +420,23 @@ message TicketReject {
 // message, and is not sent again after a resume.
 message TicketState {
   string ticket_id = 1;   // id, decimal digits. Immutable; the exchange assigns it at acceptance
-  // Present iff a pod originated the ticket: the pod's team. SPEC 23.2
+  // Present iff a pod originated the ticket: the pod's team. Absent on a
+  // house ticket, which carries house_instruction_id instead. SPEC 23.2
   optional string pod = 2; // id
   string desk = 3;        // id. The assigned Execution desk. SPEC 23.2
   string instrument = 4;  // id. SPEC 23.2
   Side side = 5;          // SPEC 23.2
   int64 shares = 6;       // int64-qty. The ticket quantity Q. SPEC 23.2
-  // Absent on a cure ticket: the hard execution limit. SPEC 23.2, SPEC 23.3
+  // Absent on a cure ticket: the hard execution limit. SPEC 23.2, SPEC 23.6
   optional int64 limit_price = 7; // int64-micro
   TicketUrgency urgency = 8; // Current urgency. SPEC 23.2
   int64 decision_price = 9;  // int64-micro. P0. SPEC 23.2
   int64 accepted_time = 10;  // timestamp. SPEC 23.2
-  int64 planned_completion_time = 11; // timestamp. At acceptance. SPEC 23.2
+  int64 planned_completion_time = 11; // timestamp. At acceptance. SPEC 23.2, SPEC 23.3
   // The shares due by update_time under the schedule, S(t), at most `shares`
-  // (SPEC 23.2). A stopped ticket's value is as at its stop.
+  // (SPEC 23.3). A stopped ticket's value is as at its stop.
   int64 due_shares = 12;       // int64-qty
-  int64 filled_shares = 13;    // int64-qty. Filled so far: the desk's children's, and the engine's after a handover
+  int64 filled_shares = 13;    // int64-qty. Filled so far
   int64 remaining_shares = 14; // int64-qty. `shares` less `filled_shares`
   // Present iff filled_shares is above zero: the volume-weighted average
   // price of the fills. SPEC 24.4
@@ -455,35 +456,30 @@ message TicketState {
   optional int32 thesis_version = 21;
   // The ticket this one replaces, if any: the cancelled ticket a pod named,
   // or, for a cure ticket, the ordinary reducing ticket its acceptance
-  // cancelled. SPEC 23.2, SPEC 23.3
+  // cancelled. SPEC 23.2, SPEC 23.6
   optional string replaces_ticket_id = 22; // id
-  bool cure = 23; // True on a cure ticket. SPEC 23.3
+  bool cure = 23; // True on a cure ticket. SPEC 23.6
   // The pod's notes to the desk, as submitted; sent to the desk and the pod
   // only. SPEC 23.2
   optional string notes = 24;
   // timestamp. The time of the change this message reports, or of the
   // connection for the state sent on connecting.
   int64 update_time = 25;
-  // Who executes the remaining shares: DESK, or ENGINE once the Directors
-  // have handed the ticket over to engine execution. A handed-over
-  // ticket stays TICKET_WORKING until it completes or stops.
+  // Who executes the remaining shares: DESK, the assigned Execution desk, or
+  // SERVICE, the automatic execution service.
   TicketExecutor executor = 26;
-  // Present iff executor is ENGINE: the effective handover time.
-  optional int64 handover_time = 27; // timestamp
-  // Present iff executor is ENGINE: the shares and the net fee of the desk's
-  // fills before the handover, which it froze. filled_shares and net_fee stay
-  // the totals; the engine's share is the totals less the desk's.
-  optional int64 desk_filled_shares = 28; // int64-qty
-  optional int64 desk_net_fee = 29; // int64-micro
-  // Present iff desk_filled_shares is above zero: the volume-weighted average
-  // price of the desk's fills, rounded as average_fill_price is. SPEC 24.4
-  optional int64 desk_average_fill_price = 30; // int64-micro
+  // 27 to 30 were handover_time, desk_filled_shares, desk_net_fee and
+  // desk_average_fill_price, set only on a ticket the Directors had handed
+  // over to engine execution, removed with the Directors' execution fallback.
+  // Never reused.
+  reserved 27 to 30;
+  reserved "handover_time", "desk_filled_shares", "desk_net_fee", "desk_average_fill_price";
   // The algorithm the ticket was accepted with: TWAP on a desk-routed or cure
   // ticket (SPEC 23.2).
   TicketAlgorithm algorithm = 31;
   // What the automatic execution service is doing with the ticket. Set on a
   // SERVICE ticket only; TICKET_ACTIVITY_UNSPECIFIED on any other (SPEC
-  // 23.2).
+  // 23.4, SPEC 23.5).
   TicketActivity activity = 32;
   // SERVICE ticket only: the filled shares were more than one nominal slice
   // behind the schedule's due shares at the service's last assessment.
@@ -501,7 +497,7 @@ message TicketState {
   // The exact sum of quantity times price over the ticket's fills, fees
   // excluded: the notional filled_shares were bought or sold for, so the
   // exact average price is filled_notional / filled_shares. 0 before any
-  // fill. Set on every ticket (SPEC 23.2).
+  // fill. Set on every ticket (SPEC 23.5, SPEC 24.4).
   int64 filled_notional = 37; // int64-micro
   // The ticket's scheduled-against-filled history, in strictly ascending
   // time, no two points at one time (SPEC 23.3, SPEC 23.5): a point at each
@@ -522,6 +518,10 @@ message TicketState {
   // cure answers. Before that close, if no cure works, the engine queues its
   // own cure at it; after it, nothing steps in again (SPEC 23.6, Table 22).
   optional string cure_deadline_date = 40;
+  // Present iff a Director originated the ticket as a house ticket
+  // (house_ticket): the house instruction it names in place of a thesis.
+  // pod is then absent and executor is DESK. SPEC 24.1, SPEC 24.2
+  optional string house_instruction_id = 41; // id
 }
 
 // One point of a ticket's progress: the shares due by the schedule and the

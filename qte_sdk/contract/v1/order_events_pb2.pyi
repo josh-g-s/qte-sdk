@@ -262,7 +262,7 @@ class TicketReject(_message.Message):
     def __init__(self, request_ref: _Optional[str] = ..., request_kind: _Optional[_Union[_common_pb2.TicketRequestKind, str]] = ..., reason_code: _Optional[_Union[_common_pb2.TicketReasonCodes.TicketReasonCode, str]] = ..., reason_detail: _Optional[str] = ..., receipt_time: _Optional[int] = ...) -> None: ...
 
 class TicketState(_message.Message):
-    __slots__ = ("ticket_id", "pod", "desk", "instrument", "side", "shares", "limit_price", "urgency", "decision_price", "accepted_time", "planned_completion_time", "due_shares", "filled_shares", "remaining_shares", "average_fill_price", "net_fee", "status", "stopped_time", "stopped_mark", "thesis_id", "thesis_version", "replaces_ticket_id", "cure", "notes", "update_time", "executor", "handover_time", "desk_filled_shares", "desk_net_fee", "desk_average_fill_price", "algorithm", "activity", "behind_schedule", "revised_completion_time", "config_version", "last_assessment_time", "filled_notional", "progress", "director_stop_pending_time", "cure_deadline_date")
+    __slots__ = ("ticket_id", "pod", "desk", "instrument", "side", "shares", "limit_price", "urgency", "decision_price", "accepted_time", "planned_completion_time", "due_shares", "filled_shares", "remaining_shares", "average_fill_price", "net_fee", "status", "stopped_time", "stopped_mark", "thesis_id", "thesis_version", "replaces_ticket_id", "cure", "notes", "update_time", "executor", "algorithm", "activity", "behind_schedule", "revised_completion_time", "config_version", "last_assessment_time", "filled_notional", "progress", "director_stop_pending_time", "cure_deadline_date", "house_instruction_id")
     TICKET_ID_FIELD_NUMBER: _ClassVar[int]
     POD_FIELD_NUMBER: _ClassVar[int]
     DESK_FIELD_NUMBER: _ClassVar[int]
@@ -289,10 +289,6 @@ class TicketState(_message.Message):
     NOTES_FIELD_NUMBER: _ClassVar[int]
     UPDATE_TIME_FIELD_NUMBER: _ClassVar[int]
     EXECUTOR_FIELD_NUMBER: _ClassVar[int]
-    HANDOVER_TIME_FIELD_NUMBER: _ClassVar[int]
-    DESK_FILLED_SHARES_FIELD_NUMBER: _ClassVar[int]
-    DESK_NET_FEE_FIELD_NUMBER: _ClassVar[int]
-    DESK_AVERAGE_FILL_PRICE_FIELD_NUMBER: _ClassVar[int]
     ALGORITHM_FIELD_NUMBER: _ClassVar[int]
     ACTIVITY_FIELD_NUMBER: _ClassVar[int]
     BEHIND_SCHEDULE_FIELD_NUMBER: _ClassVar[int]
@@ -303,6 +299,7 @@ class TicketState(_message.Message):
     PROGRESS_FIELD_NUMBER: _ClassVar[int]
     DIRECTOR_STOP_PENDING_TIME_FIELD_NUMBER: _ClassVar[int]
     CURE_DEADLINE_DATE_FIELD_NUMBER: _ClassVar[int]
+    HOUSE_INSTRUCTION_ID_FIELD_NUMBER: _ClassVar[int]
     ticket_id: str
     pod: str
     desk: str
@@ -329,10 +326,6 @@ class TicketState(_message.Message):
     notes: str
     update_time: int
     executor: _common_pb2.TicketExecutor
-    handover_time: int
-    desk_filled_shares: int
-    desk_net_fee: int
-    desk_average_fill_price: int
     algorithm: _common_pb2.TicketAlgorithm
     activity: _common_pb2.TicketActivity
     behind_schedule: bool
@@ -343,7 +336,8 @@ class TicketState(_message.Message):
     progress: _containers.RepeatedCompositeFieldContainer[TicketProgressPoint]
     director_stop_pending_time: int
     cure_deadline_date: str
-    def __init__(self, ticket_id: _Optional[str] = ..., pod: _Optional[str] = ..., desk: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., limit_price: _Optional[int] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ..., decision_price: _Optional[int] = ..., accepted_time: _Optional[int] = ..., planned_completion_time: _Optional[int] = ..., due_shares: _Optional[int] = ..., filled_shares: _Optional[int] = ..., remaining_shares: _Optional[int] = ..., average_fill_price: _Optional[int] = ..., net_fee: _Optional[int] = ..., status: _Optional[_Union[_common_pb2.TicketStatus, str]] = ..., stopped_time: _Optional[int] = ..., stopped_mark: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., replaces_ticket_id: _Optional[str] = ..., cure: bool = ..., notes: _Optional[str] = ..., update_time: _Optional[int] = ..., executor: _Optional[_Union[_common_pb2.TicketExecutor, str]] = ..., handover_time: _Optional[int] = ..., desk_filled_shares: _Optional[int] = ..., desk_net_fee: _Optional[int] = ..., desk_average_fill_price: _Optional[int] = ..., algorithm: _Optional[_Union[_common_pb2.TicketAlgorithm, str]] = ..., activity: _Optional[_Union[_common_pb2.TicketActivity, str]] = ..., behind_schedule: bool = ..., revised_completion_time: _Optional[int] = ..., config_version: _Optional[int] = ..., last_assessment_time: _Optional[int] = ..., filled_notional: _Optional[int] = ..., progress: _Optional[_Iterable[_Union[TicketProgressPoint, _Mapping]]] = ..., director_stop_pending_time: _Optional[int] = ..., cure_deadline_date: _Optional[str] = ...) -> None: ...
+    house_instruction_id: str
+    def __init__(self, ticket_id: _Optional[str] = ..., pod: _Optional[str] = ..., desk: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., limit_price: _Optional[int] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ..., decision_price: _Optional[int] = ..., accepted_time: _Optional[int] = ..., planned_completion_time: _Optional[int] = ..., due_shares: _Optional[int] = ..., filled_shares: _Optional[int] = ..., remaining_shares: _Optional[int] = ..., average_fill_price: _Optional[int] = ..., net_fee: _Optional[int] = ..., status: _Optional[_Union[_common_pb2.TicketStatus, str]] = ..., stopped_time: _Optional[int] = ..., stopped_mark: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., replaces_ticket_id: _Optional[str] = ..., cure: bool = ..., notes: _Optional[str] = ..., update_time: _Optional[int] = ..., executor: _Optional[_Union[_common_pb2.TicketExecutor, str]] = ..., algorithm: _Optional[_Union[_common_pb2.TicketAlgorithm, str]] = ..., activity: _Optional[_Union[_common_pb2.TicketActivity, str]] = ..., behind_schedule: bool = ..., revised_completion_time: _Optional[int] = ..., config_version: _Optional[int] = ..., last_assessment_time: _Optional[int] = ..., filled_notional: _Optional[int] = ..., progress: _Optional[_Iterable[_Union[TicketProgressPoint, _Mapping]]] = ..., director_stop_pending_time: _Optional[int] = ..., cure_deadline_date: _Optional[str] = ..., house_instruction_id: _Optional[str] = ...) -> None: ...
 
 class TicketProgressPoint(_message.Message):
     __slots__ = ("time", "due_shares", "filled_shares")

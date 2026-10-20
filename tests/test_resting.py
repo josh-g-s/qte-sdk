@@ -20,7 +20,6 @@ from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     CANCELLED,
     CURE_TRADE,
-    FALLBACK,
     FILLED,
     HOUSE,
     LIMIT,
@@ -137,8 +136,8 @@ def test_a_market_order_fill_has_no_level_key_and_changes_nothing():
 
 @pytest.mark.parametrize(
     "origin",
-    [CURE_TRADE, AUTO_FLATTEN, HOUSE, FALLBACK, AUTO_EXECUTION, 7, 0],
-    ids=["cure", "flatten", "house", "fallback", "auto-execution", "unknown-7", "unspecified"],
+    [CURE_TRADE, AUTO_FLATTEN, HOUSE, AUTO_EXECUTION, 7, 0],
+    ids=["cure", "flatten", "house", "auto-execution", "unknown-7", "unspecified"],
 )
 @pytest.mark.parametrize("remaining", [0, 30])
 def test_an_execution_the_pod_did_not_make_leaves_its_resting_order_alone(origin, remaining):

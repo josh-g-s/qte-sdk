@@ -112,3 +112,35 @@ class RaiseTicketUrgency(_message.Message):
     ticket_id: str
     urgency: _common_pb2.TicketUrgency
     def __init__(self, request_ref: _Optional[str] = ..., ticket_id: _Optional[str] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ...) -> None: ...
+
+class SubmitHouseTicket(_message.Message):
+    __slots__ = ("request_ref", "house_instruction_id", "desk", "instrument", "side", "shares", "limit_price", "urgency", "notes", "replaces_ticket_id")
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    HOUSE_INSTRUCTION_ID_FIELD_NUMBER: _ClassVar[int]
+    DESK_FIELD_NUMBER: _ClassVar[int]
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    SIDE_FIELD_NUMBER: _ClassVar[int]
+    SHARES_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_PRICE_FIELD_NUMBER: _ClassVar[int]
+    URGENCY_FIELD_NUMBER: _ClassVar[int]
+    NOTES_FIELD_NUMBER: _ClassVar[int]
+    REPLACES_TICKET_ID_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    house_instruction_id: str
+    desk: str
+    instrument: str
+    side: _common_pb2.Side
+    shares: int
+    limit_price: int
+    urgency: _common_pb2.TicketUrgency
+    notes: str
+    replaces_ticket_id: str
+    def __init__(self, request_ref: _Optional[str] = ..., house_instruction_id: _Optional[str] = ..., desk: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., limit_price: _Optional[int] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ..., notes: _Optional[str] = ..., replaces_ticket_id: _Optional[str] = ...) -> None: ...
+
+class CancelHouseTicket(_message.Message):
+    __slots__ = ("request_ref", "ticket_id")
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    TICKET_ID_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    ticket_id: str
+    def __init__(self, request_ref: _Optional[str] = ..., ticket_id: _Optional[str] = ...) -> None: ...

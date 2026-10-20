@@ -1,6 +1,6 @@
 // Session and subscription messages.
 //
-// **Version:** 1.13
+// **Version:** 1.14
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `instruments`, `session_reject`, `heartbeat`, `resume`,
@@ -33,9 +33,9 @@ message Auth {
   // bool, optional. A Director session's request to be sent `ticket_state`
   // for every pod's SERVICE tickets, read-only: on connect, after the
   // instruments, and live on each change, never replayed by `resume`. DESK
-  // and handed-over tickets, and the engine's own cure and its children, are
-  // never sent. The gateway logs each subscription (SPEC 23.2: every read of
-  // a ticket is logged). Ignored on a team's session and on a read-only
+  // tickets, and the engine's own cure and its children, are never sent.
+  // The gateway logs each subscription (SPEC 23.2: every read of a ticket is
+  // logged). Ignored on a team's session and on a read-only
   // Director credential's; unset or false sends nothing new.
   bool subscribe_tickets = 2;
 }
@@ -203,7 +203,7 @@ message InstrumentInfo {
   // every option contract and every equity of a term whose configuration
   // carries no classification. It is not the "group" of the universe file. A
   // client treats a value it does not know as an unknown sector, never as an
-  // error. SPEC 3.1, SPEC 11.1, SPEC 23.3
+  // error. SPEC 3.1, SPEC 11.1, SPEC 23.6
   string sector_limit = 9;
 }
 

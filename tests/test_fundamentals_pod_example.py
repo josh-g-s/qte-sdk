@@ -63,7 +63,7 @@ HAPPY = [
     ("ticket_state", state(10, activity="TAKING", due_shares="100", filled_shares="0")),
     ("execution", fill(200)),
     ("ticket_state", state(20, activity="POSTING", due_shares="300", filled_shares="200")),
-    ("execution", fill(300, "FALLBACK")),
+    ("execution", fill(300)),
     (
         "ticket_state",
         state(30, status="TICKET_COMPLETE", due_shares="500", filled_shares="500"),
@@ -203,9 +203,9 @@ async def test_a_pod_follows_its_service_ticket_to_complete_and_counts_no_fill()
     assert "ticket 17: TICKET_WORKING, filled 200 of 500, due 300, activity POSTING" in out
     assert "ticket 17: TICKET_COMPLETE, filled 500 of 500" in out
     assert "the ticket stopped: TICKET_COMPLETE" in out
-    # The service's and the engine's fills are printed, as information only.
+    # The service's fills are printed, as information only.
     assert "fill of the exchange's child (AUTO_EXECUTION) for ticket 17: 200 @ 200.1" in out
-    assert "fill of the exchange's child (FALLBACK) for ticket 17: 300 @ 200.1" in out
+    assert "fill of the exchange's child (AUTO_EXECUTION) for ticket 17: 300 @ 200.1" in out
     assert out.count("already in the ticket's filled_shares") == 2
     # The position after the stop is the second reply's (the next test tells them apart).
     assert "position in AAPL after the stop, from account_state: 500" in out

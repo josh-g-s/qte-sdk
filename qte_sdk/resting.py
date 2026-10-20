@@ -16,7 +16,7 @@ sends changes the view; only what the exchange reports does:
 - `execution` with an `order_price` sets the entry's remaining size from
   `remaining_size`, and removes the entry when that reaches 0. Only an execution of the
   team's own order (origin `TEAM`) counts: an execution with any other origin (a cure
-  trade, an auto-flatten, a Fundamentals ticket's `AUTO_EXECUTION` or `FALLBACK` child,
+  trade, an auto-flatten, a Fundamentals ticket's `AUTO_EXECUTION` child,
   or one this SDK does not know) changes nothing, even with an `order_price` at a level
   the team rests at.
 - `order_cancelled` with a `price` removes the entry, whatever the reason: a cancel, a
@@ -278,7 +278,7 @@ class RestingOrders:
     def _on_execution(self, msg: Execution) -> None:
         if msg.origin != TEAM:
             # Not the team's own resting order, even at a price where that order rests:
-            # an AUTO_EXECUTION or FALLBACK child is the exchange's, whatever it carries.
+            # an AUTO_EXECUTION child is the exchange's, whatever it carries.
             return
         if not msg.HasField("order_price"):
             return  # a market order, which never rests

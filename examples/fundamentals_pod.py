@@ -32,8 +32,8 @@ What it does, in order:
    When the state carries `progress` (on `main` only until the next release), it also
    prints the newest point: its `time`, `due_shares` and `filled_shares`. Each state
    carries the whole list, so the newest point is always the list's last.
-6. It prints each fill of the exchange's child orders (an `execution` with `origin`
-   `AUTO_EXECUTION`, or `FALLBACK` after a handover) as information only.
+6. It prints each fill of the service's child orders (an `execution` with `origin`
+   `AUTO_EXECUTION`) as information only.
 7. After the stop it asks for the account again and prints the position from that reply.
    Status 0.
 
@@ -42,7 +42,7 @@ The rules it follows, which a pod program should follow too:
 - The position comes from `account_state.positions`, the exchange's own count. A reply
   includes every fill up to its `as_of_report_seq`, and an instrument it does not list
   is a position of 0. A missing `summary` is unknown, never zero.
-- A service or FALLBACK fill is already in the ticket's `filled_shares` and in the
+- A service fill is already in the ticket's `filled_shares` and in the
   team's position: never add it on top of the ticket's totals or of a reply that covers
   it. To keep a running position between queries, use `qte_sdk.account.AccountReports`,
   which applies each fill once against the reply. Under the service the engine's own
@@ -98,7 +98,6 @@ from qte_sdk.connection import (
 from qte_sdk.contract.v1.common_pb2 import (
     AUTO_EXECUTION,
     BUY,
-    FALLBACK,
     ROUTING_DESK,
     SELL,
     TICKET_WORKING,
@@ -329,7 +328,7 @@ class Pod:
 
     def on_order_event(self, event: Received) -> None:
         message: Message = event.message
-        if isinstance(message, Execution) and message.origin in (AUTO_EXECUTION, FALLBACK):
+        if isinstance(message, Execution) and message.origin == AUTO_EXECUTION:
             # Information only. This fill is already in the ticket's filled_shares and in
             # the team's position, so adding it on top of either counts it twice. The
             # position comes from account_state (or from AccountReports, which applies

@@ -6,15 +6,15 @@
 # bytes against it.
 
 repo = "qte-platform"
-commit = "296996ddde4ca897043982233c8024fd913e2db7"
-approved = "Head, 15 Oct 2026"
-approved_commit = "296996ddde4ca897043982233c8024fd913e2db7"
+commit = "5140228251ecccf1a6d3ae5be69850ba24304a24"
+approved = "Head, 20 Oct 2026"
+approved_commit = "5140228251ecccf1a6d3ae5be69850ba24304a24"
 path = "schemas/proto/qte/contract/v1"
 
 [blobs]
-"common.proto" = "2f78f966498c7ab66551c8410da2b471cacee975"
+"common.proto" = "a217bbd6aa6d758c71855dcb07c730185623f86d"
 "envelope.proto" = "47c847d9b066383f4a08791186df86b521572b79"
-"session.proto" = "e50e9e3f0efdb28024cbf0e7e161d7328c946ab5"
-"order_entry.proto" = "295d138b2157ac5319cfe4293dd90277de11219b"
-"order_events.proto" = "4aee1200d167c63553d07c84db207ed339904f98"
-"market_data.proto" = "57f6b851c8c8d15cc588a479547e766c6a739c40"
+"session.proto" = "d4b82c943c588a04b8ae1fbca7d07c015ccf32fe"
+"order_entry.proto" = "ac9ea94c2ec97c1bce1b41d50d53af4d432f6910"
+"order_events.proto" = "3a1c3bed00bb0bf13f4f29603ba25c22cca608d9"
+"market_data.proto" = "2735d9a81a18aa4c6d27b501c45c78789e771220"
