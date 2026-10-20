@@ -259,8 +259,7 @@ class HistoryUnavailable(HistoryError):
     unavailable for every session, and an option contract's `book`, `trades` and `mark`
     can be for a session not yet rebuilt, so those answers are not permanent. After it, a
     session cached before it answers its Greeks and chain unavailable for good, unless an
-    upgrade of that
-    session is announced."""
+    upgrade of that session is announced."""
 
     code = _errors.HISTORY_UNAVAILABLE
 
