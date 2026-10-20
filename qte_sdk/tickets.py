@@ -144,13 +144,14 @@ told neither the reason nor the Director.
 Four ticket reason codes answer a Director's own messages and never reach a pod's
 `ticket_reject`: `TICKET_DESK_NOT_EXECUTION` (1717), `TICKET_RAISE_PENDING` (1718),
 `TICKET_CURE_NOT_AMENDABLE` (1719) and `TICKET_AMEND_AT_OR_BELOW_FILLED` (1720). The one
-a pod can notice is 1718: it refuses a Director's cancel of a ticket whose urgency the
+that touches a pod is 1718: it refuses a Director's cancel of a ticket whose urgency the
 pod raised (`send_ticket_urgency`) at the same instant, so that the raise already
-acknowledged to the pod is not undone. A pod has nothing to do on it: its raise stands
-and the ticket keeps working. The Director may cancel again later, and the ticket then
-stops `TICKET_CANCELLED_BY_DIRECTOR` as above. `TICKET_CANCELLED_BY_HOUSE` (10) stops
-only a house ticket, one a Director places for the house rather than for a pod (its
-state carries `house_instruction_id` and no `pod`); a pod is never sent one.
+acknowledged to the pod is not undone. The pod is never sent it and has nothing to do:
+its raise stands and the ticket keeps working. The Director may cancel again later, and
+the ticket then stops `TICKET_CANCELLED_BY_DIRECTOR` as above.
+`TICKET_CANCELLED_BY_HOUSE` (10) stops only a house ticket, one a Director places for
+the house rather than for a pod (its state carries `house_instruction_id` and no `pod`);
+a pod is never sent one.
 
 None of the three answers carries a `report_seq`, and a resume replays none of them.
 Instead, once on each connection of the pod or desk, straight after the `session_ack`,
