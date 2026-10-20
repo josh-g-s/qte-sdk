@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -28,6 +29,10 @@ import pytest
 from qte_sdk import history
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.contract.v1.market_data_pb2 import (
+    OPTION_GREEKS_VALID,
+    OPTION_ROLE_ACTIVE,
+    OPTION_ROLE_OBLIGATED,
+    OPTION_WINDOW_COMPUTED,
     Book,
     OptionChain,
     OptionGreeks,
@@ -531,6 +536,65 @@ async def test_the_option_chain_has_its_own_endpoint():
     assert [c.instrument for c in items[0].expiries[0].contracts] == [CALL]
     assert [type(item) for item in again] == [OptionChain]
     assert [path for path, _ in fake.requests] == [f"/v1/history/{DAY}/option_chain"] * 2
+
+
+# Lines the platform's history rebuild writes, copied from qte-platform #2317 at dcd707d8
+# (backtester/historyrebuild/testdata/option-history/); see tests/data/option-history.
+PLATFORM_FIXTURES = Path(__file__).parent / "data" / "option-history"
+FIXTURE_DAY = "2026-10-27"
+FIXTURE_CALL = "SPY261120C00665000"
+
+
+async def test_the_platform_fixture_chain_decodes_through_fetch_option_chain():
+    token = synthetic_token()
+    body = (PLATFORM_FIXTURES / f"{FIXTURE_DAY}-option_chain.ndjson").read_bytes()
+    fake = FakeHistory(token, {(FIXTURE_DAY, None, "option_chain"): body})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch_option_chain(FIXTURE_DAY))
+    assert [type(item) for item in items] == [OptionChain]
+    assert items[0].session_date == FIXTURE_DAY
+    [expiry] = items[0].expiries
+    assert (expiry.underlying, expiry.expiry, expiry.reducing_only) == ("SPY", "2026-11-20", False)
+    assert expiry.window_status == OPTION_WINDOW_COMPUTED
+    roles = {c.instrument: c.role for c in expiry.contracts}
+    assert list(roles) == [
+        "SPY261120C00660000",
+        "SPY261120C00665000",
+        "SPY261120C00670000",
+        "SPY261120P00660000",
+        "SPY261120P00665000",
+        "SPY261120P00670000",
+    ]
+    assert all(is_option_symbol(instrument) for instrument in roles)
+    assert roles[FIXTURE_CALL] == OPTION_ROLE_OBLIGATED
+    assert roles["SPY261120C00660000"] == OPTION_ROLE_ACTIVE
+    assert fake.requests[0][0] == f"/v1/history/{FIXTURE_DAY}/option_chain"
+
+
+async def test_the_platform_fixture_greeks_decode_through_the_option_greeks_channel():
+    token = synthetic_token()
+    name = f"{FIXTURE_DAY}-{FIXTURE_CALL}-option_greeks.ndjson"
+    body = (PLATFORM_FIXTURES / name).read_bytes()
+    fake = FakeHistory(token, {(FIXTURE_DAY, FIXTURE_CALL, "option_greeks"): body})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch(FIXTURE_DAY, FIXTURE_CALL, "option_greeks"))
+    assert [type(item) for item in items] == [OptionGreeks] * 3
+    first = items[0]
+    assert first.instrument == FIXTURE_CALL
+    assert first.status == OPTION_GREEKS_VALID
+    assert (first.grid_time, first.calculated_at) == (1_793_107_800_000, 1_793_107_800_000)
+    assert (first.forward, first.implied_vol) == (665_000_000, 20_478_077)
+    assert (first.delta, first.gamma, first.vega, first.theta) == (
+        509_031_907_257,
+        11_388_393_054,
+        678_130,
+        -287_673,
+    )
+    # One calculation every five minutes from the open.
+    assert [item.grid_time - first.grid_time for item in items] == [0, 300_000, 600_000]
+    path = f"/v1/history/{FIXTURE_DAY}/{FIXTURE_CALL}/option_greeks"
+    assert fake.requests[0][0] == path
 
 
 async def test_the_option_chain_follows_the_session_rules(waits):

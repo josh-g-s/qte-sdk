@@ -45,8 +45,9 @@ service answers them unavailable, and that answer is not permanent, so do not ca
 They are built with the session's `book`, so they are ready when its `book` is. A
 session with options cached before that build (from 15 October 2026) keeps no Greeks
 and no chain, and only the contracts that published something: once the build is live,
-treat its unavailable answer as final unless a rebuild of that session is announced
-(rebuilds are done by hand, not automatically).
+treat its unavailable answer as final unless an upgrade of that session is announced.
+An upgrade is run by hand, never automatically: it adds the missing objects and leaves
+every object already cached, and its `ETag`, unchanged.
 
 A session that has closed but is not ready yet is `pending`: `fetch` waits and asks again
 as the service's `Retry-After` header says, up to `max_wait` seconds in all, then raises
@@ -254,7 +255,7 @@ class HistoryUnavailable(HistoryError):
     session with none. Do not retry. Code `QTE-HISTORY-UNAVAILABLE`. One exception: until
     the service's options build is live, `option_greeks` and the option chain are answered
     unavailable for every session, so that answer is not permanent for them. After it, a
-    session cached before it answers them unavailable for good, unless a rebuild of that
+    session cached before it answers them unavailable for good, unless an upgrade of that
     session is announced."""
 
     code = _errors.HISTORY_UNAVAILABLE

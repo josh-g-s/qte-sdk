@@ -54,7 +54,7 @@ per-instrument channel with no option symbol among the instruments is a `ValueEr
 The option chain is not part of a replay: fetch it with
 `HistoryClient.fetch_option_chain`. The Greeks follow the history contract of
 qte-platform #2298, whose server build is not live yet; until it is, and for a session
-cached before it that has not been rebuilt since, `option_greeks` raises
+cached before it that has not been upgraded since, `option_greeks` raises
 `HistoryUnavailable`.
 
 Errors. A stream with no messages, such as an instrument with no trades that day, adds
