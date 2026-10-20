@@ -41,7 +41,9 @@ if the session's chain turns out not to list it. The service checks every id: th
 sends what you give it. A contract's `book`, `trades` and `mark` are served wherever a
 session's log carried them. `option_greeks` and `fetch_option_chain` follow the history
 contract of qte-platform #2298, whose server build is not live yet: until it is, the
-service answers them unavailable, and that answer is not permanent, so do not cache it.
+service answers them unavailable, and an option contract's `book`, `trades` and `mark`
+can be unavailable for a session not yet rebuilt; none of those answers is permanent, so
+do not cache them.
 They are built with the session's `book`, so they are ready when its `book` is. A
 session with options cached before that build (from 15 October 2026) keeps no Greeks
 and no chain, and only the contracts that published something: once the build is live,
@@ -254,8 +256,10 @@ class HistoryUnavailable(HistoryError):
     equity, an option contract the session's chain did not list, or the option chain of a
     session with none. Do not retry. Code `QTE-HISTORY-UNAVAILABLE`. One exception: until
     the service's options build is live, `option_greeks` and the option chain are answered
-    unavailable for every session, so that answer is not permanent for them. After it, a
-    session cached before it answers them unavailable for good, unless an upgrade of that
+    unavailable for every session, and an option contract's `book`, `trades` and `mark`
+    can be for a session not yet rebuilt, so those answers are not permanent. After it, a
+    session cached before it answers its Greeks and chain unavailable for good, unless an
+    upgrade of that
     session is announced."""
 
     code = _errors.HISTORY_UNAVAILABLE
