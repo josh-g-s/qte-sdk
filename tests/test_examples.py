@@ -1763,6 +1763,146 @@ async def test_options_bot_names_a_budget_reject_its_drain_is_too_short_to_wait_
     assert exchange.types().count("cancel") == 1
 
 
+async def test_options_bot_watch_only_prints_the_order_it_would_send_and_sends_nothing():
+    exchange = options_exchange()
+    code, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "1")
+    assert code == 0, out + err
+    # It reads and subscribes as usual, but no order and no cancel reach the exchange.
+    assert exchange.types() == ["auth", "subscribe"]
+    assert exchange.resting == {}
+    assert "passing over SPY261120C00665000: its trading state is OPTION_SUSPENDED" in out
+    assert (
+        "WOULD SEND (watch-only, not sent): LIMIT BUY 1 contract(s) of SPY261120P00665000 "
+        "@ 4.900000"
+    ) in out
+    assert out.count("WOULD SEND") == 1
+    assert "watch-only: chose SPY261120P00665000" in out
+    assert "sending" not in out and "cancelling" not in out
+
+
+async def test_options_bot_watch_only_from_the_environment_sends_nothing():
+    exchange = options_exchange()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "options_bot.py",
+            url,
+            synthetic_token(),
+            "--strat-id",
+            "opt-test",
+            "--seconds",
+            "1",
+            QTE_WATCH_ONLY="1",
+        )
+    assert code == 0, out + err
+    assert exchange.types() == ["auth", "subscribe"]
+    assert "WOULD SEND (watch-only, not sent)" in out
+
+
+async def test_options_bot_refuses_a_watch_only_value_it_does_not_know_and_sends_nothing():
+    exchange = options_exchange()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "options_bot.py",
+            url,
+            synthetic_token(),
+            "--strat-id",
+            "opt-test",
+            "--seconds",
+            "1",
+            QTE_WATCH_ONLY="y",
+        )
+    assert code == 2, out + err
+    assert "QTE_WATCH_ONLY must be unset, empty, or one of 0, false, no, off" in err
+    assert exchange.types() == []
+
+
+@pytest.mark.parametrize("value", ["0", " OFF "])
+async def test_options_bot_keeps_trading_mode_when_watch_only_is_set_off(value: str):
+    exchange = options_exchange()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "options_bot.py",
+            url,
+            synthetic_token(),
+            "--strat-id",
+            "opt-test",
+            "--seconds",
+            "10",
+            QTE_WATCH_ONLY=value,
+        )
+    assert code == 0, out + err
+    assert exchange.types().count("new") == 1
+    assert "WOULD SEND" not in out
+
+
+class ClosingOptionsExchange(FakeExchange):
+    """The options exchange, which after the subscribe publishes the market for a few grid
+    points (or, with `publish=False`, nothing) and then closes the connection with `code`:
+    1000 is a normal close, 1011 a server error the client reads as a dropped connection."""
+
+    def __init__(self, code: int, publish: bool) -> None:
+        super().__init__(instruments=options_table(), options=options_market())
+        self.code = code
+        self.publish_first = publish
+
+    async def publish_options(self, ws: Any) -> None:
+        assert self.options is not None
+        if self.publish_first:
+            await self.send(ws, "option_chain", self.options["chain"])
+            for greeks in self.options["greeks"]:
+                await self.send(ws, "option_greeks", greeks)
+            state = {"state": "OPEN", "session_date": "2026-10-26", "grid_time": "1"}
+            for _ in range(3):
+                await self.send(ws, "session_state", state)
+                for book in self.options["books"]:
+                    await self.send(ws, "book", book)
+                await asyncio.sleep(0.05)
+        await ws.close(code=self.code)
+
+
+@pytest.mark.parametrize("code", [1000, 1011], ids=["closed", "dropped"])
+async def test_options_bot_watch_only_names_its_choice_when_the_connection_ends(code: int):
+    exchange = ClosingOptionsExchange(code, publish=True)
+    status, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "10")
+    assert status == 0, out + err
+    assert exchange.types() == ["auth", "subscribe"]
+    ended = "closed the connection" if code == 1000 else "the connection dropped"
+    assert ended in out
+    assert out.splitlines()[-1].startswith("watch-only: chose SPY261120P00665000; would send")
+    assert "may still rest" not in out + err
+
+
+@pytest.mark.parametrize("code", [1000, 1011], ids=["closed", "dropped"])
+async def test_options_bot_watch_only_fails_with_a_reason_when_the_connection_ends_first(
+    code: int,
+):
+    exchange = ClosingOptionsExchange(code, publish=False)
+    status, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "10")
+    assert status == 1, out + err
+    assert exchange.types() == ["auth", "subscribe"]
+    ended = "closed the connection" if code == 1000 else "the connection dropped"
+    assert ended in out
+    assert out.splitlines()[-1] == (
+        "watch-only: NO CONTRACT CHOSEN: no option chain was received; nothing was sent"
+    )
+    assert "WOULD SEND" not in out
+    assert "may still rest" not in out + err
+
+
+async def test_options_bot_watch_only_fails_with_a_reason_when_no_contract_can_be_chosen():
+    market = options_market()
+    for book in market["books"]:
+        book["trading_state"] = "OPTION_SUSPENDED"
+    exchange = FakeExchange(instruments=options_table(), options=market)
+    code, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "1")
+    assert code == 1, out + err
+    assert exchange.types() == ["auth", "subscribe"]
+    assert (
+        "watch-only: NO CONTRACT CHOSEN: every contract in the nearest expiry was passed over"
+    ) in out
+    assert "WOULD SEND" not in out
+
+
 class RecordingSender:
     """A session that records each message sent."""
 
@@ -1953,6 +2093,26 @@ async def interrupt_options_bot(
                 await process.wait()
     assert process.returncode is not None
     return process.returncode, (seen + out).decode(), err.decode()
+
+
+@SENDS_SIGINT
+async def test_options_bot_watch_only_fails_with_a_reason_on_ctrl_c_before_the_table():
+    code, out, err = await interrupt_options_bot(
+        FakeExchange(), ("--watch-only", "--seconds", "10"), [b"connected:"]
+    )
+    assert code == 1, out + err
+    assert "watch-only: NO CONTRACT CHOSEN: interrupted before the chain was read" in out
+    assert "may still rest" not in out + err
+
+
+@SENDS_SIGINT
+async def test_options_bot_watch_only_exits_0_on_ctrl_c_once_a_contract_is_chosen():
+    code, out, err = await interrupt_options_bot(
+        options_exchange(), ("--watch-only", "--seconds", "10"), [b"WOULD SEND"]
+    )
+    assert code == 0, out + err
+    assert "watch-only: chose SPY261120P00665000" in out
+    assert "may still rest" not in out + err
 
 
 @SENDS_SIGINT
