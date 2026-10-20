@@ -235,6 +235,8 @@ class HistoryError(QteError, Exception):
     """
 
     code = _errors.HISTORY_REQUEST_FAILED
+    # True for the error of a download's first answer, not of a resume after data came.
+    _at_open = False
 
     def __init__(
         self,
@@ -489,9 +491,11 @@ class HistoryClient:
         an option contract's `option_greeks`, in the order they were published.
 
         `instrument` is an equity's id or an option contract's OCC symbol. A day with
-        nothing published yields nothing. Raises `HistoryUnavailable` if the data will
-        never exist (`option_greeks` of an equity included), and `HistoryPending` if it is
-        still not ready after waiting.
+        nothing published yields nothing, except that a session with options cached before
+        the options build answers `HistoryUnavailable` for a channel on which a listed
+        contract published nothing (see the module docstring). Raises `HistoryUnavailable`
+        if the data will never exist (`option_greeks` of an equity included), and
+        `HistoryPending` if it is still not ready after waiting.
         """
         return _Guarded(self._fetch(session_date, instrument, channel))
 
@@ -685,7 +689,11 @@ class HistoryClient:
                 waited += wait
                 retries += 1
                 continue
-            raise _error_for(reply, self._secret)
+            failure = _error_for(reply, self._secret)
+            # The first answer, not a resume's: `replay(skip_unavailable=True)` skips only
+            # a stream the service did not hold from the start.
+            failure._at_open = True
+            raise failure
 
     async def _resume(
         self, target: str, offset: int, etag: "_Validator", total: int | None

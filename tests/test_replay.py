@@ -4,6 +4,7 @@ import asyncio
 import threading
 from contextlib import aclosing
 from datetime import UTC, date, datetime
+from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import pytest
@@ -579,6 +580,21 @@ async def test_skip_unavailable_skips_a_channel_the_contract_never_published_on(
         point((1000, "book", CALL), (1000, "mark", CALL), (1000, "session_state"))
     ]
     assert f"/v1/history/{DAY}/{CALL}/trades" in requested(fake)
+
+
+async def test_skip_unavailable_still_raises_for_a_stream_answered_unavailable_on_a_resume():
+    class GoneOnResume(FakeHistory):
+        def respond(self, handler: BaseHTTPRequestHandler) -> None:
+            if "Range" in handler.headers:
+                self.requests.append((handler.path, {}))
+                return self.json(handler, 404, "unavailable")
+            super().respond(handler)
+
+    path = f"/v1/history/{DAY}/{CALL}/book"
+    objects = {(DAY, CALL, "book"): book_at(1000, CALL) + book_at(2000, CALL)}
+    fake = GoneOnResume(synthetic_token(), objects, drop_after={path: 10})
+    with pytest.raises(HistoryUnavailable):
+        await replayed(fake, DAY, [CALL], ["book"], skip_unavailable=True)
 
 
 async def test_skip_unavailable_still_raises_for_the_session_state():

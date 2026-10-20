@@ -165,7 +165,7 @@ def replay(
         # Errors leave without the traceback gathered inside the replay, whose frames hold
         # the messages it read and the instruments asked for.
         return _Guarded(_replay(client, day, streams, speed, skip_unavailable))
-    del session_date, instruments, channels
+    del session_date, instruments, channels, skip_unavailable
     raise failure
 
 
@@ -305,10 +305,11 @@ async def _replay(
             items = await downloads.enter_async_context(aclosing(fetched))
             try:
                 await advance(_Stream(items, rank, instrument))
-            except HistoryUnavailable:
+            except HistoryUnavailable as error:
                 # A per-instrument channel the service does not hold, such as a contract's
                 # trades on a session cached before the options build: skipped if asked.
-                if not (skip_unavailable and channel in _PER_INSTRUMENT):
+                # One answered unavailable only on a resume, after data came, still raises.
+                if not (skip_unavailable and error._at_open and channel in _PER_INSTRUMENT):
                     raise
         start: tuple[float, int] | None = None  # (clock, message time) at the first message
         while heap:
