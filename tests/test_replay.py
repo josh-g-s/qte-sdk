@@ -526,6 +526,74 @@ async def test_greeks_are_merged_in_time_order_for_the_option_contracts_only():
     )
 
 
+async def test_greeks_are_placed_by_their_grid_time_not_when_they_were_calculated():
+    objects = {
+        # Calculated 500 ms before its grid point, and a book 1 ms after that grid point.
+        (DAY, CALL, "option_greeks"): greeks(2, calculated_at=1500) + greeks(3),
+        (DAY, CALL, "book"): book_at(1800, CALL) + book_at(2001, CALL) + book_at(3001, CALL),
+    }
+    fake = FakeHistory(synthetic_token(), objects)
+    items = await replayed(fake, DAY, [CALL], ["book", "option_greeks"])
+    assert grid_points(items) == [
+        point((1800, "book", CALL)),
+        point((2000, "option_greeks", CALL)),
+        point((2001, "book", CALL)),
+        point((3000, "option_greeks", CALL)),
+        point((3001, "book", CALL)),
+    ]
+
+
+async def test_a_repeated_option_contract_has_its_greeks_fetched_once():
+    objects = {
+        (DAY, CALL, "book"): book_at(1000, CALL),
+        (DAY, CALL, "option_greeks"): greeks(1),
+    }
+    fake = FakeHistory(synthetic_token(), objects)
+    items = await replayed(fake, DAY, [CALL, CALL], ["book", "option_greeks"])
+    assert grid_points(items) == [point((1000, "book", CALL), (1000, "option_greeks", CALL))]
+    assert requested(fake) == [
+        f"/v1/history/{DAY}/{CALL}/book",
+        f"/v1/history/{DAY}/{CALL}/option_greeks",
+    ]
+
+
+def a_session_cached_before_the_options_build() -> FakeHistory:
+    """A contract that quoted but never traded: no `trades` object, so that is unavailable."""
+    objects = {
+        (DAY, CALL, "book"): book_at(1000, CALL),
+        (DAY, CALL, "mark"): mark_at(1000, CALL),
+        (DAY, None, "session_state"): state_at(1000),
+    }
+    return FakeHistory(synthetic_token(), objects)
+
+
+async def test_a_contract_that_never_traded_fails_a_default_replay_of_a_session_cached_before():
+    with pytest.raises(HistoryUnavailable):
+        await replayed(a_session_cached_before_the_options_build(), DAY, [CALL])
+
+
+async def test_skip_unavailable_skips_a_channel_the_contract_never_published_on():
+    fake = a_session_cached_before_the_options_build()
+    items = await replayed(fake, DAY, [CALL], skip_unavailable=True)
+    assert grid_points(items) == [
+        point((1000, "book", CALL), (1000, "mark", CALL), (1000, "session_state"))
+    ]
+    assert f"/v1/history/{DAY}/{CALL}/trades" in requested(fake)
+
+
+async def test_skip_unavailable_still_raises_for_the_session_state():
+    fake = FakeHistory(synthetic_token(), {(DAY, CALL, "book"): book_at(1000, CALL)})
+    with pytest.raises(HistoryUnavailable):
+        await replayed(fake, DAY, [CALL], ["book", "session_state"], skip_unavailable=True)
+
+
+@pytest.mark.parametrize("flag", [1, 0, None, "yes"])
+def test_skip_unavailable_must_be_a_bool(flag):
+    client = HistoryClient("http://127.0.0.1:9", synthetic_token())
+    with pytest.raises(TypeError, match="skip_unavailable must be a bool"):
+        replay.replay(client, DAY, [CALL], skip_unavailable=flag)
+
+
 @pytest.mark.parametrize("day", [date(2026, 1, 5), "2026-01-05"], ids=["date", "text"])
 async def test_a_session_date_is_asked_for_as_yyyy_mm_dd(day):
     fake = FakeHistory(synthetic_token(), {(DAY, "AAA", "book"): book_at(1000, "AAA")})

@@ -46,7 +46,8 @@ can be unavailable for a session not yet rebuilt; none of those answers is perma
 do not cache them.
 They are built with the session's `book`, so they are ready when its `book` is. A
 session with options cached before that build (from 15 October 2026) keeps no Greeks
-and no chain, and only the contracts that published something: once the build is live,
+and no chain, and nothing for any channel on which a listed contract published nothing
+(a contract that quoted but never traded has no `trades`): once the build is live,
 treat its unavailable answer as final unless an upgrade of that session is announced.
 An upgrade is run by hand, never automatically: it adds the missing objects and leaves
 every object already cached, and its `ETag`, unchanged.

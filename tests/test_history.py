@@ -29,6 +29,7 @@ import pytest
 from qte_sdk import history
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.contract.v1.market_data_pb2 import (
+    OPTION_GREEKS_UNAVAILABLE,
     OPTION_GREEKS_VALID,
     OPTION_ROLE_ACTIVE,
     OPTION_ROLE_OBLIGATED,
@@ -447,12 +448,18 @@ async def test_session_state_has_its_own_endpoint():
     assert fake.requests[0][0] == f"/v1/history/{DAY}/session_state"
 
 
-def greeks(seq: int, instrument: str = CALL, status: str = "OPTION_GREEKS_VALID") -> bytes:
+def greeks(
+    seq: int,
+    instrument: str = CALL,
+    status: str = "OPTION_GREEKS_VALID",
+    calculated_at: int | None = None,
+) -> bytes:
+    """Greeks at grid time `1000 * seq`, calculated then unless `calculated_at` says when."""
     payload = {
         "instrument": instrument,
         "grid_time": str(1000 * seq),
         "status": status,
-        "calculated_at": str(1000 * seq),
+        "calculated_at": str(1000 * seq if calculated_at is None else calculated_at),
         "forward": "665200000",
         "implied_vol": "18000000",
         "delta": "500000000000",
@@ -492,7 +499,8 @@ async def test_an_option_contract_has_its_greeks_and_the_equity_channels():
         1000,
         500_000_000_000,
     )
-    assert items[1].grid_time == 301_000
+    assert items[0].status == OPTION_GREEKS_VALID
+    assert (items[1].grid_time, items[1].status) == (301_000, OPTION_GREEKS_UNAVAILABLE)
     assert [(type(b), b.instrument) for b in books] == [(Book, CALL)]
     assert [path for path, _ in fake.requests] == [
         f"/v1/history/{DAY}/{CALL}/option_greeks",
