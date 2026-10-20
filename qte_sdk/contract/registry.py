@@ -27,6 +27,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
 )
 from qte_sdk.contract.v1.session_pb2 import (
     Calendar,
+    ExecutionRoute,
     Heartbeat,
     Instruments,
     OrderSnapshot,
@@ -60,6 +61,7 @@ INBOUND: dict[str, type[Message]] = {
     "ticket_accepted": TicketAccepted,
     "ticket_reject": TicketReject,
     "ticket_state": TicketState,
+    "execution_route": ExecutionRoute,
     "book": Book,
     "trades": Trades,
     "mark": Mark,

@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.19
+// **Version:** 1.24
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -61,7 +61,9 @@ message Reject {
 // ticket in NewOrder.parent_ticket_id (SPEC 24.1), and a fill of a child
 // carries that ticket's id in parent_ticket_id below. The report goes to the
 // desk whose order was filled; the originating pod follows its ticket's
-// fills in TicketState.
+// fills in TicketState. A fill of the engine's own child of a ticket the
+// Directors handed over (origin FALLBACK) goes to the originating
+// pod instead, with parent_ticket_id and no strat_id.
 message Execution {
   string exec_id = 1;  // id. Fill report identity. SPEC 8.2. Its format is not yet specified
   Origin origin = 2;   // SPEC 11.1, SPEC 11.2
@@ -387,6 +389,14 @@ message TicketAccepted {
   // schedule's due shares reach the ticket's quantity, which is not a
   // promise and not a deadline (SPEC 23.2).
   optional int64 planned_completion_time = 7; // timestamp
+  // Present iff request_kind is TICKET_REQUEST_SUBMIT: the algorithm the
+  // ticket was accepted with, TWAP on a desk-routed or cure ticket (SPEC
+  // 23.2).
+  optional TicketAlgorithm algorithm = 8;
+  // Present iff request_kind is TICKET_REQUEST_SUBMIT: who executes the
+  // ticket, DESK or SERVICE, by the automatic execution routing in force at
+  // acceptance (SPEC 23.2).
+  optional TicketExecutor executor = 9;
 }
 
 // A ticket message was refused and nothing was logged. Its reason code is
@@ -425,7 +435,7 @@ message TicketState {
   // The shares due by update_time under the schedule, S(t), at most `shares`
   // (SPEC 23.2). A stopped ticket's value is as at its stop.
   int64 due_shares = 12;       // int64-qty
-  int64 filled_shares = 13;    // int64-qty. Filled by the desk's children so far
+  int64 filled_shares = 13;    // int64-qty. Filled so far: the desk's children's, and the engine's after a handover
   int64 remaining_shares = 14; // int64-qty. `shares` less `filled_shares`
   // Present iff filled_shares is above zero: the volume-weighted average
   // price of the fills. SPEC 24.4
@@ -454,4 +464,72 @@ message TicketState {
   // timestamp. The time of the change this message reports, or of the
   // connection for the state sent on connecting.
   int64 update_time = 25;
+  // Who executes the remaining shares: DESK, or ENGINE once the Directors
+  // have handed the ticket over to engine execution. A handed-over
+  // ticket stays TICKET_WORKING until it completes or stops.
+  TicketExecutor executor = 26;
+  // Present iff executor is ENGINE: the effective handover time.
+  optional int64 handover_time = 27; // timestamp
+  // Present iff executor is ENGINE: the shares and the net fee of the desk's
+  // fills before the handover, which it froze. filled_shares and net_fee stay
+  // the totals; the engine's share is the totals less the desk's.
+  optional int64 desk_filled_shares = 28; // int64-qty
+  optional int64 desk_net_fee = 29; // int64-micro
+  // Present iff desk_filled_shares is above zero: the volume-weighted average
+  // price of the desk's fills, rounded as average_fill_price is. SPEC 24.4
+  optional int64 desk_average_fill_price = 30; // int64-micro
+  // The algorithm the ticket was accepted with: TWAP on a desk-routed or cure
+  // ticket (SPEC 23.2).
+  TicketAlgorithm algorithm = 31;
+  // What the automatic execution service is doing with the ticket. Set on a
+  // SERVICE ticket only; TICKET_ACTIVITY_UNSPECIFIED on any other (SPEC
+  // 23.2).
+  TicketActivity activity = 32;
+  // SERVICE ticket only: the filled shares were more than one nominal slice
+  // behind the schedule's due shares at the service's last assessment.
+  bool behind_schedule = 33;
+  // SERVICE ticket only, present once a trading suspension has shifted the
+  // schedule: the revised completion estimate. planned_completion_time stays
+  // the estimate at acceptance.
+  optional int64 revised_completion_time = 34; // timestamp
+  // SERVICE ticket only: the automatic execution configuration's version in
+  // force at acceptance. 0 on any other ticket.
+  uint32 config_version = 35;
+  // SERVICE ticket only, present once the service has assessed it: the
+  // service's last assessment of the ticket.
+  optional int64 last_assessment_time = 36; // timestamp
+  // The exact sum of quantity times price over the ticket's fills, fees
+  // excluded: the notional filled_shares were bought or sold for, so the
+  // exact average price is filled_notional / filled_shares. 0 before any
+  // fill. Set on every ticket (SPEC 23.2).
+  int64 filled_notional = 37; // int64-micro
+  // The ticket's scheduled-against-filled history, in strictly ascending
+  // time, no two points at one time (SPEC 23.3, SPEC 23.5): a point at each
+  // tick at or after accepted_time while the ticket works, the ticks being
+  // every session's open and every 30 minutes after it inside the session,
+  // and the session's close; and an end point at stopped_time when the
+  // ticket stops. A close or end point on a tick is one point. Sent in full
+  // on every ticket_state, the connect-time set included. Empty when the
+  // exchange holds no history for the ticket.
+  repeated TicketProgressPoint progress = 38;
+  // Present iff a Director's cancel of the ticket was logged outside a
+  // session and has not yet taken effect: the cancel's entry stamp. The
+  // ticket stays TICKET_WORKING, to stop TICKET_CANCELLED_BY_DIRECTOR at the
+  // next session open; absent once it has stopped (SPEC 23.4).
+  optional int64 director_stop_pending_time = 39; // timestamp
+  // Present iff cure is true: the session date (ISO 8601, as the calendar's
+  // session_date) whose official close is the cure deadline of the breach the
+  // cure answers. Before that close, if no cure works, the engine queues its
+  // own cure at it; after it, nothing steps in again (SPEC 23.6, Table 22).
+  optional string cure_deadline_date = 40;
+}
+
+// One point of a ticket's progress: the shares due by the schedule and the
+// shares filled, both cumulative from the ticket's start, at time. A tick's
+// filled_shares counts every fill stamped at or before the tick; an end
+// point's is the ticket's final filled_shares.
+message TicketProgressPoint {
+  int64 time = 1;          // timestamp. The tick, or stopped_time for the end point
+  int64 due_shares = 2;    // int64-qty. due_shares's rule, as of time
+  int64 filled_shares = 3; // int64-qty
 }

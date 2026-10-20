@@ -21,16 +21,28 @@ from qte_sdk.connection import (
 )
 from qte_sdk.contract.registry import INBOUND
 from qte_sdk.contract.v1.common_pb2 import (
+    AUTO_EXECUTION,
     BUY,
+    DESK,
+    ENGINE,
+    FALLBACK,
     LIMIT,
+    MESSAGE_BUDGET,
+    ROUTING_DESK,
+    ROUTING_SERVICE,
     SELL,
+    SERVICE,
     SIDE_UNSPECIFIED,
+    TAKING,
+    TICKET_ACTIVITY_UNSPECIFIED,
+    TICKET_ALGORITHM_UNSPECIFIED,
     TICKET_CANCELLED_BY_POD,
     TICKET_COMPLETE,
     TICKET_LIMIT_CANCELLED,
     TICKET_REQUEST_CANCEL,
     TICKET_REQUEST_SUBMIT,
     TICKET_SPLIT_CANCELLED,
+    TICKET_STATUS_UNSPECIFIED,
     TICKET_URGENCY_UNSPECIFIED,
     TICKET_WORKING,
     ReasonCodes,
@@ -52,6 +64,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     TicketReject,
     TicketState,
 )
+from qte_sdk.contract.v1.session_pb2 import ExecutionRoute
 from qte_sdk.market_data import as_market_data
 from qte_sdk.orders import (
     is_order_event,
@@ -63,11 +76,15 @@ from qte_sdk.orders import (
 from qte_sdk.reconnect import ReconnectingSession
 from qte_sdk.session import open_session
 from qte_sdk.tickets import (
+    EXECUTION_ROUTE_TYPE,
     TICKET_EVENT_TYPES,
+    TWAP,
     URGENCY_HIGH,
     URGENCY_LOW,
     URGENCY_MEDIUM,
+    VWAP,
     LatestTickets,
+    is_execution_route,
     is_ticket_event,
     parent_ticket_of,
     send_ticket,
@@ -202,6 +219,9 @@ async def test_a_ticket_goes_on_the_wire_as_its_canonical_json():
         "shares": "500",
         "limit_price": str(LIMIT_PRICE),
         "urgency": "URGENCY_MEDIUM",
+        # No algorithm given: the unset value, which the exchange reads as TWAP (an
+        # exchange from before the field ignores it, as it ignores any unknown field).
+        "algorithm": "TICKET_ALGORITHM_UNSPECIFIED",
     }
 
 
@@ -225,6 +245,13 @@ async def test_a_ticket_goes_on_the_wire_as_its_canonical_json():
         ({"limit_price": 1, "request_ref": ""}, "^request_ref must be"),
         ({"limit_price": 1, "side": SIDE_UNSPECIFIED}, "^side must be BUY or SELL"),
         ({"limit_price": 1, "urgency": TICKET_URGENCY_UNSPECIFIED}, "^urgency must be"),
+        (
+            {"limit_price": 1, "algorithm": TICKET_ALGORITHM_UNSPECIFIED},
+            "^algorithm must be TWAP or VWAP",
+        ),
+        ({"limit_price": 1, "algorithm": 3}, "^algorithm must be TWAP or VWAP"),
+        ({"limit_price": 1, "algorithm": True}, "^algorithm must be TWAP or VWAP"),
+        ({"limit_price": 1, "algorithm": "VWAP"}, "^algorithm must be TWAP or VWAP"),
     ],
 )
 async def test_a_ticket_that_breaks_a_rule_is_refused_before_sending(kwargs, message):
@@ -283,6 +310,48 @@ async def test_a_ticket_cancel_names_the_ticket():
     ref, type_, msg = await one_sent(lambda c: send_ticket_cancel(c, ticket_id="17"))
     assert type_ == "ticket_cancel"
     assert msg == CancelTicket(request_ref=ref, ticket_id="17")
+    assert not msg.HasField("replacing")
+
+
+async def test_a_plain_ticket_cancel_carries_no_replacing_field():
+    ref, _, msg = await one_sent(lambda c: send_ticket_cancel(c, ticket_id="17", replacing=False))
+    assert msg == CancelTicket(request_ref=ref, ticket_id="17")
+    assert not msg.HasField("replacing")
+
+
+async def test_a_replacing_ticket_cancel_sets_the_field():
+    ref, type_, msg = await one_sent(
+        lambda c: send_ticket_cancel(c, ticket_id="17", replacing=True, request_ref="t-2a")
+    )
+    assert (ref, type_) == ("t-2a", "ticket_cancel")
+    assert msg.HasField("replacing") and msg.replacing is True
+
+
+@pytest.mark.parametrize("bad", [1, 0, "true", None, 1.0])
+async def test_a_replacing_that_is_not_a_bool_is_refused_before_sending(bad):
+    conn = Recorder()
+    with pytest.raises(TypeError, match="^replacing must be a bool"):
+        await send_ticket_cancel(conn, ticket_id="17", replacing=bad)
+    assert conn.sent == []
+
+
+@pytest.mark.parametrize("replacing", [False, True])
+async def test_the_replacing_flag_goes_on_the_wire_only_when_true(replacing):
+    inbox: list[str] = []
+    async with exchange([], inbox) as url:
+        async with Connection(url) as conn:
+            await send_ticket_cancel(
+                conn, ticket_id="48211", replacing=replacing, request_ref="t-2a"
+            )
+            async for _ in conn:
+                pass
+    [raw] = inbox
+    payload = json.loads(raw)["payload"]
+    assert payload["ticket_id"] == "48211"
+    if replacing:
+        assert payload["replacing"] is True
+    else:
+        assert "replacing" not in payload
 
 
 async def test_an_urgency_change_names_the_ticket_and_the_new_urgency():
@@ -659,8 +728,10 @@ def test_a_sequence_gap_leaves_the_tickets_held():
     assert latest.get("17") is not None
 
 
-def ticket_frame(ticket_id: str, update_time: int, status: str = "TICKET_WORKING") -> str:
-    payload = {**state_payload(update_time, status), "ticket_id": ticket_id}
+def ticket_frame(
+    ticket_id: str, update_time: int, status: str = "TICKET_WORKING", **extra: Any
+) -> str:
+    payload = {**state_payload(update_time, status, **extra), "ticket_id": ticket_id}
     if status != "TICKET_WORKING":
         payload.update(stopped_time=str(update_time), stopped_mark="200050000")
     return frame("ticket_state", payload)
@@ -829,3 +900,433 @@ async def test_a_ticket_of_an_earlier_term_is_not_held_after_reconnecting_in_a_n
 
 def test_docstring_examples():
     assert doctest.testmod(tickets).failed == 0
+
+
+# Automatic execution: the algorithm, the SERVICE executor, execution_route and the fills
+# of the exchange's own children.
+
+
+@pytest.mark.parametrize("algorithm", [TWAP, VWAP])
+async def test_a_ticket_carries_the_algorithm_given(algorithm):
+    _, _, msg = await one_sent(
+        lambda c: send_ticket(
+            c,
+            instrument="AAPL",
+            side=BUY,
+            shares=500,
+            limit_price=LIMIT_PRICE,
+            urgency=URGENCY_MEDIUM,
+            algorithm=algorithm,
+        )
+    )
+    assert msg.algorithm == algorithm
+
+
+async def test_a_ticket_with_no_algorithm_sends_the_unset_value_the_exchange_reads_as_twap():
+    _, _, msg = await one_sent(
+        lambda c: send_ticket(
+            c, instrument="AAPL", side=BUY, shares=1, limit_price=1, urgency=URGENCY_LOW
+        )
+    )
+    assert msg.algorithm == TICKET_ALGORITHM_UNSPECIFIED
+
+
+@pytest.mark.parametrize("algorithm", [TWAP, VWAP])
+async def test_a_cure_ticket_may_name_either_algorithm_and_sends_it_as_given(algorithm):
+    # The exchange works a cure ticket as TWAP whatever it names, so naming VWAP is not
+    # an error to refuse: ticket_accepted.algorithm says TWAP.
+    _, _, msg = await one_sent(
+        lambda c: send_ticket(
+            c,
+            instrument="AAPL",
+            side=SELL,
+            shares=1,
+            urgency=URGENCY_LOW,
+            cure=True,
+            algorithm=algorithm,
+        )
+    )
+    assert msg.cure and msg.algorithm == algorithm
+
+
+async def test_a_vwap_ticket_goes_on_the_wire_by_name():
+    inbox: list[str] = []
+    async with exchange([], inbox) as url:
+        async with Connection(url) as conn:
+            await send_ticket(
+                conn,
+                instrument="AAPL",
+                side=BUY,
+                shares=500,
+                limit_price=LIMIT_PRICE,
+                urgency=URGENCY_MEDIUM,
+                algorithm=VWAP,
+                request_ref="r-1",
+            )
+            async for _ in conn:
+                pass
+    [raw] = inbox
+    assert json.loads(raw)["payload"]["algorithm"] == "VWAP"
+
+
+def test_the_algorithms_are_the_contracts_twap_and_vwap():
+    assert (tickets.TWAP, tickets.VWAP) == (1, 2)
+    assert {"TWAP", "VWAP"} <= set(tickets.__all__)
+
+
+def test_the_vwap_refusal_is_named():
+    assert ticket_reason_code_name(1713) == "TICKET_ALGORITHM_UNAVAILABLE"
+    assert TicketReasonCodes.TICKET_ALGORITHM_UNAVAILABLE == 1713
+
+
+def test_the_route_off_refusal_is_named():
+    assert ticket_reason_code_name(1714) == "TICKET_SERVICE_OFF"
+    assert TicketReasonCodes.TICKET_SERVICE_OFF == 1714
+
+
+def service_state_payload(update_time: int, **extra: Any) -> dict:
+    fields = {
+        "algorithm": "VWAP",
+        "executor": "SERVICE",
+        "activity": "TAKING",
+        "behind_schedule": True,
+        "revised_completion_time": "1791400000000",
+        "config_version": 4,
+        "last_assessment_time": "1791207000500",
+        "filled_notional": "16008000000",
+    }
+    payload = state_payload(update_time, **{**fields, **extra})
+    del payload["desk"]  # a SERVICE ticket has no desk
+    return payload
+
+
+async def test_a_service_ticket_is_accepted_with_its_algorithm_and_executor():
+    [event] = await received(
+        frame("ticket_accepted", accepted_payload(algorithm="VWAP", executor="SERVICE"), 1)
+    )
+    assert event.message.algorithm == VWAP
+    assert event.message.executor == SERVICE
+    assert event.unknown_enum_names() == {}
+
+
+async def test_a_service_tickets_progress_reaches_latest_tickets():
+    events = await received(
+        frame("ticket_state", service_state_payload(10), 1),
+        frame("ticket_state", service_state_payload(20, activity="MESSAGE_BUDGET"), 2),
+    )
+    latest = LatestTickets()
+    assert [latest.update(e) for e in events] == [True, True]
+    held = latest.get("17")
+    assert held.desk == ""
+    assert held.executor == SERVICE
+    assert held.algorithm == VWAP
+    assert held.activity == MESSAGE_BUDGET
+    assert held.behind_schedule is True
+    assert held.revised_completion_time == 1_791_400_000_000
+    assert held.planned_completion_time == 1_791_300_000_000
+    assert held.config_version == 4
+    assert held.last_assessment_time == 1_791_207_000_500
+    assert held.filled_notional == 16_008_000_000
+    assert [s.ticket_id for s in latest.working()] == ["17"]
+    assert events[0].message.activity == TAKING
+
+
+async def test_an_activity_this_sdk_does_not_know_keeps_its_name():
+    [event] = await received(
+        frame("ticket_state", service_state_payload(10, activity="SOMETHING_NEW"), 1)
+    )
+    assert event.message.activity == TICKET_ACTIVITY_UNSPECIFIED
+    assert event.unknown_enum_names() == {"activity": "SOMETHING_NEW"}
+
+
+async def test_a_status_this_sdk_does_not_know_is_a_stop_that_keeps_its_name():
+    # A newer contract can add a way a ticket stops (a Director's cancel, say): it decodes,
+    # keeps the name the exchange sent, and the ticket is no longer working.
+    events = await received(
+        frame("ticket_state", state_payload(10), 1),
+        frame("ticket_state", state_payload(20, "TICKET_CANCELLED_BY_SOMEONE_NEW"), 2),
+    )
+    latest = LatestTickets()
+    assert [latest.update(e) for e in events] == [True, True]
+    assert events[1].message.status == TICKET_STATUS_UNSPECIFIED
+    assert events[1].unknown_enum_names() == {"status": "TICKET_CANCELLED_BY_SOMEONE_NEW"}
+    assert latest.working() == []
+
+
+async def test_a_desk_ticket_has_no_service_fields_and_a_handover_carries_the_desks_part():
+    events = await received(
+        frame("ticket_state", state_payload(10, executor="DESK"), 1),
+        frame(
+            "ticket_state",
+            state_payload(
+                20,
+                executor="ENGINE",
+                handover_time="1791207000400",
+                desk_filled_shares="50",
+                desk_net_fee="-700",
+                desk_average_fill_price="200050000",
+            ),
+            2,
+        ),
+    )
+    desk, engine = (e.message for e in events)
+    assert desk.executor == DESK
+    assert desk.activity == TICKET_ACTIVITY_UNSPECIFIED
+    assert not desk.HasField("handover_time")
+    assert not desk.HasField("revised_completion_time")
+    assert desk.config_version == 0
+    assert engine.executor == ENGINE
+    assert engine.status == TICKET_WORKING
+    assert engine.handover_time == 1_791_207_000_400
+    assert (engine.desk_filled_shares, engine.desk_net_fee) == (50, -700)
+    assert engine.desk_average_fill_price == 200_050_000
+
+
+@pytest.mark.parametrize("origin", ["AUTO_EXECUTION", "FALLBACK"])
+async def test_a_fill_of_the_exchanges_child_names_its_ticket_and_origin(origin):
+    [event] = await received(
+        frame(
+            "execution",
+            {
+                "exec_id": "x-1",
+                "origin": origin,
+                "instrument": "AAPL",
+                "side": "BUY",
+                "fill_price": "200100000",
+                "fill_size": "40",
+                "remaining_size": "0",
+                "parent_ticket_id": "17",
+            },
+            1,
+            report_seq=5,
+        )
+    )
+    assert is_order_event(event)
+    assert event.message.origin == {"AUTO_EXECUTION": AUTO_EXECUTION, "FALLBACK": FALLBACK}[origin]
+    assert event.unknown_enum_names() == {}
+    assert parent_ticket_of(event.message) == "17"
+    assert not event.message.HasField("strat_id")
+
+
+def test_a_handed_over_childs_reject_is_named():
+    assert reason_code_name(ReasonCodes.PARENT_HANDED_OVER) == "PARENT_HANDED_OVER"
+
+
+def route_payload(**extra: Any) -> dict[str, Any]:
+    return {"routing_in_force": "ROUTING_SERVICE", "config_version": 4, **extra}
+
+
+def test_execution_route_is_registered():
+    assert INBOUND[EXECUTION_ROUTE_TYPE] is ExecutionRoute
+    assert EXECUTION_ROUTE_TYPE not in TICKET_EVENT_TYPES
+
+
+async def test_execution_route_is_decoded_and_is_neither_a_ticket_nor_an_order_event():
+    [event] = await received(
+        frame("execution_route", route_payload(routing_next_open="ROUTING_DESK", paused=True), 1)
+    )
+    assert isinstance(event, Received)
+    assert is_execution_route(event)
+    assert not is_ticket_event(event)
+    assert not is_order_event(event)
+    assert as_market_data(event) is None
+    route = event.message
+    assert route.routing_in_force == ROUTING_SERVICE
+    assert route.HasField("routing_next_open") and route.routing_next_open == ROUTING_DESK
+    assert route.config_version == 4
+    assert route.paused is True
+    assert event.report_seq is None
+
+
+async def test_latest_tickets_keeps_the_newest_route_and_forgets_it_on_a_disconnect():
+    events = await received(
+        frame("execution_route", {"routing_in_force": "ROUTING_DESK"}, 1),
+        frame("execution_route", route_payload(), 2),
+        frame("execution_route", route_payload(), 3),
+    )
+    latest = LatestTickets()
+    assert latest.route is None
+    assert [latest.update(e) for e in events] == [True, True, False]
+    assert latest.route.routing_in_force == ROUTING_SERVICE
+    assert not latest.route.HasField("routing_next_open")
+    assert len(latest) == 0
+    assert latest.update(Disconnected(None))
+    assert latest.route is None
+    latest.update(events[0])
+    latest.clear()
+    assert latest.route is None
+
+
+DESK_ROUTE = frame("execution_route", {"routing_in_force": "ROUTING_DESK"})
+SERVICE_ROUTE = frame("execution_route", route_payload())
+# A control logged mid-session: the service paused, under a new configuration.
+PAUSED_ROUTE = frame("execution_route", route_payload(config_version=5, paused=True))
+
+
+@pytest.mark.parametrize("first", [True, False], ids=["before-states", "after-states"])
+async def test_a_reconnect_delivers_each_connections_route_before_its_replay(first):
+    def group(route: str, *states: str) -> list[str]:
+        # Contract 01 sends the calendar and the instruments straight after the ack; the
+        # route follows, at a point among the ticket states the contract does not fix.
+        return connect_group(route, *states) if first else connect_group(*states, route)
+
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "before_resume": group(DESK_ROUTE, ticket_frame("17", 10)),
+            "answer": [resume_ack()],
+            "after": [order_state(1)],
+            "drop": True,
+        },
+        {
+            "term": TERM,
+            "before_resume": group(SERVICE_ROUTE, ticket_frame("17", 50)),
+            # A report missed while disconnected is replayed after the route arrives.
+            "answer": [resume_ack(True, 2), order_state(2)],
+            "after": [PAUSED_ROUTE, book(7)],
+        },
+    )
+    events, latest, last_report_seq = await read_until_book(exchange)
+    assert last_report_seq == 2
+    reconnected = kinds(events)[kinds(events).index("Disconnected") :]
+    states = ["ticket_state:None"]
+    expected = ["execution_route:None", *states] if first else [*states, "execution_route:None"]
+    assert reconnected[3:] == [
+        "calendar:None",
+        "instruments:None",
+        *expected,
+        "resume_ack:None",
+        "order_state:2",
+        "ResumeComplete",
+        "execution_route:None",
+        "book:None",
+    ]
+    routes = [e.message for e in events if is_execution_route(e)]
+    assert [(r.routing_in_force, r.config_version, r.paused) for r in routes] == [
+        (ROUTING_DESK, 0, False),
+        (ROUTING_SERVICE, 4, False),
+        (ROUTING_SERVICE, 5, True),
+    ]
+    assert latest.route == routes[-1]
+    assert latest.get("17").update_time == 50
+
+
+# Progress (qte-platform contract 11, choice 18).
+
+
+def point(time: int, due: int, filled: int) -> dict[str, str]:
+    return {"time": str(time), "due_shares": str(due), "filled_shares": str(filled)}
+
+
+def points(state: TicketState) -> list[tuple[int, int, int]]:
+    return [(p.time, p.due_shares, p.filled_shares) for p in state.progress]
+
+
+OPEN = 1_791_207_000_000  # a session's open, in milliseconds
+HALF_HOUR = 30 * 60 * 1000
+
+
+async def test_a_tickets_progress_is_decoded_point_by_point_in_ascending_time():
+    progress = [
+        point(OPEN, 9_800, 8_000),
+        point(OPEN + HALF_HOUR, 19_600, 17_500),
+        point(OPEN + 2 * HALF_HOUR, 29_400, 26_500),
+    ]
+    [event] = await received(frame("ticket_state", state_payload(10, progress=progress), 1))
+    assert is_ticket_event(event)
+    assert points(event.message) == [
+        (OPEN, 9_800, 8_000),
+        (OPEN + HALF_HOUR, 19_600, 17_500),
+        (OPEN + 2 * HALF_HOUR, 29_400, 26_500),
+    ]
+    assert all(isinstance(value, int) for row in points(event.message) for value in row)
+    assert event.unknown_enum_names() == {}
+
+
+async def test_a_stopped_tickets_progress_ends_at_its_stop_time():
+    stop = OPEN + HALF_HOUR + 1_000
+    progress = [point(OPEN, 100, 80), point(stop, 120, 500)]
+    [event] = await received(
+        frame(
+            "ticket_state",
+            state_payload(
+                20,
+                "TICKET_COMPLETE",
+                filled_shares="500",
+                stopped_time=str(stop),
+                progress=progress,
+            ),
+            1,
+        )
+    )
+    end = event.message.progress[-1]
+    assert end.time == stopped_time_of(event.message)
+    assert end.filled_shares == event.message.filled_shares == 500
+
+
+@pytest.mark.parametrize("progress", [None, []], ids=["absent", "empty"])
+async def test_a_ticket_with_no_history_has_an_empty_progress(progress):
+    extra = {} if progress is None else {"progress": progress}
+    [event] = await received(frame("ticket_state", state_payload(10, **extra), 1))
+    latest = LatestTickets()
+    assert latest.update(event)
+    held = latest.get("17")
+    assert len(held.progress) == 0
+    assert list(held.progress) == []
+
+
+async def test_each_state_replaces_the_progress_held_and_never_appends_to_it():
+    events = await received(
+        frame("ticket_state", state_payload(10, progress=[point(OPEN, 100, 80)]), 1),
+        frame(
+            "ticket_state",
+            state_payload(20, progress=[point(OPEN, 100, 80), point(OPEN + HALF_HOUR, 200, 150)]),
+            2,
+        ),
+        # The exchange dropped the history (a split adjustment): the list held empties.
+        frame("ticket_state", state_payload(30, progress=[]), 3),
+    )
+    latest = LatestTickets()
+    assert latest.update(events[0])
+    assert points(latest.get("17")) == [(OPEN, 100, 80)]
+    assert latest.update(events[1])
+    assert points(latest.get("17")) == [(OPEN, 100, 80), (OPEN + HALF_HOUR, 200, 150)]
+    assert latest.update(events[2])
+    assert points(latest.get("17")) == []
+    # An older state does not bring an older list back.
+    assert not latest.update(events[0])
+    assert points(latest.get("17")) == []
+
+
+async def test_the_connect_time_set_carries_each_tickets_whole_progress():
+    first = [point(OPEN, 100, 80), point(OPEN + HALF_HOUR, 200, 150)]
+    second = [*first, point(OPEN + 2 * HALF_HOUR, 300, 290)]
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "before_resume": connect_group(
+                ticket_frame("17", 10, progress=first), ticket_frame("18", 10)
+            ),
+            "answer": [resume_ack()],
+            "after": [order_state(1)],
+            "drop": True,
+        },
+        {
+            "term": TERM,
+            # The new connection's set: each ticket's whole list again, not what is new.
+            "before_resume": connect_group(
+                ticket_frame("17", 50, progress=second), ticket_frame("18", 50)
+            ),
+            "answer": [resume_ack(True, 1)],
+            "after": [book(7)],
+        },
+    )
+    events, latest, _ = await read_until_book(exchange)
+    states = [e.message for e in events if isinstance(e, Received) and e.type == "ticket_state"]
+    assert [len(s.progress) for s in states if s.ticket_id == "17"] == [2, 3]
+    assert points(latest.get("17")) == [
+        (OPEN, 100, 80),
+        (OPEN + HALF_HOUR, 200, 150),
+        (OPEN + 2 * HALF_HOUR, 300, 290),
+    ]
+    assert points(latest.get("18")) == []

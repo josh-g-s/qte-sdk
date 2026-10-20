@@ -1,6 +1,6 @@
 // Inbound order entry.
 //
-// **Version:** 1.9
+// **Version:** 1.11
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`, and, from a Fundamentals pod only, `ticket`, `ticket_cancel`
@@ -187,6 +187,13 @@ message SubmitTicket {
   // Present and true on a cure ticket; absent means an ordinary ticket.
   // SPEC 23.3
   optional bool cure = 11;
+  // The execution algorithm the automatic execution service works the ticket
+  // with (SPEC 23.2). TICKET_ALGORITHM_UNSPECIFIED (unset) means
+  // TWAP. Read only when the ticket is routed to the service at acceptance:
+  // a desk-routed ticket ignores it. A cure ticket is always TWAP, whatever
+  // it names. VWAP is refused TICKET_ALGORITHM_UNAVAILABLE while no VWAP
+  // profile is available. On a SERVICE ticket `notes` is ignored.
+  TicketAlgorithm algorithm = 12;
 }
 
 // Cancels one of the pod's own ordinary tickets that is still working. The
@@ -197,6 +204,13 @@ message SubmitTicket {
 message CancelTicket {
   string request_ref = 1; // id, 1 to 32 bytes. Client correlation id, echoed on the response
   string ticket_id = 2;   // id, decimal digits only. The ticket to cancel
+  // Present and true when this cancel is the first half of an amendment, the
+  // pod's replacement ticket to follow; absent means false, a plain cancel.
+  // In a term with no Fundamentals-to-Execution pairing, while SERVICE
+  // routing is not in force, the replacement would be refused, so a
+  // replacing cancel is refused TICKET_SERVICE_OFF and the ticket keeps
+  // working. Not logged. SPEC 23.2, SPEC 23.4
+  optional bool replacing = 3;
 }
 
 // Raises the urgency of the pod's working cure ticket. A cure ticket's

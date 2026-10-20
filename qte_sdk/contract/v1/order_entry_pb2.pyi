@@ -66,7 +66,7 @@ class MassCancel(_message.Message):
     def __init__(self, request_ref: _Optional[str] = ...) -> None: ...
 
 class SubmitTicket(_message.Message):
-    __slots__ = ("request_ref", "thesis_id", "thesis_version", "instrument", "side", "shares", "limit_price", "urgency", "notes", "replaces_ticket_id", "cure")
+    __slots__ = ("request_ref", "thesis_id", "thesis_version", "instrument", "side", "shares", "limit_price", "urgency", "notes", "replaces_ticket_id", "cure", "algorithm")
     REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
     THESIS_ID_FIELD_NUMBER: _ClassVar[int]
     THESIS_VERSION_FIELD_NUMBER: _ClassVar[int]
@@ -78,6 +78,7 @@ class SubmitTicket(_message.Message):
     NOTES_FIELD_NUMBER: _ClassVar[int]
     REPLACES_TICKET_ID_FIELD_NUMBER: _ClassVar[int]
     CURE_FIELD_NUMBER: _ClassVar[int]
+    ALGORITHM_FIELD_NUMBER: _ClassVar[int]
     request_ref: str
     thesis_id: str
     thesis_version: int
@@ -89,15 +90,18 @@ class SubmitTicket(_message.Message):
     notes: str
     replaces_ticket_id: str
     cure: bool
-    def __init__(self, request_ref: _Optional[str] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., limit_price: _Optional[int] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ..., notes: _Optional[str] = ..., replaces_ticket_id: _Optional[str] = ..., cure: bool = ...) -> None: ...
+    algorithm: _common_pb2.TicketAlgorithm
+    def __init__(self, request_ref: _Optional[str] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., limit_price: _Optional[int] = ..., urgency: _Optional[_Union[_common_pb2.TicketUrgency, str]] = ..., notes: _Optional[str] = ..., replaces_ticket_id: _Optional[str] = ..., cure: bool = ..., algorithm: _Optional[_Union[_common_pb2.TicketAlgorithm, str]] = ...) -> None: ...
 
 class CancelTicket(_message.Message):
-    __slots__ = ("request_ref", "ticket_id")
+    __slots__ = ("request_ref", "ticket_id", "replacing")
     REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
     TICKET_ID_FIELD_NUMBER: _ClassVar[int]
+    REPLACING_FIELD_NUMBER: _ClassVar[int]
     request_ref: str
     ticket_id: str
-    def __init__(self, request_ref: _Optional[str] = ..., ticket_id: _Optional[str] = ...) -> None: ...
+    replacing: bool
+    def __init__(self, request_ref: _Optional[str] = ..., ticket_id: _Optional[str] = ..., replacing: bool = ...) -> None: ...
 
 class RaiseTicketUrgency(_message.Message):
     __slots__ = ("request_ref", "ticket_id", "urgency")

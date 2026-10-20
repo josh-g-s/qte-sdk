@@ -797,10 +797,11 @@ async def test_print_book_stops_after_its_message_count():
     assert out.count("market session 2026-01-05: OPEN") == 1
     # The fake sends the same book again at the same grid time: it is printed once.
     assert out.count("book   TEST") == 1
+    # A Director's request; the SDK leaves it False, printed as a no-presence zero value.
     assert exchange.received[0] == {
         "version": CONTRACT_VERSION,
         "type": "auth",
-        "payload": {"token": token},
+        "payload": {"token": token, "subscribe_tickets": False},
     }
     assert exchange.types() == ["auth", "subscribe"]
     assert token not in out + err
@@ -817,7 +818,7 @@ async def test_an_example_reads_the_address_and_token_from_dotenv_in_its_working
             "print_book.py", None, None, "--instrument", INSTRUMENT, "--max-messages", "2"
         )
     assert code == 0, err
-    assert exchange.received[0]["payload"] == {"token": token}
+    assert exchange.received[0]["payload"] == {"token": token, "subscribe_tickets": False}
     assert token not in out + err
 
 
@@ -1980,9 +1981,14 @@ async def test_options_bot_names_the_level_on_a_second_ctrl_c_while_cancelling()
     )
 
 
+# The arguments an example needs to get as far as connecting, beyond QTE_STRAT_ID.
+REQUIRED_ARGS = {"fundamentals_pod.py": ("--shares", "100", "--limit", "200")}
+
+
 @pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
 async def test_each_example_refuses_to_start_without_an_exchange_url(path: Path):
-    code, out, err = await run_example(path.name, None, synthetic_token(), QTE_STRAT_ID="x")
+    args = REQUIRED_ARGS.get(path.name, ())
+    code, out, err = await run_example(path.name, None, synthetic_token(), *args, QTE_STRAT_ID="x")
     assert code == 2
     assert "QTE_URL" in err
 
@@ -1990,7 +1996,8 @@ async def test_each_example_refuses_to_start_without_an_exchange_url(path: Path)
 @pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
 async def test_each_example_refuses_to_start_without_a_token(path: Path):
     async with serve_local(FakeExchange()) as url:
-        code, out, err = await run_example(path.name, url, None, QTE_STRAT_ID="x")
+        args = REQUIRED_ARGS.get(path.name, ())
+        code, out, err = await run_example(path.name, url, None, *args, QTE_STRAT_ID="x")
     assert code == 2
     assert "QTE_TOKEN" in err
 

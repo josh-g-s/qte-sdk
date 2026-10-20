@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.13
+**Version:** 0.14
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -220,6 +220,12 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 - Raised as: `SessionTimeout`, a `TimeoutError`, from `Session.resume`.
 - Cause: The exchange did not answer the resume within `timeout` seconds.
 - Fix: Open a new session and resume again, or raise `timeout`.
+
+### QTE-SESSION-LOG-CHANGED
+
+- Raised as: a WARNING from the `qte_sdk.reconnect` logger, with `old_log_id`, `new_log_id` and `cursor`, logged by a `ReconnectingSession` when it forgets its report cursor for this reason.
+- Cause: A new session's `session_ack` named a different event log (`log_id`, 16 lowercase hex characters) from the one the report cursor was counted under: the exchange started a new log, for a new term or a fresh start. Report numbers belong to one log, so the old cursor would skip the new log's first reports. The cursor was reset, as at a term change: with a resume the session asks from 0 and gets a snapshot of your resting orders; with `resume=False` it counts the new log's reports from the first it reads. A `log_id` that is absent or malformed is unknown: it resets the cursor too, as the contract asks, but without this warning.
+- Fix: Nothing to retry. Treat the resting orders you track as unknown until a snapshot loads them: with a resume, until the next `ResumeComplete`; with `resume=False`, which never gets one, until you call `resume(0)` on a session of your own. Check your positions with `send_account_query` before you trade. With `Session.resume` on your own, pass your saved `last_report_seq` only when `info.log_id` is known and equal to the one it was counted under, and 0 otherwise.
 
 ## CONNECT
 

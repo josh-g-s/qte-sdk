@@ -38,24 +38,28 @@ CALL: OptionRight
 PUT: OptionRight
 
 class Auth(_message.Message):
-    __slots__ = ("token",)
+    __slots__ = ("token", "subscribe_tickets")
     TOKEN_FIELD_NUMBER: _ClassVar[int]
+    SUBSCRIBE_TICKETS_FIELD_NUMBER: _ClassVar[int]
     token: str
-    def __init__(self, token: _Optional[str] = ...) -> None: ...
+    subscribe_tickets: bool
+    def __init__(self, token: _Optional[str] = ..., subscribe_tickets: bool = ...) -> None: ...
 
 class SessionAck(_message.Message):
-    __slots__ = ("session_id", "team", "server_time", "contract_version", "unscored")
+    __slots__ = ("session_id", "team", "server_time", "contract_version", "unscored", "log_id")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     TEAM_FIELD_NUMBER: _ClassVar[int]
     SERVER_TIME_FIELD_NUMBER: _ClassVar[int]
     CONTRACT_VERSION_FIELD_NUMBER: _ClassVar[int]
     UNSCORED_FIELD_NUMBER: _ClassVar[int]
+    LOG_ID_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     team: str
     server_time: int
     contract_version: str
     unscored: bool
-    def __init__(self, session_id: _Optional[str] = ..., team: _Optional[str] = ..., server_time: _Optional[int] = ..., contract_version: _Optional[str] = ..., unscored: bool = ...) -> None: ...
+    log_id: str
+    def __init__(self, session_id: _Optional[str] = ..., team: _Optional[str] = ..., server_time: _Optional[int] = ..., contract_version: _Optional[str] = ..., unscored: bool = ..., log_id: _Optional[str] = ...) -> None: ...
 
 class CalendarSession(_message.Message):
     __slots__ = ("session_date", "open_time", "close_time", "early_close")
@@ -160,6 +164,18 @@ class SessionReject(_message.Message):
 class Heartbeat(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class ExecutionRoute(_message.Message):
+    __slots__ = ("routing_in_force", "routing_next_open", "config_version", "paused")
+    ROUTING_IN_FORCE_FIELD_NUMBER: _ClassVar[int]
+    ROUTING_NEXT_OPEN_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_VERSION_FIELD_NUMBER: _ClassVar[int]
+    PAUSED_FIELD_NUMBER: _ClassVar[int]
+    routing_in_force: _common_pb2.ExecutionRouting
+    routing_next_open: _common_pb2.ExecutionRouting
+    config_version: int
+    paused: bool
+    def __init__(self, routing_in_force: _Optional[_Union[_common_pb2.ExecutionRouting, str]] = ..., routing_next_open: _Optional[_Union[_common_pb2.ExecutionRouting, str]] = ..., config_version: _Optional[int] = ..., paused: bool = ...) -> None: ...
 
 class Resume(_message.Message):
     __slots__ = ("last_report_seq",)
