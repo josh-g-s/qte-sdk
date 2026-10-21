@@ -7,7 +7,7 @@ This repository contains only participant-facing material. Exchange internals (t
 ## Requirements
 
 - Python 3.11 or later.
-- The address of the exchange you are trading on, your team's practice token and, for any program that sends orders, a strategy ID registered for your team. Contact the Head of Technology, Joshua, for all three. Treat the token like a password: never put it in a source file, a notebook, a screenshot or a repository.
+- The address of the exchange you are trading on, your team's practice token and, for any program that sends orders, a strategy ID registered for your team. Contact the Head of Technology, Joshua, for the address and the token. Your Team Lead registers it, with its declared scope, on the Strategy registration page of the Team Lead console. Registrations are accepted at any hour, including before the term's first session, and count for orders sent after one is accepted. October registrations do not carry into Winter. Before a session opens, every order is rejected `MARKET_CLOSED`. In a session, an order under a strategy ID that is not registered, or whose registration was retired, is rejected `STRATEGY_NOT_REGISTERED`, and one outside the declared scope `OUTSIDE_DECLARED_SCOPE`. Treat the token like a password: never put it in a source file, a notebook, a screenshot or a repository.
 
 ## Install
 

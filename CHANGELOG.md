@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.58
+**Version:** 0.59
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- Docs: who registers a strategy ID. The README, the quickstart and AGENTS.md said to ask the Head of Technology; your Team Lead registers it in the Team Lead console, and October registrations do not carry into Winter. Docs only.
 
 ## 1.5.0
 
