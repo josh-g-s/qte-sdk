@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.58
+**Version:** 0.59
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- Docs: from the Winter term on, Agentic AI teams also stop trading at the term-end cutoff, five minutes before the final session's close, and get `TERM_CUTOFF` and `TRADING_CUTOFF` as Market Taking does (qte-platform #2607, #2609). Docs only.
 
 ## 1.5.0
 
