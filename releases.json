@@ -50,7 +50,7 @@
   {
     "version": "1.5.0",
     "recommended": true,
-    "why": "a Director's amend now sends your pod a replacement ticket to follow; tickets carry progress; option history and a watch-only options bot; code naming the retired fallback must drop it",
+    "why": "a Director's amend now sends your pod a replacement ticket to follow; tickets carry progress; a watch-only options bot; code naming the retired fallback must drop it",
     "platforms": []
   }
 ]
