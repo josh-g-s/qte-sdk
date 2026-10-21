@@ -46,5 +46,11 @@
     "recommended": true,
     "why": "Fundamentals pods can read tickets under automatic execution and must take positions from account_state; a reconnect after a new event log no longer skips reports; a halted options chain is named",
     "platforms": []
+  },
+  {
+    "version": "1.5.0",
+    "recommended": true,
+    "why": "a Director's amend now sends your pod a replacement ticket to follow; tickets carry progress; option history and a watch-only options bot; code naming the retired fallback must drop it",
+    "platforms": []
   }
 ]
