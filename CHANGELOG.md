@@ -8,7 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-- Docs: who registers a strategy ID. The README, the quickstart and AGENTS.md said to ask the Head of Technology; your Team Lead registers it in the Team Lead console, and October registrations do not carry into Winter. Docs only.
+- Docs: who registers a strategy ID. The README, the quickstart and AGENTS.md said to ask the Head of Technology; your Team Lead registers it in the Team Lead console, and a registration made while October runs is not live in Winter, so Team Leads register after October ends. Docs only.
 
 ## 1.5.0
 
