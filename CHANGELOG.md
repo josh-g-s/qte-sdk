@@ -8,7 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-- Docs: from the Winter term on, Agentic AI teams also stop trading at the term-end cutoff, five minutes before the final session's close, and get `TERM_CUTOFF` and `TRADING_CUTOFF` as Market Taking does (qte-platform #2607, #2609). Docs only.
+- Docs: Agentic AI teams, who sit out the Winter term and start in Spring, also stop trading at the term-end cutoff in every term they trade, five minutes before the final session's close, and get `TERM_CUTOFF` and `TRADING_CUTOFF` as Market Taking does (qte-platform #2607, #2609). Docs only.
 
 ## 1.5.0
 
