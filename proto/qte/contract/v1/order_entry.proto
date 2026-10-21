@@ -1,10 +1,11 @@
 // Inbound order entry.
 //
-// **Version:** 1.11
+// **Version:** 1.12
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`, and, from a Fundamentals pod only, `ticket`, `ticket_cancel`
-// and `ticket_urgency` (see the end of this file). Every new, cancel, amend and mass-cancel message is released
+// and `ticket_urgency`, and, from a Director session only, `house_ticket` and
+// `house_ticket_cancel` (see the end of this file). Every new, cancel, amend and mass-cancel message is released
 // to the engine delta_oe after gateway receipt (SPEC 8.1, SPEC 8.2); nothing
 // about that timing is a field here.
 //
@@ -159,7 +160,7 @@ message MassCancel {
 // (SPEC 23.2).
 //
 // An ordinary ticket carries a hard execution limit price. A cure ticket
-// (SPEC 23.3) carries none and is flagged cure; its `limit_price` is absent.
+// (SPEC 23.6) carries none and is flagged cure; its `limit_price` is absent.
 message SubmitTicket {
   string request_ref = 1;   // id, 1 to 32 bytes. Client correlation id, echoed on the response
   // Present on an opening or increasing ticket: the filed thesis covering
@@ -173,7 +174,7 @@ message SubmitTicket {
   Side side = 5;            // BUY or SELL. SPEC 23.2
   int64 shares = 6;         // int64-qty, a whole number of shares, positive. SPEC 23.2
   // Required unless cure is set, and absent on a cure ticket: the hard
-  // execution limit, a tick multiple. SPEC 23.2, SPEC 23.3
+  // execution limit, a tick multiple. SPEC 23.2, SPEC 23.6
   optional int64 limit_price = 7; // int64-micro
   TicketUrgency urgency = 8;  // SPEC 23.2
   // Optional free text for the desk, at most 280 characters, with no NUL
@@ -182,10 +183,10 @@ message SubmitTicket {
   // Present when this ticket replaces one the pod cancelled: the ticket_id of
   // that cancelled ticket of the same pod in the same instrument. Absent on a
   // cure ticket, whose acceptance replaces any ordinary reducing ticket in the
-  // instrument by itself. SPEC 23.2, SPEC 23.3
+  // instrument by itself. SPEC 23.2, SPEC 23.6
   optional string replaces_ticket_id = 10; // id, decimal digits only
   // Present and true on a cure ticket; absent means an ordinary ticket.
-  // SPEC 23.3
+  // SPEC 23.6
   optional bool cure = 11;
   // The execution algorithm the automatic execution service works the ticket
   // with (SPEC 23.2). TICKET_ALGORITHM_UNSPECIFIED (unset) means
@@ -198,7 +199,7 @@ message SubmitTicket {
 
 // Cancels one of the pod's own ordinary tickets that is still working. The
 // pod may cancel an ordinary ticket at any time; a cure ticket cannot be
-// cancelled by the pod (SPEC 23.2, SPEC 23.3). The remainder is cancelled,
+// cancelled by the pod (SPEC 23.2, SPEC 23.6). The remainder is cancelled,
 // the desk's children are cancelled with it and committed fills stand
 // (SPEC 24.1). The desk may never cancel or amend a ticket (SPEC 23.2).
 message CancelTicket {
@@ -215,9 +216,61 @@ message CancelTicket {
 
 // Raises the urgency of the pod's working cure ticket. A cure ticket's
 // urgency may only increase, and the change applies to the remaining
-// schedule from then on, not to what is already due (SPEC 23.3).
+// schedule from then on, not to what is already due (SPEC 23.6).
 message RaiseTicketUrgency {
   string request_ref = 1; // id, 1 to 32 bytes. Client correlation id, echoed on the response
   string ticket_id = 2;   // id, decimal digits only. The cure ticket
-  TicketUrgency urgency = 3; // Higher than the ticket's current urgency. SPEC 23.3
+  TicketUrgency urgency = 3; // Higher than the ticket's current urgency. SPEC 23.6
+}
+
+// The two house ticket messages below: `house_ticket` and
+// `house_ticket_cancel` (contract 11; SPEC 24.1, SPEC 24.2).
+//
+// Sent by a Director session only: another session's is answered with the
+// ordinary `reject` MALFORMED_MESSAGE, as a message type its session is not
+// served. A house ticket is the house's instruction to an Execution desk the
+// Director chooses; it names a house instruction in place of a thesis, and
+// its children's fills post to the house account (SPEC 14). The answers are
+// those of the ticket messages: `ticket_accepted` or `ticket_reject` with
+// request_kind TICKET_REQUEST_SUBMIT or TICKET_REQUEST_CANCEL, then
+// `ticket_state`. Identifier limits are those above.
+
+// Submits a house ticket to an Execution desk on the term roster
+// (TICKET_DESK_NOT_EXECUTION otherwise). There is no thesis and no cure. An
+// amendment is a linked replacement (SPEC 24.1): a house_ticket_cancel, then,
+// once the ticket's ticket_state shows TICKET_CANCELLED_BY_HOUSE, a new
+// house_ticket naming it in replaces_ticket_id.
+// The pod-only checks (one working ticket per instrument, crossing zero, the
+// portfolio limits, completion after the term) do not apply; an unfilled
+// remainder expires at the term's final close (SPEC 24.1).
+message SubmitHouseTicket {
+  string request_ref = 1;          // id, 1 to 32 bytes. Client correlation id, echoed on the response
+  string house_instruction_id = 2; // id, at most 32 bytes. The house instruction, in place of a thesis. SPEC 24.1, SPEC 24.2
+  string desk = 3;                 // id, at most 32 bytes. An Execution desk on the term roster. SPEC 24.2
+  string instrument = 4;           // id, at most 32 bytes. SPEC 3.1
+  Side side = 5;                   // BUY or SELL
+  int64 shares = 6;                // int64-qty, a whole number of shares, positive
+  // The hard execution limit, a positive tick multiple, at or beyond the
+  // unshifted wall price the ticket would trade against. Required: a house
+  // ticket is never a cure ticket.
+  int64 limit_price = 7;           // int64-micro
+  TicketUrgency urgency = 8;       // SPEC 23.2, SPEC 24.1
+  // Optional free text for the desk, at most 280 characters, with no NUL
+  // character. Visible to the desk and logged; unscored.
+  optional string notes = 9;
+  // Present when this ticket replaces a house ticket the house cancelled:
+  // the ticket_id of that cancelled house ticket in the same instrument,
+  // which no other ticket already replaces (TICKET_REPLACES_INVALID
+  // otherwise). SPEC 24.1, SPEC 24.2
+  optional string replaces_ticket_id = 10; // id, decimal digits only
+}
+
+// Cancels a working house ticket. Any Director may cancel any house ticket.
+// The remainder is cancelled, the desk's children are cancelled with it and
+// committed fills stand (SPEC 24.1). The stop is reported in ticket_state as
+// TICKET_CANCELLED_BY_HOUSE. A ticket id that names no house ticket, a pod's
+// ticket included, is TICKET_NOT_FOUND; a stopped one is TICKET_NOT_WORKING.
+message CancelHouseTicket {
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id, echoed on the response
+  string ticket_id = 2;   // id, decimal digits only. The house ticket to cancel
 }

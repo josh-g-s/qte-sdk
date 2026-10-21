@@ -63,7 +63,7 @@ HAPPY = [
     ("ticket_state", state(10, activity="TAKING", due_shares="100", filled_shares="0")),
     ("execution", fill(200)),
     ("ticket_state", state(20, activity="POSTING", due_shares="300", filled_shares="200")),
-    ("execution", fill(300, "FALLBACK")),
+    ("execution", fill(300)),
     (
         "ticket_state",
         state(30, status="TICKET_COMPLETE", due_shares="500", filled_shares="500"),
@@ -203,9 +203,9 @@ async def test_a_pod_follows_its_service_ticket_to_complete_and_counts_no_fill()
     assert "ticket 17: TICKET_WORKING, filled 200 of 500, due 300, activity POSTING" in out
     assert "ticket 17: TICKET_COMPLETE, filled 500 of 500" in out
     assert "the ticket stopped: TICKET_COMPLETE" in out
-    # The service's and the engine's fills are printed, as information only.
+    # The service's fills are printed, as information only.
     assert "fill of the exchange's child (AUTO_EXECUTION) for ticket 17: 200 @ 200.1" in out
-    assert "fill of the exchange's child (FALLBACK) for ticket 17: 300 @ 200.1" in out
+    assert "fill of the exchange's child (AUTO_EXECUTION) for ticket 17: 300 @ 200.1" in out
     assert out.count("already in the ticket's filled_shares") == 2
     # The position after the stop is the second reply's (the next test tells them apart).
     assert "position in AAPL after the stop, from account_state: 500" in out
@@ -283,6 +283,52 @@ async def test_a_status_this_sdk_does_not_know_is_a_stop_named_as_sent():
     assert code == 0, out + err
     assert "the ticket stopped: TICKET_CANCELLED_BY_SOMEONE_NEW (not known to this SDK)" in out
     assert "position in AAPL after the stop, from account_state: 80" in out
+
+
+async def test_a_directors_amend_is_not_a_stop_and_the_replacement_is_followed():
+    replacement = {"ticket_id": "18", "replaces_ticket_id": "17", "shares": "700"}
+    after = [
+        ("ticket_state", state(10, activity="TAKING")),
+        ("ticket_state", state(20, status="TICKET_AMENDED_BY_DIRECTOR", filled_shares="80")),
+        ("ticket_state", state(20, activity="TAKING", **replacement)),
+        (
+            "ticket_state",
+            state(30, status="TICKET_COMPLETE", filled_shares="620", **replacement),
+        ),
+    ]
+    exchange = PodExchange(
+        route=route_payload(), accounts=[account(None), account(700)], after=after
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "5")
+    assert code == 0, out + err
+    assert "a Director amended the ticket: following its replacement" in out
+    assert "ticket 17 was replaced by ticket 18" in out
+    assert "ticket 18: TICKET_WORKING, filled 0 of 700" in out
+    assert "the ticket stopped: TICKET_AMENDED_BY_DIRECTOR" not in out
+    assert "the ticket stopped: TICKET_COMPLETE" in out
+    assert out.index("ticket 17 was replaced") < out.index("ticket 18: TICKET_COMPLETE")
+    assert "position in AAPL after the stop, from account_state: 700" in out
+    # The replacement came with no ticket_accepted, and the pod sent only its own ticket.
+    assert len(exchange.tickets()) == 1
+
+
+async def test_a_replacement_held_before_the_amend_is_followed_at_the_amend():
+    replacement = {"ticket_id": "18", "replaces_ticket_id": "17", "shares": "700"}
+    before = [("ticket_state", state(20, activity="TAKING", **replacement))]
+    after = [
+        ("ticket_state", state(20, status="TICKET_AMENDED_BY_DIRECTOR")),
+        ("ticket_state", state(30, status="TICKET_COMPLETE", **replacement)),
+    ]
+    exchange = PodExchange(
+        route=route_payload(),
+        accounts=[account(None), account(700)],
+        after=after,
+        before=before,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "5")
+    assert code == 0, out + err
+    assert out.index("a Director amended") < out.index("ticket 17 was replaced by ticket 18")
+    assert "the ticket stopped: TICKET_COMPLETE" in out
 
 
 async def test_a_paused_route_still_sends_the_ticket_and_says_the_service_will_catch_up():

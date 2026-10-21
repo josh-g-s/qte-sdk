@@ -31,9 +31,12 @@ What it does, in order:
    prints the stop reason (the status's name, or the unknown name the exchange sent).
    When the state carries `progress` (on `main` only until the next release), it also
    prints the newest point: its `time`, `due_shares` and `filled_shares`. Each state
-   carries the whole list, so the newest point is always the list's last.
-6. It prints each fill of the exchange's child orders (an `execution` with `origin`
-   `AUTO_EXECUTION`, or `FALLBACK` after a handover) as information only.
+   carries the whole list, so the newest point is always the list's last. A Director's
+   amend is not a stop for the pod: the ticket stops `TICKET_AMENDED_BY_DIRECTOR` and the
+   exchange sends, with no `ticket_accepted`, the state of a replacement ticket whose
+   `replaces_ticket_id` names it. The example says so and follows the replacement.
+6. It prints each fill of the service's child orders (an `execution` with `origin`
+   `AUTO_EXECUTION`) as information only.
 7. After the stop it asks for the account again and prints the position from that reply.
    Status 0.
 
@@ -42,7 +45,7 @@ The rules it follows, which a pod program should follow too:
 - The position comes from `account_state.positions`, the exchange's own count. A reply
   includes every fill up to its `as_of_report_seq`, and an instrument it does not list
   is a position of 0. A missing `summary` is unknown, never zero.
-- A service or FALLBACK fill is already in the ticket's `filled_shares` and in the
+- A service fill is already in the ticket's `filled_shares` and in the
   team's position: never add it on top of the ticket's totals or of a reply that covers
   it. To keep a running position between queries, use `qte_sdk.account.AccountReports`,
   which applies each fill once against the reply. Under the service the engine's own
@@ -98,9 +101,9 @@ from qte_sdk.connection import (
 from qte_sdk.contract.v1.common_pb2 import (
     AUTO_EXECUTION,
     BUY,
-    FALLBACK,
     ROUTING_DESK,
     SELL,
+    TICKET_AMENDED_BY_DIRECTOR,
     TICKET_WORKING,
     URGENCY_HIGH,
     URGENCY_LOW,
@@ -307,6 +310,24 @@ class Pod:
                 self.state_events[message.ticket_id] = event
                 if message.ticket_id == self.ticket_id:
                     self.on_state(event)
+                elif self.replaces_followed(message):
+                    self.follow_replacement(event)
+
+    def replaces_followed(self, state: TicketState) -> bool:
+        """Whether `state` is of a ticket that replaces the one followed, as a Director's
+        amend sends it (no `ticket_accepted` comes for it)."""
+        return (
+            self.ticket_id is not None
+            and state.HasField("replaces_ticket_id")
+            and state.replaces_ticket_id == self.ticket_id
+        )
+
+    def follow_replacement(self, event: Received) -> None:
+        state: TicketState = event.message
+        print(f"ticket {state.replaces_ticket_id} was replaced by ticket {state.ticket_id}")
+        self.ticket_id = state.ticket_id
+        self.stopped = False
+        self.on_state(event)
 
     def on_state(self, event: Received) -> None:
         state: TicketState = event.message
@@ -322,14 +343,24 @@ class Pod:
             print(
                 f"  progress at {point.time}: due {point.due_shares}, filled {point.filled_shares}"
             )
-        # Any status but TICKET_WORKING is a stop, one this SDK does not know included.
+        if state.status == TICKET_AMENDED_BY_DIRECTOR:
+            # Not the end: a replacement naming this ticket in replaces_ticket_id is
+            # accepted at the same instant. Follow it, whether its state came already or
+            # is still to come.
+            print("a Director amended the ticket: following its replacement")
+            for newer in list(self.state_events.values()):
+                if self.replaces_followed(newer.message):
+                    self.follow_replacement(newer)
+                    break
+            return
+        # Any other status but TICKET_WORKING is a stop, one this SDK does not know included.
         if state.status != TICKET_WORKING:
             print(f"the ticket stopped: {status}")
             self.stopped = True
 
     def on_order_event(self, event: Received) -> None:
         message: Message = event.message
-        if isinstance(message, Execution) and message.origin in (AUTO_EXECUTION, FALLBACK):
+        if isinstance(message, Execution) and message.origin == AUTO_EXECUTION:
             # Information only. This fill is already in the ticket's filled_shares and in
             # the team's position, so adding it on top of either counts it twice. The
             # position comes from account_state (or from AccountReports, which applies

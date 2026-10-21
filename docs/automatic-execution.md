@@ -1,6 +1,6 @@
 # Automatic execution
 
-**Version:** 0.21
+**Version:** 0.22
 
 The exchange can work a Fundamentals pod's tickets itself, with its automatic execution service, instead of sending them to the pod's Execution desk. This page says what changes for a pod and a desk while the service is on, what each SDK release shows of it, and the one mistake to avoid: adding ticket fills to a position of your own. The rules in full are in the [`qte_sdk.tickets`](../qte_sdk/tickets.py) docstring.
 
@@ -18,7 +18,7 @@ Both releases keep working while the service is on: nothing raises, disconnects 
 | `send_ticket` | `algorithm=TWAP` (the default) or `algorithm=VWAP` | no `algorithm`: the exchange reads it as TWAP |
 | `ticket_state.progress`, a ticket's shares due against shares filled | not shown (`main` only, until the next release) | not shown |
 
-Only `main`, not yet any release, names reason 1714, `TICKET_SERVICE_OFF` (a ticket or a replacing cancel refused while the route is off), and has `send_ticket_cancel(..., replacing=True)` for the cancel that begins an amendment (see "Amending a ticket"). 1.4.0 and 1.3.0 show 1714 unnamed, with the name in `event.unknown_enum_names()`, and send only plain cancels.
+Only `main`, not yet any release, names reason 1714, `TICKET_SERVICE_OFF` (a ticket or a replacing cancel refused while the route is off), and has `send_ticket_cancel(..., replacing=True)` for the cancel that begins an amendment (see "Amending a ticket"). 1.4.0 and 1.3.0 show 1714 unnamed, with the name in `event.unknown_enum_names()`, and send only plain cancels. In the same way only `main` names the statuses `TICKET_CANCELLED_BY_DIRECTOR` (8) and `TICKET_AMENDED_BY_DIRECTOR` (9) (see "A Director's cancel or amend"); 1.4.0 and 1.3.0 read each as `TICKET_STATUS_UNSPECIFIED`, a stop, with the name in `event.unknown_enum_names()`.
 
 A status, activity, origin or reason this SDK does not know decodes as its zero value, never as an error, and keeps the name the exchange sent in `event.unknown_enum_names()`. A ticket whose `status` is anything but `TICKET_WORKING` has stopped.
 
@@ -28,7 +28,7 @@ The exchange's routing when it accepts a ticket decides who works it, not the po
 
 The service off (`routing_in_force` `ROUTING_DESK`) and the service paused (`paused` true) differ:
 
-- **Off:** a ticket goes to the pod's Execution desk as before (`executor` `DESK`). The Execution arm is to pause, unscored, once the service takes over, so do not count on a desk working it, and the 15 October term has no fallback. From the Winter term (26 October) no desk is paired: in a term that pairs no pod with an Execution desk, a ticket received while `ROUTING_SERVICE` is not in force, a cure ticket included, is refused `TICKET_SERVICE_OFF` (1714) with the detail "the automatic execution route is off: no ticket is accepted until it is on", and nothing is logged (Jack's answer G-164 A; qte-platform #2315). A `SERVICE` ticket still working when the route goes off is worked by the service to completion, and a plain cancel of it is taken.
+- **Off:** a ticket goes to the pod's Execution desk as before (`executor` `DESK`). The Execution arm is to pause, unscored, once the service takes over, so do not count on a desk working it. From the Winter term (26 October) no desk is paired: in a term that pairs no pod with an Execution desk, a ticket received while `ROUTING_SERVICE` is not in force, a cure ticket included, is refused `TICKET_SERVICE_OFF` (1714) with the detail "the automatic execution route is off: no ticket is accepted until it is on", and nothing is logged (Jack's answer G-164 A; qte-platform #2315). A `SERVICE` ticket still working when the route goes off is worked by the service to completion, and a plain cancel of it is taken.
 - **Paused:** a new ticket is accepted, and the service catches up when the pause lifts (see "The pause").
 
 Read `routing_in_force` and `paused` before you send.
@@ -106,9 +106,15 @@ In a term that pairs no pod with an Execution desk, while `ROUTING_SERVICE` is n
 
 The flag protects the amendment only at the cancel's instant. Once the cancel is taken, the cancel and the replacement are not atomic: if the replacement is refused for any reason, the old ticket stays cancelled. That includes `TICKET_SERVICE_OFF` (1714) when the route is off by the time the replacement arrives, for example because `ROUTING_DESK` comes into force at the next open first, so send the replacement as soon as the cancel is taken.
 
-## Handover
+## A Director's cancel or amend
 
-In a term whose configuration provides a fallback, the Directors can hand a desk's ticket over to the exchange: its `executor` turns `ENGINE` and its fills come with `origin` `FALLBACK`, treated like the service's above. The 15 October term has no fallback, so no ticket is handed over in it.
+A Director may cancel a `SERVICE` ticket: it stops `TICKET_CANCELLED_BY_DIRECTOR`, its fills standing. A cancel logged between sessions takes effect at the next open, and until then the ticket keeps working with `director_stop_pending_time` set.
+
+A Director may also amend a `SERVICE` ticket, in a session only. The ticket stops `TICKET_AMENDED_BY_DIRECTOR`, its fills standing, and at the same instant the exchange accepts a replacement for your pod: a new ticket with its own `ticket_id`, whose `replaces_ticket_id` names the amended one. You are sent the amended ticket's `ticket_state` and then the replacement's (`TICKET_WORKING`), and no `ticket_accepted`, since your pod did not send it. Follow the replacement from then on: it is your working ticket in that instrument. Neither the reason nor the Director is sent.
+
+A pod's `ticket_reject` never carries `TICKET_DESK_NOT_EXECUTION` (1717), `TICKET_RAISE_PENDING` (1718), `TICKET_CURE_NOT_AMENDABLE` (1719) or `TICKET_AMEND_AT_OR_BELOW_FILLED` (1720): they answer a Director. 1718 is the one that touches a pod: it refuses a Director's cancel of a ticket whose urgency your pod raised with `send_ticket_urgency` at the same instant, so that the raise already acknowledged to you is not undone. Do nothing on it: your raise stands and the ticket keeps working. If the Director cancels again later, the ticket stops `TICKET_CANCELLED_BY_DIRECTOR` as above.
+
+A house ticket, one a Director places for the house rather than for a pod, carries `house_instruction_id` and no pod, and stops `TICKET_CANCELLED_BY_HOUSE` when a Director cancels it. A pod is never sent one.
 
 ## Execution desks
 
@@ -117,7 +123,7 @@ The Execution arm is paused, so no desk trades (see "Who works a ticket"). The r
 ## A checklist for your agent
 
 - Pass every event to one `LatestTickets` and read the route from `tickets.route`.
-- Treat any `status` other than `TICKET_WORKING` as a stop, including a name this SDK does not know.
+- Treat any `status` other than `TICKET_WORKING` as a stop, including a name this SDK does not know. After `TICKET_AMENDED_BY_DIRECTOR`, follow the new ticket whose `replaces_ticket_id` names the stopped one.
 - Read a ticket's `progress` from the newest state only: each `ticket_state` carries the whole list, so never append one to another.
 - Take a pod's position from `account_state.positions`, never adding fills on top of ticket totals; keep it between queries with `AccountReports`, and query again after a ticket stops.
 - On a 1713 reject, resend the ticket as TWAP.

@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from fake_exchange import exchange, frame, serve_local
+from google.protobuf import descriptor_pb2
 from google.protobuf.message import Message
 from test_reconnect import Clock, resume_ack
 from test_resume import NEXT_TERM, TERM, Scripted, book, kinds, order_state
@@ -20,12 +21,11 @@ from qte_sdk.connection import (
     SeqGap,
 )
 from qte_sdk.contract.registry import INBOUND
+from qte_sdk.contract.v1 import common_pb2, order_events_pb2, session_pb2
 from qte_sdk.contract.v1.common_pb2 import (
     AUTO_EXECUTION,
     BUY,
     DESK,
-    ENGINE,
-    FALLBACK,
     LIMIT,
     MESSAGE_BUDGET,
     ROUTING_DESK,
@@ -1053,43 +1053,154 @@ async def test_a_status_this_sdk_does_not_know_is_a_stop_that_keeps_its_name():
     assert latest.working() == []
 
 
-async def test_a_desk_ticket_has_no_service_fields_and_a_handover_carries_the_desks_part():
-    events = await received(
-        frame("ticket_state", state_payload(10, executor="DESK"), 1),
-        frame(
-            "ticket_state",
-            state_payload(
-                20,
-                executor="ENGINE",
-                handover_time="1791207000400",
-                desk_filled_shares="50",
-                desk_net_fee="-700",
-                desk_average_fill_price="200050000",
-            ),
-            2,
-        ),
-    )
-    desk, engine = (e.message for e in events)
+async def test_a_desk_ticket_has_no_service_fields():
+    [event] = await received(frame("ticket_state", state_payload(10, executor="DESK"), 1))
+    desk = event.message
     assert desk.executor == DESK
     assert desk.activity == TICKET_ACTIVITY_UNSPECIFIED
-    assert not desk.HasField("handover_time")
     assert not desk.HasField("revised_completion_time")
     assert desk.config_version == 0
-    assert engine.executor == ENGINE
-    assert engine.status == TICKET_WORKING
-    assert engine.handover_time == 1_791_207_000_400
-    assert (engine.desk_filled_shares, engine.desk_net_fee) == (50, -700)
-    assert engine.desk_average_fill_price == 200_050_000
 
 
-@pytest.mark.parametrize("origin", ["AUTO_EXECUTION", "FALLBACK"])
-async def test_a_fill_of_the_exchanges_child_names_its_ticket_and_origin(origin):
+# The retired execution fallback (qte-platform #2425): no team was ever sent these, and
+# the contract now reserves them so that no number or name is reused.
+
+RETIRED = {
+    # enum or message: (reserved numbers, reserved names)
+    "Origin": ([5], ["FALLBACK"]),
+    "TicketExecutor": ([2], ["ENGINE"]),
+    "TicketState": (
+        [27, 28, 29, 30],
+        ["handover_time", "desk_filled_shares", "desk_net_fee", "desk_average_fill_price"],
+    ),
+}
+
+
+def _reserved_numbers(descriptor) -> set[int]:
+    # Read the descriptor protos: an enum's reserved range includes its end, a
+    # message's excludes it.
+    if hasattr(descriptor, "values_by_number"):
+        proto = descriptor_pb2.EnumDescriptorProto()
+        descriptor.CopyToProto(proto)
+        return {n for r in proto.reserved_range for n in range(r.start, r.end + 1)}
+    proto = descriptor_pb2.DescriptorProto()
+    descriptor.CopyToProto(proto)
+    return {n for r in proto.reserved_range for n in range(r.start, r.end)}
+
+
+def _reserved_names(descriptor) -> set[str]:
+    proto = (
+        descriptor_pb2.EnumDescriptorProto()
+        if hasattr(descriptor, "values_by_number")
+        else descriptor_pb2.DescriptorProto()
+    )
+    descriptor.CopyToProto(proto)
+    return set(proto.reserved_name)
+
+
+def _descriptor(name: str):
+    if name == "TicketState":
+        return order_events_pb2.TicketState.DESCRIPTOR
+    return common_pb2.DESCRIPTOR.enum_types_by_name[name]
+
+
+@pytest.mark.parametrize("name", sorted(RETIRED))
+def test_the_retired_fallback_values_are_gone_and_reserved(name):
+    numbers, names = RETIRED[name]
+    descriptor = _descriptor(name)
+    if hasattr(descriptor, "values_by_number"):
+        assert not set(numbers) & set(descriptor.values_by_number)
+        assert not set(names) & set(descriptor.values_by_name)
+    else:
+        assert not set(numbers) & set(descriptor.fields_by_number)
+        assert not set(names) & set(descriptor.fields_by_name)
+    assert set(numbers) <= _reserved_numbers(descriptor)
+    assert set(names) <= _reserved_names(descriptor)
+
+
+def test_the_retired_handed_over_reject_is_gone_and_reserved():
+    descriptor = ReasonCodes.ReasonCode.DESCRIPTOR
+    assert 1610 not in descriptor.values_by_number
+    assert "PARENT_HANDED_OVER" not in descriptor.values_by_name
+    assert 1610 in _reserved_numbers(descriptor)
+    assert "PARENT_HANDED_OVER" in _reserved_names(descriptor)
+    assert reason_code_name(1610) == "1610"
+
+
+def test_no_retired_name_is_left_in_the_generated_modules():
+    for module in (common_pb2, order_events_pb2, session_pb2):
+        for name in ("FALLBACK", "ENGINE", "PARENT_HANDED_OVER"):
+            assert not hasattr(module, name), (module.__name__, name)
+    assert not hasattr(ReasonCodes, "PARENT_HANDED_OVER")
+    for field in RETIRED["TicketState"][1]:
+        assert field not in TicketState.DESCRIPTOR.fields_by_name
+
+
+async def test_a_retired_value_on_the_wire_decodes_as_unknown_not_an_error():
+    # No exchange sends these, but an old one would be read without raising.
+    events = await received(
+        frame("ticket_state", state_payload(10, executor="ENGINE"), 1),
+        frame(
+            "execution",
+            {
+                "exec_id": "x-1",
+                "origin": "FALLBACK",
+                "instrument": "AAPL",
+                "side": "BUY",
+                "fill_price": "200100000",
+                "fill_size": "40",
+                "remaining_size": "0",
+                "parent_ticket_id": "17",
+            },
+            2,
+            report_seq=5,
+        ),
+    )
+    state, fill = events
+    assert state.message.executor == 0
+    assert state.unknown_enum_names() == {"executor": "ENGINE"}
+    assert fill.message.origin == 0
+    assert fill.unknown_enum_names() == {"origin": "FALLBACK"}
+
+
+def test_the_new_ticket_codes_statuses_and_fields_are_named():
+    assert ticket_reason_code_name(1717) == "TICKET_DESK_NOT_EXECUTION"
+    assert ticket_reason_code_name(1718) == "TICKET_RAISE_PENDING"
+    assert TicketReasonCodes.TICKET_RAISE_PENDING == 1718
+    assert ticket_reason_code_name(1719) == "TICKET_CURE_NOT_AMENDABLE"
+    assert ticket_reason_code_name(1720) == "TICKET_AMEND_AT_OR_BELOW_FILLED"
+    assert reason_code_name(1008) == "THESIS_FILINGS_NOT_SERVED"
+    assert TicketStatus.Name(9) == "TICKET_AMENDED_BY_DIRECTOR"
+    assert TicketStatus.Name(10) == "TICKET_CANCELLED_BY_HOUSE"
+    assert TicketState.DESCRIPTOR.fields_by_name["house_instruction_id"].number == 41
+
+
+async def test_a_directors_amend_stops_the_ticket_and_its_replacement_is_followed():
+    latest = LatestTickets()
+    events = await received(
+        frame("ticket_state", state_payload(10), 1),
+        frame("ticket_state", state_payload(20, status="TICKET_AMENDED_BY_DIRECTOR"), 2),
+        frame(
+            "ticket_state",
+            state_payload(20, ticket_id="18", shares="700", replaces_ticket_id="17"),
+            3,
+        ),
+    )
+    assert [latest.update(e) for e in events] == [True, True, True]
+    assert events[1].message.status == TicketStatus.Value("TICKET_AMENDED_BY_DIRECTOR")
+    assert events[1].unknown_enum_names() == {}
+    [working] = latest.working()
+    assert working.ticket_id == "18"
+    assert working.replaces_ticket_id == "17"
+
+
+async def test_a_fill_of_the_exchanges_child_names_its_ticket_and_origin():
     [event] = await received(
         frame(
             "execution",
             {
                 "exec_id": "x-1",
-                "origin": origin,
+                "origin": "AUTO_EXECUTION",
                 "instrument": "AAPL",
                 "side": "BUY",
                 "fill_price": "200100000",
@@ -1102,14 +1213,10 @@ async def test_a_fill_of_the_exchanges_child_names_its_ticket_and_origin(origin)
         )
     )
     assert is_order_event(event)
-    assert event.message.origin == {"AUTO_EXECUTION": AUTO_EXECUTION, "FALLBACK": FALLBACK}[origin]
+    assert event.message.origin == AUTO_EXECUTION
     assert event.unknown_enum_names() == {}
     assert parent_ticket_of(event.message) == "17"
     assert not event.message.HasField("strat_id")
-
-
-def test_a_handed_over_childs_reject_is_named():
-    assert reason_code_name(ReasonCodes.PARENT_HANDED_OVER) == "PARENT_HANDED_OVER"
 
 
 def route_payload(**extra: Any) -> dict[str, Any]:

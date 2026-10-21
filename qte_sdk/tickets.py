@@ -9,10 +9,7 @@ or sell, and the exchange has it executed by one of two executors, which the pod
   (volume-weighted). No desk is involved: `desk` is empty, and no desk is sent anything
   about the ticket.
 - `DESK`: the pod's assigned Execution desk works the ticket with child orders that name
-  it in `parent_ticket_id` (see `qte_sdk.orders.send_new`). The Directors may later hand
-  a desk's ticket over to the exchange to execute: its `executor` then turns `ENGINE`,
-  which is never undone. A term whose configuration provides no fallback has no
-  handover; the 15 October term has none.
+  it in `parent_ticket_id` (see `qte_sdk.orders.send_new`).
 
 Which executor a new ticket gets is the exchange's routing at acceptance, a switch the
 Directors set (`execution_route`, below), not the pod's choice. A ticket keeps its
@@ -69,8 +66,8 @@ ticket's state in `ticket_state`:
   ticket included, or a replacing cancel, while the automatic execution route is off in
   a term with no Fundamentals-to-Execution pairing (see `execution_route` below).
 - `ticket_state` is the whole state of one ticket. It is sent to the pod that originated
-  it whenever the ticket changes, and to its desk too while it has one (`DESK` or
-  `ENGINE`). A pod is sent its own tickets only. `LatestTickets` keeps the newest state
+  it whenever the ticket changes, and to its desk too when it has one (`DESK`). A pod
+  is sent its own tickets only. `LatestTickets` keeps the newest state
   of each.
 
 A `ticket_state` carries the ticket's totals on every executor: `filled_shares`,
@@ -108,8 +105,8 @@ each tick at or after `accepted_time` while the ticket works, the ticks being ev
 session's open, every 30 minutes after it inside the session, and the session's close;
 and an end point at `stopped_time` when the ticket stops, whatever the status. A close or
 an end point on a tick is one point. A point's `due_shares` is by the rule of the ticket's
-own `due_shares` as of its `time`: the desk schedule's for a `DESK` or handed-over
-ticket, and for a `SERVICE` ticket the figure of the service's latest step as of `time`.
+own `due_shares` as of its `time`: the desk schedule's for a `DESK` ticket, and for a
+`SERVICE` ticket the figure of the service's latest step as of `time`.
 A tick's `filled_shares` counts the fills stamped at or before it, and an end point's is
 the ticket's final `filled_shares`. Every `ticket_state` carries the whole list, the
 connect-time set included, so each one replaces the list held and is never appended to:
@@ -134,6 +131,27 @@ date (as the calendar's `session_date`) whose official close is the deadline of 
 breach it cures: if no cure is working by then, the engine queues its own cure at that
 close, and after it nothing steps in again. Both are optional fields: check
 `state.HasField(...)` before reading them.
+
+A Director may also amend a `SERVICE` ticket, in a session only: it stops
+`TICKET_AMENDED_BY_DIRECTOR` (9), its fills standing, and at the same instant the
+exchange accepts its replacement for the pod, a new ticket with its own `ticket_id`
+whose `replaces_ticket_id` names the amended one. The pod is sent the amended ticket's
+`ticket_state` and then the replacement's (`TICKET_WORKING`), and no `ticket_accepted`
+for the replacement, which it did not send. From then on the replacement is the pod's
+working ticket in that instrument: `LatestTickets` follows it like any other. The pod is
+told neither the reason nor the Director.
+
+Four ticket reason codes answer a Director's own messages and never reach a pod's
+`ticket_reject`: `TICKET_DESK_NOT_EXECUTION` (1717), `TICKET_RAISE_PENDING` (1718),
+`TICKET_CURE_NOT_AMENDABLE` (1719) and `TICKET_AMEND_AT_OR_BELOW_FILLED` (1720). The one
+that touches a pod is 1718: it refuses a Director's cancel of a ticket whose urgency the
+pod raised (`send_ticket_urgency`) at the same instant, so that the raise already
+acknowledged to the pod is not undone. The pod is never sent it and has nothing to do:
+its raise stands and the ticket keeps working. The Director may cancel again later, and
+the ticket then stops `TICKET_CANCELLED_BY_DIRECTOR` as above.
+`TICKET_CANCELLED_BY_HOUSE` (10) stops only a house ticket, one a Director places for
+the house rather than for a pod (its state carries `house_instruction_id` and no `pod`);
+a pod is never sent one.
 
 None of the three answers carries a `report_seq`, and a resume replays none of them.
 Instead, once on each connection of the pod or desk, straight after the `session_ack`,
@@ -174,12 +192,10 @@ replay it. It says:
 `LatestTickets.route` keeps the newest one, and forgets it on a `Disconnected`. A desk is
 never sent `execution_route`.
 
-The service's and the engine's children are placed by the exchange, not by you (the
-service's passive child rests as a limit order of the pod, which any team's order may
-fill): the pod is
+The service's children are placed by the exchange, not by you (the service's passive
+child rests as a limit order of the pod, which any team's order may fill): the pod is
 sent each of their fills as an `execution` that names the ticket in `parent_ticket_id`
-(`parent_ticket_of`), with `origin` `AUTO_EXECUTION` for the service's and `FALLBACK`
-for the engine's after a handover, and no `strat_id`. Nothing else of
+(`parent_ticket_of`), with `origin` `AUTO_EXECUTION` and no `strat_id`. Nothing else of
 those orders is sent to anyone: no `accepted`, `order_state` or `order_cancelled`, and no
 entry in a resume's `order_snapshot`. They never rest in `qte_sdk.resting.RestingOrders`.
 Under `SERVICE` the engine's own cure ticket is worked by the service and
@@ -204,17 +220,6 @@ child orders still resting when a desk's ticket stops depends on why it stopped:
   standing and `stopped_mark` 0, since there is no valid mark at the open. No child is
   resting then, since the close before cancelled each one `SESSION_CLOSE`. Send a new
   ticket in post-split shares if you still want the trade.
-
-`PARENT_STOPPED` can also come while the ticket keeps working: when the Directors hand a
-desk's ticket over to the exchange to execute, every resting child is cancelled
-`PARENT_STOPPED`, and the ticket stays `TICKET_WORKING` with `executor` `ENGINE`. So
-never read `PARENT_STOPPED` as the ticket having stopped: read the ticket's own
-`ticket_state`. A desk child sent after the handover, or still in its order delay at it,
-is rejected `PARENT_HANDED_OVER`. From the handover on, the ticket's state carries
-`handover_time` and the desk's frozen part in `desk_filled_shares`, `desk_net_fee` and,
-when the desk filled any, `desk_average_fill_price`; the totals still include the desk's
-fills, so the engine's part is the totals less the desk's. The engine executes against
-the ticket's original schedule.
 
 Every send checks what it can before sending, and raises `ValueError` or `TypeError`
 and sends nothing if a check fails: `request_ref` is 1 to 32 bytes of UTF-8, `instrument`
@@ -472,8 +477,7 @@ def ticket_reason_code_name(code: int) -> str:
 def parent_ticket_of(execution: Execution) -> str | None:
     """The id of the ticket a filled child order works, or None when the filled order is
     not a child of a ticket. The child is a desk's (`origin` `TEAM`, on the desk's
-    session), the service's (`AUTO_EXECUTION`) or the engine's after a handover
-    (`FALLBACK`), the last two on the pod's session."""
+    session) or the service's (`AUTO_EXECUTION`, on the pod's session)."""
     return execution.parent_ticket_id if execution.HasField("parent_ticket_id") else None
 
 

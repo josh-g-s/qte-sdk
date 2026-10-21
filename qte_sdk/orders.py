@@ -42,11 +42,10 @@ An `execution`'s `origin` says whose order filled. `TEAM` is the team's own orde
 others are orders the exchange placed (a service's passive child rests as a limit order
 of the pod): `CURE_TRADE` and `AUTO_FLATTEN` from the team's
 account; `AUTO_EXECUTION`, a child of a Fundamentals ticket the automatic execution
-service works, and `FALLBACK`, the engine's child of a ticket the Directors handed over
-from its desk. A fill of an `AUTO_EXECUTION` or `FALLBACK` child goes to the ticket's pod
-only, naming the ticket in `parent_ticket_id`, with a `report_seq` (a resume replays it)
-and with no `strat_id` and no `order_price`; nothing else of those orders (no
-`accepted`, `order_state` or `order_cancelled`) is sent. An origin this SDK does not know
+service works. A fill of an `AUTO_EXECUTION` child goes to the ticket's pod only, naming
+the ticket in `parent_ticket_id`, with a `report_seq` (a resume replays it) and with no
+`strat_id` and no `order_price`; nothing else of those orders (no `accepted`,
+`order_state` or `order_cancelled`) is sent. An origin this SDK does not know
 decodes as `ORIGIN_UNSPECIFIED` (0), its name kept in `unknown_enum_names()`.
 """
 
@@ -178,11 +177,9 @@ async def send_new(
     and a well-formed one is rejected `PARENT_NOT_WORKING` on a `new` from any team other
     than an Execution desk, as is a desk's `new` that names no working parent ticket
     assigned to the desk. When the parent ticket stops, a child still resting is
-    cancelled, with `PARENT_STOPPED` for some stops but not all, and `PARENT_STOPPED` can
-    also come while the ticket keeps working: `qte_sdk.tickets` says which reason each
-    case gives. A desk child sent after the Directors handed its ticket over to the
-    exchange, or still in its order delay then, is rejected `PARENT_HANDED_OVER`. A ticket
-    the automatic execution service works has no desk and takes no desk children.
+    cancelled, with `PARENT_STOPPED` for some stops but not all: `qte_sdk.tickets` says
+    which reason each case gives. A ticket the automatic execution service works has no
+    desk and takes no desk children.
     """
     ref = _ref(request_ref)
     _id("strat_id", strat_id)

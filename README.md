@@ -156,7 +156,7 @@ The main modules, each documented in its docstrings:
 
 ## Fundamentals pods: your position
 
-A Fundamentals pod is sent an `execution` for every fill of its tickets' child orders: the automatic execution service's (origin `AUTO_EXECUTION`) and the engine's after a handover (`FALLBACK`). They name the ticket in `parent_ticket_id` and carry no `strat_id`. Each fill is already counted in the ticket's `ticket_state` (`filled_shares`), so a pod that adds these fills on top of totals it takes from its tickets counts each one twice. A release before this one reads their origin as `ORIGIN_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
+A Fundamentals pod is sent an `execution` for every fill of the automatic execution service's child orders for its tickets (origin `AUTO_EXECUTION`). They name the ticket in `parent_ticket_id` and carry no `strat_id`. Each fill is already counted in the ticket's `ticket_state` (`filled_shares`), so a pod that adds these fills on top of totals it takes from its tickets counts each one twice. A release before this one reads their origin as `ORIGIN_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
 
 Follow each ticket's progress in `LatestTickets`, and take your position from the exchange's own count, `account_state.positions` (`qte_sdk.account`). A reply already includes every fill up to its `as_of_report_seq`; to keep the position between queries, let `qte_sdk.account.AccountReports` sort the fills against the reply, so that each is applied once. Query again from time to time all the same: under automatic execution the engine's own cure ticket and its fills are sent to no one, so only a new `account_state` shows them, and a position carries across terms while tickets do not.
 
