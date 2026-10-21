@@ -29,8 +29,8 @@ What it does, in order:
    shares, `due_shares`, `activity` and `behind_schedule`, until the status is anything
    but `TICKET_WORKING`, which is a stop, a status this SDK does not know included. It
    prints the stop reason (the status's name, or the unknown name the exchange sent).
-   When the state carries `progress` (on `main` only until the next release), it also
-   prints the newest point: its `time`, `due_shares` and `filled_shares`. Each state
+   When the state carries `progress` (1.5.0 and later), it also prints the newest
+   point: its `time`, `due_shares` and `filled_shares`. Each state
    carries the whole list, so the newest point is always the list's last. A Director's
    amend is not a stop for the pod: the ticket stops `TICKET_AMENDED_BY_DIRECTOR` and the
    exchange sends, with no `ticket_accepted`, the state of a replacement ticket whose
