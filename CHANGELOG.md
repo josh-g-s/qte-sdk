@@ -9,7 +9,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 ## Unreleased
 
 - Docs only: the README, the quickstart, AGENTS.md and docs/automatic-execution.md name v1.5.0 as the latest release, its zip in the install line, and no longer call `progress`, reason 1714, `replacing=True` or statuses 8 and 9 `main` only (#273).
-- Docs: who registers a strategy ID. The README, the quickstart and AGENTS.md said to ask the Head of Technology; your Team Lead registers it in the Team Lead console, and a registration counts only on the term it is made in, so for each new term Team Leads register again once their Directors announce that its registration is open. Winter's first week, 26 to 30 October, is an unscored practice week, and Winter starts afresh on 2 November as a new term, so Team Leads register again before then. `examples/smoke_test.py` now says to ask your Team Lead on `STRATEGY_NOT_REGISTERED`. Docs and one example message only.
+- Docs: who registers a strategy ID. The README, the quickstart and AGENTS.md said to ask the Head of Technology; your Team Lead registers it in the Team Lead console, and a registration counts only on the term it is made in, so for each new term Team Leads register again once their Directors announce that its registration is open. Winter's first week, 26 to 30 October, is an unscored practice week, and Winter starts afresh on 2 November as a new term, so Team Leads register again before then. The quickstart's account section adds that nothing carries over from the practice week: every team, Fundamentals included, starts the 2 November term flat. `examples/smoke_test.py` now says to ask your Team Lead on `STRATEGY_NOT_REGISTERED`. Docs and one example message only.
 
 ## 1.5.0
 
