@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.59
+**Version:** 0.60
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- Docs only: from the Winter term, a `DESK` ticket's `due_shares` and `progress` stop while its instrument is halted or an outage is declared, the clock a `SERVICE` ticket already uses (qte-platform #2676, term key `urgency_clock_stops`). A `DESK` ticket still gets no `revised_completion_time`. Described in the `qte_sdk.tickets` docstring and docs/automatic-execution.md, "Execution desks".
 - Docs only: the README, the quickstart, AGENTS.md and docs/automatic-execution.md name v1.5.0 as the latest release, its zip in the install line, and no longer call `progress`, reason 1714, `replacing=True` or statuses 8 and 9 `main` only (#273).
 
 ## 1.5.0
