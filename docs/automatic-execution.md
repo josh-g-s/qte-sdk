@@ -120,7 +120,7 @@ A house ticket, one a Director places for the house rather than for a pod, carri
 
 ## Execution desks
 
-The Execution arm is paused, so no desk trades (see "Who works a ticket"). The rules below are those of the exchange's contract for when desks work: a desk works only the tickets routed to it (`executor` `DESK`) and is sent nothing about a ticket the service works: no `ticket_state`, no fills. Its own children's fills name their ticket in `parent_ticket_id`, and the orders the service places never appear in a desk's `RestingOrders`. From the Winter term, a `DESK` ticket's `due_shares` and `progress` stop while its instrument is halted or an outage is declared, as a `SERVICE` ticket's do; it gets no `revised_completion_time`, and its `planned_completion_time` is not changed (qte-platform #2676).
+The Execution arm is paused, so no desk trades (see "Who works a ticket"). The rules below are those of the exchange's contract for when desks work: a desk works only the tickets routed to it (`executor` `DESK`) and is sent nothing about a ticket the service works: no `ticket_state`, no fills. Its own children's fills name their ticket in `parent_ticket_id`, and the orders the service places never appear in a desk's `RestingOrders`. In a term that sets the exchange's `urgency_clock_stops` (the Winter term does), a `DESK` ticket's schedule clock stops while its instrument is halted or the Directors declare an outage, as a `SERVICE` ticket's does: its `due_shares`, and each progress point's, do not grow during them, though the points still come at every tick. It gets no `revised_completion_time`, and its `planned_completion_time` is not changed (qte-platform #2676).
 
 ## A checklist for your agent
 

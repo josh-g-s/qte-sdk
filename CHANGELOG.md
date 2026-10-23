@@ -8,7 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-- Docs only: from the Winter term, a `DESK` ticket's `due_shares` and `progress` stop while its instrument is halted or an outage is declared, the clock a `SERVICE` ticket already uses (qte-platform #2676, term key `urgency_clock_stops`). A `DESK` ticket still gets no `revised_completion_time`. Described in the `qte_sdk.tickets` docstring and docs/automatic-execution.md, "Execution desks".
+- Docs only: in a term that sets the exchange's `urgency_clock_stops` (the Winter term does), a `DESK` ticket's schedule clock stops while its instrument is halted or the Directors declare an outage, the clock a `SERVICE` ticket already uses (qte-platform #2676): its `due_shares`, and each progress point's, do not grow during them. A `DESK` ticket still gets no `revised_completion_time`. Described in the `qte_sdk.tickets` docstring and docs/automatic-execution.md, "Execution desks".
 - Docs only: the README, the quickstart, AGENTS.md and docs/automatic-execution.md name v1.5.0 as the latest release, its zip in the install line, and no longer call `progress`, reason 1714, `replacing=True` or statuses 8 and 9 `main` only (#273).
 
 ## 1.5.0

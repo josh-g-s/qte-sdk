@@ -107,11 +107,12 @@ and an end point at `stopped_time` when the ticket stops, whatever the status. A
 an end point on a tick is one point. A point's `due_shares` is by the rule of the ticket's
 own `due_shares` as of its `time`: the desk schedule's for a `DESK` ticket, and for a
 `SERVICE` ticket the figure of the service's latest step as of `time`.
-From the Winter term, whose term file sets the exchange's `urgency_clock_stops`, a `DESK`
-ticket's `due_shares` and `progress` count only time its instrument can trade, the same
-clock as a `SERVICE` ticket: the instrument's halts and declared outages are taken out. A
-`DESK` ticket still gets no `revised_completion_time`, and its `planned_completion_time` is
-not changed.
+In a term whose file sets the exchange's `fundamentals_tickets.urgency_clock_stops` (the
+Winter term's does; absent means off), a `DESK` ticket's schedule counts only time its
+instrument can trade, the same clock as a `SERVICE` ticket: the instrument's halts and the
+Director-declared outages are taken out, so its `due_shares`, and each progress point's,
+do not grow during them. The progress points still come at every tick. A `DESK` ticket
+still gets no `revised_completion_time`, and its `planned_completion_time` is not changed.
 A tick's `filled_shares` counts the fills stamped at or before it, and an end point's is
 the ticket's final `filled_shares`. Every `ticket_state` carries the whole list, the
 connect-time set included, so each one replaces the list held and is never appended to:
