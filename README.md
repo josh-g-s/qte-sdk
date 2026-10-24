@@ -43,7 +43,7 @@ That is the latest release, v1.5.0, as this is written. The [changelog](CHANGELO
 
 If you use a coding agent, such as Claude Code or Codex, have it read [AGENTS.md](AGENTS.md) first, the guidance for coding agents. It comes with the SDK from 1.2.0 (and in an install of `main`), where `python -m qte_sdk.agents` prints it. [`llms.txt`](llms.txt) points agents to it too.
 
-This installs the `qte_sdk` package only, not the [worked examples](examples/); you do not need them to use the SDK. To run or read them, clone this repository or, without git, download the source zip of the release you installed (the address above, or the repository's Releases or Tags page on GitHub) and unzip it, so the examples match your SDK. A zip of `main` may be newer than the release you installed. Then copy its `examples` folder into your project folder, the one that holds your `.env` (below), and run the examples from the project folder: the SDK reads `.env` only from the folder you run in.
+This installs the `qte_sdk` package only, not the [worked examples](examples/); you do not need them to use the SDK. To run or read them, clone this repository or, without git, download the source zip of the release you installed (the address above, or the repository's Tags page on GitHub) and unzip it, so the examples match your SDK. A zip of `main` may be newer than the release you installed. Then copy its `examples` folder into your project folder, the one that holds your `.env` (below), and run the examples from the project folder: the SDK reads `.env` only from the folder you run in.
 
 To see whether a newer release is out, run:
 

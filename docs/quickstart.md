@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.71
+**Version:** 0.73
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -46,7 +46,7 @@ That is the latest release, v1.5.0, as this is written; the [changelog](../CHANG
 
 If you use a coding agent, such as Claude Code or Codex, have it read [AGENTS.md](../AGENTS.md) first, the guidance for coding agents on setup, your token, updates and the SDK's message codes. It comes with the SDK from 1.2.0 (and in an install of `main`), where `python -m qte_sdk.agents` prints it.
 
-This installs the `qte_sdk` package only. The worked examples (step 11) are not installed with it. To run or read them, clone this repository or, without git, download the source zip of the release you installed (the address above, or the repository's Releases or Tags page on GitHub) and unzip it, so the examples match your SDK. A zip of `main` may be newer than the release you installed. Then copy its `examples` folder into your project folder, the one that will hold your `.env` (step 2), and run the examples from the project folder, inside the virtual environment where the SDK is installed: the SDK reads `.env` only from the folder you run in. You do not need the examples for anything else in this guide.
+This installs the `qte_sdk` package only. The worked examples (step 11) are not installed with it. To run or read them, clone this repository or, without git, download the source zip of the release you installed (the address above, or the repository's Tags page on GitHub) and unzip it, so the examples match your SDK. A zip of `main` may be newer than the release you installed. Then copy its `examples` folder into your project folder, the one that will hold your `.env` (step 2), and run the examples from the project folder, inside the virtual environment where the SDK is installed: the SDK reads `.env` only from the folder you run in. You do not need the examples for anything else in this guide.
 
 The SDK has numbered releases, each a `vX.Y.Z` tag listed in the [changelog](../CHANGELOG.md). To see whether yours is the latest, run:
 
@@ -708,5 +708,7 @@ python examples/out_of_hours.py --instrument AAPL
 python examples/replay_book.py --date 2026-01-05 --instrument AAPL
 python examples/fundamentals_pod.py --instrument AAPL --side buy --shares 500 --limit 201.50 --thesis-id t-aapl --thesis-version 1
 ```
+
+For a Fundamentals pod: from the Winter term, the exchange refuses a ticket that opens or increases a position unless it names a signed thesis your pod has filed that covers the ticket's instrument and side, at its current version (SPEC 23.1). The refusal is `TICKET_THESIS_NOT_FILED`, with a `reason_detail` saying what is missing. Your Team Lead files and signs the thesis on the Research page of the Team Lead console, which gives it its thesis ID and version; pass its ID and its latest signed version as `--thesis-id` and `--thesis-version`. A version that a later revision has replaced is refused too. `t-aapl` in the examples is a placeholder that the exchange refuses: use your pod's own filed thesis ID. A ticket that reduces a position needs no thesis.
 
 The examples are for learning the SDK, not strategies: they make no attempt to make money. When you are ready to build your own, [Developing your algo](developing-your-algo.md) walks through the path from past market data to the exchange.
