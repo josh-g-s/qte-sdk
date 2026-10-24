@@ -652,7 +652,8 @@ def address_problem(url: str) -> str | None:
         return None
     return (
         "it is a plain ws:// address for a host other than this machine, which would send "
-        "your token unencrypted: use the wss:// address you were given"
+        "your token unencrypted: use the exchange's wss:// address, given in the README and "
+        "the quickstart"
     )
 
 
@@ -1321,7 +1322,9 @@ def rejected_new(order: ProbeOrder) -> tuple[str, str]:
     if code == ReasonCodes.DUPLICATE_ORDER_AT_LEVEL:
         return SKIP, f"{order.where} not placed: your team already has an order there ({text})"
     hint = {
-        ReasonCodes.STRATEGY_NOT_REGISTERED: "; ask the Head of Technology to register it",
+        ReasonCodes.STRATEGY_NOT_REGISTERED: (
+            "; ask your Team Lead to register it in the Team Lead console"
+        ),
         ReasonCodes.NO_MARKET_ACCESS: "; this team's account does not send orders",
         ReasonCodes.TICK_VIOLATION: "; give the instrument's tick with --tick",
     }.get(code, "")

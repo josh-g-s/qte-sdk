@@ -1,6 +1,6 @@
 """Replay a past session's book of one instrument and print the best bid and ask.
 
-Set QTE_HISTORY_URL (the history service's address, which the course team gives you) and
+Set QTE_HISTORY_URL (the history service's address, given in the README and the quickstart) and
 QTE_TOKEN first. QTE_TOKEN can also come from ./.env; QTE_HISTORY_URL is read from the
 environment only. Then:
 

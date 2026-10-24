@@ -183,18 +183,19 @@ CODES: dict[str, Entry] = {
     ADDRESS_MISSING: Entry(
         "no exchange address was found in {where}",
         "The SDK cannot connect without it",
-        f"Run {_TOKEN_SET} and enter the address the course team gave you, or set QTE_URL",
+        f"Run {_TOKEN_SET} and enter the exchange's address, "
+        "wss://api.trading.queenstowerexchange.com/ws, or set QTE_URL",
         "No address was passed, QTE_URL is unset, and ./.env sets no QTE_URL",
         f"Run {_TOKEN_SET}, or set QTE_URL",
     ),
     ADDRESS_INVALID: Entry(
         "the exchange address from {source} {problem}",
         "The SDK cannot connect to it safely",
-        f"Set QTE_URL to the wss:// address the course team gave you, for example with "
-        f"{_TOKEN_SET}",
+        "Set QTE_URL to the exchange's address, wss://api.trading.queenstowerexchange.com/ws, "
+        f"for example with {_TOKEN_SET}",
         "The address does not start with ws:// or wss://, or is a plain ws:// address for "
         "another computer",
-        "Use the wss:// address you were given",
+        "Use the exchange's address, wss://api.trading.queenstowerexchange.com/ws",
     ),
     ADDRESS_SHARED: Entry(
         "{path} sets QTE_URL, the exchange address, and other users may change or replace it",
@@ -360,18 +361,19 @@ CODES: dict[str, Entry] = {
     HISTORY_ADDRESS_MISSING: Entry(
         "no history service address was given",
         "HistoryClient has no default address, and does not read one from .env",
-        "Pass url=, or set QTE_HISTORY_URL in the environment to the https:// address the "
-        "course team gave you",
+        "Pass url=, or set QTE_HISTORY_URL in the environment to the history service's "
+        "address, https://history.trading.queenstowerexchange.com",
         "HistoryClient was given no url=, and QTE_HISTORY_URL is unset or empty",
         "Set QTE_HISTORY_URL",
     ),
     HISTORY_ADDRESS_INVALID: Entry(
         "the history service address {problem}",
         "The client will not send your token there",
-        "Set QTE_HISTORY_URL, or pass url=, to the https:// address the course team gave you",
+        "Set QTE_HISTORY_URL, or pass url=, to the history service's address, "
+        "https://history.trading.queenstowerexchange.com",
         "The address is not an https:// URL (http:// only to this computer), or holds "
         "credentials, a query, a fragment or a port that is not a number",
-        "Use the https:// address you were given",
+        "Use the history service's address, https://history.trading.queenstowerexchange.com",
     ),
     HISTORY_PENDING: Entry(
         "{what}",

@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.66
+**Version:** 0.68
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- Messages: the errors for a missing or invalid exchange or history service address, and `token set`'s prompt, give the production addresses, `wss://api.trading.queenstowerexchange.com/ws` and `https://history.trading.queenstowerexchange.com`, instead of "the address the course team gave you". The smoke test's hint for `STRATEGY_NOT_REGISTERED` says to ask your Team Lead to register the strategy in the Team Lead console, not the Head of Technology.
 - Docs only: docs/developing-your-algo.md no longer gives Winter pacing budgets at a quarter of their value: the October values continue in Winter. The quickstart says a Fundamentals ticket that opens or increases a position is refused `TICKET_THESIS_NOT_FILED` from the Winter term unless it names the pod's own filed thesis, and that `t-aapl` in the examples is a placeholder. The README and the quickstart point to the Tags page for a release's source zip.
 - Docs only: the README and AGENTS.md give the console and web trading address, `https://trading.queenstowerexchange.com`, and the README, the quickstart and AGENTS.md add a chat to the places a token must never go.
 - Docs only: the README, the quickstart and AGENTS.md give the exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, and the history service's, `https://history.trading.queenstowerexchange.com`; say that each team has one token, emailed by the Head of Technology to its Team Lead and shared only within the team; and say that the Team Lead registers strategy IDs in the Team Lead console. docs/developing-your-algo.md no longer mentions a separate practice exchange.
