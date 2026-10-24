@@ -7,7 +7,10 @@ This repository contains only participant-facing material. Exchange internals (t
 ## Requirements
 
 - Python 3.11 or later.
-- The address of the exchange you are trading on, your team's practice token and, for any program that sends orders, a strategy ID registered for your team. Contact the Head of Technology, Joshua, for all three. Treat the token like a password: never put it in a source file, a notebook, a screenshot or a repository.
+- The exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, which the SDK reads as `QTE_URL`, and, for past market data, the history service's address, `https://history.trading.queenstowerexchange.com`, read as `QTE_HISTORY_URL`.
+- Your team's token, one per team. The Head of Technology, Joshua, emailed it to your Team Lead, who shares it only with your own team's members; a Team Lead who does not have it emails Joshua. `python -m qte_sdk.token set` saves it with the exchange's address (see below).
+- For any program that sends orders, a strategy ID registered for your team. Your Team Lead registers it, with its declared scope, on the Strategy registration page of the Team Lead console.
+- Treat the token like a password: never put it in a source file, a notebook, a screenshot or a repository.
 
 ## Install
 
