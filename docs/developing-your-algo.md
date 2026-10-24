@@ -1,10 +1,10 @@
 # Developing your algo
 
-**Version:** 0.9
+**Version:** 0.10
 
 This guide is one path from an idea to a program trading on the exchange: explore past market data, run your strategy's loop on a replay of a past session, keep its order logic separate so you can test it, check your setup with the smoke test, then try it on the exchange during a session. Most of it works at any hour, so you can do it while the market is closed.
 
-Install the SDK and set `QTE_URL` and `QTE_TOKEN` first ([quickstart steps 1 and 2](quickstart.md#1-install)). Steps 1 and 2 also need the history service's address, which the course team gives you, set as `QTE_HISTORY_URL` in the environment (it is never read from `.env`). The smoke test in step 4 is a worked example, so it needs a clone of this repository.
+Install the SDK and set `QTE_URL` and `QTE_TOKEN` first ([quickstart steps 1 and 2](quickstart.md#1-install)). Steps 1 and 2 also need the history service's address, `https://history.trading.queenstowerexchange.com`, set as `QTE_HISTORY_URL` in the environment (it is never read from `.env`). The smoke test in step 4 is a worked example, so it needs a clone of this repository.
 
 ## 1. Explore past market data
 
@@ -201,7 +201,7 @@ With `--place-test-order --strat-id ID --tick DOLLARS`, during a session, it als
 
 A replay cannot show you what happens to your orders. Only the exchange can, and only during a session: read the hours from the calendar, and trade only while `SessionState.state` is `OPEN`.
 
-- Start on the practice exchange the course team gives you, or a test exchange on your own machine. Point your program at the exchange you compete on only when you mean it to trade for real.
+- Try a new program first on a test exchange on your own machine. Point it at the exchange (quickstart step 2) only when you mean it to trade for real.
 - Start small: one instrument, small sizes, and a bounded run that cancels your orders when it stops.
 - Handle every reject by its reason. Rejects are where you meet the order delay, the minimum resting time, the price collar and your message budgets. The exchange sets all of these and can change them, so act on what it reports rather than building them into your code ([quickstart step 8](quickstart.md#8-values-the-exchange-sets)).
 - Your orders are part of the market there: once one rests, it is in every participant's book, and others can trade with it.

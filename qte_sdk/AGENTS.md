@@ -1,12 +1,12 @@
 # Using qte-sdk
 
-**Version:** 1.46
+**Version:** 1.48
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of 1.2.0 or later, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With an earlier release, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
 ## What this is
 
-- `qte_sdk` is the Python client for the QTE exchange. You run your program on your own machine and it trades through the exchange's API, using the exchange address and team token the course team gives you.
+- `qte_sdk` is the Python client for the QTE exchange. You run your program on your own machine and it trades through the exchange's API, using the exchange's address (under "Where to test") and your team's token (under "Getting help").
 - Start with the [README](https://github.com/josh-g-s/qte-sdk#readme), then the [quickstart](https://github.com/josh-g-s/qte-sdk/blob/main/docs/quickstart.md), which covers sessions, market data, orders, the values the exchange sets, reconnecting and past market data.
 - To check a setup end to end, have the person run `python examples/smoke_test.py --instruments <symbols>` from the project folder, with `examples/` copied into it. It prints PASS, FAIL or SKIP per check and sends no orders unless given `--place-test-order`.
 
@@ -99,9 +99,9 @@ An option contract is an instrument in history too, named by its unpadded OCC sy
 
 ## Where to test
 
-Run your program against the practice exchange the course team gives you, or a test exchange on your own machine. Do not guess exchange addresses, and do not point an experiment at an exchange where it would trade for real unless you mean it to.
+Run your program against the exchange, `wss://api.trading.queenstowerexchange.com/ws` (its history service is `https://history.trading.queenstowerexchange.com`), or a test exchange on your own machine. Do not guess exchange addresses, and do not point an experiment at an exchange where it would trade for real unless you mean it to.
 
 ## Getting help
 
 - For a bug in the SDK or its docs, open an issue on this repository. It is public: never include your token, your team's account details or your strategy's code.
-- For tokens, exchange addresses and access, ask the Head of Technology, Joshua. Your Team Lead registers strategy IDs.
+- Your team has one token: the Head of Technology, Joshua, emailed it to your Team Lead, who shares it only with your own team's members. A Team Lead who does not have it, or anyone who needs access, emails Joshua. Your Team Lead registers strategy IDs.

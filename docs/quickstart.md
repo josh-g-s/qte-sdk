@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.67
+**Version:** 0.69
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -10,11 +10,11 @@ The commands are for macOS and Linux. On Windows, type `py` where this guide say
 
 - Python 3.11 or later.
 - The `examples` folder of this repository, from a clone or the source zip of your release, but only to run or read the worked examples (step 11).
-- The address of the exchange you are trading on. The Head of Technology, Joshua, gives you the practice exchange's address; a test exchange you run on your own machine is usually `ws://127.0.0.1:8080/ws`.
-- Your team's practice token. The Head of Technology, Joshua, gives it to you. Treat it like a password: never put it in a source file, a notebook, a screenshot or a repository.
+- The exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, and, for past market data (step 10), the history service's address, `https://history.trading.queenstowerexchange.com`. A test exchange you run on your own machine is usually `ws://127.0.0.1:8080/ws`.
+- Your team's token, one per team. The Head of Technology, Joshua, emailed it to your Team Lead, who shares it only with your own team's members; a Team Lead who does not have it emails Joshua. Step 2 saves it. Treat it like a password: never put it in a source file, a notebook, a screenshot or a repository.
 - A strategy ID registered for your team, for any program that sends orders. Your Team Lead registers it, with its declared scope, on the Strategy registration page of the Team Lead console. A registration counts only on the term it is made in: one made while the October term runs stays on October's exchange and is not live in Winter. So for each new term, your Team Lead registers again once your Directors announce that its registration is open, and the registration counts for orders sent after it is accepted. Winter's first week, 26 to 30 October, is an unscored practice week; Winter then starts afresh on 2 November as a new term, so a registration made in the practice week does not carry over and your Team Lead registers again before then. Before a session opens, an order is rejected `MARKET_CLOSED` when the earlier checks pass. In a session, when the earlier checks pass, a new order under a strategy ID that is not registered, or whose registration was retired, is rejected `STRATEGY_NOT_REGISTERED`, and a new order outside the declared scope `OUTSIDE_DECLARED_SCOPE`.
 
-The practice exchange keeps the hours in the calendar it sends after you authenticate (step 3), so read them there rather than from this guide.
+The exchange keeps the hours in the calendar it sends after you authenticate (step 3), so read them there rather than from this guide.
 
 ## 1. Install
 
@@ -82,7 +82,7 @@ From your project folder, with your virtual environment active, run the SDK's se
 python -m qte_sdk.token set
 ```
 
-It asks for the exchange address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the address the course team gives you) and then for the token: paste it and press Enter. Nothing is shown as you paste, and since the token is typed at a prompt rather than on the command line, it never reaches your shell history. The helper writes both to `.env` as `QTE_URL` and `QTE_TOKEN`, in a file created readable only by you, keeping any other lines already in it. If the folder is a git repository that does not ignore `.env`, it offers to add `.env` to `.gitignore`; say yes. If git already tracks a `.env`, it stops before asking for the token and tells you to run `git rm --cached .env`, since `.gitignore` alone does not stop git committing a file it tracks. Inside a git repository it also stops if it cannot ask git (git is not installed, say), rather than guess. Run it again whenever the token changes.
+It asks for the exchange address (a test exchange on your own machine is usually `ws://127.0.0.1:8080/ws`; otherwise use the exchange's address, `wss://api.trading.queenstowerexchange.com/ws`) and then for the token: paste it and press Enter. Nothing is shown as you paste, and since the token is typed at a prompt rather than on the command line, it never reaches your shell history. The helper writes both to `.env` as `QTE_URL` and `QTE_TOKEN`, in a file created readable only by you, keeping any other lines already in it. If the folder is a git repository that does not ignore `.env`, it offers to add `.env` to `.gitignore`; say yes. If git already tracks a `.env`, it stops before asking for the token and tells you to run `git rm --cached .env`, since `.gitignore` alone does not stop git committing a file it tracks. Inside a git repository it also stops if it cannot ask git (git is not installed, say), rather than guess. Run it again whenever the token changes.
 
 On Windows the helper cannot make the file readable only by you: Windows does not apply the file's private mode, and the helper does not change Windows access lists. A file takes its access from its folder, so keep your project, and any token file, in a folder under your user profile (`%USERPROFILE%`, such as `C:\Users\you\qte-project`), which only you can open by default, and do not share that folder. A folder on another drive, such as `D:\`, is usually readable by every local user, and often changeable by them too. To check a folder, run `icacls <folder>` and look for `Everyone`, `NT AUTHORITY\Authenticated Users` or `BUILTIN\Users` in what it prints. When the helper saves the file, it reads the access lists and owners of the file and its folder, and says whether any of these groups can read or change the file, or add or remove files in its folder (and so replace the file with one of their own), or whether another account owns the file or the folder, or whether Windows would not let it see a list. The SDK warns you when it reads a `.env` or token file for which any of these is so. A later release will refuse such a file on Windows, rather than warn. On macOS and Linux the SDK refuses only a `.env` holding the token that other users can read. If `QTE_URL` is already set, press Enter at the address prompt to keep it.
 
@@ -630,7 +630,7 @@ An exchange that does not offer resume yet answers `resume` with a `reject`. `se
 
 The exchange's history service serves the market data of sessions that have closed, going back to the first session held, at any hour. It serves exactly what the live feed published to everyone, message for message, so you get the same `Book`, `Trades`, `Mark` and `SessionState` classes as from `market_data` and the same handling code works on both. It holds nothing else: no raw feed, and nothing about other teams.
 
-It is a separate service with its own address, which the course team gives you. Set it as `QTE_HISTORY_URL`; the SDK has no default. Your token comes from `QTE_TOKEN` as before. No session is needed: this runs in any `async` function.
+It is a separate service with its own address, `https://history.trading.queenstowerexchange.com`. Set it as `QTE_HISTORY_URL`; the SDK has no default. Your token comes from `QTE_TOKEN` as before. No session is needed: this runs in any `async` function.
 
 ```python
 from qte_sdk.connection import DecodeFailed, Unknown
