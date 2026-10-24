@@ -1,6 +1,6 @@
 # Developing your algo
 
-**Version:** 0.10
+**Version:** 0.11
 
 This guide is one path from an idea to a program trading on the exchange: explore past market data, run your strategy's loop on a replay of a past session, keep its order logic separate so you can test it, check your setup with the smoke test, then try it on the exchange during a session. Most of it works at any hour, so you can do it while the market is closed.
 
@@ -229,7 +229,7 @@ The pacer keeps you at 80% of each cap (`headroom=0.8`), spreads bursts over the
 <!-- The only place in the SDK's docs that gives budget values: update these tables, and their dates, when the exchange's values change. -->
 Your team's budgets, by term and arm. The exchange does not send them, and they can change from term to term: ask the Head of Technology, Joshua, for your term's values if your term is not listed here.
 
-The October term (from 12 October 2026) runs at 4 times the usual values:
+The October term (from 12 October 2026) and the Winter term (from 26 October 2026) both run at these values, 4 times the values in the specification's Table 9:
 
 | Arm | Sustained, per minute | Burst, per second | New orders, per minute |
 |---|---|---|---|
@@ -237,20 +237,8 @@ The October term (from 12 October 2026) runs at 4 times the usual values:
 | Options Market Making | 17,280 | 800 | no cap |
 | Options Taking | 2,400 | 800 | no cap |
 | Market Taking | 4,800 | 800 | no cap |
-| Agentic AI | 4,800 | 800 | 480 |
+| Agentic AI (closed in Winter) | 4,800 | 800 | 480 |
 | Execution | 7,200 | 800 | no cap |
-| Fundamentals | sends no orders; tickets do not count | | |
-
-From the Winter term (26 October 2026) the usual values apply:
-
-| Arm | Sustained, per minute | Burst, per second | New orders, per minute |
-|---|---|---|---|
-| Market Making | 4,320 | 200 | no cap |
-| Options Market Making | 4,320 | 200 | no cap |
-| Options Taking | 600 | 200 | no cap |
-| Market Taking | 1,200 | 200 | no cap |
-| Agentic AI (closed in Winter; opens in Spring) | 1,200 | 200 | 120 |
-| Execution | 1,800 | 200 | no cap |
 | Fundamentals | sends no orders; tickets do not count | | |
 
 ## What the replay is not
