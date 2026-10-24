@@ -304,7 +304,9 @@ def _ask_address(url: str | None, ask: Prompt) -> str:
         current = os.environ.get(URL_ENV_VAR) or read_value(URL_ENV_VAR)[0]
     if url is None:
         hint = " [Enter keeps the address already set]" if current else ""
-        url = ask(f"Exchange address (from the course team){hint}: ").strip()
+        url = ask(
+            f"Exchange address, such as wss://api.trading.queenstowerexchange.com/ws{hint}: "
+        ).strip()
         if not url and current:
             url = current
     if not url:
