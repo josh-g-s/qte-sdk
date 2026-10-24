@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.72
+**Version:** 0.73
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -594,7 +594,7 @@ Some rejects you are likely to meet while learning (the exchange's rules decide 
 
 A `reject` can also carry `CURE_WINDOW`, a reason you otherwise see on `order_cancelled`: a new still waiting out its order delay when a cure window opens on a limit it falls under is rejected when it is released, so that it never rests. A reason from a newer contract than your SDK knows decodes as `REASON_CODE_UNSPECIFIED`; `event.unknown_enum_names()` returns the name the exchange sent.
 
-**The term-end trading cutoff.** On the final session of a term, Market Making, Market Taking, Options MM and Options Taking teams stop trading five minutes before the close. Other teams trade on to the close. At the cutoff the exchange cancels each of your resting orders with an `order_cancelled` whose reason is `TERM_CUTOFF`. A new or amend still waiting out its order delay at that moment is dropped with no answer, while a cancel or mass cancel you sent before the cutoff, still waiting out its delay, still applies. Any order message of yours that the exchange receives at or after the cutoff is rejected `TRADING_CUTOFF`, even one you sent just before it. No `SessionState` phase marks the cutoff, so these two reasons are how your program learns of it: compare a reason with `ReasonCodes.TRADING_CUTOFF` or `ReasonCodes.TERM_CUTOFF` (from `qte_sdk.contract.v1.common_pb2`), or name it with `reason_code_name`. An SDK of 1.0.2 or older does not know them and decodes them as `REASON_CODE_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
+**The term-end trading cutoff.** On the final session of a term, Market Making, Market Taking, Options MM and Options Taking teams stop trading five minutes before the close, and so do Agentic AI teams in a term whose file sets the exchange's `term_end.agentic_ai` to `true` (false or absent means off; Agentic AI sits out the Winter term and starts in Spring). Other teams trade on to the close. At the cutoff the exchange cancels each of your resting orders with an `order_cancelled` whose reason is `TERM_CUTOFF`. A new or amend still waiting out its order delay at that moment is dropped with no answer, while a cancel or mass cancel you sent before the cutoff, still waiting out its delay, still applies. Any order message of yours that the exchange receives at or after the cutoff is rejected `TRADING_CUTOFF`, even one you sent just before it. No `SessionState` phase marks the cutoff, so these two reasons are how your program learns of it: compare a reason with `ReasonCodes.TRADING_CUTOFF` or `ReasonCodes.TERM_CUTOFF` (from `qte_sdk.contract.v1.common_pb2`), or name it with `reason_code_name`. An SDK of 1.0.2 or older does not know them and decodes them as `REASON_CODE_UNSPECIFIED`, with the name in `event.unknown_enum_names()`.
 
 ## 9. If the connection drops
 
