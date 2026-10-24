@@ -8,9 +8,10 @@ This repository contains only participant-facing material. Exchange internals (t
 
 - Python 3.11 or later.
 - The exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, which the SDK reads as `QTE_URL`, and, for past market data, the history service's address, `https://history.trading.queenstowerexchange.com`, read as `QTE_HISTORY_URL`.
+- The console and web trading are at `https://trading.queenstowerexchange.com`: sign in there as a Team Lead or a team member.
 - Your team's token, one per team. The Head of Technology, Joshua, emailed it to your Team Lead, who shares it only with your own team's members; a Team Lead who does not have it emails Joshua. `python -m qte_sdk.token set` saves it with the exchange's address (see below).
 - For any program that sends orders, a strategy ID registered for your team. Your Team Lead registers it, with its declared scope, on the Strategy registration page of the Team Lead console.
-- Treat the token like a password: never put it in a source file, a notebook, a screenshot or a repository.
+- Treat the token like a password: never put it in a source file, a notebook, a chat, a screenshot or a repository.
 
 ## Install
 
