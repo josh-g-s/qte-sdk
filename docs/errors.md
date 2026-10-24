@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.14
+**Version:** 0.15
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -106,13 +106,13 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 - Raised as: `qte_sdk.session.MissingURL` (from `open_session`, `resolve_url`, `ReconnectingSession`); `token check` exits 1; `token set` refuses an empty address.
 - Cause: No address was passed, `QTE_URL` is unset or empty, and `./.env` sets no `QTE_URL`.
-- Fix: Run `python -m qte_sdk.token set` and enter the address the course team gave you, or set `QTE_URL`.
+- Fix: Run `python -m qte_sdk.token set` and enter the exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, or set `QTE_URL`.
 
 ### QTE-ADDRESS-INVALID
 
 - Raised as: a `token check` line (exit 1); `token set` refuses the address; the smoke test's `address` check fails.
 - Cause: The address does not start with `ws://` or `wss://`, has spaces or quotes, or (in the smoke test) is a plain `ws://` address for another computer, which would send your token unencrypted.
-- Fix: Set `QTE_URL` to the `wss://` address you were given, for example with `python -m qte_sdk.token set`. A test exchange on your own machine may use `ws://127.0.0.1:8080/ws`.
+- Fix: Set `QTE_URL` to the exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, for example with `python -m qte_sdk.token set`. A test exchange on your own machine may use `ws://127.0.0.1:8080/ws`.
 
 ### QTE-ADDRESS-SHARED
 
@@ -262,13 +262,13 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 
 - Raised as: `qte_sdk.history.MissingHistoryURL`, a `ValueError`, from `HistoryClient`.
 - Cause: `HistoryClient` was given no `url=`, and `QTE_HISTORY_URL` is unset or empty. It has no default address, and never reads one from `.env`.
-- Fix: Pass `url=`, or set `QTE_HISTORY_URL` in the environment to the `https://` address the course team gave you.
+- Fix: Pass `url=`, or set `QTE_HISTORY_URL` in the environment to the history service's address, `https://history.trading.queenstowerexchange.com`.
 
 ### QTE-HISTORY-ADDRESS-INVALID
 
 - Raised as: `qte_sdk.history.HistoryAddressInvalid`, a `ValueError`, from `HistoryClient`. The smoke test's `history` check fails with it.
 - Cause: The address is not a well-formed `https://` URL, holds credentials, a query or a fragment, has a port that is not a number, or is a plain `http://` address for another computer (only a test server on your own computer may use `http://`). The client will not send your token there. The message never shows the address, since a mistake could have put the token in it.
-- Fix: Set `QTE_HISTORY_URL`, or pass `url=`, to the `https://` address you were given.
+- Fix: Set `QTE_HISTORY_URL`, or pass `url=`, to the history service's address, `https://history.trading.queenstowerexchange.com`.
 
 ### QTE-HISTORY-PENDING
 

@@ -1,12 +1,12 @@
 # Using qte-sdk
 
-**Version:** 1.45
+**Version:** 1.49
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of 1.2.0 or later, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With an earlier release, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
 ## What this is
 
-- `qte_sdk` is the Python client for the QTE exchange. You run your program on your own machine and it trades through the exchange's API, using the exchange address and team token the course team gives you.
+- `qte_sdk` is the Python client for the QTE exchange. You run your program on your own machine and it trades through the exchange's API, using the exchange's address (under "Where to test") and your team's token (under "Getting help").
 - Start with the [README](https://github.com/josh-g-s/qte-sdk#readme), then the [quickstart](https://github.com/josh-g-s/qte-sdk/blob/main/docs/quickstart.md), which covers sessions, market data, orders, the values the exchange sets, reconnecting and past market data.
 - To check a setup end to end, have the person run `python examples/smoke_test.py --instruments <symbols>` from the project folder, with `examples/` copied into it. It prints PASS, FAIL or SKIP per check and sends no orders unless given `--place-test-order`.
 
@@ -28,7 +28,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 
 - The SDK takes the team token from `token=` if you pass one, then the `QTE_TOKEN` environment variable, then the file named by `QTE_TOKEN_FILE`, then `QTE_TOKEN` in a `.env` file in the working directory. It takes the exchange address from the `url` you pass, then `QTE_URL`, then `QTE_URL` in `.env`, so `open_session()` needs neither argument.
 - A `.env` is the recommended place for both. The person creates it by running `python -m qte_sdk.token set` themselves (it needs a terminal and reads the token without echo); `python -m qte_sdk.token check` says where the SDK finds each without showing the token. It must be listed in the project's `.gitignore` and readable only by its owner (`chmod 600 .env`). The SDK refuses a `.env` holding the token that others can read (on Windows it warns when others can read or change it, and the fix is to keep the project under `%USERPROFILE%`) and warns when git does not ignore it: fix the cause, never silence the warning or loosen the check.
-- Never write the token into source code, a notebook, a config file that is committed, a test, a log, printed output or a screenshot.
+- Never write the token into source code, a notebook, a config file that is committed, a test, a log, printed output, a chat or a screenshot.
 - An agent must never ask for the token in chat, print it, read or display the contents of `.env` or a token file, or add code that logs it. If you find a token anywhere other than a private, git-ignored `.env` or token file, such as in a tracked file or in output, stop and tell the person to have it replaced.
 - The SDK keeps the token out of its own logs and errors. Do not defeat that, for example by logging request headers or the raw connection.
 
@@ -65,7 +65,7 @@ Act on what the exchange reports instead: cancel or amend after the order's `ord
 
 - There is no order ID. Your team's orders are addressed by instrument, side and price, and your team holds at most one resting order at each, across all of its strategies. A second new order at a level where you already rest is rejected; send an amend to change its size.
 - A cancel or amend acts on whichever of your team's orders holds that level when it is applied, which may be another strategy's. A mass cancel cancels every resting order your team has, on every instrument and for every strategy.
-- A new order carries a strategy ID registered for your team. Ask the Head of Technology, Joshua, to register one.
+- A new order carries a strategy ID registered for your team. Your Team Lead registers it, with its declared scope, on the Strategy registration page of the Team Lead console.
 - Prices are whole numbers of micro-dollars (`199_970_000` is $199.97). Convert with `qte_sdk.units` (`to_micros`, `to_decimal`) and never use `float` for a price.
 - An option contract's instrument id is its OCC symbol without spaces, such as `SPY240119C00470000`. Build and read it with `qte_sdk.options` (`option_symbol`, `parse_option_symbol`, `is_option_symbol`) rather than slicing strings. An option order's size is in contracts, never shares, and its prices are per share. Read an option book's `trading_state` with `qte_sdk.options.trading_state`, which treats a state it does not know as suspended. Send a new or amend only while it is `OPTION_TRADING` (or `OPTION_REDUCING_ONLY` for an order that reduces the position). `OPTION_HALTED` means a Director has halted the whole chain on that underlying: only cancels until the book shows another state, and the orders resting when it started were cancelled `CHAIN_HALTED` and are not restored. A `CONTRACT_HALTED` reject or a `QTE-OPTIONS-CHAIN-HALTED` warning in the log means the same: do not retry until the chain trades again. Keep the latest Greeks per contract with `qte_sdk.options.LatestGreeks`. Take a first option contract to subscribe to from the instruments table (`qte_sdk.options.listed_contracts`), never by guessing a symbol. Convert Greeks with `greek_to_decimal` and `vol_to_decimal`, never `float`. The worked example `examples/options_bot.py` does all of this end to end: chain, Greeks, a skip of a contract that is not trading, one limit order by OCC symbol, and its cancel; start an options program from it. With `--watch-only` it chooses the same contract but sends nothing, no order and no cancel: it prints a `WOULD SEND (watch-only, not sent):` line and exits 0, or 1 with `watch-only: NO CONTRACT CHOSEN:` and the reason, so it is safe to point at a live exchange to see what it reads.
 - A Fundamentals pod sends no orders: it sends tickets with `qte_sdk.tickets` (`send_ticket`, `send_ticket_cancel`, `send_ticket_urgency`), reads the answers with `is_ticket_event`, and keeps each ticket's newest state with `LatestTickets`. There is no ticket amend message: send the cancel with `send_ticket_cancel(..., replacing=True)`, and once its `ticket_state` shows `TICKET_CANCELLED_BY_POD`, send a new ticket naming the old one in `replaces_ticket_id`. If that cancel is refused `TICKET_SERVICE_OFF` (1714), the automatic execution route is off in a term that pairs no pod with an Execution desk: send no replacement, since the original ticket is still working with its fills and children; cancel it plainly to stop it. A new ticket, a cure ticket included, is refused 1714 the same way while the route is off in such a term. A ticket stops only when a `ticket_state` says so, never on a `ticket_reject`, and on every connection the exchange resends each ticket's whole state, which replaces what you held.
@@ -99,9 +99,9 @@ An option contract is an instrument in history too, named by its unpadded OCC sy
 
 ## Where to test
 
-Run your program against the practice exchange the course team gives you, or a test exchange on your own machine. Do not guess exchange addresses, and do not point an experiment at an exchange where it would trade for real unless you mean it to.
+Run your program against the exchange, `wss://api.trading.queenstowerexchange.com/ws` (its history service is `https://history.trading.queenstowerexchange.com`), or a test exchange on your own machine. The console and web trading are at `https://trading.queenstowerexchange.com`: sign in there as a Team Lead or a team member. Do not guess exchange addresses, and do not point an experiment at an exchange where it would trade for real unless you mean it to.
 
 ## Getting help
 
 - For a bug in the SDK or its docs, open an issue on this repository. It is public: never include your token, your team's account details or your strategy's code.
-- For tokens, strategy IDs, exchange addresses and access, ask the Head of Technology, Joshua.
+- Your team has one token: the Head of Technology, Joshua, emailed it to your Team Lead, who shares it only with your own team's members. A Team Lead who does not have it, or anyone who needs access, emails Joshua. Your Team Lead registers strategy IDs.

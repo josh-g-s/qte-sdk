@@ -75,6 +75,11 @@ OUT_OF_HOURS = EXAMPLES_DIR.parent / "docs" / "out-of-hours.md"
 DEVELOPING = EXAMPLES_DIR.parent / "docs" / "developing-your-algo.md"
 SDK_INSTALL_URL = "git+https://github.com/josh-g-s/qte-sdk"
 SDK_ARCHIVE_URL = "https://github.com/josh-g-s/qte-sdk/archive/refs/tags/"
+# The production exchange and history service, which the docs give teams (issue #277).
+PRODUCTION_URLS = (
+    "wss://api.trading.queenstowerexchange.com/ws",
+    "https://history.trading.queenstowerexchange.com",
+)
 NO_NETWORK = Path(__file__).resolve().parent / "no_network"
 INSTRUMENT = "TEST"
 BID, ASK = 99_950_000, 100_050_000
@@ -117,6 +122,8 @@ def test_no_example_or_quickstart_names_any_exchange_but_a_local_one(path: Path)
             or re.fullmatch(rf"{re.escape(SDK_ARCHIVE_URL)}v\d+\.\d+\.\d+\.zip", url)
         ):
             continue  # where pip installs the SDK from, or one release of it, not an exchange
+        if url in PRODUCTION_URLS and path.suffix == ".md":
+            continue  # the docs name the production addresses; examples never do
         parts = urlsplit(url)
         assert parts.scheme == "ws", url
         assert parts.hostname == "127.0.0.1", url
