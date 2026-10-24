@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.68
+**Version:** 0.70
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -11,7 +11,7 @@ The commands are for macOS and Linux. On Windows, type `py` where this guide say
 - Python 3.11 or later.
 - The `examples` folder of this repository, from a clone or the source zip of your release, but only to run or read the worked examples (step 11).
 - The exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, and, for past market data (step 10), the history service's address, `https://history.trading.queenstowerexchange.com`. A test exchange you run on your own machine is usually `ws://127.0.0.1:8080/ws`.
-- Your team's token, one per team. The Head of Technology, Joshua, emailed it to your Team Lead, who shares it only with your own team's members; a Team Lead who does not have it emails Joshua. Step 2 saves it. Treat it like a password: never put it in a source file, a notebook, a screenshot or a repository.
+- Your team's token, one per team. The Head of Technology, Joshua, emailed it to your Team Lead, who shares it only with your own team's members; a Team Lead who does not have it emails Joshua. Step 2 saves it. Treat it like a password: never put it in a source file, a notebook, a chat, a screenshot or a repository.
 - A strategy ID registered for your team, for any program that sends orders. Your Team Lead registers it, with its declared scope, on the Strategy registration page of the Team Lead console.
 
 The exchange keeps the hours in the calendar it sends after you authenticate (step 3), so read them there rather than from this guide.
