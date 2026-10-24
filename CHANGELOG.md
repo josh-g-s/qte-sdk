@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.64
+**Version:** 0.65
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -11,6 +11,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - Docs only: the README and AGENTS.md give the console and web trading address, `https://trading.queenstowerexchange.com`, and the README, the quickstart and AGENTS.md add a chat to the places a token must never go.
 - Docs only: the README, the quickstart and AGENTS.md give the exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, and the history service's, `https://history.trading.queenstowerexchange.com`; say that each team has one token, emailed by the Head of Technology to its Team Lead and shared only within the team; and say that the Team Lead registers strategy IDs in the Team Lead console. docs/developing-your-algo.md no longer mentions a separate practice exchange.
 - Docs only: the README, the quickstart, AGENTS.md and docs/automatic-execution.md name v1.5.0 as the latest release, its zip in the install line, and no longer call `progress`, reason 1714, `replacing=True` or statuses 8 and 9 `main` only (#273).
+- Docs: who registers a strategy ID. The README, the quickstart and AGENTS.md said to ask the Head of Technology; your Team Lead registers it in the Team Lead console, and a registration counts only on the term it is made in, so for each new term Team Leads register again once their Directors announce that its registration is open. Winter's first week, 26 to 30 October, is an unscored practice week, and Winter starts afresh on 2 November as a new term, so Team Leads register again before then. The quickstart's account section adds that nothing carries over from the practice week: every team, Fundamentals included, starts the 2 November term flat. `examples/smoke_test.py` now says to ask your Team Lead on `STRATEGY_NOT_REGISTERED`. Docs and one example message only.
 
 ## 1.5.0
 
