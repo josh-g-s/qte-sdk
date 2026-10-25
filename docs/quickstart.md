@@ -577,7 +577,7 @@ The query is not an order message: the exchange does not hold it for the order d
 Where the term posts splits (SPEC.md 12.2), a split takes effect at the open of the instrument's ex-date. The current case is MTUM, 4 new shares for 1 old at the open on Thursday 5 November 2026.
 
 - Your position in the instrument is scaled at that open (for `a` new shares for `b` old, `a/b` times as many, rounding toward zero), and a fraction of a share is paid to a long, or charged to a short, as cash. No report and no report number comes with it: only an `account_state` shows it. After that open, query your account and wait for the reply before you trade. A program that keeps its own positions from fills, or with `AccountReports`, keeps the pre-split shares until it does.
-- Orders resting in the instrument were already cancelled at the close before (`SESSION_CLOSE`). A pod's working tickets in it stop with `TICKET_SPLIT_CANCELLED`, their fills standing: if you still want the trade, send a new ticket in post-split shares, with any limit price in post-split prices.
+- Orders resting in the instrument were already cancelled at the close before (`SESSION_CLOSE`). A pod's ordinary working tickets in it stop with `TICKET_SPLIT_CANCELLED`, their fills standing: if you still want the trade, send a new ticket in post-split shares, with any limit price in post-split prices. A cure ticket keeps working, its unfilled shares scaled to post-split shares, rounding toward zero.
 - Prices you kept from before the ex-date, and history, are in pre-split terms: history is not adjusted for splits. Multiply earlier prices by `b/a`, and earlier share counts by `a/b`, to compare them with later ones.
 
 ## 8. Values the exchange sets
