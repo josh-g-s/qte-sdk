@@ -52,5 +52,11 @@
     "recommended": true,
     "why": "a Director's amend now sends your pod a replacement ticket to follow; tickets carry progress; a watch-only options bot; code naming the retired fallback must drop it",
     "platforms": []
+  },
+  {
+    "version": "1.5.1",
+    "recommended": false,
+    "why": "the history-unavailable message and the packaged guidance say the options history build is live, and messages give the production addresses",
+    "platforms": []
   }
 ]

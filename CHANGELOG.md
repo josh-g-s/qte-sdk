@@ -1,12 +1,16 @@
 # Changelog
 
-**Version:** 0.72
+**Version:** 0.73
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+## 1.5.1
+
+**Nothing to change in your code.** 1.5.1 brings the messages and the guidance that ship inside the package up to date. The history service's options build is live, so the `QTE-HISTORY-UNAVAILABLE` message and the `qte_sdk.history`, `qte_sdk.options` and `qte_sdk.replay` docstrings no longer call it not live: 15 and 16 October 2026 now serve option chains and Greeks, and 19 to 21 October are due later. The errors for a missing service address give the production addresses, and the packaged AGENTS.md says a Team Lead registers strategy IDs in the Team Lead console. Update with `python -m qte_sdk.update` and follow what it prints.
 
 - The `QTE-HISTORY-UNAVAILABLE` message no longer says its answer can change "until the service's options build is live": the build is live, so it names only a session cached before the build, once that session is upgraded (#287).
 - Docs only: the history service's options build (qte-platform #2298) is live, so the quickstart, docs/developing-your-algo.md, docs/errors.md, AGENTS.md and the `qte_sdk.history`, `qte_sdk.options` and `qte_sdk.replay` docstrings no longer call it "not live yet". A session cached before the build answers its Greeks and chain unavailable until it is upgraded: 15 and 16 October 2026 have been, and 19 to 21 October are due later, so their answer is not final yet (#285).
