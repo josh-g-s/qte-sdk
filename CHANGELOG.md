@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.75
+**Version:** 0.76
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -9,6 +9,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 ## Unreleased
 
 - The README, the quickstart, both copies of AGENTS.md and the automatic execution page name v1.5.1 as the latest release, and their install lines use the v1.5.1 zip (#291).
+- The quickstart and the packaged AGENTS.md say that in Winter's practice week, 26 to 30 October 2026, Market Making obligation breaches only warn, Options ones included, and the daily loss halts stay live, citing qte-platform DL-162 and DL-163 (#293).
 
 ## 1.5.1
 
