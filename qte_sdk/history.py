@@ -13,6 +13,12 @@ message as the live feed carried it, so the items are the same generated classes
 `qte_sdk.market_data.market_data` yields and your handling code works on both. It serves
 only what was published to everyone: there is no raw feed and no other team's data here.
 
+Splits. Prices and quantities are as published, not adjusted for a later split. For a
+split of `a` new shares for `b` old (MTUM's 4-for-1 at the 5 November 2026 open is 4 for
+1), multiply prices published before its ex-date by `b/a`, and share counts by `a/b`, to
+compare them with later ones. Otherwise a series that crosses the ex-date shows a step
+there that the market did not make.
+
 Each request is a plain HTTPS GET authenticated with your team token. There is no
 session, nothing to subscribe to and nothing to close. The service's address comes from
 the `url` argument or the `QTE_HISTORY_URL` environment variable; there is no default.
