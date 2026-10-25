@@ -392,9 +392,8 @@ CODES: dict[str, Entry] = {
     ),
     HISTORY_UNAVAILABLE: Entry(
         "{what}",
-        "Asking again will not change that, except for option contracts, their Greeks and "
-        "option chains until the service's options build is live, and for a session cached "
-        "before it once an upgrade of that session is announced (see docs/errors.md)",
+        "Asking again will not change that, except for a session cached before the service's "
+        "options build once an upgrade of that session is run (see docs/errors.md)",
         "Check the date, instrument and channel against the calendar and the instruments "
         "the exchange lists",
         "A date before the service's coverage, a day with no session, an instrument or "
