@@ -1,12 +1,12 @@
 # Automatic execution
 
-**Version:** 0.24
+**Version:** 0.25
 
 The exchange can work a Fundamentals pod's tickets itself, with its automatic execution service, instead of sending them to the pod's Execution desk. This page says what changes for a pod and a desk while the service is on, what each SDK release shows of it, and the one mistake to avoid: adding ticket fills to a position of your own. The rules in full are in the [`qte_sdk.tickets`](../qte_sdk/tickets.py) docstring.
 
 ## What each release shows
 
-1.5.0, the latest release, reads everything the service sends: a ticket's `progress` included, it names reason 1714 and the statuses 8 and 9, and it has the replacing cancel that begins an amendment. Teams that have not updated keep working while the service is on: with 1.4.0 or 1.3.0 nothing raises, disconnects or is delivered twice after a reconnect, but each shows less, as the table says. A field a release does not show is not in its Python types at all: reading it, or testing it with `HasField`, raises, so update before your code uses it. Older programs can also act on less: one built on 1.4.0 or 1.3.0 takes a Director's amend (status 9, which it reads as `TICKET_STATUS_UNSPECIFIED`) for the end of the ticket and never follows the replacement, so update and follow it as "A Director's cancel or amend" says. Check yours with `python -m qte_sdk.update`, which says whether a newer release exists and how to install it.
+1.5.0 and later releases, 1.5.1 the latest, read everything the service sends: a ticket's `progress` included, they name reason 1714 and the statuses 8 and 9, and they have the replacing cancel that begins an amendment. Teams that have not updated keep working while the service is on: with 1.4.0 or 1.3.0 nothing raises, disconnects or is delivered twice after a reconnect, but each shows less, as the table says. A field a release does not show is not in its Python types at all: reading it, or testing it with `HasField`, raises, so update before your code uses it. Older programs can also act on less: one built on 1.4.0 or 1.3.0 takes a Director's amend (status 9, which it reads as `TICKET_STATUS_UNSPECIFIED`) for the end of the ticket and never follows the replacement, so update and follow it as "A Director's cancel or amend" says. Check yours with `python -m qte_sdk.update`, which says whether a newer release exists and how to install it.
 
 | What the exchange sends | 1.5.0 | 1.4.0 | 1.3.0 |
 |---|---|---|---|
