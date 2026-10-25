@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.67
+**Version:** 0.73
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,11 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- The `QTE-HISTORY-UNAVAILABLE` message no longer says its answer can change "until the service's options build is live": the build is live, so it names only a session cached before the build, once that session is upgraded (#287).
+- Docs only: the history service's options build (qte-platform #2298) is live, so the quickstart, docs/developing-your-algo.md, docs/errors.md, AGENTS.md and the `qte_sdk.history`, `qte_sdk.options` and `qte_sdk.replay` docstrings no longer call it "not live yet". A session cached before the build answers its Greeks and chain unavailable until it is upgraded: 15 and 16 October 2026 have been, and 19 to 21 October are due later, so their answer is not final yet (#285).
+- Docs only: in a term whose file sets the exchange's `term_end.agentic_ai` to `true`, Agentic AI teams also stop trading at the term-end cutoff, five minutes before the final session's close, and get `TERM_CUTOFF` and `TRADING_CUTOFF` as Market Taking does. Agentic AI sits out the Winter term and starts in Spring (qte-platform #2607, #2609).
+- Docs only: in a term that sets the exchange's `urgency_clock_stops` (the Winter term does), a `DESK` ticket's schedule clock stops while its instrument is halted or the Directors declare an outage, the clock a `SERVICE` ticket already uses (qte-platform #2676): its `due_shares`, and each progress point's, do not grow during them. A `DESK` ticket still gets no `revised_completion_time`. Described in the `qte_sdk.tickets` docstring and docs/automatic-execution.md, "Execution desks".
+- Messages: the errors for a missing or invalid exchange or history service address, and `token set`'s prompt, give the production addresses, `wss://api.trading.queenstowerexchange.com/ws` and `https://history.trading.queenstowerexchange.com`, instead of "the address the course team gave you". The smoke test's hint for `STRATEGY_NOT_REGISTERED` says to ask your Team Lead to register the strategy in the Team Lead console, not the Head of Technology.
 - Docs only: docs/developing-your-algo.md no longer gives Winter pacing budgets at a quarter of their value: the October values continue in Winter. The quickstart says a Fundamentals ticket that opens or increases a position is refused `TICKET_THESIS_NOT_FILED` from the Winter term unless it names the pod's own filed thesis, and that `t-aapl` in the examples is a placeholder. The README and the quickstart point to the Tags page for a release's source zip.
 - Docs only: the README and AGENTS.md give the console and web trading address, `https://trading.queenstowerexchange.com`, and the README, the quickstart and AGENTS.md add a chat to the places a token must never go.
 - Docs only: the README, the quickstart and AGENTS.md give the exchange's address, `wss://api.trading.queenstowerexchange.com/ws`, and the history service's, `https://history.trading.queenstowerexchange.com`; say that each team has one token, emailed by the Head of Technology to its Team Lead and shared only within the team; and say that the Team Lead registers strategy IDs in the Team Lead console. docs/developing-your-algo.md no longer mentions a separate practice exchange.

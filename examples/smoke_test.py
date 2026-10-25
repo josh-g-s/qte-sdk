@@ -652,7 +652,8 @@ def address_problem(url: str) -> str | None:
         return None
     return (
         "it is a plain ws:// address for a host other than this machine, which would send "
-        "your token unencrypted: use the wss:// address you were given"
+        "your token unencrypted: use the exchange's wss:// address, given in the README and "
+        "the quickstart"
     )
 
 
