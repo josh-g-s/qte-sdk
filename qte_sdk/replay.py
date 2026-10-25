@@ -24,6 +24,9 @@ day, with whatever was really traded then, your own team's orders and trades inc
 it traded. It cannot add an order that was not there, or work out what one would have
 done.
 
+Splits. A replay serves what was published that day, not adjusted for a later split: see
+`qte_sdk.history`.
+
 Order. Grid points come in order: every message of one grid point comes before any
 message of the next, as on a live connection. A message's grid point is its `grid_time`
 (`Book`, `Trades`, `OptionGreeks`, `SessionState`), or its `sampled_at` for a `Mark`,

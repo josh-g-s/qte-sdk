@@ -224,6 +224,13 @@ class AccountReports:
     query again. Report numbers start again each term, and a reply from the term before
     would take a new term's first reports for ones it includes: before you trade in a new
     term, query and wait for the reply, or start a new `AccountReports`.
+
+    A split posts with no report. At the open of a split's ex-date, where the term posts
+    splits (SPEC.md 12.2), the exchange scales your position in the instrument and pays a
+    fraction of a share to a long, or charges it to a short, as cash. No `execution`,
+    `risk_notice` or report number comes with it: only the next `account_state` shows it,
+    and its `as_of_report_seq` does not move. So after that open, query again and wait for
+    the reply before you trade, or your account keeps the pre-split shares and cash.
     """
 
     def __init__(self) -> None:

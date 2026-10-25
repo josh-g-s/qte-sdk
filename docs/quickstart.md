@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.77
+**Version:** 0.78
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -571,6 +571,14 @@ For the reply to your query, `update` returns the reply itself, then the reports
 Report numbers start again each term, so a reply from the term before would take a new term's first reports for ones it already includes: before you trade in a new term, query again and wait for the reply, or start a new `AccountReports`. An exchange that does not number its reports sends no `as_of_report_seq`, and then every report applies; a reply can then be ordered against your fills only by when they arrive, which that exchange does not promise, so a fill close to a reply can be counted twice or missed.
 
 The query is not an order message: the exchange does not hold it for the order delay or count it in your message budgets. It is a good way to check your positions again after a `SeqGap` or a dropped connection.
+
+### Stock splits
+
+Where the term posts splits (SPEC.md 12.2), a split takes effect at the open of the instrument's ex-date. The current case is MTUM, 4 new shares for 1 old at the open on Thursday 5 November 2026.
+
+- Your position in the instrument is scaled at that open (for `a` new shares for `b` old, `a/b` times as many, rounding toward zero), and a fraction of a share is paid to a long, or charged to a short, as cash. No report and no report number comes with it: only an `account_state` shows it. After that open, query your account and wait for the reply before you trade. A program that keeps its own positions from fills, or with `AccountReports`, keeps the pre-split shares until it does.
+- Orders resting in the instrument were already cancelled at the close before (`SESSION_CLOSE`). A pod's working tickets in it stop with `TICKET_SPLIT_CANCELLED`, their fills standing: if you still want the trade, send a new ticket in post-split shares, with any limit price in post-split prices.
+- Prices you kept from before the ex-date, and history, are in pre-split terms: history is not adjusted for splits. Multiply earlier prices by `b/a`, and earlier share counts by `a/b`, to compare them with later ones.
 
 ## 8. Values the exchange sets
 
