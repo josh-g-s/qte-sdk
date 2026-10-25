@@ -1,6 +1,6 @@
 # Developing your algo
 
-**Version:** 0.11
+**Version:** 0.12
 
 This guide is one path from an idea to a program trading on the exchange: explore past market data, run your strategy's loop on a replay of a past session, keep its order logic separate so you can test it, check your setup with the smoke test, then try it on the exchange during a session. Most of it works at any hour, so you can do it while the market is closed.
 
@@ -41,7 +41,7 @@ asyncio.run(main())
 - Take session dates from the exchange's calendar, never from a list of your own: [Outside session hours](out-of-hours.md#2-read-the-calendar) shows how to find the last session that closed. A day with no session raises `HistoryUnavailable`.
 - A book is published only when it has changed, so the stream holds the session's first book and then only the changes. The book in force at any moment is the last one before it.
 - A `Book` shows two kinds of depth: the wall (`bid_levels`, `ask_levels`) and participants' resting orders (`student_bid_levels`, `student_ask_levels`).
-- `fetch(date, instrument, channel)` is one instrument and one of `book`, `trades` or `mark`, or `option_greeks` for an option contract named by its OCC symbol; `fetch_session_state(date)` is the market session state; `fetch_option_chain(date)` is the session's option chain; `fetch_range` fetches several instruments and channels over a span of dates in one download. An option contract's `book`, `trades` and `mark` are served now; only `option_greeks` and the chain wait on the history service's options build (qte-platform #2298), which is not live yet.
+- `fetch(date, instrument, channel)` is one instrument and one of `book`, `trades` or `mark`, or `option_greeks` for an option contract named by its OCC symbol; `fetch_session_state(date)` is the market session state; `fetch_option_chain(date)` is the session's option chain; `fetch_range` fetches several instruments and channels over a span of dates in one download. An option contract's `book`, `trades` and `mark` are served wherever a session's log carried them, and `option_greeks` and the chain since the history service's options build (qte-platform #2298) went live; for a session cached before it, see `QTE-HISTORY-UNAVAILABLE` in docs/errors.md.
 
 ## 2. Run your strategy's loop on a replay
 

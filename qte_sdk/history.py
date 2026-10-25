@@ -40,15 +40,14 @@ is rebuilt, a symbol the term could list is pending, and becomes unavailable, no
 if the session's chain turns out not to list it. The service checks every id: the SDK
 sends what you give it. A contract's `book`, `trades` and `mark` are served wherever a
 session's log carried them. `option_greeks` and `fetch_option_chain` follow the history
-contract of qte-platform #2298, whose server build is not live yet: until it is, the
-service answers them unavailable, and an option contract's `book`, `trades` and `mark`
-can be unavailable for a session not yet rebuilt; none of those answers is permanent, so
-do not cache them.
+contract of qte-platform #2298, whose server build is live.
 They are built with the session's `book`, so they are ready when its `book` is. A
 session with options cached before that build (from 15 October 2026) keeps no Greeks
 and no chain, and nothing for any channel on which a listed contract published nothing
-(a contract that quoted but never traded has no `trades`): once the build is live,
-treat its unavailable answer as final unless an upgrade of that session is announced.
+(a contract that quoted but never traded has no `trades`) until an upgrade of that
+session is run. 15 and 16 October 2026 have been upgraded; 19, 20 and 21 October are
+due an upgrade later, so their unavailable answer is not final yet. Treat any other such
+unavailable answer as final unless an upgrade of that session is announced.
 An upgrade is run by hand, never automatically: it adds the missing objects and leaves
 every object already cached, and its `ETag`, unchanged.
 
@@ -257,12 +256,12 @@ class HistoryUnavailable(HistoryError):
     """The data will never exist: a date before the service's coverage, a day with no
     session, an instrument or channel the service does not know, `option_greeks` of an
     equity, an option contract the session's chain did not list, or the option chain of a
-    session with none. Do not retry. Code `QTE-HISTORY-UNAVAILABLE`. One exception: until
-    the service's options build is live, `option_greeks` and the option chain are answered
-    unavailable for every session, and an option contract's `book`, `trades` and `mark`
-    can be for a session not yet rebuilt, so those answers are not permanent. After it, a
-    session cached before it answers its Greeks and chain unavailable for good, unless an
-    upgrade of that session is announced."""
+    session with none. Do not retry. Code `QTE-HISTORY-UNAVAILABLE`. One exception: a
+    session cached before the service's options build (from 15 October 2026) answers its
+    Greeks and chain unavailable until an upgrade of that session is run. 15 and 16
+    October 2026 have been upgraded; 19, 20 and 21 October are due an upgrade later, so
+    their answer is not final yet. Any other such session's answer is final unless an
+    upgrade of it is announced."""
 
     code = _errors.HISTORY_UNAVAILABLE
 
