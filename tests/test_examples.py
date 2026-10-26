@@ -4811,6 +4811,18 @@ class MovedDuringDrop(FakeExchange):
         await super().answer_resume(ws, last_report_seq)
 
 
+async def test_quote_both_sides_stops_when_one_of_its_orders_moved_during_a_drop():
+    # Its buy rests, unheard, when the connection drops, and is moved a tick up meanwhile:
+    # the snapshot shows an order of the strategy where it sent nothing, so it stops
+    # rather than call its cleanup done while that order rests.
+    exchange = MovedDuringDrop(drop_on_new=1)
+    code, out, err = await run_quoter(exchange)
+    assert code == 1, out + err
+    assert "where this example sent nothing" in out
+    assert "all of this example's orders are cancelled" not in out
+    assert exchange.resting == {(INSTRUMENT, "BUY", BID + TICK + 50_000): ("quote-test", 1)}
+
+
 async def test_options_bot_does_not_call_its_order_gone_when_one_rests_elsewhere():
     exchange = MovedDuringDrop(instruments=options_table(), options=options_market(), drop_on_new=1)
     code, out, err = await run_options_bot(exchange, "--seconds", "3")

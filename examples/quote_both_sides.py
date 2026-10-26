@@ -255,6 +255,9 @@ class Quoter:
         # The levels this run sent a new to with none of its strategy resting there: an
         # order of its strategy left at any other level (an earlier run's) is not its own.
         self.levels: set[tuple[int, int]] = set()
+        # The levels where an order of its strategy rested at the first session's resume,
+        # before this run sent anything: those orders are an earlier run's.
+        self.earlier: set[tuple[int, int]] = set()
 
     def on_session_state(self, state: SessionState) -> None:
         self.market_open = state.state == MarketSessionPhase.OPEN
@@ -293,7 +296,21 @@ class Quoter:
         say which order is this example's."""
         self.up = True
         if self.sessions < 2:
-            return True  # the first session: nothing was sent before it
+            # The first session: nothing was sent before it.
+            self.earlier = self.own_levels()
+            return True
+        known = self.earlier | {
+            (quote.side, quote.price) for quote in self.quotes.values() if quote.price is not None
+        }
+        for side, price in sorted(self.own_levels() - known):
+            # Not an earlier run's order, nor at a level this run sent to: perhaps one of
+            # this run's, moved while disconnected. Whose it is cannot be told, so stop.
+            print(
+                f"an order of this strategy rests at {SIDE_NAMES[side]} {self.instrument} @ "
+                f"{price_text(price)}, where this example sent nothing; perhaps one of its "
+                "orders moved while disconnected: check it yourself"
+            )
+            return False
         for quote in self.quotes.values():
             if quote.pending_kind == "new" and quote.pending_ref and quote.taken_before:
                 if self.resting(quote) is not None:
@@ -313,6 +330,14 @@ class Quoter:
             quote.cancelling = False
         print(f"resumed: the orders this example has now: {self.believed_resting()}")
         return True
+
+    def own_levels(self) -> set[tuple[int, int]]:
+        """The levels where the view shows an order of this strategy on the instrument."""
+        return {
+            (order.key.side, order.key.price)
+            for order in self.view
+            if order.strat_id == self.strat_id and order.key.instrument == self.instrument
+        }
 
     def believes_any(self) -> bool:
         """Whether this example may have an order resting or a message in flight."""
