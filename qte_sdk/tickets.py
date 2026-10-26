@@ -236,7 +236,8 @@ and `thesis_id` at most 32 bytes, none containing NUL; a ticket id is a string o
 digits; `notes` is at most 280 characters with no NUL; an ordinary ticket has a
 `limit_price` and a cure ticket has none; `algorithm` is `TWAP` or `VWAP`; `cure` and
 `replacing` are bools. Whether a
-ticket is accepted (its thesis, its size against the position, its limit against the
+ticket is accepted (its thesis, refused `TICKET_THESIS_NOT_FILED` (1700) when missing
+or not current, its size against the position, its limit against the
 wall, the schedule against the term, a VWAP profile) is for the exchange to judge. Prices
 are integers in micro-dollars, and `shares` is a whole number of shares.
 """
@@ -344,7 +345,12 @@ async def send_ticket(
     order's side: the exchange works out from the pod's position whether the ticket
     increases or reduces it. An opening or increasing ticket names the filed thesis that
     covers it in `thesis_id` and `thesis_version`, which go together; a reducing ticket
-    may leave both out. `notes` is free text for the desk, at most 280 characters; a
+    may leave both out. From the Winter term, a ticket with no thesis, one that does not
+    cover its instrument and side, or a version a later revision has replaced is refused
+    `TICKET_THESIS_NOT_FILED` (1700), whose `reason_detail` says what is missing (SPEC.md
+    23.1). The Team Lead files and signs the thesis on the Research page of the Team Lead
+    console, which gives its ID and version; `t-aapl` in these docs is a placeholder the
+    exchange refuses. `notes` is free text for the desk, at most 280 characters; a
     ticket the service works ignores it.
 
     `algorithm` is `TWAP` or `VWAP`; left out (None), the ticket carries
