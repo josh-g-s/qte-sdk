@@ -4823,6 +4823,33 @@ async def test_quote_both_sides_stops_when_one_of_its_orders_moved_during_a_drop
     assert exchange.resting == {(INSTRUMENT, "BUY", BID + TICK + 50_000): ("quote-test", 1)}
 
 
+class CutFirstSnapshot(FakeExchange):
+    """Closes the first connection after its resume_ack, before the snapshot it announced."""
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        if self.connections > 1:
+            await super().answer_resume(ws, last_report_seq)
+            return
+        ack = {"replayed": False, "as_of_report_seq": "0", "snapshot_count": len(self.resting)}
+        await self.send(ws, "resume_ack", ack)
+        await asyncio.sleep(0.3)  # the session is up, and its view waits for the snapshot
+        await ws.close()
+
+
+async def test_quote_both_sides_takes_earlier_orders_from_the_first_resume_to_complete():
+    # The first snapshot is cut off, so the first resume to complete is the second
+    # connection's: the earlier run's order it shows is still not this run's.
+    exchange = CutFirstSnapshot()
+    earlier = (INSTRUMENT, "BUY", BID - 5 * TICK)
+    exchange.resting[earlier] = ("quote-test", 7)
+    code, out, err = await run_quoter(exchange)
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert "where this example sent nothing" not in out
+    assert "all of this example's orders are cancelled" in out
+    assert exchange.resting == {earlier: ("quote-test", 7)}
+
+
 async def test_options_bot_does_not_call_its_order_gone_when_one_rests_elsewhere():
     exchange = MovedDuringDrop(instruments=options_table(), options=options_market(), drop_on_new=1)
     code, out, err = await run_options_bot(exchange, "--seconds", "3")

@@ -77,7 +77,9 @@ was down is not replayed, so it quotes again only from a book received since it
 reconnected, once the session state says the market is open. If the view cannot be put
 right (the exchange did not resume, or messages were missed meanwhile), or a new was in
 flight to a level where an order of its strategy already rested, as from an earlier run,
-so the view cannot say whose order rests there, it stops sending, as above. --seconds
+so the view cannot say whose order rests there, or an order of its strategy rests at a
+level it never sent to and no earlier run's order rested at (perhaps one of its own,
+moved while it was down), it stops sending, as above. --seconds
 counts the time down too; if the connection is down when it ends, the example waits at
 most --drain-seconds for it to come back to cancel its orders, and otherwise names them
 for you to check. Only the first connection is not retried: if it
@@ -255,9 +257,9 @@ class Quoter:
         # The levels this run sent a new to with none of its strategy resting there: an
         # order of its strategy left at any other level (an earlier run's) is not its own.
         self.levels: set[tuple[int, int]] = set()
-        # The levels where an order of its strategy rested at the first session's resume,
-        # before this run sent anything: those orders are an earlier run's.
-        self.earlier: set[tuple[int, int]] = set()
+        # The levels where an order of its strategy rested when the first resume completed,
+        # before this run sent anything: those orders are an earlier run's. None until then.
+        self.earlier: set[tuple[int, int]] | None = None
 
     def on_session_state(self, state: SessionState) -> None:
         self.market_open = state.state == MarketSessionPhase.OPEN
@@ -295,8 +297,9 @@ class Quoter:
         this example's orders from it, and send again. Returns False when the view cannot
         say which order is this example's."""
         self.up = True
-        if self.sessions < 2:
-            # The first session: nothing was sent before it.
+        if self.earlier is None:
+            # The first resume to complete: nothing is sent before it, so every order of
+            # its strategy in the view now is an earlier run's.
             self.earlier = self.own_levels()
             return True
         known = self.earlier | {
