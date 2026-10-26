@@ -78,8 +78,8 @@ reconnected, once the session state says the market is open. If the view cannot 
 right (the exchange did not resume, or messages were missed meanwhile), or a new was in
 flight to a level where an order of its strategy already rested, as from an earlier run,
 so the view cannot say whose order rests there, or an order of its strategy rests at a
-level it never sent to and no earlier run's order rested at (perhaps one of its own,
-moved while it was down), it stops sending, as above. --seconds
+level where it has no order and no earlier run's order rested (perhaps one of its own,
+moved, or left by a cancel lost in the drop), it stops sending, as above. --seconds
 counts the time down too; if the connection is down when it ends, the example waits at
 most --drain-seconds for it to come back to cancel its orders, and otherwise names them
 for you to check. Only the first connection is not retried: if it
@@ -306,12 +306,13 @@ class Quoter:
             (quote.side, quote.price) for quote in self.quotes.values() if quote.price is not None
         }
         for side, price in sorted(self.own_levels() - known):
-            # Not an earlier run's order, nor at a level this run sent to: perhaps one of
-            # this run's, moved while disconnected. Whose it is cannot be told, so stop.
+            # Not an earlier run's order, nor at a level where this run has one: perhaps one
+            # of this run's, moved while disconnected or left by a cancel lost in the drop.
+            # Whose it is cannot be told, so stop.
             print(
                 f"an order of this strategy rests at {SIDE_NAMES[side]} {self.instrument} @ "
-                f"{price_text(price)}, where this example sent nothing; perhaps one of its "
-                "orders moved while disconnected: check it yourself"
+                f"{price_text(price)}, where this example has no order now; perhaps one of "
+                "its orders moved, or was not cancelled, while disconnected: check it yourself"
             )
             return False
         for quote in self.quotes.values():

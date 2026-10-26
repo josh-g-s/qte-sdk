@@ -4818,7 +4818,7 @@ async def test_quote_both_sides_stops_when_one_of_its_orders_moved_during_a_drop
     exchange = MovedDuringDrop(drop_on_new=1)
     code, out, err = await run_quoter(exchange)
     assert code == 1, out + err
-    assert "where this example sent nothing" in out
+    assert "where this example has no order now" in out
     assert "all of this example's orders are cancelled" not in out
     assert exchange.resting == {(INSTRUMENT, "BUY", BID + TICK + 50_000): ("quote-test", 1)}
 
@@ -4845,7 +4845,7 @@ async def test_quote_both_sides_takes_earlier_orders_from_the_first_resume_to_co
     code, out, err = await run_quoter(exchange)
     assert code == 0, out + err
     assert exchange.connections == 2
-    assert "where this example sent nothing" not in out
+    assert "where this example has no order now" not in out
     assert "all of this example's orders are cancelled" in out
     assert exchange.resting == {earlier: ("quote-test", 7)}
 
