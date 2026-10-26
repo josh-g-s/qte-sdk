@@ -644,6 +644,9 @@ class FakeExchange:
                 if self.hide_moves:
                     self._seq += 1  # the order_state the client never receives
                 else:
+                    if price == moves[0]:
+                        # Later than the resting report, so the client acts on that first.
+                        await asyncio.sleep(0.2)
                     await self.send(ws, "order_state", state)
                 key = moved
             if moves and self.refill_level:
@@ -4781,6 +4784,59 @@ async def test_options_bot_applies_its_view_as_it_handles_each_event():
     assert view.get("SPY261120P00665000", BUY, 4_900_000) is None
     await bot.on_event(Received("order_state", state, 1))
     assert view.get("SPY261120P00665000", BUY, 4_900_000) is not None
+
+
+async def test_quote_both_sides_does_not_wait_on_an_earlier_order_at_another_level():
+    # The first resume's snapshot shows an earlier run's order of the strategy at a level
+    # this run never quotes: it is not this run's to cancel, so cleanup does not wait on it.
+    exchange = FakeExchange()
+    earlier = (INSTRUMENT, "BUY", BID - 5 * TICK)
+    exchange.resting[earlier] = ("quote-test", 7)
+    code, out, err = await run_quoter(exchange, seconds="0.5")
+    assert code == 0, out + err
+    assert "all of this example's orders are cancelled" in out
+    assert exchange.resting == {earlier: ("quote-test", 7)}
+
+
+class MovedDuringDrop(FakeExchange):
+    """Moves each resting order one tick up before answering a reconnect's resume, as an
+    amend from another program of the strategy would while the example is disconnected."""
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        if self.connections > 1:
+            self.resting = {
+                (instrument, side, price + 50_000): order
+                for (instrument, side, price), order in self.resting.items()
+            }
+        await super().answer_resume(ws, last_report_seq)
+
+
+async def test_options_bot_does_not_call_its_order_gone_when_one_rests_elsewhere():
+    exchange = MovedDuringDrop(instruments=options_table(), options=options_market(), drop_on_new=1)
+    code, out, err = await run_options_bot(exchange, "--seconds", "3")
+    assert code == 1, out + err
+    assert "perhaps this one moved: check it yourself" in out
+    assert "nothing of the order rests at" not in out
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting == {("SPY261120P00665000", "BUY", 4_950_000): ("opt-test", 1)}
+
+
+async def test_options_bot_acts_only_once_the_events_already_read_are_applied():
+    # Events queued behind the one in hand may change what is safe to send (a drop,
+    # say), so the bot acts only once the queue is empty.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False, None)
+    acted: list[int] = []
+
+    async def act() -> None:
+        acted.append(bot.grid_points)
+
+    bot.act = act
+    queue: asyncio.Queue = asyncio.Queue()
+    for _ in range(3):
+        queue.put_nowait(session_state_event())
+    assert await example.drive(bot, queue, 0.2) == "time"
+    assert acted == [3]
 
 
 def test_the_reconnecting_examples_bound_each_close_of_the_connection():

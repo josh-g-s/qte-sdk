@@ -585,13 +585,30 @@ class OptionsBot:
             if not self.resting:
                 print(f"resting: {order.remaining_size} at {self.where} (from the resume)")
             self.accepted = self.resting = True
+        elif any(
+            other.strat_id == self.strat_id
+            and other.key.instrument == self.contract
+            and other.key.side == BUY
+            for other in self.view
+        ):
+            # Not at its level, but an order of this strategy rests elsewhere on the
+            # contract: perhaps this one, moved by an amend while disconnected.
+            print(
+                f"nothing rests at {self.where}, but an order of this strategy rests at "
+                "another price on the contract, perhaps this one moved: check it yourself"
+            )
+            self.missed = True
+            self.gone = True
         else:
             print(f"nothing of the order rests at {self.where} (from the resume)")
             self.gone = True
 
     # Receiving
 
-    async def on_event(self, event: object) -> None:
+    async def on_event(self, event: object, act: bool = True) -> None:
+        """Apply one event, then act unless `act` is False: a caller with more events
+        already queued applies them all first, so no order goes out on what an event still
+        queued (a drop, say) would have changed."""
         if self.view is not None:
             self.view.apply(event)  # in the order the bot handles events
         if isinstance(event, Retrying):
@@ -624,7 +641,8 @@ class OptionsBot:
                 self.greeks.update(item)
         elif is_order_event(event):
             self.on_order_event(event.message)  # type: ignore[attr-defined]
-        await self.act()
+        if act:
+            await self.act()
 
     def ours(self, message: OrderState | OrderCancelled | Execution) -> bool:
         """Whether a report is about this example's order: same strategy, contract, side
@@ -786,11 +804,13 @@ async def drive(bot: OptionsBot, queue: asyncio.Queue, seconds: float) -> str:
     session is closed ("closed")."""
     try:
         async with asyncio.timeout(seconds):
-            await bot.act()
+            if queue.empty():
+                await bot.act()
             if bot.finished:
                 return "done"
             while (event := await next_item(queue)) is not None:
-                await bot.on_event(event)
+                # Act only once every event already read is applied.
+                await bot.on_event(event, act=queue.empty())
                 if bot.finished:
                     return "done"
     except TimeoutError:

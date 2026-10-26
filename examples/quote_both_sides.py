@@ -252,6 +252,9 @@ class Quoter:
         # Whether a session is up and its resume complete; nothing is sent until it is.
         self.up = True
         self.sessions = 0  # how many sessions have been connected
+        # The levels this run sent a new to with none of its strategy resting there: an
+        # order of its strategy left at any other level (an earlier run's) is not its own.
+        self.levels: set[tuple[int, int]] = set()
 
     def on_session_state(self, state: SessionState) -> None:
         self.market_open = state.state == MarketSessionPhase.OPEN
@@ -370,6 +373,8 @@ class Quoter:
         if quote.price is None:
             quote.price = best
             quote.taken_before = self.resting(quote) is not None
+            if not quote.taken_before:
+                self.levels.add((quote.side, best))
             await send_new(
                 self.session,
                 strat_id=self.strat_id,
@@ -427,9 +432,11 @@ class Quoter:
                     # One message per call: the caller applies any events that came in
                     # meanwhile, which may change what is safe to send, before the next.
                     return False
-        # Done once the exchange has also reported each order gone from the book.
+        # Done once the exchange has also reported each of its orders gone from the book.
         return done and not any(
-            order.strat_id == self.strat_id and order.key.instrument == self.instrument
+            order.strat_id == self.strat_id
+            and order.key.instrument == self.instrument
+            and (order.key.side, order.key.price) in self.levels
             for order in self.view
         )
 
