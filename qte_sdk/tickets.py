@@ -345,8 +345,9 @@ async def send_ticket(
     order's side: the exchange works out from the pod's position whether the ticket
     increases or reduces it. An opening or increasing ticket names the filed thesis that
     covers it in `thesis_id` and `thesis_version`, which go together; a reducing ticket
-    may leave both out. From the Winter term, a ticket with no thesis, one that does not
-    cover its instrument and side, or a version a later revision has replaced is refused
+    may leave both out. From the Winter term, an opening or increasing ticket with no
+    thesis, one that does not cover its instrument and side, or a version a later revision
+    has replaced is refused
     `TICKET_THESIS_NOT_FILED` (1700), whose `reason_detail` says what is missing (SPEC.md
     23.1). The Team Lead files and signs the thesis on the Research page of the Team Lead
     console, which gives its ID and version; `t-aapl` in these docs is a placeholder the
