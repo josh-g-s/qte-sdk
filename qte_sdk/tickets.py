@@ -57,14 +57,17 @@ ticket's state in `ticket_state`:
   assigned, or the ticket cancelled or changed. For a new ticket it also carries the
   decision price, the acceptance time, the planned completion time, the `algorithm` the
   ticket was accepted with and its `executor`, `SERVICE` or `DESK`. Read the algorithm
-  there: a `VWAP` you asked for is accepted as `TWAP` when the ticket goes to a desk.
+  there: a pod's ticket under the automatic route keeps the `VWAP` it names, while a
+  ticket that goes to a desk, a cure ticket and a Director's house ticket are `TWAP`.
 - `ticket_reject` echoes the `request_ref` when the exchange could read it, and gives a
   `TicketReasonCodes.TicketReasonCode`, a separate set from the order reasons. Name one
   with `ticket_reason_code_name`. `TICKET_ALGORITHM_UNAVAILABLE` (1713) refuses a
-  `VWAP` ticket for the service while no VWAP profile is available for the instrument:
-  send it again as `TWAP`, or later. `TICKET_SERVICE_OFF` (1714) refuses a ticket, a cure
-  ticket included, or a replacing cancel, while the automatic execution route is off in
-  a term with no Fundamentals-to-Execution pairing (see `execution_route` below).
+  `VWAP` ticket for the service while no current VWAP profile is available for the
+  instrument (VWAP is offered from 26 October 2026). Its `reason_detail` says why and
+  ends "TWAP is available". The exchange never resends it as `TWAP` for you: send it
+  again as `TWAP`, or later, if you still want it. `TICKET_SERVICE_OFF` (1714) refuses
+  a ticket, a cure ticket included, or a replacing cancel, while the automatic execution
+  route is off in a term with no Fundamentals-to-Execution pairing (see `execution_route` below).
 - `ticket_state` is the whole state of one ticket. It is sent to the pod that originated
   it whenever the ticket changes, and to its desk too when it has one (`DESK`). A pod
   is sent its own tickets only. `LatestTickets` keeps the newest state
@@ -346,10 +349,12 @@ async def send_ticket(
 
     `algorithm` is `TWAP` or `VWAP`; left out (None), the ticket carries
     `TICKET_ALGORITHM_UNSPECIFIED`, which the exchange reads as TWAP. Only the service
-    reads it: a ticket that goes to a desk, and a cure ticket, are TWAP whatever they name.
+    reads it: a pod's ticket under the automatic route keeps `VWAP`, while a ticket that
+    goes to a desk, and a cure ticket, are TWAP whatever they name.
     `ticket_accepted.algorithm` says what the ticket was accepted with. The service refuses
-    `VWAP` with `TICKET_ALGORITHM_UNAVAILABLE` while no VWAP profile is available for the
-    instrument.
+    `VWAP` with `TICKET_ALGORITHM_UNAVAILABLE` while no current VWAP profile is available
+    for the instrument; the `reason_detail` says why, and the exchange never switches the
+    ticket to `TWAP` for you.
     """
     ref = _ref(request_ref)
     _id("instrument", instrument, required=False)

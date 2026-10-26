@@ -279,7 +279,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConnectionClosedError:
         return fail(
             "the connection dropped, so the order's outcome may not be known, and this "
-            "example does not reconnect. Check your fills before running this again"
+            "example does not reconnect (a long-running program reconnects with "
+            "ReconnectingSession: docs/quickstart.md step 9). Check your fills before "
+            "running this again"
         )
     except KeyboardInterrupt:
         return 130

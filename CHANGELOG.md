@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.78
+**Version:** 0.80
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -10,11 +10,13 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## 1.5.2
 
-**Nothing to change in your code.** 1.5.2 brings the guidance that ships inside the package up to date before MTUM's 4-for-1 split at the 5 November 2026 open. The packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a split does to your positions, tickets and history, and that a program keeping its account with `AccountReports` must query `account_state` again after the open of a split's ex-date. Update with `python -m qte_sdk.update` and follow what it prints.
+**Nothing to change in your code.** 1.5.2 brings the guidance that ships inside the package up to date before MTUM's 4-for-1 split at the 5 November 2026 open. The packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a split does to your positions, tickets and history, and that a program keeping its account with `AccountReports` must query `account_state` again after the open of a split's ex-date. The quoting, options and book examples now reconnect and resume by themselves with `ReconnectingSession`: if your bot started from one of them and stops on a dropped connection, compare it with the new example. The guidance also says VWAP is offered from 26 October 2026 and what a 1713 refusal means. Update with `python -m qte_sdk.update` and follow what it prints.
 
 - The README, the quickstart, both copies of AGENTS.md and the automatic execution page name v1.5.1 as the latest release, and their install lines use the v1.5.1 zip (#291).
 - The quickstart and the packaged AGENTS.md say that in Winter's practice week, 26 to 30 October 2026, Market Making obligation breaches only warn, Options ones included, and the daily loss halts stay live, citing qte-platform DL-162 and DL-163 (#293).
 - The quickstart, the packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a stock split does: positions scaled at the ex-date open with a fraction paid in cash and no report, so query the account again after that open; ordinary working tickets stopped `TICKET_SPLIT_CANCELLED`; history not split-adjusted. The current case is MTUM's 4-for-1 at the 5 November 2026 open (#295).
+- VWAP is offered from 26 October 2026: the quickstart, the packaged AGENTS.md, docs/automatic-execution.md and the `qte_sdk.tickets` docstrings say so, that a 1713 refusal's `reason_detail` says why and ends "TWAP is available", that the exchange never switches a refused VWAP ticket to TWAP, and which tickets keep VWAP. `examples/fundamentals_pod.py` prints the refusal's `reason_detail` in place of a fixed text (#298).
+- `examples/quote_both_sides.py`, `examples/options_bot.py` and `examples/print_book.py` reconnect with `ReconnectingSession` after a drop: they stop sending while down, never resend an order that was in flight, take their own orders from the resting view after the resume, and wait for a fresh book before sending again. The quickstart and both copies of AGENTS.md point a long-running bot at `ReconnectingSession` and say each example still stops after `--seconds` (#303).
 
 ## 1.5.1
 

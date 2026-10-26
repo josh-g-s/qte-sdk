@@ -21,10 +21,11 @@ What it does, in order:
    exits with status 1. This is a pod's example.
 4. It sends one ticket (`send_ticket`) for --shares of --instrument at the hard limit
    --limit, with --algorithm twap or vwap (default twap). If the exchange refuses a VWAP
-   ticket with `TICKET_ALGORITHM_UNAVAILABLE` (1713, no VWAP profile for the
-   instrument), it says so and sends it once more as TWAP. Any other reject is printed by
-   name and the example stops with status 0. It prints the `ticket_accepted`'s ticket
-   id, `algorithm` and `executor` (`SERVICE` or `DESK`).
+   ticket with `TICKET_ALGORITHM_UNAVAILABLE` (1713, no current VWAP profile for the
+   instrument), it prints the refusal's `reason_detail` and, by this example's own
+   choice, sends it once more as TWAP: the exchange never does that for you. Any other
+   reject is printed by name and the example stops with status 0. It prints the
+   `ticket_accepted`'s ticket id, `algorithm` and `executor` (`SERVICE` or `DESK`).
 5. It prints each `ticket_state` of that ticket: status, `filled_shares` of the ticket's
    shares, `due_shares`, `activity` and `behind_schedule`, until the status is anything
    but `TICKET_WORKING`, which is a stop, a status this SDK does not know included. It
@@ -57,9 +58,10 @@ The rules it follows, which a pod program should follow too:
   exchange is to refuse it at once instead. With `execution_route.paused` true a ticket
   is still accepted, no child is placed and resting children are cancelled, and the
   service catches up when the pause lifts; its `activity` can read `SERVICE_PAUSED`.
-- 1713 (`TICKET_ALGORITHM_UNAVAILABLE`) refuses VWAP only: send the ticket again as TWAP,
-  or later. A desk's ticket is always TWAP, whatever it names: read
-  `ticket_accepted.algorithm`.
+- 1713 (`TICKET_ALGORITHM_UNAVAILABLE`) refuses VWAP only, and its `reason_detail` says
+  why: send the ticket again as TWAP, or later, if you still want it; the exchange never
+  switches it for you. A pod's ticket under the automatic route keeps VWAP; a desk's
+  ticket and a cure ticket are TWAP, whatever they name: read `ticket_accepted.algorithm`.
 - A `ticket_reject` never stops a ticket; only a `ticket_state` whose status is not
   `TICKET_WORKING` does.
 
@@ -277,9 +279,14 @@ class Pod:
                 and self.algorithm == VWAP
                 and not self.resent
             ):
+                why = (
+                    message.reason_detail
+                    if message.HasField("reason_detail")
+                    else "no reason given"
+                )
                 print(
-                    "VWAP refused: TICKET_ALGORITHM_UNAVAILABLE (1713), no VWAP profile for "
-                    f"{self.instrument}; sending the ticket again as TWAP"
+                    f"VWAP refused: TICKET_ALGORITHM_UNAVAILABLE (1713) for {self.instrument}: "
+                    f"{why}; sending the ticket again as TWAP (this example's choice)"
                 )
                 self.algorithm = TWAP
                 self.resent = True
