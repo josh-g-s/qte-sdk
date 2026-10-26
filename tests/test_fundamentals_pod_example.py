@@ -84,6 +84,7 @@ class PodExchange:
         accounts: list[dict[str, Any]],
         after: list[tuple[str, dict[str, Any]]],
         refuse_vwap: bool = False,
+        vwap_detail: str | None = None,
         reject: str | None = None,
         before: list[tuple[str, dict[str, Any]]] | None = None,
         stray_account: dict[str, Any] | None = None,
@@ -100,6 +101,8 @@ class PodExchange:
         self.accounts = list(accounts)
         self.after = after
         self.refuse_vwap = refuse_vwap
+        # With `vwap_detail`, the 1713 refusal carries it as its reason_detail.
+        self.vwap_detail = vwap_detail
         self.received: list[dict[str, Any]] = []
         self._seq = 0
         self._report_seq = 0
@@ -159,6 +162,8 @@ class PodExchange:
                 "reason_code": reason,
                 "receipt_time": "1",
             }
+            if reason == "TICKET_ALGORITHM_UNAVAILABLE" and self.vwap_detail is not None:
+                reject["reason_detail"] = self.vwap_detail
             await self.send(ws, "ticket_reject", reject)
             return
         accepted = accepted_payload(
@@ -265,10 +270,26 @@ async def test_a_vwap_ticket_refused_1713_is_sent_again_once_as_twap():
     code, out, err = await run_pod(exchange, "--algorithm", "vwap")
     assert code == 0, out + err
     assert [t["algorithm"] for t in exchange.tickets()] == ["VWAP", "TWAP"]
-    assert "VWAP refused: TICKET_ALGORITHM_UNAVAILABLE (1713)" in out
-    assert "sending the ticket again as TWAP" in out
+    assert "VWAP refused: TICKET_ALGORITHM_UNAVAILABLE (1713) for AAPL: no reason given" in out
+    assert "sending the ticket again as TWAP (this example's choice)" in out
     assert "accepted: ticket 17, algorithm TWAP, executor SERVICE" in out
     assert "the ticket stopped: TICKET_COMPLETE" in out
+
+
+async def test_the_1713_message_prints_the_refusals_reason_detail():
+    detail = "no VWAP profile in force for AAPL; TWAP is available"
+    exchange = PodExchange(
+        route=route_payload(),
+        accounts=[account(None), account(500)],
+        after=HAPPY,
+        refuse_vwap=True,
+        vwap_detail=detail,
+    )
+    code, out, err = await run_pod(exchange, "--algorithm", "vwap")
+    assert code == 0, out + err
+    assert f"VWAP refused: TICKET_ALGORITHM_UNAVAILABLE (1713) for AAPL: {detail};" in out
+    assert "no VWAP profile for AAPL;" not in out
+    assert [t["algorithm"] for t in exchange.tickets()] == ["VWAP", "TWAP"]
 
 
 async def test_a_status_this_sdk_does_not_know_is_a_stop_named_as_sent():
