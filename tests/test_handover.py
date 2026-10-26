@@ -40,6 +40,7 @@ from qte_sdk.connection import (
     DEFAULT_LIVENESS_TIMEOUT,
     DataUncertain,
     HandshakeFailed,
+    LivenessTimeout,
     Received,
     SeqGap,
 )
@@ -131,6 +132,7 @@ class Link:
         self.seq = 0
         self.sent: list[Sent] = []
         self.received: list[dict] = []
+        self.paused = False  # heartbeats stop while set
         self._lock = asyncio.Lock()
 
     async def send(
@@ -164,7 +166,8 @@ class Link:
         try:
             while True:
                 await asyncio.sleep(every)
-                await self.send("heartbeat", {})
+                if not self.paused:
+                    await self.send("heartbeat", {})
         except ConnectionClosed:
             return
 
@@ -204,14 +207,17 @@ class Build:
 class Gateway:
     """A fake gateway in front of build A (live) and build B (standby), one connection.
 
-    It sends the opening ticket state and reports 1 to M from A. With `handover`, it holds
-    every order the client sends from just before report M, for `hold` seconds, sending
-    heartbeats all the while; then it switches to B (or stays on A if `abort`), sends report
-    M again from B if `repeat`, and answers the held orders from the build now live. Without
-    `handover` it answers an order as soon as it arrives. Either way it then sends ticket
-    states from the live build and a `book`, which tells the client the script is over.
-    `seq_jump` breaks the contract: the counter skips that many seqs at the switch.
-    `resume` answers the client's resume, as a `ReconnectingSession` sends one.
+    It sends a first heartbeat, so the client's liveness clock runs from the start, then
+    the opening ticket states and reports 1 to M from A. With `handover`, it holds every
+    order the client sends from just before report M; the hold lasts until `hold` seconds
+    after the first held order arrived (so a slow client cannot miss it), with heartbeats
+    all the while unless `heartbeats_in_hold` is False. Then it switches to B (or stays on
+    A if `abort`), sends report M again from B if `repeat`, and answers the held orders from
+    the build now live. Without `handover` it answers an order as soon as it arrives.
+    Either way it then sends ticket states from the live build and a `book`, which tells
+    the client the script is over. `seq_jump` breaks the contract: the counter skips that
+    many seqs at the switch. `resume` answers the client's resume, as a
+    `ReconnectingSession` sends one.
     """
 
     def __init__(
@@ -223,6 +229,7 @@ class Gateway:
         abort: bool = False,
         seq_jump: int = 0,
         heartbeat_every: float = 0.05,
+        heartbeats_in_hold: bool = True,
         resume: bool = False,
     ) -> None:
         self.handover = handover
@@ -231,6 +238,7 @@ class Gateway:
         self.abort = abort
         self.seq_jump = seq_jump
         self.heartbeat_every = heartbeat_every
+        self.heartbeats_in_hold = heartbeats_in_hold
         self.resume = resume
         self.log = list(OPENING_LOG)
         self.a = Build("A", self.log)
@@ -266,6 +274,8 @@ class Gateway:
                 message = await link.recv()
                 if message["type"] == "new":
                     if self.holding:
+                        if not self.held:
+                            self.hold_started = asyncio.get_running_loop().time()
                         self.held.append(message)
                     self.orders.append(message)
                     self.order_arrived.set()
@@ -274,7 +284,9 @@ class Gateway:
 
     async def _script(self, link: Link) -> None:
         loop = asyncio.get_running_loop()
+        await link.send("heartbeat", {})
         await link.send("ticket_state", ticket("17", 10), build="A")
+        await link.send("ticket_state", ticket("19", 10), build="A")
         for n in range(1, M + 1):
             if n == M and self.handover:
                 # The gateway holds from here: an order sent in answer to report M is held.
@@ -282,8 +294,14 @@ class Gateway:
             type_, payload = self.log[n - 1]
             await link.send(type_, payload, n, "A")
         if self.handover:
-            self.hold_started = loop.time()
-            await asyncio.sleep(self.hold)  # heartbeats go on meanwhile
+            link.paused = not self.heartbeats_in_hold
+            await asyncio.wait_for(self.order_arrived.wait(), 5)
+            assert self.hold_started is not None
+            # To a deadline, since a timer may fire a little early on a coarse clock.
+            deadline = self.hold_started + self.hold
+            while (left := deadline - loop.time()) > 0:
+                await asyncio.sleep(left)
+            link.paused = False
             if not self.abort:
                 self.live = self.b
                 link.seq += self.seq_jump
@@ -401,6 +419,8 @@ def uncertain(seen: Seen) -> list[Any]:
 
 
 CLIENTS = ["session", "reconnecting"]
+# The longest hold: the gateway aborts a handover still holding at 2 s.
+MAX_HOLD = 2.0
 # The reports after the handover: the held order's acceptance, its resting remainder and
 # its fill, all by the live build.
 AFTER = [M + 1, M + 2, M + 3]
@@ -419,7 +439,10 @@ async def test_no_seq_gap_disconnect_or_uncertainty_across_the_switch(kind, repe
     if kind == "reconnecting":
         assert [type(e) for e in seen.events if isinstance(e, Connected)] == [Connected]
     assert seen.incomplete is False
+    # Ticket 19, sent only before the switch, is still held: nothing cleared the tickets.
     assert not seen.tickets_cleared
+    ticket_19 = seen.tickets.get("19")
+    assert ticket_19 is not None and ticket_19.update_time == 10
     # The script ran to the end on the one connection: the book was read.
     assert received(seen)[-1].type == "book"
     assert gateway.b.orders and not gateway.a.orders
@@ -454,13 +477,14 @@ async def test_the_per_connection_seq_is_continuous_across_the_switch(kind):
     assert not any(isinstance(e, SeqGap) for e in seen.events)
 
 
-@pytest.mark.parametrize("hold", [0.2, 2.0])
+@pytest.mark.parametrize("hold", [0.2, MAX_HOLD])
 @pytest.mark.parametrize("kind", CLIENTS)
 async def test_an_order_sent_in_the_hold_is_answered_late_with_heartbeats_meanwhile(kind, hold):
-    # The liveness timeout is half the longest hold, so a 2 s hold is survived only
-    # because the gateway's heartbeats keep arriving during it.
+    # The liveness timeout is half the longest hold, and its clock is running before the
+    # hold (a heartbeat came first), so a 2 s hold is survived only because the gateway's
+    # heartbeats keep arriving during it; see the next test for the same hold without them.
     gateway = Gateway(hold=hold, heartbeat_every=0.05)
-    seen = await run(gateway, kind, liveness_timeout=1.0)
+    seen = await run(gateway, kind, liveness_timeout=MAX_HOLD / 2)
     assert uncertain(seen) == []
     assert not any(e.type in ("reject", "ticket_reject") for e in received(seen))
     # The order was sent during the hold and held, and answered only after the release.
@@ -470,18 +494,29 @@ async def test_an_order_sent_in_the_hold_is_answered_late_with_heartbeats_meanwh
     assert gateway.hold_started is not None and gateway.released_at is not None
     assert gateway.released_at - gateway.hold_started >= hold
     assert seen.sent_at is not None and seen.answered_at is not None
-    assert seen.sent_at >= gateway.hold_started
+    assert seen.sent_at <= gateway.hold_started
     assert seen.answered_at >= gateway.released_at
-    # Answered within the hold, give or take a slow machine.
-    assert seen.answered_at - seen.sent_at < hold + 3
-    # Heartbeats kept arriving while the order waited.
+    # Answered late, by the hold, and within it, give or take a slow machine.
+    assert hold <= seen.answered_at - seen.sent_at < hold + 3
+    # The liveness clock was running when the hold began, and heartbeats kept arriving
+    # while the order waited.
+    assert seen.heartbeats_at_send >= 1
     assert seen.heartbeats_at_answer - seen.heartbeats_at_send >= max(1, int(hold / 0.05 / 4))
 
 
-def test_the_longest_hold_is_far_below_the_liveness_timeout():
-    # Should heartbeats ever pause during a hold, the hold aborts at 2 s, far inside the
-    # 45 s a link may stay quiet before it is presumed dead.
-    assert DEFAULT_LIVENESS_TIMEOUT >= 20 * 2.0
+async def test_the_same_hold_without_heartbeats_would_outlast_a_short_liveness_timeout():
+    # The control for the test above: with the gateway's heartbeats stopped for the hold,
+    # the 1 s liveness timeout fires inside a 2 s hold. So that test passes because the
+    # heartbeats arrive, not because the liveness clock was idle.
+    gateway = Gateway(hold=MAX_HOLD, heartbeats_in_hold=False)
+    with pytest.raises(LivenessTimeout):
+        await run(gateway, "session", liveness_timeout=MAX_HOLD / 2)
+
+
+def test_the_longest_hold_is_far_below_the_default_liveness_timeout():
+    # A static comparison, no gateway involved: should heartbeats ever pause, a hold ends
+    # by 2 s, far inside the 45 s a link may stay quiet before it is presumed dead.
+    assert DEFAULT_LIVENESS_TIMEOUT >= 20 * MAX_HOLD
 
 
 @pytest.mark.parametrize("kind", CLIENTS)
@@ -506,9 +541,13 @@ async def test_a_repeated_report_m_is_dropped_and_no_view_applies_a_duplicate_fi
         (PRICE, 70),
         (HELD_PRICE, 30),
     }
-    # LatestTickets kept ticket 17 across the switch and took B's newer states.
+    # LatestTickets kept ticket 19, sent only by A, and took B's newer states.
     assert not seen.tickets_cleared
-    assert [(s.ticket_id, s.update_time) for s in seen.tickets] == [("17", 20), ("18", 20)]
+    assert [(s.ticket_id, s.update_time) for s in seen.tickets] == [
+        ("17", 20),
+        ("18", 20),
+        ("19", 10),
+    ]
 
 
 @pytest.mark.parametrize("kind", CLIENTS)
@@ -549,11 +588,16 @@ def summary(seen: Seen) -> tuple:
     )
 
 
-@pytest.mark.parametrize("kind", CLIENTS)
-async def test_an_aborted_handover_changes_nothing(kind):
-    aborted = Gateway(abort=True)
+@pytest.mark.parametrize(
+    ("kind", "hold"), [("session", 0.2), ("reconnecting", 0.2), ("session", MAX_HOLD)]
+)
+async def test_an_aborted_handover_changes_nothing(kind, hold):
+    # The longest case is a hold that runs to the 2 s abort.
+    aborted = Gateway(abort=True, hold=hold)
     seen = await run(aborted, kind)
     plain = await run(Gateway(handover=False), kind)
+    assert aborted.released_at is not None and aborted.hold_started is not None
+    assert aborted.released_at - aborted.hold_started >= hold
     # The held order went back to A, which answered it; B saw nothing.
     assert aborted.held and aborted.a.orders == aborted.held and not aborted.b.orders
     assert aborted.link is not None
@@ -632,6 +676,8 @@ class Restarting:
                 ("execution", execution("x-5", HELD_PRICE, 50, 0), 5),
             ]
         )
+        # Live again: a frame after the replay, so the client reads past its completion.
+        await link.send("book", {"instrument": "AAPL", "grid_time": "1"})
         await link.record_until_closed()
 
 
@@ -659,7 +705,7 @@ async def restart_run(gateway: Restarting) -> tuple[list[Any], Clock, Reconnecti
                         size=50,
                         price=HELD_PRICE,
                     )
-                if isinstance(event, Received) and event.report_seq == 5:
+                if isinstance(event, Received) and event.type == "book":
                     break
     # Leaving `serving` waited for every handler, so each link has recorded all the client
     # sent before it closed.
@@ -686,8 +732,17 @@ async def test_a_gateway_restart_close_1001_is_retried_and_resumed_from_last_rep
     assert clock.waits == [0.5]
     assert len(gateway.links) == 2
     assert_resumed_with_nothing_resent(gateway, rs)
-    replayed = [(e.type, e.report_seq) for e in events if isinstance(e, Received)][-2:]
-    assert replayed == [("accepted", 4), ("execution", 5)]
+    tail = [
+        f"{e.type}:{e.report_seq}" if isinstance(e, Received) else type(e).__name__ for e in events
+    ]
+    assert tail[-6:] == [
+        "calendar:None",
+        "resume_ack:None",
+        "accepted:4",
+        "execution:5",
+        "ResumeComplete",
+        "book:None",
+    ]
     assert not any(isinstance(e, SeqGap) for e in events)
 
 
