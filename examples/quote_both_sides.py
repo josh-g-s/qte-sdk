@@ -75,10 +75,12 @@ cancelled, or never arrived) enters a new one. A message in flight at the drop i
 sent again: the replay or the snapshot says what became of it. Market data sent while it
 was down is not replayed, so it quotes again only from a book received since it
 reconnected, once the session state says the market is open. If the view cannot be put
-right (the exchange did not resume, or messages were missed meanwhile), it stops sending,
-as above. --seconds counts the time down too; if the connection is down when it ends, the
-example waits at most --drain-seconds for it to come back to cancel its orders, and
-otherwise names them for you to check. Only the first connection is not retried: if it
+right (the exchange did not resume, or messages were missed meanwhile), or a new was in
+flight to a level where an order of its strategy already rested, as from an earlier run,
+so the view cannot say whose order rests there, it stops sending, as above. --seconds
+counts the time down too; if the connection is down when it ends, the example waits at
+most --drain-seconds for it to come back to cancel its orders, and otherwise names them
+for you to check. Only the first connection is not retried: if it
 fails, the example says why and stops, before sending anything.
 """
 
@@ -218,6 +220,10 @@ class Quote:
     sent_at: float = float("-inf")
     # True from an accepted cancel until the exchange reports the order gone.
     cancelling: bool = False
+    # Whether an order of this strategy already rested at the level when the new was sent,
+    # as from an earlier run: the new is then refused as a duplicate, but if that reply is
+    # lost with the connection, the view cannot tell the two apart.
+    taken_before: bool = False
 
 
 class Quoter:
@@ -278,12 +284,23 @@ class Quoter:
             f"example believes it has: {self.believed_resting()}"
         )
 
-    def resumed(self) -> None:
+    def resumed(self) -> bool:
         """The view of resting orders is complete again after a session's resume: take
-        this example's orders from it, and send again."""
+        this example's orders from it, and send again. Returns False when the view cannot
+        say which order is this example's."""
         self.up = True
         if self.sessions < 2:
-            return  # the first session: nothing was sent before it
+            return True  # the first session: nothing was sent before it
+        for quote in self.quotes.values():
+            if quote.pending_kind == "new" and quote.pending_ref and quote.taken_before:
+                if self.resting(quote) is not None:
+                    # Its new was in flight to a level where an order of this strategy
+                    # already rested, and its reply was lost: whose order rests is unknown.
+                    print(
+                        "an order of this strategy already rested where this example's "
+                        "new was sent when the connection dropped"
+                    )
+                    return False
         for quote in self.quotes.values():
             # A message in flight at the drop is never sent again, and its reply may never
             # come: the view, from the replay or the snapshot, says what became of it.
@@ -292,6 +309,7 @@ class Quoter:
             quote.pending_ref = None
             quote.cancelling = False
         print(f"resumed: the orders this example has now: {self.believed_resting()}")
+        return True
 
     def believes_any(self) -> bool:
         """Whether this example may have an order resting or a message in flight."""
@@ -351,6 +369,7 @@ class Quoter:
             return
         if quote.price is None:
             quote.price = best
+            quote.taken_before = self.resting(quote) is not None
             await send_new(
                 self.session,
                 strat_id=self.strat_id,
@@ -608,9 +627,8 @@ def apply_received(quoter: Quoter, view: RestingOrders, item: object) -> str | N
     if isinstance(item, ResumeComplete) or (isinstance(item, Connected) and item.resume is None):
         # The session's resume is complete, or the exchange did not resume it. Only a view
         # put right by the replay or the snapshot says which orders are this example's.
-        if view.incomplete:
+        if view.incomplete or not quoter.resumed():
             return "unreliable"
-        quoter.resumed()
     elif quoter.up and view.incomplete:
         return "unreliable"  # messages were missed while connected
     return None
@@ -759,7 +777,9 @@ async def run(url: str, args: argparse.Namespace) -> int:
     # subscribes to the instrument again and resumes the team's order reports. The view of
     # resting orders is not passed as `resting=`: the example applies each event to it
     # itself, in the order it handles them, while the reader may already have read ahead.
-    session = ReconnectingSession(url, instruments=[args.instrument])
+    # `close_timeout` bounds the close of each connection, since a ReconnectingSession
+    # finishes closing even when the wait for it is cut short.
+    session = ReconnectingSession(url, instruments=[args.instrument], close_timeout=CLOSE_SECONDS)
     # Each Ctrl+C from here on cancels this task. The first cancellation is absorbed,
     # whether it lands while quoting or while cancelling, so the run still cancels its
     # orders; a second is let through and stops the run, and a third also stops it

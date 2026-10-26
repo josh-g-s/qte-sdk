@@ -79,7 +79,10 @@ became of it, and a cancel is sent afresh only while the order rests. Market dat
 while it was down is not replayed, so before it chooses a contract again it waits for a
 session state, Greeks and a book received since it reconnected. If the order reports
 cannot be recovered (the exchange did not resume, or messages were missed meanwhile), it
-treats them as missed, as above. --seconds and --drain-seconds count the time down too.
+treats them as missed, as above, and sends no order from then on. If its order went to a
+level where an order of its strategy already rested, as from an earlier run, and the reply
+was lost, it cannot tell whose order rests there: it cancels nothing and warns instead.
+--seconds and --drain-seconds count the time down too.
 Only the first connection is not retried: if it fails, the example says why and stops.
 
 Watching only. With --watch-only (or QTE_WATCH_ONLY=1) it reads the table, subscribes, keeps
@@ -270,8 +273,13 @@ class OptionsBot:
         view: RestingOrders | None = None,
     ) -> None:
         self.session = session
-        # The team's resting orders, from the session's order reports; read after a resume.
+        # The team's resting orders, from the session's order reports, applied as each event
+        # is handled; read after a resume.
         self.view = view
+        self.reconnected = False  # a session after the first has come up
+        # Whether an order of this strategy already rested at the level when the order was
+        # sent, as from an earlier run: see `resumed`.
+        self.taken_before = False
         self.table = table
         self.underlying = underlying
         self.strat_id = strat_id
@@ -477,6 +485,8 @@ class OptionsBot:
             print(f"WOULD SEND (watch-only, not sent): {self.would_send}")
             return
         print(f"sending a LIMIT buy of {size} contract(s): {self.where}")
+        earlier = None if self.view is None else self.view.get(contract, BUY, price)
+        self.taken_before = earlier is not None and earlier.strat_id == self.strat_id
         self.ref = new_request_ref()
         self.sent_at = time.monotonic()
         await send_new(
@@ -509,6 +519,7 @@ class OptionsBot:
     async def on_connected(self, connected: Connected) -> None:
         self.up = False  # until its resume is complete
         if connected.reconnected:
+            self.reconnected = True
             print("reconnected: sending nothing until the resume is complete")
         if connected.resume is None:
             self.resumed(replayed=False)  # the exchange did not resume this session
@@ -539,15 +550,18 @@ class OptionsBot:
         """A session's resume is complete, or the exchange did not resume it: take this
         example's order from the view of resting orders, and send again."""
         self.up = True
-        if self.ref is None or self.view is None:
-            return  # no order was sent, so there is nothing to take from the view
+        if self.view is None:
+            return
         if self.view.incomplete:
-            # The reports missed while down are not recovered: treat them as missed.
+            if self.ref is None and (not self.reconnected or self.watch_only):
+                return  # nothing was missed: the first session, or nothing is ever sent
+            # The reports missed while down are not recovered: treat them as missed, so
+            # no order is sent from now on.
             print("warning: the order reports missed while disconnected were not recovered")
             self.missed = True
             return
-        if self.finished:
-            return
+        if self.ref is None or self.finished:
+            return  # no order was sent, so there is nothing to take from the view
         # An order or a cancel in flight at the drop is never sent again: the view, from
         # the replay or the snapshot, says what became of it.
         self.cancel_ref = None
@@ -555,6 +569,18 @@ class OptionsBot:
             self.unreported_fills = True
         assert self.contract is not None
         order = self.view.get(self.contract, BUY, self.price)
+        if order is not None and order.strat_id == self.strat_id and self.taken_before:
+            if not self.accepted:
+                # Its order went to a level where an order of this strategy already rested,
+                # and its reply was lost: the exchange refuses such a duplicate, but whose
+                # order rests now is unknown, so it is not cancelled as this example's.
+                print(
+                    f"an order of this strategy already rested at {self.where} when this "
+                    "one was sent, so whose order rests there now is unknown: check it yourself"
+                )
+                self.missed = True
+                self.gone = True
+                return
         if order is not None and order.strat_id == self.strat_id:
             if not self.resting:
                 print(f"resting: {order.remaining_size} at {self.where} (from the resume)")
@@ -566,6 +592,8 @@ class OptionsBot:
     # Receiving
 
     async def on_event(self, event: object) -> None:
+        if self.view is not None:
+            self.view.apply(event)  # in the order the bot handles events
         if isinstance(event, Retrying):
             print(f"reconnecting in {event.delay:.1f} s (attempt {event.attempt})")
             return
@@ -841,9 +869,12 @@ def watch_only_outcome(bot: OptionsBot) -> int:
 async def run(url: str, args: argparse.Namespace, progress: Progress) -> int:
     # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE. It is read
     # once, here, and kept to authenticate again on each reconnect. Every new session
-    # subscribes to the contracts again and resumes the team's order reports, which the
-    # session applies to `resting`, the view the bot reads after a resume.
-    session = ReconnectingSession(url, resting=RestingOrders())
+    # subscribes to the contracts again and resumes the team's order reports. The bot
+    # applies them to its own view of resting orders as it handles each event, not as the
+    # reader queues it, so the view never runs ahead of what the bot has handled.
+    # `close_timeout` bounds the close of each connection, since a ReconnectingSession
+    # finishes closing even when the wait for it is cut short.
+    session = ReconnectingSession(url, close_timeout=CLOSE_SECONDS)
     # Each Ctrl+C from here on cancels this task. The first is absorbed, so the run still
     # cancels its order; a second is let through and stops the run. The event loop handles
     # Ctrl+C itself where it can (not on Windows).
@@ -911,7 +942,7 @@ async def trade_from(
         print(f"no option contract is listed on {underlying}; no order was sent")
         return 0
     print(f"{len(contracts)} contract(s) listed on {underlying}; subscribing to them")
-    bot = OptionsBot(session, table, underlying, args.strat_id, args.watch_only, session.resting)
+    bot = OptionsBot(session, table, underlying, args.strat_id, args.watch_only, RestingOrders())
     progress.bot = bot
     for event in early:
         await bot.on_event(event)  # the first Connected among them; nothing is sent yet

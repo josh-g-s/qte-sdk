@@ -139,7 +139,7 @@ def test_no_example_or_quickstart_reaches_past_the_session_to_its_connection(pat
 
 
 # The private reports a resume replays: each carries a report_seq.
-REPORT_TYPES = frozenset({"execution", "order_cancelled", "order_state", "risk_notice"})
+REPORT_TYPES = frozenset({"accepted", "execution", "order_cancelled", "order_state", "risk_notice"})
 
 
 class FakeExchange:
@@ -4648,10 +4648,11 @@ async def test_quote_both_sides_takes_its_orders_from_a_replay_after_a_drop():
     code, out, err = await run_quoter(exchange)
     assert code == 0, out + err
     assert exchange.connections == 2
-    assert [p["last_report_seq"] for p in payloads(exchange, "resume")] == ["0", "1"]
+    # The buy's accepted and order_state were reports 1 and 2; the sell's are replayed.
+    assert [p["last_report_seq"] for p in payloads(exchange, "resume")] == ["0", "2"]
     log = exchange.on_connection(2)
     replayed = log.index(("sent", "resume_ack")) + 1
-    assert log[replayed] == ("sent", "order_state")
+    assert log[replayed : replayed + 2] == [("sent", "accepted"), ("sent", "order_state")]
     assert (
         "resumed: the orders this example has now: BUY TEST @ 99.960000, SELL TEST @ 100.040000"
     ) in out
@@ -4728,3 +4729,64 @@ async def test_print_book_reconnects_after_a_drop_and_prints_afresh():
     assert out.count("book   TEST") == 2
     assert out.count("market session 2026-01-05: OPEN") == 2
     assert out.splitlines()[-1].startswith("stopped after 2 seconds")
+
+
+async def test_quote_both_sides_claims_no_earlier_order_at_its_level_after_a_drop():
+    # An earlier run's order of the strategy rests where the buy goes. The exchange
+    # refuses the buy as a duplicate, but the connection drops first, so the snapshot
+    # cannot say whose order rests: the example stops and cancels nothing of it.
+    exchange = FakeExchange(drop_on_new=1)
+    earlier = (INSTRUMENT, "BUY", BID + TICK)
+    exchange.resting[earlier] = ("quote-test", 7)
+    code, out, err = await run_quoter(exchange)
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert "already rested where this example's new was sent" in out
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting[earlier] == ("quote-test", 7)
+
+
+async def test_options_bot_claims_no_earlier_order_at_its_level_after_a_drop():
+    exchange = options_exchange(drop_on_new=1)
+    earlier = ("SPY261120P00665000", "BUY", 4_900_000)
+    exchange.resting[earlier] = ("opt-test", 7)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert "whose order rests there now is unknown" in out
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting[earlier] == ("opt-test", 7)
+
+
+async def test_options_bot_sends_no_order_when_the_resume_is_refused_before_it_sent_one():
+    # The first connection drops before the bot could choose; the next one is not resumed,
+    # so its view cannot be put right and it sends no order at all.
+    exchange = options_exchange(drop_after_books=1, refuse_resume_on_reconnect=True)
+    code, out, err = await run_options_bot(exchange, "--seconds", "3")
+    assert exchange.connections >= 2
+    assert payloads(exchange, "new") == []
+    assert "the order reports missed while disconnected were not recovered" in out
+    assert code == 0, out + err  # as after messages missed before an order: none sent
+    assert out.splitlines()[-1] == "no order was sent"
+
+
+async def test_options_bot_applies_its_view_as_it_handles_each_event():
+    # Its reader queues events ahead of it, so the view follows what the bot has
+    # handled, not what the reader has read.
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False, view)
+    level = {"strat_id": "opt-test", "instrument": "SPY261120P00665000", "side": BUY}
+    state = OrderState(**level, price=4_900_000, state=RESTING, remaining_size=1)
+    assert view.get("SPY261120P00665000", BUY, 4_900_000) is None
+    await bot.on_event(Received("order_state", state, 1))
+    assert view.get("SPY261120P00665000", BUY, 4_900_000) is not None
+
+
+def test_the_reconnecting_examples_bound_each_close_of_the_connection():
+    # ReconnectingSession finishes closing even when the wait for it is cut short, so
+    # each connection's own close is bounded by CLOSE_SECONDS.
+    for name in ("print_book.py", "quote_both_sides.py", "options_bot.py"):
+        source = (EXAMPLES_DIR / name).read_text()
+        assert source.count("ReconnectingSession(") == 1, name
+        assert source.count("close_timeout=CLOSE_SECONDS") == 1, name

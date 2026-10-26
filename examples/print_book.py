@@ -159,7 +159,11 @@ async def run(url: str, args: argparse.Namespace) -> int:
     # once, here, and kept to authenticate again on each reconnect. Every new session
     # subscribes to the instrument again. This example sends no orders, so it has no order
     # reports to resume: resume=False.
-    session = ReconnectingSession(url, instruments=[args.instrument], resume=False)
+    # `close_timeout` bounds the close of each connection, since a ReconnectingSession
+    # finishes closing even when the wait for it is cut short.
+    session = ReconnectingSession(
+        url, instruments=[args.instrument], resume=False, close_timeout=CLOSE_SECONDS
+    )
     async with closing(session):
         connected = False
         received = 0
