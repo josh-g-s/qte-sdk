@@ -1,6 +1,6 @@
 # Automatic execution
 
-**Version:** 0.25
+**Version:** 0.26
 
 The exchange can work a Fundamentals pod's tickets itself, with its automatic execution service, instead of sending them to the pod's Execution desk. This page says what changes for a pod and a desk while the service is on, what each SDK release shows of it, and the one mistake to avoid: adding ticket fills to a position of your own. The rules in full are in the [`qte_sdk.tickets`](../qte_sdk/tickets.py) docstring.
 
@@ -98,7 +98,9 @@ When the Directors pause the service, `execution_route.paused` is true, and a wo
 
 ## VWAP
 
-Under the service, `send_ticket(..., algorithm=VWAP)` asks for a volume-weighted schedule. While the instrument has no VWAP profile the ticket is refused `TICKET_ALGORITHM_UNAVAILABLE` (1713): send it again as TWAP. A ticket that goes to a desk, and a cure ticket, are TWAP whatever they name.
+Under the service, `send_ticket(..., algorithm=VWAP)` asks for a volume-weighted schedule. The exchange offers VWAP from Monday 26 October 2026. A VWAP ticket for an instrument with no current VWAP profile is refused `TICKET_ALGORITHM_UNAVAILABLE` (1713), and the refusal's `reason_detail` names the case and ends "TWAP is available". The cases are: VWAP not enabled; no profile in force; a profile too old, or one that cannot be counted on the calendar; a profile that does not list the instrument or has no valid weights for it; and no VWAP schedule that fits the ticket's window. The refusal is of VWAP alone: the same ticket sent as TWAP is judged on its own.
+
+The exchange never switches a refused VWAP ticket to TWAP: whether to send it again as TWAP is yours to decide, and `ticket_accepted.algorithm` always says what was accepted. A pod's ticket under the automatic route (`ROUTING_SERVICE`) keeps the VWAP it names. A cure ticket, a ticket routed to a desk (`ROUTING_DESK`) and a Director's house ticket are TWAP, and that field shows it.
 
 ## Amending a ticket
 
