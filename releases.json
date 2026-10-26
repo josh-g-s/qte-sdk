@@ -62,7 +62,7 @@
   {
     "version": "1.5.2",
     "recommended": true,
-    "why": "the packaged guidance says what a stock split does to your positions, tickets and history before MTUM splits 4-for-1 at the 5 November open; query the account again after that open. The quoting, options and book examples reconnect by themselves",
+    "why": "the guidance says what MTUM's 4-for-1 split at the 5 November open does to positions, tickets and history (query the account again after it), and the quoting, options and book examples reconnect",
     "platforms": []
   }
 ]
