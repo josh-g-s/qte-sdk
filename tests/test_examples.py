@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 import test_history
-from fake_exchange import CONTRACT_VERSION, serve_local
+from fake_exchange import CONTRACT_VERSION, drop_connection, serve_local
 from test_history import FakeHistory, serve_history
 from test_history import book as history_book
 from websockets.asyncio.server import ServerConnection
@@ -138,6 +138,10 @@ def test_no_example_or_quickstart_reaches_past_the_session_to_its_connection(pat
     assert re.search(r"\bsession\.connection\b", path.read_text()) is None
 
 
+# The private reports a resume replays: each carries a report_seq.
+REPORT_TYPES = frozenset({"execution", "order_cancelled", "order_state", "risk_notice"})
+
+
 class FakeExchange:
     """A scripted exchange: acknowledges the session, publishes a book on every tick once
     subscribed, and answers order messages the way the contract describes.
@@ -184,7 +188,31 @@ class FakeExchange:
         newer: dict[str, Any] | None = None,
         tickets: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
+        replay: bool = False,
+        drop_on_new: int | None = None,
+        drop_after_books: int | None = None,
+        refuse_resume_on_reconnect: bool = False,
     ) -> None:
+        # Every `resume` is answered. By default with a snapshot of the resting orders, as
+        # the exchange answers a resume from 0; with `replay`, the session_ack names an
+        # event log, each private report carries a report_seq, and a resume from a later
+        # number replays the reports after it. With `refuse_resume_on_reconnect`, a resume on
+        # any connection after the first is refused, as by an exchange that does not serve it.
+        self.replay = replay
+        self.refuse_resume_on_reconnect = refuse_resume_on_reconnect
+        # With `drop_on_new`, the nth `new` (counted over every connection) is taken, so it
+        # may rest, but nothing about it is sent: the connection drops while it is in
+        # flight. Its reports are kept for a replay.
+        self.drop_on_new = drop_on_new
+        # With `drop_after_books`, the first connection drops once that many books are sent.
+        self.drop_after_books = drop_after_books
+        self.connections = 0
+        self.news = 0
+        self.report_seq = 0
+        self.reports: list[tuple[int, str, dict[str, Any]]] = []
+        self._withhold = False
+        # Every message sent and received, in order, as (connection number, direction, type).
+        self.connection_log: list[tuple[int, str, str]] = []
         # With `options`, the first subscribe is answered as for option contracts: its
         # "chain" as `option_chain`, then each of its "greeks" as `option_greeks`, then on
         # each tick the session state and each of its "books", in place of the TEST book.
@@ -280,11 +308,55 @@ class FakeExchange:
         self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
     ) -> None:
         async with self._lock:  # seq numbers must reach the client in order
+            if self.replay and type_ in REPORT_TYPES and "report_seq" not in envelope:
+                self.report_seq += 1
+                envelope["report_seq"] = str(self.report_seq)
+                self.reports.append((self.report_seq, type_, payload))
+            if self._withhold:
+                return  # never sent: the connection drops first
             self._seq += 1
             env = {"version": CONTRACT_VERSION, "type": type_, "payload": payload, "seq": self._seq}
             env.update(envelope)
-            self.log.append(("sent", type_))
+            self.note("sent", type_)
             await ws.send(json.dumps(env))
+
+    def note(self, direction: str, type_: str) -> None:
+        self.log.append((direction, type_))
+        self.connection_log.append((self.connections, direction, type_))
+
+    def on_connection(self, number: int) -> list[tuple[str, str]]:
+        """What connection `number` (from 1) sent and received, in order."""
+        return [(d, t) for n, d, t in self.connection_log if n == number]
+
+    async def drop(self, ws: ServerConnection) -> None:
+        async with self._lock:  # no frame is half sent when the stream ends
+            await drop_connection(ws)
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        if self.refuse_resume_on_reconnect and self.connections > 1:
+            refused = {"request_type": "RESUME", "reason_code": "MALFORMED_MESSAGE"}
+            await self.send(ws, "reject", {**refused, "receipt_time": "1"})
+            return
+        as_of = str(self.report_seq)
+        if self.replay and last_report_seq > 0:
+            ack = {"replayed": True, "as_of_report_seq": as_of, "snapshot_count": 0}
+            await self.send(ws, "resume_ack", ack)
+            for number, type_, payload in self.reports:
+                if number > last_report_seq:
+                    await self.send(ws, type_, payload, report_seq=str(number))
+            return
+        ack = {"replayed": False, "as_of_report_seq": as_of, "snapshot_count": len(self.resting)}
+        await self.send(ws, "resume_ack", ack)
+        for (instrument, side, price), (strat_id, size) in list(self.resting.items()):
+            snapshot = {
+                "strat_id": strat_id,
+                "instrument": instrument,
+                "side": side,
+                "price": str(price),
+                "remaining_size": str(size),
+                "timestamp": "1",
+            }
+            await self.send(ws, "order_snapshot", snapshot)
 
     async def beat(self, ws: ServerConnection) -> None:
         assert self.heartbeat_every is not None
@@ -314,8 +386,10 @@ class FakeExchange:
             await self.send(ws, "account_state", {**self.account_state, "request_ref": ref})
 
     async def __call__(self, ws: ServerConnection) -> None:
+        self.connections += 1
+        self._seq = 0  # each connection numbers its messages from 1
         self.received.append(json.loads(await ws.recv()))
-        self.log.append(("received", self.received[-1]["type"]))
+        self.note("received", self.received[-1]["type"])
         if self.session_reject is not None:
             await self.send(ws, "session_reject", self.session_reject)
             await ws.close()
@@ -327,6 +401,8 @@ class FakeExchange:
             "contract_version": CONTRACT_VERSION,
             "unscored": self.unscored,
         }
+        if self.replay:
+            ack["log_id"] = "00000000000000aa"
         await self.send(ws, "session_ack", ack)
         if self.calendar is not None:
             await self.send(ws, "calendar", self.calendar)
@@ -342,14 +418,17 @@ class FakeExchange:
             async for raw in ws:
                 message = json.loads(raw)
                 self.received.append(message)
-                self.log.append(("received", message["type"]))
+                self.note("received", message["type"])
                 if message["type"] == "subscribe":
                     instruments = message["payload"]["instruments"]
                     if self.known_instruments is not None:
                         instruments = await self.refuse_unknown(ws, instruments)
                         if not instruments:
                             continue
-                if message["type"] == "account_query":
+                if message["type"] == "resume":
+                    last = int(message["payload"].get("last_report_seq", "0"))
+                    await self.answer_resume(ws, last)
+                elif message["type"] == "account_query":
                     await self.answer_account_query(ws, message["payload"]["request_ref"])
                 elif message["type"] == "subscribe" and self.closed:
                     await self.answer_closed(ws, instruments)
@@ -362,6 +441,12 @@ class FakeExchange:
                     ticker = asyncio.create_task(publish(ws))
                 else:
                     await self.on_order(ws, message["type"], message["payload"])
+                    if self._withhold:
+                        self._withhold = False
+                        if ticker is not None:
+                            ticker.cancel()
+                        await self.drop(ws)
+                        break
         except ConnectionClosed:
             pass
         finally:
@@ -396,6 +481,9 @@ class FakeExchange:
             elif not self.book_once or self.books_sent == 0:
                 await self.send(ws, "book", book)
                 self.books_sent += 1
+                if self.connections == 1 and self.books_sent == self.drop_after_books:
+                    await self.drop(ws)
+                    return
             published += 1
             await asyncio.sleep(0.05)
 
@@ -411,6 +499,9 @@ class FakeExchange:
             for book in self.options["books"]:
                 await self.send(ws, "book", book)
                 self.books_sent += 1
+                if self.connections == 1 and self.books_sent == self.drop_after_books:
+                    await self.drop(ws)
+                    return
             await asyncio.sleep(0.05)
 
     async def refuse_unknown(self, ws: ServerConnection, instruments: list[str]) -> list[str]:
@@ -449,6 +540,8 @@ class FakeExchange:
         ref = p.get("request_ref")
         accepted = {"request_ref": ref, "request_type": type_.upper(), "receipt_time": "1"}
         if type_ == "new":
+            self.news += 1
+            self._withhold = self.news == self.drop_on_new
             level = (p["instrument"], p["side"], int(p.get("price", 0)))
             if p["order_type"] == "LIMIT" and level in self.resting:
                 reject = {
@@ -1059,7 +1152,9 @@ async def test_the_trading_examples_send_no_orders_outside_a_session(name: str, 
             name, url, synthetic_token(), "--instrument", INSTRUMENT, *args
         )
     assert code == 0, out + err
-    assert exchange.types() == ["auth", "subscribe"]
+    # quote_both_sides reconnects, so it resumes first; it still sends no order.
+    expected = ["auth", "resume", "subscribe"] if name == "quote_both_sides.py" else None
+    assert exchange.types() == (expected or ["auth", "subscribe"])
 
 
 async def test_quote_both_sides_rests_amends_and_cancels_its_own_orders():
@@ -1681,7 +1776,7 @@ async def test_options_bot_sends_no_order_outside_a_session():
     exchange = FakeExchange(instruments=options_table(), options=market)
     code, out, err = await run_options_bot(exchange, "--seconds", "1")
     assert code == 0, out + err
-    assert exchange.types() == ["auth", "subscribe"]
+    assert exchange.types() == ["auth", "resume", "subscribe"]
     assert "no contract could take the order" in out
 
 
@@ -1730,7 +1825,7 @@ async def test_options_bot_stops_when_its_underlying_has_no_contract_listed():
     code, out, err = await run_options_bot(exchange, "--underlying", "QQQ", "--seconds", "5")
     assert code == 0, out + err
     assert "no option contract is listed on QQQ" in out
-    assert exchange.types() == ["auth"]
+    assert exchange.types() == ["auth", "resume"]
 
 
 async def test_options_bot_passes_over_a_contract_without_room_below_the_asks():
@@ -1775,7 +1870,7 @@ async def test_options_bot_watch_only_prints_the_order_it_would_send_and_sends_n
     code, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "1")
     assert code == 0, out + err
     # It reads and subscribes as usual, but no order and no cancel reach the exchange.
-    assert exchange.types() == ["auth", "subscribe"]
+    assert exchange.types() == ["auth", "resume", "subscribe"]
     assert exchange.resting == {}
     assert "passing over SPY261120C00665000: its trading state is OPTION_SUSPENDED" in out
     assert (
@@ -1801,7 +1896,7 @@ async def test_options_bot_watch_only_from_the_environment_sends_nothing():
             QTE_WATCH_ONLY="1",
         )
     assert code == 0, out + err
-    assert exchange.types() == ["auth", "subscribe"]
+    assert exchange.types() == ["auth", "resume", "subscribe"]
     assert "WOULD SEND (watch-only, not sent)" in out
 
 
@@ -1843,9 +1938,10 @@ async def test_options_bot_keeps_trading_mode_when_watch_only_is_set_off(value: 
 
 
 class ClosingOptionsExchange(FakeExchange):
-    """The options exchange, which after the subscribe publishes the market for a few grid
+    """The options exchange, which after each subscribe publishes the market for a few grid
     points (or, with `publish=False`, nothing) and then closes the connection with `code`:
-    1000 is a normal close, 1011 a server error the client reads as a dropped connection."""
+    1000 is a normal close, 1011 a server error the client reads as a dropped connection.
+    Every connection ends so, however often the example reconnects."""
 
     def __init__(self, code: int, publish: bool) -> None:
         super().__init__(instruments=options_table(), options=options_market())
@@ -1868,13 +1964,17 @@ class ClosingOptionsExchange(FakeExchange):
 
 
 @pytest.mark.parametrize("code", [1000, 1011], ids=["closed", "dropped"])
-async def test_options_bot_watch_only_names_its_choice_when_the_connection_ends(code: int):
+async def test_options_bot_watch_only_names_its_choice_when_the_connection_keeps_ending(code: int):
+    # It reconnects after each close, sending nothing, and names its choice when time is up.
     exchange = ClosingOptionsExchange(code, publish=True)
-    status, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "10")
+    status, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "2")
     assert status == 0, out + err
-    assert exchange.types() == ["auth", "subscribe"]
-    ended = "closed the connection" if code == 1000 else "the connection dropped"
+    types = exchange.types()
+    assert types[:3] == ["auth", "resume", "subscribe"] and types.count("auth") >= 2
+    assert set(types) == {"auth", "resume", "subscribe"}
+    ended = "the exchange closed it" if code == 1000 else "the connection dropped"
     assert ended in out
+    assert "reconnected: sending nothing until the resume is complete" in out
     assert out.splitlines()[-1].startswith("watch-only: chose SPY261120P00665000; would send")
     assert "may still rest" not in out + err
 
@@ -1884,11 +1984,12 @@ async def test_options_bot_watch_only_fails_with_a_reason_when_the_connection_en
     code: int,
 ):
     exchange = ClosingOptionsExchange(code, publish=False)
-    status, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "10")
+    status, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "2")
     assert status == 1, out + err
-    assert exchange.types() == ["auth", "subscribe"]
-    ended = "closed the connection" if code == 1000 else "the connection dropped"
-    assert ended in out
+    types = exchange.types()
+    assert types[:3] == ["auth", "resume", "subscribe"] and types.count("auth") >= 2
+    assert set(types) == {"auth", "resume", "subscribe"}
+    assert "the connection dropped" in out
     assert out.splitlines()[-1] == (
         "watch-only: NO CONTRACT CHOSEN: no option chain was received; nothing was sent"
     )
@@ -1903,7 +2004,7 @@ async def test_options_bot_watch_only_fails_with_a_reason_when_no_contract_can_b
     exchange = FakeExchange(instruments=options_table(), options=market)
     code, out, err = await run_options_bot(exchange, "--watch-only", "--seconds", "1")
     assert code == 1, out + err
-    assert exchange.types() == ["auth", "subscribe"]
+    assert exchange.types() == ["auth", "resume", "subscribe"]
     assert (
         "watch-only: NO CONTRACT CHOSEN: every contract in the nearest expiry was passed over"
     ) in out
@@ -1980,15 +2081,12 @@ async def test_options_bot_takes_ctrl_c_as_its_own_cancel_of_the_run(monkeypatch
     example = load_example("options_bot.py")
     started = asyncio.Event()
 
-    async def opened(url: str) -> object:
-        return object()
-
     async def trading(*args: Any) -> int:
         started.set()
         await asyncio.sleep(RUN_LIMIT)
         return 0
 
-    monkeypatch.setattr(example, "open_session", opened)
+    monkeypatch.setattr(example, "ReconnectingSession", lambda *args, **kwargs: object())
     monkeypatch.setattr(example, "trade_and_clean_up", trading)
     caught: list[int] = []
     previous = signal.signal(signal.SIGINT, lambda signum, frame: caught.append(signum))
@@ -2759,7 +2857,8 @@ async def test_take_liquidity_knows_it_may_have_sent_an_order_whose_send_stalled
 class StalledSession:
     """A session whose close never finishes and on which no event ever arrives, as on a
     connection that has stopped taking data. With `stall_sends`, sends never return
-    either. It stands in for `open_session`'s session, to run an example's own code."""
+    either. It stands in for `open_session`'s session, or a `ReconnectingSession`, to run an
+    example's own code."""
 
     def __init__(self, *, stall_sends: bool) -> None:
         self.info = SimpleNamespace(team="team-a", unscored=True)
@@ -2802,6 +2901,10 @@ async def test_each_example_stops_in_time_on_a_connection_that_stalls(
         if name == "quote_both_sides.py":
             # Its own part, so this test process does not take over Ctrl+C.
             await example.quote_and_clean_up(session, args, asyncio.current_task())
+        elif name == "print_book.py":
+            # It reconnects: its ReconnectingSession is the stalled one, whose events stall.
+            example.ReconnectingSession = lambda *args, **kwargs: session
+            await example.run("ws://127.0.0.1:1/ws", args)
         else:
 
             async def stalled_open_session(url: str) -> StalledSession:
@@ -2810,7 +2913,9 @@ async def test_each_example_stops_in_time_on_a_connection_that_stalls(
             example.open_session = stalled_open_session
             await example.run("ws://127.0.0.1:1/ws", args)
     assert loop.time() - started < 3  # --seconds plus the close bound, not forever
-    assert session.sent[0] == "subscribe"
+    if name == "take_liquidity.py":
+        # The others subscribe through their ReconnectingSession, which no event reached.
+        assert session.sent[0] == "subscribe"
     assert session.close_started
     assert "did not close in time" in capsys.readouterr().out
 
@@ -4472,3 +4577,154 @@ async def test_the_smoke_test_says_a_bad_log_format_with_its_code():
     code, out, err = await run_example(SMOKE_TEST, None, None, QTE_LOG_FORMAT="jsonl")
     assert (code, out) == (2, "")
     assert err.startswith("error: QTE-LOG-FORMAT-INVALID: ")
+
+
+# Reconnecting: quote_both_sides, options_bot and print_book use ReconnectingSession.
+
+# A term for the calendar, so a reconnect may resume from the last report number.
+TERM = {"term_start": "2026-10-26", "term_end": "2026-10-30"}
+
+
+def orders_on(exchange: FakeExchange, number: int, *types: str) -> list[int]:
+    """Where in connection `number`'s log the example sent a message of one of `types`."""
+    log = exchange.on_connection(number)
+    return [i for i, (way, type_) in enumerate(log) if way == "received" and type_ in types]
+
+
+def first_sent(exchange: FakeExchange, number: int, type_: str) -> int:
+    """Where in connection `number`'s log the exchange first sent a `type_`."""
+    return exchange.on_connection(number).index(("sent", type_))
+
+
+def assert_waited_to_resume_and_for_a_book(exchange: FakeExchange, number: int) -> None:
+    """On connection `number`, nothing was sent before auth, resume and subscribe, and no
+    new order or amend before the exchange sent that connection's first book."""
+    received = [type_ for way, type_ in exchange.on_connection(number) if way == "received"]
+    assert received[:3] == ["auth", "resume", "subscribe"]
+    sends = orders_on(exchange, number, "new", "amend")
+    assert sends and first_sent(exchange, number, "book") < sends[0]
+
+
+async def run_quoter(exchange: FakeExchange, seconds: str = "2") -> tuple[int, str, str]:
+    async with serve_local(exchange) as url:
+        return await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", seconds, "--requote-seconds", "0.1", "--drain-seconds", "3"),
+        )
+
+
+def news(exchange: FakeExchange) -> list[tuple[str, str]]:
+    return [(p["side"], p["price"]) for p in payloads(exchange, "new")]
+
+
+async def test_quote_both_sides_takes_its_orders_from_a_snapshot_after_a_drop():
+    # Its buy is in flight when the connection drops: it rests, but the example hears
+    # nothing of it. The resume's snapshot shows it resting, so it is never sent again,
+    # and the books start late on each connection, so the sell waits for a fresh one.
+    exchange = FakeExchange(drop_on_new=1, first_book_after=3)
+    code, out, err = await run_quoter(exchange)
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert "the connection dropped" in out and "reconnected: team team-a" in out
+    assert "resumed: the orders this example has now: BUY TEST @ 99.960000" in out
+    assert [p["last_report_seq"] for p in payloads(exchange, "resume")] == ["0", "0"]
+    buy, sell = ("BUY", str(BID + TICK)), ("SELL", str(ASK - TICK))
+    assert news(exchange).count(buy) == 1  # in flight at the drop, never sent again
+    assert news(exchange).count(sell) >= 1
+    assert_waited_to_resume_and_for_a_book(exchange, 2)
+    # The buy is cancelled from the view: the example never saw it rest.
+    assert [(p["side"], p["price"]) for p in payloads(exchange, "cancel")].count(buy) == 1
+    assert exchange.resting == {}
+    assert "all of this example's orders are cancelled" in out
+
+
+async def test_quote_both_sides_takes_its_orders_from_a_replay_after_a_drop():
+    # Its buy rests and is reported; its sell is in flight at the drop. The resume
+    # replays the sell's report, so both are its own again and neither is sent again.
+    exchange = FakeExchange(drop_on_new=2, replay=True, calendar=TERM, first_book_after=3)
+    code, out, err = await run_quoter(exchange)
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert [p["last_report_seq"] for p in payloads(exchange, "resume")] == ["0", "1"]
+    log = exchange.on_connection(2)
+    replayed = log.index(("sent", "resume_ack")) + 1
+    assert log[replayed] == ("sent", "order_state")
+    assert (
+        "resumed: the orders this example has now: BUY TEST @ 99.960000, SELL TEST @ 100.040000"
+    ) in out
+    assert sorted(news(exchange)) == [("BUY", str(BID + TICK)), ("SELL", str(ASK - TICK))]
+    assert orders_on(exchange, 2, "new", "amend") == []
+    assert len(payloads(exchange, "cancel")) == 2
+    assert exchange.resting == {}
+    assert "all of this example's orders are cancelled" in out
+
+
+async def test_quote_both_sides_sends_nothing_more_when_the_resume_is_refused():
+    # Without the resume its view stays incomplete, so it stops sending, as on a gap,
+    # and names the orders it may have.
+    exchange = FakeExchange(drop_on_new=1, refuse_resume_on_reconnect=True)
+    code, out, err = await run_quoter(exchange)
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert orders_on(exchange, 2, "new", "amend", "cancel") == []
+    assert "can no longer tell which orders are its own and sends nothing more" in out
+    assert "it believes it may have: BUY TEST @ 99.960000" in out
+
+
+async def test_options_bot_takes_its_order_from_the_resume_after_a_drop():
+    # Its order is in flight when the connection drops; the snapshot shows it resting, so
+    # it is not sent again and is cancelled on the new session.
+    exchange = options_exchange(drop_on_new=1)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert len(payloads(exchange, "new")) == 1
+    assert "the order sent may still rest at SPY261120P00665000 BUY @ 4.900000" in out
+    assert "resting: 1 at SPY261120P00665000 BUY @ 4.900000 (from the resume)" in out
+    assert orders_on(exchange, 2, "cancel")
+    assert exchange.resting == {}
+    assert "fills while disconnected are not reported" in out
+
+
+async def test_options_bot_warns_and_fails_when_the_resume_is_refused():
+    exchange = options_exchange(drop_on_new=1, refuse_resume_on_reconnect=True)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert code == 1, out + err
+    assert len(payloads(exchange, "new")) == 1  # nothing sent again
+    assert "warning: the order reports missed while disconnected were not recovered" in out
+    assert "WARNING: messages from the exchange were missed" in out
+
+
+async def test_options_bot_waits_for_fresh_books_and_greeks_after_a_drop():
+    # The first connection drops after its first book, before it could choose. The order
+    # goes out only on the new connection, once its Greeks and books have arrived.
+    exchange = options_exchange(drop_after_books=1)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert orders_on(exchange, 1, "new") == []
+    [new] = orders_on(exchange, 2, "new")
+    assert first_sent(exchange, 2, "option_greeks") < new
+    assert_waited_to_resume_and_for_a_book(exchange, 2)
+    assert len(payloads(exchange, "new")) == 1
+    assert exchange.resting == {}
+
+
+async def test_print_book_reconnects_after_a_drop_and_prints_afresh():
+    exchange = FakeExchange(drop_after_books=3)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "print_book.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "2"
+        )
+    assert code == 0, out + err
+    # It tracks no orders, so it does not resume; it subscribes again.
+    assert exchange.types() == ["auth", "subscribe", "auth", "subscribe"]
+    assert "the connection dropped (" in out
+    assert "reconnected: subscribed to TEST again" in out
+    # The book and state are printed again from the new session, though unchanged.
+    assert out.count("book   TEST") == 2
+    assert out.count("market session 2026-01-05: OPEN") == 2
+    assert out.splitlines()[-1].startswith("stopped after 2 seconds")

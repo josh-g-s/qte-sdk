@@ -65,6 +65,23 @@ fills at once), its reports may be misread, so use a strategy nothing else is us
 messages from the exchange are missed after the order is sent, it still cancels, but then
 exits with status 1 and a warning to check your orders and fills.
 
+On a drop. The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the
+connection drops, or the exchange restarts, it reconnects by itself, waiting longer between
+attempts (at most 30 seconds). While it is down it sends nothing and keeps what it knows of
+its order. Each new session subscribes to the contracts again and resumes the team's order
+reports: the exchange either replays every report missed, or sends a snapshot of the
+orders resting now. Once that is complete, the example takes its order from its view of
+resting orders (`qte_sdk.resting.RestingOrders`): if the order rests at its level, it
+cancels it as usual; if not, nothing of it rests and the example stops. After a snapshot,
+fills made while it was down are not reported, and the summary says so. An order or a
+cancel in flight at the drop is never sent again: the replay or the snapshot says what
+became of it, and a cancel is sent afresh only while the order rests. Market data sent
+while it was down is not replayed, so before it chooses a contract again it waits for a
+session state, Greeks and a book received since it reconnected. If the order reports
+cannot be recovered (the exchange did not resume, or messages were missed meanwhile), it
+treats them as missed, as above. --seconds and --drain-seconds count the time down too.
+Only the first connection is not retried: if it fails, the example says why and stops.
+
 Watching only. With --watch-only (or QTE_WATCH_ONLY=1) it reads the table, subscribes, keeps
 the chain, Greeks and books, and chooses a contract exactly as above, printing the reason for
 each contract it passes over. It then prints the order it would send, as one line starting
@@ -72,9 +89,9 @@ each contract it passes over. It then prints the order it would send, as one lin
 and sends nothing at all: no order and no cancel. It keeps reading until --seconds are up or
 Ctrl+C, then exits with status 0 and a last line starting `watch-only: chose`, or, if no
 contract could be chosen, with status 1 and a last line starting `watch-only: NO CONTRACT
-CHOSEN:` that names why. If the exchange closes or drops the connection, it prints that
-and the same last line, with the same status. --drain-seconds has no use then, since there
-is nothing to cancel. --strat-id is still required, as for any run of this example.
+CHOSEN:` that names why. If the connection drops, it prints that and reconnects, as above.
+--drain-seconds has no use then, since there is nothing to cancel. --strat-id is still
+required, as for any run of this example.
 QTE_WATCH_ONLY, read without case or surrounding spaces, turns it on with 1, true, yes or on,
 and leaves it off when unset, empty, 0, false, no or off; any other value stops the example
 with status 2 before it connects, so a mistyped value never sends an order.
@@ -95,7 +112,13 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.books import LatestBooks
-from qte_sdk.connection import ReportGap, SessionRejected
+from qte_sdk.connection import (
+    Connected,
+    Disconnected,
+    ReportGap,
+    ResumeComplete,
+    SessionRejected,
+)
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     LIMIT,
@@ -148,12 +171,12 @@ from qte_sdk.orders import (
     send_cancel,
     send_new,
 )
+from qte_sdk.reconnect import NotConnected, ReconnectingSession, Retrying
+from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     MissingToken,
     MissingURL,
-    Session,
     SessionNotAcknowledged,
-    open_session,
     resolve_url,
 )
 from qte_sdk.units import to_decimal
@@ -239,13 +262,16 @@ def price_text(price: int) -> str:
 class OptionsBot:
     def __init__(
         self,
-        session: Session,
+        session: ReconnectingSession,
         table: Instruments,
         underlying: str,
         strat_id: str,
         watch_only: bool = False,
+        view: RestingOrders | None = None,
     ) -> None:
         self.session = session
+        # The team's resting orders, from the session's order reports; read after a resume.
+        self.view = view
         self.table = table
         self.underlying = underlying
         self.strat_id = strat_id
@@ -285,6 +311,10 @@ class OptionsBot:
         self.watch_only = watch_only
         self.would_send: str | None = None
         self.why_none = "no contract was chosen yet"
+        # Whether a session is up and its resume complete; nothing is sent until it is.
+        self.up = True
+        self.unreported_fills = False  # resumed from a snapshot after the order was sent
+        self.subscribe_to: list[str] = []  # contracts to subscribe to once a session is up
 
     @property
     def finished(self) -> bool:
@@ -401,8 +431,16 @@ class OptionsBot:
     # Sending
 
     async def act(self) -> None:
-        if self.finished:
-            return
+        if self.finished or not self.up:
+            return  # nothing while the connection is down or resuming
+        try:
+            await self.act_now()
+        except (NotConnected, ConnectionClosed) as error:
+            # The connection dropped before the example saw it. The message stays recorded
+            # as in flight, and is never sent again: the resume says what became of it.
+            print(f"not sent, the connection is down: {error}")
+
+    async def act_now(self) -> None:
         if self.ref is None:
             if self.missed and self.would_send is None:
                 self.why_none = "a message from the exchange was missed before a choice"
@@ -466,11 +504,79 @@ class OptionsBot:
             request_ref=self.cancel_ref,
         )
 
+    # The connection
+
+    async def on_connected(self, connected: Connected) -> None:
+        self.up = False  # until its resume is complete
+        if connected.reconnected:
+            print("reconnected: sending nothing until the resume is complete")
+        if connected.resume is None:
+            self.resumed(replayed=False)  # the exchange did not resume this session
+        if self.subscribe_to:
+            await self.subscribe()
+
+    async def subscribe(self) -> None:
+        """Subscribe to the contracts. The session subscribes to them again on every
+        reconnect; if it is down now, this is done once the next session is up."""
+        try:
+            await subscribe(self.session, self.subscribe_to)
+            self.subscribe_to = []
+        except (NotConnected, ConnectionClosed):
+            print("not subscribed yet, the connection is down: subscribing once it is back")
+
+    def on_disconnected(self, disconnected: Disconnected) -> None:
+        self.up = False
+        # Wait for a session state, Greeks and a book received after the reconnect.
+        self.market = None
+        self.books.update(disconnected)
+        self.greeks.update(disconnected)
+        why = disconnected.error or "the exchange closed it"
+        print(f"the connection dropped ({why}); sending nothing until it is back")
+        if self.ref is not None and not self.finished:
+            print(f"the order sent may still rest at {self.where}")
+
+    def resumed(self, replayed: bool) -> None:
+        """A session's resume is complete, or the exchange did not resume it: take this
+        example's order from the view of resting orders, and send again."""
+        self.up = True
+        if self.ref is None or self.view is None:
+            return  # no order was sent, so there is nothing to take from the view
+        if self.view.incomplete:
+            # The reports missed while down are not recovered: treat them as missed.
+            print("warning: the order reports missed while disconnected were not recovered")
+            self.missed = True
+            return
+        if self.finished:
+            return
+        # An order or a cancel in flight at the drop is never sent again: the view, from
+        # the replay or the snapshot, says what became of it.
+        self.cancel_ref = None
+        if not replayed:
+            self.unreported_fills = True
+        assert self.contract is not None
+        order = self.view.get(self.contract, BUY, self.price)
+        if order is not None and order.strat_id == self.strat_id:
+            if not self.resting:
+                print(f"resting: {order.remaining_size} at {self.where} (from the resume)")
+            self.accepted = self.resting = True
+        else:
+            print(f"nothing of the order rests at {self.where} (from the resume)")
+            self.gone = True
+
     # Receiving
 
     async def on_event(self, event: object) -> None:
+        if isinstance(event, Retrying):
+            print(f"reconnecting in {event.delay:.1f} s (attempt {event.attempt})")
+            return
+        if isinstance(event, Connected):
+            await self.on_connected(event)
+        elif isinstance(event, ResumeComplete):
+            self.resumed(event.replayed)
         item = as_market_data(event)
-        if isinstance(item, OptionChain):
+        if isinstance(item, Disconnected):
+            self.on_disconnected(item)
+        elif isinstance(item, OptionChain):
             self.chain = item
         elif isinstance(item, OptionGreeks):
             self.greeks.update(item)
@@ -593,6 +699,11 @@ class OptionsBot:
         if self.rejected:
             return "the order was rejected, so nothing rests"
         text = f"nothing of the order rests; {self.filled} contract(s) filled"
+        if self.unreported_fills and not self.missed:
+            text += (
+                " (resumed from a snapshot, so fills while disconnected are not reported: "
+                "check your fills)"
+            )
         if self.missed:
             text += " (messages were missed, so this may be incomplete: check your fills)"
         return text
@@ -605,7 +716,7 @@ CLOSE_SECONDS = 5.0
 
 
 @contextlib.asynccontextmanager
-async def closing(session: Session) -> AsyncIterator[Session]:
+async def closing(session: ReconnectingSession) -> AsyncIterator[ReconnectingSession]:
     """Like `async with session:`, but waits at most CLOSE_SECONDS for the close, so a
     connection that has stopped taking data cannot keep the example from exiting."""
     try:
@@ -621,21 +732,71 @@ async def closing(session: Session) -> AsyncIterator[Session]:
             print("interrupted while closing; the connection is dropped as the example exits")
 
 
-async def drive(bot: OptionsBot, session: Session, seconds: float) -> str:
+async def pump(session: ReconnectingSession, queue: asyncio.Queue) -> None:
+    """Read every event into `queue`, then None when the session is closed, or the exception
+    if it fails for good. Only this task reads the session, so a timeout that ends one wait
+    for events never ends the session's stream."""
+    try:
+        async for event in session:
+            await queue.put(event)
+    except Exception as error:
+        await queue.put(error)
+    else:
+        await queue.put(None)
+
+
+async def next_item(queue: asyncio.Queue) -> object:
+    """The next event from `pump`. Raises the exception that ended the session, if any."""
+    item = await queue.get()
+    if isinstance(item, Exception):
+        raise item
+    return item
+
+
+async def drive(bot: OptionsBot, queue: asyncio.Queue, seconds: float) -> str:
     """Apply events until the bot is finished ("done"), `seconds` pass ("time") or the
-    exchange closes the connection ("closed")."""
+    session is closed ("closed")."""
     try:
         async with asyncio.timeout(seconds):
             await bot.act()
             if bot.finished:
                 return "done"
-            async for event in session:
+            while (event := await next_item(queue)) is not None:
                 await bot.on_event(event)
                 if bot.finished:
                     return "done"
     except TimeoutError:
         return "time"
     return "closed"
+
+
+async def wait_for_table(
+    session: ReconnectingSession, queue: asyncio.Queue, early: list
+) -> Instruments | None:
+    """Wait for the first session, then at most TABLE_SECONDS for the instruments table.
+    The events read meanwhile are kept in `early`, for the bot to apply in order."""
+    loop = asyncio.get_running_loop()
+    connected = False
+    try:
+        async with asyncio.timeout(None) as within:
+            while True:
+                event = await next_item(queue)
+                if event is None:
+                    return None  # the session was closed
+                if isinstance(event, Retrying) and not connected and event.error is not None:
+                    raise event.error  # the first connection failed: stop
+                early.append(event)
+                if isinstance(event, Connected) and not connected:
+                    connected = True
+                    info = event.info
+                    print(f"connected: team {info.team}, unscored session: {info.unscored}")
+                    within.reschedule(loop.time() + TABLE_SECONDS)
+                if connected and session.instrument_table is not None:
+                    return session.instrument_table
+    except TimeoutError:
+        if not within.expired():
+            raise
+        return None
 
 
 @dataclasses.dataclass
@@ -678,8 +839,11 @@ def watch_only_outcome(bot: OptionsBot) -> int:
 
 
 async def run(url: str, args: argparse.Namespace, progress: Progress) -> int:
-    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE.
-    session = await open_session(url)
+    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE. It is read
+    # once, here, and kept to authenticate again on each reconnect. Every new session
+    # subscribes to the contracts again and resumes the team's order reports, which the
+    # session applies to `resting`, the view the bot reads after a resume.
+    session = ReconnectingSession(url, resting=RestingOrders())
     # Each Ctrl+C from here on cancels this task. The first is absorbed, so the run still
     # cancels its order; a second is let through and stops the run. The event loop handles
     # Ctrl+C itself where it can (not on Windows).
@@ -696,7 +860,7 @@ async def run(url: str, args: argparse.Namespace, progress: Progress) -> int:
 
 
 async def trade_and_clean_up(
-    session: Session, args: argparse.Namespace, task: asyncio.Task, progress: Progress
+    session: ReconnectingSession, args: argparse.Namespace, task: asyncio.Task, progress: Progress
 ) -> int:
     async with closing(session):
         progress.status = await trade(session, args, task, progress)
@@ -704,10 +868,25 @@ async def trade_and_clean_up(
 
 
 async def trade(
-    session: Session, args: argparse.Namespace, task: asyncio.Task, progress: Progress
+    session: ReconnectingSession, args: argparse.Namespace, task: asyncio.Task, progress: Progress
 ) -> int:
-    print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
-    table = await session.wait_for_instrument_table(timeout=TABLE_SECONDS)
+    queue: asyncio.Queue = asyncio.Queue()
+    reader = asyncio.create_task(pump(session, queue))
+    try:
+        return await trade_from(session, queue, args, task, progress)
+    finally:
+        reader.cancel()
+
+
+async def trade_from(
+    session: ReconnectingSession,
+    queue: asyncio.Queue,
+    args: argparse.Namespace,
+    task: asyncio.Task,
+    progress: Progress,
+) -> int:
+    early: list = []
+    table = await wait_for_table(session, queue, early)
     if table is None:
         if args.watch_only:
             print("watch-only: NO CONTRACT CHOSEN: no instruments table from this exchange")
@@ -732,10 +911,12 @@ async def trade(
         print(f"no option contract is listed on {underlying}; no order was sent")
         return 0
     print(f"{len(contracts)} contract(s) listed on {underlying}; subscribing to them")
-    await subscribe(session, contracts)
-
-    bot = OptionsBot(session, table, underlying, args.strat_id, args.watch_only)
+    bot = OptionsBot(session, table, underlying, args.strat_id, args.watch_only, session.resting)
     progress.bot = bot
+    for event in early:
+        await bot.on_event(event)  # the first Connected among them; nothing is sent yet
+    bot.subscribe_to = contracts
+    await bot.subscribe()
     interrupted = False
 
     def absorb_first_interrupt() -> bool:
@@ -748,7 +929,7 @@ async def trade(
         return task.uncancel() == 0
 
     try:
-        why = await drive(bot, session, args.seconds)
+        why = await drive(bot, queue, args.seconds)
     except asyncio.CancelledError:
         if not absorb_first_interrupt():
             raise
@@ -767,7 +948,7 @@ async def trade(
         bot.stopping = True
         while True:
             try:
-                why = await drive(bot, session, args.drain_seconds)
+                why = await drive(bot, queue, args.drain_seconds)
                 break
             except asyncio.CancelledError:
                 if not absorb_first_interrupt():
@@ -845,17 +1026,14 @@ def main(argv: list[str] | None = None) -> int:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosed:
         if progress.watch_only:
-            print("the connection dropped, and this example does not reconnect")
+            print("the connection dropped before the session was up")
             if progress.bot is not None:
                 return watch_only_outcome(progress.bot)
             print(
                 "watch-only: NO CONTRACT CHOSEN: the connection dropped before the chain was read"
             )
             return 1
-        return fail(
-            "the connection dropped, and this example does not reconnect. Your order may "
-            "still rest: reconnect and cancel it"
-        )
+        return fail("the connection dropped before the session was up: run it again")
     except (KeyboardInterrupt, asyncio.CancelledError):
         # A Ctrl+C before the run could take it over, or a second one while it cancels.
         return stopped_at_once(progress)
