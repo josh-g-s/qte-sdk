@@ -58,5 +58,11 @@
     "recommended": false,
     "why": "the history-unavailable message and the packaged guidance say the options history build is live, and messages give the production addresses",
     "platforms": []
+  },
+  {
+    "version": "1.5.2",
+    "recommended": true,
+    "why": "the packaged guidance says what a stock split does to your positions, tickets and history before MTUM splits 4-for-1 at the 5 November open; query the account again after that open",
+    "platforms": []
   }
 ]

@@ -1,12 +1,16 @@
 # Changelog
 
-**Version:** 0.77
+**Version:** 0.78
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+## 1.5.2
+
+**Nothing to change in your code.** 1.5.2 brings the guidance that ships inside the package up to date before MTUM's 4-for-1 split at the 5 November 2026 open. The packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a split does to your positions, tickets and history, and that a program keeping its account with `AccountReports` must query `account_state` again after the open of a split's ex-date. Update with `python -m qte_sdk.update` and follow what it prints.
 
 - The README, the quickstart, both copies of AGENTS.md and the automatic execution page name v1.5.1 as the latest release, and their install lines use the v1.5.1 zip (#291).
 - The quickstart and the packaged AGENTS.md say that in Winter's practice week, 26 to 30 October 2026, Market Making obligation breaches only warn, Options ones included, and the daily loss halts stay live, citing qte-platform DL-162 and DL-163 (#293).
