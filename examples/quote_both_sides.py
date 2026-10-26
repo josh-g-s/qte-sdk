@@ -62,6 +62,28 @@ may be out of date, so the example sends nothing from it until a newer book arri
 also quotes only while the latest session state says the market is open, and only from
 a book published since that session opened, never one kept from an earlier session. It
 sends one message at a time, and applies what has come in since before sending the next.
+
+On a drop. The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the
+connection drops, or the exchange restarts, it reconnects by itself, waiting longer between
+attempts (at most 30 seconds). While it is down it sends nothing, keeps the orders it
+believes it has, and prints them. Each new session subscribes again and resumes the
+team's order reports: the exchange either replays every report missed, or sends a
+snapshot of the orders resting now. Once that is complete, the example takes its own
+orders from its view of resting orders (`qte_sdk.resting.RestingOrders`): a side whose
+order still rests at its price keeps it, and a side whose order is gone (filled,
+cancelled, or never arrived) enters a new one. A message in flight at the drop is never
+sent again: the replay or the snapshot says what became of it. Market data sent while it
+was down is not replayed, so it quotes again only from a book received since it
+reconnected, once the session state says the market is open. If the view cannot be put
+right (the exchange did not resume, or messages were missed meanwhile), or a new was in
+flight to a level where an order of its strategy already rested, as from an earlier run,
+so the view cannot say whose order rests there, or an order of its strategy rests at a
+level where it has no order and no earlier run's order rested (perhaps one of its own,
+moved, or left by a cancel lost in the drop), it stops sending, as above. --seconds
+counts the time down too; if the connection is down when it ends, the example waits at
+most --drain-seconds for it to come back to cancel its orders, and otherwise names them
+for you to check. Only the first connection is not retried: if it
+fails, the example says why and stops, before sending anything.
 """
 
 import argparse
@@ -75,11 +97,17 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from google.protobuf.message import Message
-from websockets.exceptions import ConnectionClosedError, InvalidHandshake
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.books import LatestBooks
-from qte_sdk.connection import Event, SessionRejected
+from qte_sdk.connection import (
+    Connected,
+    Disconnected,
+    Event,
+    ResumeComplete,
+    SessionRejected,
+)
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
     LIMIT,
@@ -100,7 +128,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     Reject,
     RiskNotice,
 )
-from qte_sdk.market_data import DecodeFailed, SeqGap, SessionState, as_market_data, subscribe
+from qte_sdk.market_data import DecodeFailed, SeqGap, SessionState, as_market_data
 from qte_sdk.orders import (
     is_order_event,
     new_request_ref,
@@ -110,13 +138,12 @@ from qte_sdk.orders import (
     send_cancel,
     send_new,
 )
+from qte_sdk.reconnect import NotConnected, ReconnectingSession, Retrying
 from qte_sdk.resting import RestingOrder, RestingOrders
 from qte_sdk.session import (
     MissingToken,
     MissingURL,
-    Session,
     SessionNotAcknowledged,
-    open_session,
     resolve_url,
 )
 from qte_sdk.units import to_decimal, to_micros
@@ -195,10 +222,16 @@ class Quote:
     sent_at: float = float("-inf")
     # True from an accepted cancel until the exchange reports the order gone.
     cancelling: bool = False
+    # Whether an order of this strategy already rested at the level when the new was sent,
+    # as from an earlier run: the new is then refused as a duplicate, but if that reply is
+    # lost with the connection, the view cannot tell the two apart.
+    taken_before: bool = False
 
 
 class Quoter:
-    def __init__(self, session: Session, view: RestingOrders, args: argparse.Namespace) -> None:
+    def __init__(
+        self, session: ReconnectingSession, view: RestingOrders, args: argparse.Namespace
+    ) -> None:
         self.session = session
         self.view = view
         self.instrument: str = args.instrument
@@ -218,11 +251,101 @@ class Quoter:
         # How many order messages it has sent, so a caller can tell whether a step sent one.
         self.messages = 0
         self.last_side: Side = SELL  # so BUY goes first
+        # Whether a session is up and its resume complete; nothing is sent until it is.
+        self.up = True
+        self.sessions = 0  # how many sessions have been connected
+        # The levels this run sent a new to with none of its strategy resting there: an
+        # order of its strategy left at any other level (an earlier run's) is not its own.
+        self.levels: set[tuple[int, int]] = set()
+        # The levels where an order of its strategy rested when the first resume completed,
+        # before this run sent anything: those orders are an earlier run's. None until then.
+        self.earlier: set[tuple[int, int]] | None = None
 
     def on_session_state(self, state: SessionState) -> None:
         self.market_open = state.state == MarketSessionPhase.OPEN
         # A book published before this session opened is from an earlier session.
         self.open_time = state.open_time
+
+    # The connection
+
+    def on_retrying(self, retrying: Retrying) -> None:
+        if self.sessions == 0 and retrying.error is not None:
+            raise retrying.error  # the first connection failed: stop, before any order
+        print(f"reconnecting in {retrying.delay:.1f} s (attempt {retrying.attempt})")
+
+    def on_connected(self, connected: Connected) -> None:
+        self.sessions += 1
+        self.up = False  # until its resume is complete
+        info = connected.info
+        if connected.reconnected:
+            print(f"reconnected: team {info.team}; sending nothing until the resume is complete")
+        else:
+            print(f"connected: team {info.team}, unscored session: {info.unscored}")
+
+    def on_disconnected(self, disconnected: Disconnected) -> None:
+        self.up = False
+        # The market may have closed meanwhile: quote again only after the next OPEN.
+        self.market_open = False
+        why = disconnected.error or "the exchange closed it"
+        print(
+            f"the connection dropped ({why}); sending nothing until it is back. Orders this "
+            f"example believes it has: {self.believed_resting()}"
+        )
+
+    def resumed(self) -> bool:
+        """The view of resting orders is complete again after a session's resume: take
+        this example's orders from it, and send again. Returns False when the view cannot
+        say which order is this example's."""
+        self.up = True
+        if self.earlier is None:
+            # The first resume to complete: nothing is sent before it, so every order of
+            # its strategy in the view now is an earlier run's.
+            self.earlier = self.own_levels()
+            return True
+        known = self.earlier | {
+            (quote.side, quote.price) for quote in self.quotes.values() if quote.price is not None
+        }
+        for side, price in sorted(self.own_levels() - known):
+            # Not an earlier run's order, nor at a level where this run has one: perhaps one
+            # of this run's, moved while disconnected or left by a cancel lost in the drop.
+            # Whose it is cannot be told, so stop.
+            print(
+                f"an order of this strategy rests at {SIDE_NAMES[side]} {self.instrument} @ "
+                f"{price_text(price)}, where this example has no order now; perhaps one of "
+                "its orders moved, or was not cancelled, while disconnected: check it yourself"
+            )
+            return False
+        for quote in self.quotes.values():
+            if quote.pending_kind == "new" and quote.pending_ref and quote.taken_before:
+                if self.resting(quote) is not None:
+                    # Its new was in flight to a level where an order of this strategy
+                    # already rested, and its reply was lost: whose order rests is unknown.
+                    print(
+                        "an order of this strategy already rested where this example's "
+                        "new was sent when the connection dropped"
+                    )
+                    return False
+        for quote in self.quotes.values():
+            # A message in flight at the drop is never sent again, and its reply may never
+            # come: the view, from the replay or the snapshot, says what became of it.
+            if self.resting(quote) is None:
+                self.gone(quote)
+            quote.pending_ref = None
+            quote.cancelling = False
+        print(f"resumed: the orders this example has now: {self.believed_resting()}")
+        return True
+
+    def own_levels(self) -> set[tuple[int, int]]:
+        """The levels where the view shows an order of this strategy on the instrument."""
+        return {
+            (order.key.side, order.key.price)
+            for order in self.view
+            if order.strat_id == self.strat_id and order.key.instrument == self.instrument
+        }
+
+    def believes_any(self) -> bool:
+        """Whether this example may have an order resting or a message in flight."""
+        return any(q.price is not None or q.pending_ref is not None for q in self.quotes.values())
 
     def in_turn(self) -> list[Quote]:
         """Both sides, starting with the one that did not send last, so that with one
@@ -278,6 +401,9 @@ class Quoter:
             return
         if quote.price is None:
             quote.price = best
+            quote.taken_before = self.resting(quote) is not None
+            if not quote.taken_before:
+                self.levels.add((quote.side, best))
             await send_new(
                 self.session,
                 strat_id=self.strat_id,
@@ -335,9 +461,11 @@ class Quoter:
                     # One message per call: the caller applies any events that came in
                     # meanwhile, which may change what is safe to send, before the next.
                     return False
-        # Done once the exchange has also reported each order gone from the book.
+        # Done once the exchange has also reported each of its orders gone from the book.
         return done and not any(
-            order.strat_id == self.strat_id and order.key.instrument == self.instrument
+            order.strat_id == self.strat_id
+            and order.key.instrument == self.instrument
+            and (order.key.side, order.key.price) in self.levels
             for order in self.view
         )
 
@@ -355,13 +483,16 @@ class Quoter:
 
     async def quote_from_book(self) -> None:
         book = self.books.get(self.instrument)
-        if not self.quoting or not self.market_open or book is None:
-            return  # outside a session the exchange takes no orders
+        if not self.quoting or not self.up or not self.market_open or book is None:
+            # Nothing while the connection is down or resuming. Outside a session the
+            # exchange takes no orders.
+            return
         if book.grid_time < self.open_time:
             return  # kept from an earlier session: wait for this session's first book
         if self.instrument in self.books.stale:
-            # A message that may have been a newer book was missed or unreadable, so this
-            # book may be out of date. Send nothing until a newer book arrives.
+            # A message that may have been a newer book was missed or unreadable, or the
+            # connection dropped, so this book may be out of date. Send nothing until a
+            # newer book arrives, on the new connection after a drop.
             return
         # Quote --inside dollars inside the wall's best price on each side that has one.
         bid = book.bid_levels[0].price + self.inside if book.bid_levels else None
@@ -460,10 +591,10 @@ class Quoter:
                 print(f"risk notice: {RiskNoticeKind.Name(message.kind)}")
 
 
-async def pump(session: Session, queue: asyncio.Queue) -> None:
-    """Read every event into `queue`, then None when the exchange closes the connection, or
-    the exception if it drops. Only this task reads the session. A separate reader lets
-    the main loop wait for the next event with a timeout without disturbing the stream."""
+async def pump(session: ReconnectingSession, queue: asyncio.Queue) -> None:
+    """Read every event into `queue`, then None when the session is closed, or the exception
+    if it fails for good. Only this task reads the session. A separate reader lets the main
+    loop wait for the next event with a timeout without disturbing the stream."""
     try:
         async for event in session:
             await queue.put(event)
@@ -505,11 +636,17 @@ def handle(quoter: Quoter, view: RestingOrders, event: Event) -> bool:
         # The exchange refused the subscription, for example an unknown instrument.
         print(f"subscription refused: {reason_code_name(item.reason_code)}")
         return False
+    elif isinstance(item, Disconnected):
+        quoter.on_disconnected(item)
     elif isinstance(item, SeqGap | DecodeFailed):
         print("warning: a message from the exchange was missed or could not be read")
         if isinstance(item, DecodeFailed) and item.type in (None, "session_state"):
             # It may have said the market closed: quote again only after the next OPEN.
             quoter.market_open = False
+    elif isinstance(event, Connected):
+        quoter.on_connected(event)
+    elif isinstance(event, Retrying):
+        quoter.on_retrying(event)
     elif is_order_event(event):
         quoter.on_order_event(event.message)
     return True
@@ -523,8 +660,13 @@ def apply_received(quoter: Quoter, view: RestingOrders, item: object) -> str | N
         raise item  # the connection dropped
     if not handle(quoter, view, item):
         return "refused"
-    if view.incomplete:
-        return "unreliable"
+    if isinstance(item, ResumeComplete) or (isinstance(item, Connected) and item.resume is None):
+        # The session's resume is complete, or the exchange did not resume it. Only a view
+        # put right by the replay or the snapshot says which orders are this example's.
+        if view.incomplete or not quoter.resumed():
+            return "unreliable"
+    elif quoter.up and view.incomplete:
+        return "unreliable"  # messages were missed while connected
     return None
 
 
@@ -572,6 +714,10 @@ async def quote_until(
                 await quoter.act()
         except TimeoutError:
             return "time"
+        except (NotConnected, ConnectionClosed) as error:
+            # The connection dropped before the example saw it. The message stays recorded
+            # as in flight, and is never sent again: the resume says what became of it.
+            print(f"not sent, the connection is down: {error}")
         if quoter.messages != sent:
             continue  # apply what came in during that send before sending another
         # Wait for the next event, but only until it is time to act again.
@@ -596,35 +742,40 @@ async def cancel_own_orders(
         # Apply every event already received first, so a missed message is seen before
         # anything is sent. After missed events, ownership is no longer known.
         for item in drain(queue):
-            if item is None:
+            why = apply_received(quoter, view, item)
+            if why == "closed":
                 return "unconfirmed"
-            if isinstance(item, Exception):
-                raise item
-            handle(quoter, view, item)
-        if view.incomplete:
-            return "unreliable"
+            if why == "unreliable":
+                return "unreliable"
+        if not quoter.up and not quoter.believes_any():
+            return "done"  # nothing was sent, or nothing is left: there is nothing to cancel
         sent = quoter.messages
-        try:
-            # Bounded by the time left, so a stalled send cannot outlast --drain-seconds.
-            async with asyncio.timeout(max(deadline - loop.time(), 0)):
-                done = await quoter.cancel_own()
-        except TimeoutError:
-            return "unconfirmed"
-        if done:
-            return "done"
+        if quoter.up:
+            # While the connection is down or resuming, wait for it instead.
+            try:
+                # Bounded by the time left, so a stalled send cannot outlast --drain-seconds.
+                async with asyncio.timeout(max(deadline - loop.time(), 0)):
+                    done = await quoter.cancel_own()
+            except TimeoutError:
+                return "unconfirmed"
+            except (NotConnected, ConnectionClosed) as error:
+                print(f"not sent, the connection is down: {error}")
+                done = False
+            if done:
+                return "done"
         if loop.time() >= deadline:
             return "unconfirmed"
         if quoter.messages != sent:
             continue  # apply what came in during that send before sending another
         # Wake at least every requote interval, to retry a rejected cancel.
         item = await next_event(queue, min(deadline - loop.time(), quoter.requote_seconds))
-        if item is None:
-            return "unconfirmed"
         if isinstance(item, TimeoutError):
             continue
-        if isinstance(item, Exception):
-            raise item
-        handle(quoter, view, item)
+        why = apply_received(quoter, view, item)
+        if why == "closed":
+            return "unconfirmed"
+        if why == "unreliable":
+            return "unreliable"
 
 
 def unreliable(quoter: Quoter) -> int:
@@ -643,7 +794,7 @@ CLOSE_SECONDS = 5.0
 
 
 @contextlib.asynccontextmanager
-async def closing(session: Session) -> AsyncIterator[Session]:
+async def closing(session: ReconnectingSession) -> AsyncIterator[ReconnectingSession]:
     """Like `async with session:`, but waits at most CLOSE_SECONDS for the close, so a
     connection that has stopped taking data cannot keep the example from exiting."""
     try:
@@ -657,8 +808,14 @@ async def closing(session: Session) -> AsyncIterator[Session]:
 
 
 async def run(url: str, args: argparse.Namespace) -> int:
-    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE.
-    session = await open_session(url)
+    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE. It is read
+    # once, here, and kept to authenticate again on each reconnect. Every new session
+    # subscribes to the instrument again and resumes the team's order reports. The view of
+    # resting orders is not passed as `resting=`: the example applies each event to it
+    # itself, in the order it handles them, while the reader may already have read ahead.
+    # `close_timeout` bounds the close of each connection, since a ReconnectingSession
+    # finishes closing even when the wait for it is cut short.
+    session = ReconnectingSession(url, instruments=[args.instrument], close_timeout=CLOSE_SECONDS)
     # Each Ctrl+C from here on cancels this task. The first cancellation is absorbed,
     # whether it lands while quoting or while cancelling, so the run still cancels its
     # orders; a second is let through and stops the run, and a third also stops it
@@ -676,19 +833,14 @@ async def run(url: str, args: argparse.Namespace) -> int:
             loop.remove_signal_handler(signal.SIGINT)
 
 
-async def quote_and_clean_up(session: Session, args: argparse.Namespace, task: asyncio.Task) -> int:
+async def quote_and_clean_up(
+    session: ReconnectingSession, args: argparse.Namespace, task: asyncio.Task
+) -> int:
     loop = asyncio.get_running_loop()
     async with closing(session):
-        print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
-        try:
-            async with asyncio.timeout(args.seconds):
-                await subscribe(session, [args.instrument])
-        except TimeoutError:
-            print("could not subscribe within --seconds; no orders were sent")
-            return 1
-
         view = RestingOrders()
         quoter = Quoter(session, view, args)
+        quoter.up = False  # until the first session is connected and resumed
         queue: asyncio.Queue = asyncio.Queue()
         reader = asyncio.create_task(pump(session, queue))
         interrupted = False
@@ -772,10 +924,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosedError:
-        return fail(
-            "the connection dropped, and this example does not reconnect. Your orders may "
-            "still rest: reconnect and cancel them"
-        )
+        return fail("the connection dropped before the session was up: run it again")
     except (KeyboardInterrupt, asyncio.CancelledError):
         # A second Ctrl+C, before the example's orders were confirmed cancelled.
         return fail("interrupted: this example's orders may still rest; check and cancel them")
