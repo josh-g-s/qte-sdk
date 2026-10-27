@@ -47,8 +47,15 @@ what `check` warns about. It looks afresh each time, even where the SDK has alre
 once in the same process, and it never prints a path that holds the token. With `--json` it
 prints one JSON document instead, with the same exit status (docs/errors.md gives its keys).
 A `QTE_LOG_FORMAT` other than json or text makes it exit 2 with `QTE-LOG-FORMAT-INVALID`.
-`set` exits with 0 when it saved, 1 when it refused, and 130 if stopped. Either exits with
-2, after a `usage:` line, if the command line is wrong.
+`set` refuses a token with a space, a quote, a #, or an invisible or control character,
+and says its length and which of those kinds it found. A token without them that is not 64
+characters of 0-9 and a-f, the shape of a trading token, is saved, with a
+`QTE-TOKEN-UNUSUAL` warning on stderr that gives its length and whether it has other
+characters, such as capitals; it is only a warning, so a future token format still works.
+Spaces and line breaks around a pasted token are removed before either check. Neither the
+refusal nor the warning ever shows the token or any part of it. `set` exits with 0 when it
+saved, 1 when it refused, and 130 if stopped. Either exits with 2, after a `usage:` line, if
+the command line is wrong.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
@@ -94,6 +101,7 @@ from qte_sdk.session import (
     TOKEN_FILE_ENV_VAR,
     URL_ENV_VAR,
     MissingURL,
+    _detached,
     _find_token,
     _missing_token,
     _redact,
@@ -238,7 +246,7 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     lines = _existing_lines(path)
     _refuse_if_tracked(_on_disk(path))
     address = _ask_address(url, ask)
-    secret = _ask_token(ask_secret)
+    secret, unusual = _ask_token(ask_secret)
     _offer_gitignore(path, ask)
     text = _merge(lines, {URL_ENV_VAR: address, TOKEN_ENV_VAR: secret.value})
     if len(text.encode("utf-8")) > MAX_DOTENV_SIZE:
@@ -254,6 +262,8 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     del text, secret, lines
     print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}{_privacy(path)}")
     print("Run your programs from this folder, so the SDK finds it.")
+    if unusual:
+        print(unusual, file=sys.stderr)
     if os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR):
         print(
             f"Note: {TOKEN_ENV_VAR} or {TOKEN_FILE_ENV_VAR} is set in this terminal, and the "
@@ -323,17 +333,51 @@ def _ask_address(url: str | None, ask: Prompt) -> str:
     return url
 
 
-def _ask_token(ask_secret: Prompt) -> _Secret:
+def _ask_token(ask_secret: Prompt) -> tuple[_Secret, str | None]:
+    """Read the token, and refuse one that is empty or has a character no token has. Return
+    it with the warning to print once it is saved, if it is not shaped like a trading token,
+    or None. Neither the refusal nor the warning holds the token or any part of it."""
     secret = _read_secret(ask_secret)
-    problem = None
-    if not secret.value:
-        problem = _Refused(_errors.TOKEN_MISSING, where="what was entered")
-    elif not _is_plain(secret.value):
-        problem = _Refused(_errors.TOKEN_MALFORMED)
+    problem = interrupted = None
+    try:
+        if not secret.value:
+            problem = _Refused(_errors.TOKEN_MISSING, where="what was entered")
+        elif not _is_plain(secret.value):
+            problem = _Refused(
+                _errors.TOKEN_MALFORMED, where="entered", **_errors.token_faults(secret.value)
+            )
+        else:
+            unusual = _unusual(secret.value)
+    except BaseException as error:
+        # A Ctrl-C during these checks: their frames hold the token, so they are dropped.
+        interrupted = _detached(error)
+    if interrupted is not None:
+        del secret
+        raise interrupted
     if problem is not None:
         del secret
         raise problem
-    return secret
+    return secret, unusual
+
+
+# A trading token: 32 random bytes as 64 lowercase hex digits (qte-platform's
+# credential.NewToken).
+_TRADING_TOKEN_LENGTH = 64
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _unusual(value: str) -> str | None:
+    """The `QTE-TOKEN-UNUSUAL` warning for a token that passed `_is_plain` but is not 64
+    characters of 0-9 and a-f, or None. Only a warning, so a future token format still
+    works: it gives the length and whether a character falls outside 0-9 and a-f, never the
+    token or any part of it."""
+    outside = not set(value) <= _HEX_DIGITS
+    if len(value) == _TRADING_TOKEN_LENGTH and not outside:
+        return None
+    found = (
+        "characters outside 0-9 and a-f (capital letters count)" if outside else "only 0-9 and a-f"
+    )
+    return "warning: " + render(_errors.TOKEN_UNUSUAL, length=len(value), found=found)
 
 
 def _read_secret(ask_secret: Prompt) -> _Secret:
@@ -524,10 +568,12 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             fix="Choose another path with --file PATH",
         )
     _refuse_if_tracked(path)
-    secret = _ask_token(ask_secret)
+    secret, unusual = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")
     del secret
     print(f"Saved the token to {path}{_privacy(path, sets_address=False)}")
+    if unusual:
+        print(unusual, file=sys.stderr)
     interrupted = False
     try:
         _offer_gitignore(path, ask)

@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.79
+**Version:** 0.80
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -13,6 +13,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - The quickstart, the packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a stock split does: positions scaled at the ex-date open with a fraction paid in cash and no report, so query the account again after that open; ordinary working tickets stopped `TICKET_SPLIT_CANCELLED`; history not split-adjusted. The current case is MTUM's 4-for-1 at the 5 November 2026 open (#295).
 - VWAP is offered from 26 October 2026: the quickstart, the packaged AGENTS.md, docs/automatic-execution.md and the `qte_sdk.tickets` docstrings say so, that a 1713 refusal's `reason_detail` says why and ends "TWAP is available", that the exchange never switches a refused VWAP ticket to TWAP, and which tickets keep VWAP. `examples/fundamentals_pod.py` prints the refusal's `reason_detail` in place of a fixed text (#298).
 - `examples/quote_both_sides.py`, `examples/options_bot.py` and `examples/print_book.py` reconnect with `ReconnectingSession` after a drop: they stop sending while down, never resend an order that was in flight, take their own orders from the resting view after the resume, and wait for a fresh book before sending again. The quickstart and both copies of AGENTS.md point a long-running bot at `ReconnectingSession` and say each example still stops after `--seconds` (#303).
+- `python -m qte_sdk.token set` explains a `QTE-TOKEN-MALFORMED` refusal: the message gives the token's length and the kinds of character no token has that it found (a space, a quote, a #, an invisible or control character), never the token, a position or a codepoint, and says a trading token is 64 characters, 0-9 and a-f, and to copy it again from plain text and paste it only at the hidden prompt. It no longer claims to refuse a letter outside ASCII. A token that passes but is not 64 characters of 0-9 and a-f, such as one cut short or in capitals, is still saved, with a new `QTE-TOKEN-UNUSUAL` warning on stderr giving its length and whether it has characters outside 0-9 and a-f. `HistoryClient`'s refusal gives the same length and kinds (#317).
 
 ## 1.5.1
 

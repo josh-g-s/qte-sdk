@@ -147,7 +147,14 @@ from qte_sdk.contract import codec
 from qte_sdk.contract.registry import INBOUND
 from qte_sdk.errors import QteError, flatten, plain
 from qte_sdk.market_data import MarketData
-from qte_sdk.session import _holds_token, _redact, _Secret, _url_holds_token, resolve_token
+from qte_sdk.session import (
+    _detached,
+    _holds_token,
+    _redact,
+    _Secret,
+    _url_holds_token,
+    resolve_token,
+)
 
 __all__ = [
     "DEFAULT_MAX_RESUMES",
@@ -452,10 +459,18 @@ class HistoryClient:
         if not (self._secret.value.isascii() and self._secret.value.isprintable()):
             # Checked here, since the HTTP library's own error would quote the header.
             del url  # it could hold the token too, so it stays out of the traceback
+            interrupted = None
+            try:
+                faults = _errors.token_faults(self._secret.value, ascii_only=True)
+            except BaseException as error:
+                # Its frame holds the token, so an interruption is raised without it.
+                interrupted = _detached(error)
+            if interrupted is not None:
+                raise interrupted
             raise TokenMalformed(
                 "the token has a character an HTTP header cannot carry, such as a newline "
                 "or a non-ASCII character; check how it was copied",
-                fields={},
+                fields={"where": "given to HistoryClient", **faults},
             )
         if url is None:
             url = os.environ.get(HISTORY_URL_ENV_VAR)

@@ -98,9 +98,11 @@ FIELD_VALUES: dict[str, object] = {
     "command": "`git rm --cached .env` in /home/student/algo",
     "cursor": 3,
     "fix": "Choose another path with --file PATH",
+    "found": "a space and a quote",
     "instrument": "SPY261120C00450000",
     "kind": "InvalidStatus",
     "latest": "1.2.0",
+    "length": 65,
     "line": 3,
     "name": ".env",
     "new_log_id": "fedcba9876543210",
@@ -600,6 +602,12 @@ def token_malformed(token: str, ctx: Context) -> str:
     )
 
 
+def token_unusual(token: str, ctx: Context) -> str:
+    # Saved with the warning: the synthetic token is not 64 characters of 0-9 and a-f.
+    assert len(token) != 64 or not set(token) <= set("0123456789abcdef")
+    return ctx.cli(["set"], ask=answers(URL), ask_secret=answers(token), interactive=lambda: True)
+
+
 def token_no_terminal(token: str, ctx: Context) -> str:
     return ctx.cli(["set"], interactive=lambda: False)
 
@@ -1084,6 +1092,7 @@ CASES: dict[str, Case] = {
     errors.TOKEN_SHARED: token_shared,
     errors.TOKEN_UNCHECKED: token_unchecked,
     errors.TOKEN_MALFORMED: token_malformed,
+    errors.TOKEN_UNUSUAL: token_unusual,
     errors.TOKEN_NO_TERMINAL: token_no_terminal,
     errors.TOKEN_SET_PATH: token_set_path,
     errors.TOKEN_SET_WRITE: token_set_write,
