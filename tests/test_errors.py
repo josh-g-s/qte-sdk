@@ -95,6 +95,7 @@ RELEASED: frozenset[str] = frozenset()
 # A realistic value for every field a template may take. None is the token.
 FIELD_VALUES: dict[str, object] = {
     "action": "write",
+    "characters": "characters",
     "command": "`git rm --cached .env` in /home/student/algo",
     "cursor": 3,
     "fix": "Choose another path with --file PATH",

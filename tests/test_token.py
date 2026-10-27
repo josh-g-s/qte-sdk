@@ -236,6 +236,7 @@ REFUSED = {
     "double quotes": (lambda t: f'"{t}"', 66, "a quote"),
     "single quotes": (lambda t: f"'{t}'", 66, "a quote"),
     "a label": (lambda t: f"Token: {t}", 71, "a space"),
+    "a label with an accent": (lambda t: f"Clé {t}", 68, "a space"),
     "a Windows Ctrl+V": (lambda t: "\x16" + t, 65, "an invisible or control character"),
     "a #": (lambda t: "#" + t, 65, "a #"),
     "a comment": (lambda t: t + " # ours", 71, "a space and a #"),
@@ -266,8 +267,25 @@ def test_a_token_with_a_character_no_token_has_is_refused_with_a_hint(case: str,
     assert_nothing_of(pasted, out + err)
     with pytest.raises(helper._Refused) as refused:
         helper._ask_token(answers(pasted))
-    assert refused.value.fields == {"where": "entered", "length": length, "found": found}
+    assert refused.value.fields == {
+        "where": "entered",
+        "length": length,
+        "characters": "characters",
+        "found": found,
+    }
     assert_nothing_of(pasted, str(refused.value) + repr(refused.value.args))
+
+
+def test_a_length_of_one_is_one_character():
+    faults = errors_module.token_faults("x")
+    assert faults["characters"] == "character"
+    shown = errors_module.render(errors_module.TOKEN_MALFORMED, where="entered", **faults)
+    assert " is 1 character long " in shown
+    shown = errors_module.render(
+        errors_module.TOKEN_UNUSUAL, length=1, characters="character", found="only 0-9 and a-f"
+    )
+    assert " is 1 character long " in shown
+    assert errors_module.token_faults("xy")["characters"] == "characters"
 
 
 def test_the_hint_names_kinds_but_never_a_codepoint_or_a_position(capsys):
@@ -309,7 +327,7 @@ WARNED = {
     ),
     "with a non-hex letter": (
         lambda t: t[:63] + "g",
-        "is 64 characters long and has characters outside 0-9 and a-f",
+        "is 64 characters long and has characters outside 0-9 and a-f (capital letters count), but",
     ),
     "too long": (lambda t: t + "0", "is 65 characters long and has only 0-9 and a-f, but"),
 }
@@ -332,6 +350,13 @@ def test_an_unusual_token_is_saved_with_a_warning(case: str, to_file: bool, home
     assert len(warning) == 1
     assert warning[0].startswith("warning: QTE-TOKEN-UNUSUAL: the token entered is ")
     assert said in warning[0]
+    found = said.split(" and has ", 1)[1].removesuffix(", but")
+    assert warning[0] == "warning: " + errors_module.render(
+        errors_module.TOKEN_UNUSUAL,
+        length=len(pasted),
+        characters="character" if len(pasted) == 1 else "characters",
+        found=found,
+    )
     assert "a trading token is 64 characters, 0-9 and a-f" in warning[0]
     assert "It was saved anyway" in warning[0]
     assert "error:" not in err

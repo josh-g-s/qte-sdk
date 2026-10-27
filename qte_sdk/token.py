@@ -377,7 +377,12 @@ def _unusual(value: str) -> str | None:
     found = (
         "characters outside 0-9 and a-f (capital letters count)" if outside else "only 0-9 and a-f"
     )
-    return "warning: " + render(_errors.TOKEN_UNUSUAL, length=len(value), found=found)
+    return "warning: " + render(
+        _errors.TOKEN_UNUSUAL,
+        length=len(value),
+        characters=_errors.characters(len(value)),
+        found=found,
+    )
 
 
 def _read_secret(ask_secret: Prompt) -> _Secret:

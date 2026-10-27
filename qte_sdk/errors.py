@@ -153,7 +153,7 @@ CODES: dict[str, Entry] = {
         f"Keep the file in {_PROFILE}",
     ),
     TOKEN_MALFORMED: Entry(
-        "the token {where} is {length} characters long and has {found}, which no token has",
+        "the token {where} is {length} {characters} long and has {found}, which no token has",
         "A trading token is 64 characters, 0-9 and a-f, on one line, so this one picked up "
         "something extra or lost part of itself when it was copied",
         "Copy it again from plain text, or type it, and paste it only at the hidden prompt of "
@@ -163,7 +163,7 @@ CODES: dict[str, Entry] = {
         f"Copy the token again from plain text, or type it, at the hidden prompt of {_TOKEN_SET}",
     ),
     TOKEN_UNUSUAL: Entry(
-        "the token entered is {length} characters long and has {found}, but a trading token "
+        "the token entered is {length} {characters} long and has {found}, but a trading token "
         "is 64 characters, 0-9 and a-f",
         "It was saved anyway, in case the token format has changed, but it may have been "
         "copied wrongly",
@@ -624,6 +624,7 @@ HANDSHAKE_STEPS: dict[str, tuple[str, str]] = {
 FIELDS = frozenset(
     {
         "action",
+        "characters",
         "command",
         "cursor",
         "fix",
@@ -795,10 +796,11 @@ _FAULT_ORDER = (_SPACE, _QUOTE, _HASH, _INVISIBLE, _NOT_ASCII)
 
 
 def token_faults(value: str, /, *, ascii_only: bool = False) -> dict[str, Any]:
-    """The `length` and `found` fields of a `QTE-TOKEN-MALFORMED` message for `value`: its
-    length, and the kinds of character in it that no token has (a space, a quote, a #, an
-    invisible or control character, and with `ascii_only` a character outside ASCII),
-    joined as a phrase. Neither field holds the token, any part of it, a position or a
+    """The `length`, `characters` and `found` fields of a `QTE-TOKEN-MALFORMED` message for
+    `value`: its length, "character" or "characters" to follow it, and the kinds of
+    character in it that no token has (a space, a quote, a #, an invisible or control
+    character, and with `ascii_only` a character outside ASCII), joined as a phrase. No
+    field holds the token, any part of it, a position or a
     codepoint."""
     kinds = set()
     for c in value:
@@ -814,7 +816,12 @@ def token_faults(value: str, /, *, ascii_only: bool = False) -> dict[str, Any]:
             kinds.add(_NOT_ASCII)
     named = [kind for kind in _FAULT_ORDER if kind in kinds] or ["a character"]
     found = named[0] if len(named) == 1 else ", ".join(named[:-1]) + " and " + named[-1]
-    return {"length": len(value), "found": found}
+    return {"length": len(value), "characters": characters(len(value)), "found": found}
+
+
+def characters(length: int, /) -> str:
+    """ "character" or "characters", whichever follows `length` in a message."""
+    return "character" if length == 1 else "characters"
 
 
 def withheld(withhold: Callable[[str], bool], /, **fields: Any) -> dict[str, Any]:
