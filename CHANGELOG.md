@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.78
+**Version:** 0.80
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -12,6 +12,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - The quickstart and the packaged AGENTS.md say that in Winter's practice week, 26 to 30 October 2026, Market Making obligation breaches only warn, Options ones included, and the daily loss halts stay live, citing qte-platform DL-162 and DL-163 (#293).
 - The quickstart, the packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a stock split does: positions scaled at the ex-date open with a fraction paid in cash and no report, so query the account again after that open; ordinary working tickets stopped `TICKET_SPLIT_CANCELLED`; history not split-adjusted. The current case is MTUM's 4-for-1 at the 5 November 2026 open (#295).
 - VWAP is offered from 26 October 2026: the quickstart, the packaged AGENTS.md, docs/automatic-execution.md and the `qte_sdk.tickets` docstrings say so, that a 1713 refusal's `reason_detail` says why and ends "TWAP is available", that the exchange never switches a refused VWAP ticket to TWAP, and which tickets keep VWAP. `examples/fundamentals_pod.py` prints the refusal's `reason_detail` in place of a fixed text (#298).
+- Tests only: a gateway conformance suite. The handover and restart scenarios, and new section-0 checks (close codes passed on, 503 with no upstream, heartbeats both ways), run against the in-test fake gateway by default, or against a real `qte-gateway` binary named by `QTE_GATEWAY_BIN`, in front of two fake exchanges that speak the exchange side of the hot-switch link protocol v0.12. A stage-1 binary runs the section-0 checks and skips the handover ones, with a reason. tests/README.md says how (#311).
 
 ## 1.5.1
 
