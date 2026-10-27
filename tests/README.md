@@ -37,4 +37,4 @@ The tests start the binary themselves with every flag it needs (`gateway_command
 
 Tests marked fake-only (they check the fake gateway itself, or a contract break a real gateway cannot be made to show) skip in binary mode. The 45 s silence close (4000) is not run: it takes 45 s and needs a stage-2 gateway.
 
-The switch route (`SWITCH_ROUTE`) and the stage-2 flag names follow the v0.12 draft and are pending qte-platform G3 (#2764); if G3 names them differently, change `tests/gateway_target.py` only.
+The switch command (`SWITCH_ROUTE`, its replies in `SWITCH_RESULTS`) and the stage-2 flag names are the ones qte-core set for qte-platform G3 (#2764), to go into link protocol v0.13; if they change, change `tests/gateway_target.py` only.

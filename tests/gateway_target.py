@@ -10,8 +10,9 @@ A stage-1 binary (a transparent proxy, link protocol section 0 only) runs the se
 scenarios; the handover scenarios, which need stage 2, are skipped with a reason. A binary
 is taken for stage 2 when its `-h` output names `-link-credential-file`.
 
-Every gateway flag is set in `gateway_command`. The switch command's route is
-`SWITCH_ROUTE`, pending G3 (qte-platform #2764), which has not specified it yet.
+Every gateway flag is set in `gateway_command`. The switch command (`SWITCH_ROUTE`) and
+the stage-2 flags are as qte-core set them for G3 (qte-platform #2764) on 27 Oct 2026, to go
+into link protocol v0.13.
 Everything is local: no AWS, no network beyond loopback, and a throwaway link credential
 and upstream header written to a temporary folder.
 """
@@ -50,10 +51,13 @@ GATEWAY_BIN_ENV = "QTE_GATEWAY_BIN"
 GATEWAY_BIN = os.environ.get(GATEWAY_BIN_ENV) or None
 FAKE = GATEWAY_BIN is None
 
-# Pending G3 (qte-platform #2764): the switch command's route and body on -switch-addr are
-# not specified yet. Change them here, and only here, once G3 says.
+# The switch command on the loopback-only -switch-addr listener (qte-core for G3, v0.13).
+# It answers 200 {"result": "promoted", "seq": M}, 200 {"result": "aborted", "abort_step",
+# "abort_reason", "abort_detail"}, or 409 {"result": "refused", "reason"} with nothing changed.
+# The -admin-addr listener answers the same POST with 403.
 SWITCH_ROUTE = "/gateway/switch"
 SWITCH_BODY = {"to": "b"}
+SWITCH_RESULTS = {200: {"promoted", "aborted"}, 409: {"refused"}}
 STATUS_ROUTE = "/gateway/switch-status"  # section 2b
 HEALTH_ROUTE = "/gateway/healthz"  # section 0
 HOLD_LIMIT = 2.0  # seconds, the -hold-limit of section 3 step 7
@@ -113,10 +117,11 @@ def gateway_command(
     live: str,
     slots: dict[str, str],
     switch_addr: str,
+    admin_addr: str,
     credential_file: Path,
 ) -> list[str]:
     """Every gateway flag, in one place. Stage 1 knows only -listen and -upstream; stage 2
-    adds the flags of link protocol v0.12 (G3 may still rename them)."""
+    adds the flags qte-core set for G3."""
     command = [binary, "-listen", listen]
     if stage < 2:
         return [*command, "-upstream", f"http://{live}"]
@@ -126,6 +131,8 @@ def gateway_command(
         str(credential_file),
         "-slots",
         ",".join(f"{slot}={addr}" for slot, addr in sorted(slots.items())),
+        "-admin-addr",
+        admin_addr,
         "-switch-addr",
         switch_addr,
         "-hold-limit",
@@ -164,6 +171,7 @@ class Rig:
     def __post_init__(self) -> None:
         self.listen = f"127.0.0.1:{free_port()}"
         self.switch_addr = f"127.0.0.1:{free_port()}"
+        self.admin_addr = f"127.0.0.1:{free_port()}"
         self.log_path = self.folder / "gateway.log"
         _, self.credential_file, _ = self.credentials
 
@@ -182,6 +190,7 @@ class Rig:
             live=self.a.addr,
             slots={"a": self.a.addr, "b": self.b.addr},
             switch_addr=self.switch_addr,
+            admin_addr=self.admin_addr,
             credential_file=self.credential_file,
         )
 
@@ -230,10 +239,15 @@ class Rig:
         assert code == 200, (code, text)
         return json.loads(text)
 
-    async def switch(self) -> tuple[int, str]:
-        """Start a switch to slot b through the switch listener."""
-        url = f"http://{self.switch_addr}{SWITCH_ROUTE}"
-        return await asyncio.to_thread(http, "POST", url, SWITCH_BODY)
+    async def switch(self, addr: str | None = None) -> tuple[int, dict]:
+        """Send the switch command to slot b, on the switch listener unless `addr` says
+        otherwise. A 200 or 409 reply must carry one of its listed results."""
+        url = f"http://{addr or self.switch_addr}{SWITCH_ROUTE}"
+        code, text = await asyncio.to_thread(http, "POST", url, SWITCH_BODY)
+        reply = json.loads(text) if code in SWITCH_RESULTS else {}
+        if code in SWITCH_RESULTS:
+            assert reply.get("result") in SWITCH_RESULTS[code], (code, text)
+        return code, reply
 
     async def sigterm(self) -> None:
         assert self.process is not None

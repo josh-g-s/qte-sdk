@@ -626,7 +626,7 @@ class BinaryGateway:
                         # Section 2: an internal link error, which the gateway must never
                         # pass on to the client.
                         self.link_errors.append(message)
-                        error = {"type": "link_error", "reason": "not live"}
+                        error = {"type": "link_error", "reason": "not_live"}
                         await ws.send(json.dumps(error))
         except ConnectionClosed:
             return

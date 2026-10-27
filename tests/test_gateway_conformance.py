@@ -33,6 +33,7 @@ from gateway_target import (
     binary_stage,
     gateway_command,
     http,
+    needs_stage_2,
     rig,
     stage_of,
 )
@@ -221,6 +222,17 @@ async def test_the_gateway_answers_its_own_health_route():
     assert code == 200
 
 
+@NEEDS_BINARY
+async def test_the_switch_command_answers_only_on_the_switch_listener():
+    needs_stage_2()
+    async with section0(Upstream()) as (_, the_rig):
+        admin, _ = await the_rig.switch(the_rig.admin_addr)
+        code, reply = await the_rig.switch()
+    assert admin == 403
+    # Promoted, aborted or refused (if B is not ready yet); switch() checks the result.
+    assert code in (200, 409), (code, reply)
+
+
 @pytest.mark.skip(
     reason="the 45 s silence close (4000) takes 45 s and needs a stage-2 gateway; "
     "run by hand: hold a client silent 46 s through the binary and expect close 4000"
@@ -241,12 +253,13 @@ def test_the_gateway_flags_live_in_one_place():
         "live": "127.0.0.1:2",
         "slots": {"b": "h:2", "a": "h:1"},
         "switch_addr": "127.0.0.1:3",
+        "admin_addr": "127.0.0.1:4",
         "credential_file": Path("c"),
     }
     stage_1 = gateway_command("gw", 1, **where)
     assert stage_1 == ["gw", "-listen", "127.0.0.1:1", "-upstream", "http://127.0.0.1:2"]
     stage_2 = gateway_command("gw", 2, **where)
-    for flag in ("-link-credential-file", "-slots", "-switch-addr", "-hold-limit"):
+    for flag in ("-link-credential-file", "-slots", "-admin-addr", "-switch-addr", "-hold-limit"):
         assert flag in stage_2
     assert stage_2[stage_2.index("-slots") + 1] == "a=h:1,b=h:2"
 
@@ -478,7 +491,7 @@ async def test_an_order_sent_to_a_follower_or_a_stopped_live_is_a_link_error():
             await b_link.send(json.dumps({"type": "auth", "payload": {}}))
             await until(b_link, "calendar")
             await b_link.send(json.dumps(order()))
-            assert (await until(b_link, "link_error"))["reason"]
+            assert (await until(b_link, "link_error"))["reason"] == "not_live"
             async with await d.control(d.a) as a_ctl:
                 await a_ctl.send(json.dumps({"type": "stop_after_current"}))
                 await until(a_ctl, "stopped")
@@ -486,7 +499,7 @@ async def test_an_order_sent_to_a_follower_or_a_stopped_live_is_a_link_error():
                     await a_link.send(json.dumps({"type": "auth", "payload": {}}))
                     await until(a_link, "calendar")
                     await a_link.send(json.dumps(order()))
-                    assert (await until(a_link, "link_error"))["reason"]
+                    assert (await until(a_link, "link_error"))["reason"] == "not_live"
         assert len(d.gateway.link_errors) == 2
         assert not d.gateway.a.orders and not d.gateway.b.orders
 

@@ -295,7 +295,7 @@ class LinkExchange:
         b = self.behaviour
         if kind == "stop_after_current":
             if self.role != "live" or self.stopped:
-                await self._send_control(ws, {"type": "error", "reason": "not live"})
+                await self._send_control(ws, {"type": "error", "reason": "not_live"})
                 return
             # Step 3: no further append; M is the last seq, O the log size after it.
             self.stopped = True
