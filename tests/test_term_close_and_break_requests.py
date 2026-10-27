@@ -153,6 +153,7 @@ async def test_term_end_decodes():
     assert isinstance(event, Received) and not isinstance(event, Unknown)
     assert event.report_seq is None
     assert event.message == TermEnd(session_date="2026-12-04", term_id="winter-2026")
+    assert not is_break_request_event(event)
 
 
 async def test_a_break_request_state_decodes():
@@ -374,6 +375,21 @@ async def test_a_withdraw_needs_a_decimal_break_request_id(bad):
     conn = Recorder()
     with pytest.raises(ValueError, match="^break_request_id must be a non-empty string"):
         await send_break_request_withdraw(conn, break_request_id=bad)
+    assert conn.sent == []
+
+
+async def test_a_break_request_withdraw_makes_a_fresh_request_ref():
+    conn = Recorder()
+    ref = await send_break_request_withdraw(conn, break_request_id="73104")
+    [(_, msg)] = conn.sent
+    assert len(ref) == 32 and msg.request_ref == ref
+
+
+@pytest.mark.parametrize("bad", ["", "r" * 33])
+async def test_a_withdraw_with_a_bad_request_ref_is_not_sent(bad):
+    conn = Recorder()
+    with pytest.raises(ValueError, match="^request_ref must be 1 to 32 bytes"):
+        await send_break_request_withdraw(conn, break_request_id="73104", request_ref=bad)
     assert conn.sent == []
 
 
