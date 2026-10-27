@@ -452,7 +452,10 @@ ABORTS = {
 def switch_reply_for(outcome: str) -> tuple[int, dict]:
     """The switch command's reply at `outcome`, as the fake gateway gives it: promoted at M
     for a switch or a late promotion, aborted for the rest. No exchange confirmed live is
-    an abort too: any failure before step 5's promoted aborts the switch (step 7)."""
+    an abort too: any failure before step 5's promoted aborts the switch (step 7).
+
+    This and the teardown check both read `ABORTS`, so on the fake the reply check only
+    checks this function and the outcome wiring; it tests a gateway only on a binary."""
     if outcome in SWITCHED:
         return 200, {"result": "promoted", "seq": M}
     step, reason = ABORTS[outcome]

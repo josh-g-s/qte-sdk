@@ -355,6 +355,7 @@ async def test_link_status_comes_every_250_ms_on_the_control_connection():
             arrived = []  # loop time of each
             loop = asyncio.get_running_loop()
             async with await d.control(exchange) as ws:
+                start = loop.time()
                 try:
                     async with asyncio.timeout(window):
                         while True:
@@ -362,6 +363,7 @@ async def test_link_status_comes_every_250_ms_on_the_control_connection():
                             arrived.append(loop.time())
                 except TimeoutError:
                     pass
+                end = loop.time()
             assert {s["type"] for s in statuses} == {"link_status"}
             assert {s["role"] for s in statuses} == {role}
             assert all(s["ready"] and s["log_id"] == SCRIPTED_LOG for s in statuses)
@@ -369,10 +371,12 @@ async def test_link_status_comes_every_250_ms_on_the_control_connection():
             # One at once, then one every 250 ms (section 2's interval, not the fake's own):
             # 5 in a second, the last at the window's edge. A short gap is not checked, so a
             # slow reader that takes two at once does not fail it; a long one is, so a burst
-            # then silence does.
+            # then silence does. The window's start and end count as edges, so silence
+            # before the first status or after the last fails too.
             expected = 1 + window / 0.25
             assert expected - 1 <= len(statuses) <= expected, len(statuses)
-            gaps = [arrived[i + 1] - arrived[i] for i in range(len(arrived) - 1)]
+            edges = [start, *arrived, end]
+            gaps = [edges[i + 1] - edges[i] for i in range(len(edges) - 1)]
             assert max(gaps) < 0.25 + 0.2, gaps
 
 
