@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.16
+**Version:** 0.17
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -91,7 +91,7 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 ### QTE-TOKEN-SET-PATH
 
 - Raised as: `token set` refuses the destination; nothing is changed.
-- Cause: The `.env` is a symbolic link, not a regular file, not UTF-8 text, or would grow past the 64 KiB the SDK reads; or the `--file` path is a folder, a symbolic link or a `.gitignore`.
+- Cause: The `.env` is a symbolic link, not a regular file, not UTF-8 text, or would grow past the 64 KiB the SDK reads; or the `--file` path is a folder, a symbolic link or a `.gitignore`, or has a run of 32 hex digits like a token or a control character or line break (not shown, since it may be your token).
 - Fix: Edit the file by hand, or choose another path with `--file PATH`.
 
 ### QTE-TOKEN-SET-WRITE
