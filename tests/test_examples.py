@@ -4878,6 +4878,200 @@ async def test_options_bot_acts_only_once_the_events_already_read_are_applied():
     assert acted == [3]
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("quote_both_sides.py", "--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+        ("options_bot.py", "--strat-id", "opt-test"),
+        ("print_book.py", "--instrument", INSTRUMENT),
+    ],
+    ids=["quote_both_sides", "options_bot", "print_book"],
+)
+async def test_each_reconnecting_example_stops_when_its_first_connection_fails(
+    args: tuple[str, ...],
+):
+    # Nothing listens at port 1, so the first connection is refused. That is retryable
+    # for ReconnectingSession, but the example stops at once rather than retry until
+    # --seconds runs out and then report success.
+    name, *rest = args
+    code, out, err = await run_example(
+        name, "ws://127.0.0.1:1/ws", synthetic_token(), *rest, "--seconds", "3"
+    )
+    assert code == 1, out + err
+    assert "could not connect to QTE_URL" in err
+    assert "reconnecting in" not in out
+
+
+class LateStateOnReconnect(FakeExchange):
+    """Withholds the session state from a reconnect's first ticks, so that connection's
+    first books come before any session state."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.states_held = 0
+
+    async def send(
+        self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
+    ) -> None:
+        if type_ == "session_state" and self.connections > 1 and self.states_held < 5:
+            self.states_held += 1
+            return
+        await super().send(ws, type_, payload, **envelope)
+
+
+async def test_quote_both_sides_quotes_after_a_drop_only_once_a_new_session_state_says_open():
+    # Its buy is in flight at the drop and rests; its sell goes out on the new connection.
+    # The market may have closed meanwhile, so it waits for that connection's session
+    # state, though fresh books come first.
+    exchange = LateStateOnReconnect(drop_on_new=1)
+    code, out, err = await run_quoter(exchange)
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    sends = orders_on(exchange, 2, "new", "amend")
+    assert sends, out
+    assert first_sent(exchange, 2, "book") < first_sent(exchange, 2, "session_state") < sends[0]
+    # The drop message names the order by the request_ref of its new.
+    [buy] = payloads(exchange, "new")[:1]
+    assert (
+        f"believes it has: BUY TEST @ 99.960000 (request_ref {buy['request_ref']}, new in flight)"
+    ) in out
+
+
+async def test_quote_both_sides_names_each_order_by_the_request_ref_of_its_new_at_a_drop():
+    # Its buy rests and is reported, so nothing of it is in flight; its sell is in flight.
+    exchange = FakeExchange(drop_on_new=2, first_book_after=3)
+    code, out, err = await run_quoter(exchange)
+    assert code == 0, out + err
+    buy, sell = (p["request_ref"] for p in payloads(exchange, "new"))
+    assert (
+        f"believes it has: BUY TEST @ 99.960000 (request_ref {buy}), "
+        f"SELL TEST @ 100.040000 (request_ref {sell}, new in flight)"
+    ) in out
+
+
+class LostFirstCancel(FakeExchange):
+    """The first cancel is lost with the connection: it drops before the cancel is
+    applied, so the order still rests and no reply ever comes."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(instruments=options_table(), options=options_market(), **kwargs)
+        self.cancel_lost = False
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        if type_ == "cancel" and not self.cancel_lost:
+            self.cancel_lost = True
+            self._withhold = True  # the connection drops, with nothing applied or sent
+            return
+        await super().on_order(ws, type_, p)
+
+
+async def test_options_bot_sends_its_cancel_again_when_one_in_flight_at_a_drop_was_lost():
+    # The resume shows the order still resting: the bot does not wait for the lost
+    # cancel's reply, but cancels afresh on the new connection.
+    exchange = LostFirstCancel()
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert len(payloads(exchange, "new")) == 1
+    assert len(orders_on(exchange, 1, "cancel")) == 1
+    assert len(orders_on(exchange, 2, "cancel")) == 1
+    assert exchange.resting == {}
+
+
+class UnfinishedFirstResume(FakeExchange):
+    """On the first connection, announces a snapshot it never sends, so the bot's resume
+    never completes and it sends nothing, though it gets all it needs to choose; then
+    drops. A later connection sends its Greeks, its session state and its books apart,
+    in the `order` given, so the bot acts between them."""
+
+    def __init__(self, order: tuple[str, ...] = ("greeks", "state", "books"), **kwargs: Any):
+        super().__init__(instruments=options_table(), options=options_market(), **kwargs)
+        self.order = order
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        if self.connections > 1:
+            await super().answer_resume(ws, last_report_seq)
+            return
+        ack = {"replayed": False, "as_of_report_seq": "0", "snapshot_count": 1}
+        await self.send(ws, "resume_ack", ack)
+
+    async def publish_options(self, ws: ServerConnection) -> None:
+        assert self.options is not None
+        state = {"state": "OPEN", "session_date": "2026-10-26", "grid_time": "1"}
+
+        async def send_state() -> None:
+            await self.send(ws, "session_state", state)
+
+        async def send_books() -> None:
+            for book in self.options["books"]:
+                await self.send(ws, "book", book)
+
+        async def send_greeks() -> None:
+            for greeks in self.options["greeks"]:
+                await self.send(ws, "option_greeks", greeks)
+
+        await self.send(ws, "option_chain", self.options["chain"])
+        if self.connections == 1:
+            await send_greeks()
+            await send_state()
+            await send_books()
+            await asyncio.sleep(0.3)  # the bot has handled them all, and could choose
+            await self.drop(ws)
+            return
+        senders = {"greeks": send_greeks, "state": send_state, "books": send_books}
+        parts = [senders[name] for name in self.order]
+        while True:
+            for part in parts:
+                await asyncio.sleep(0.2)  # the bot acts on what came before
+                await part()
+
+
+@pytest.mark.parametrize(
+    "order",
+    [("greeks", "books", "state"), ("greeks", "state", "books"), ("state", "books", "greeks")],
+    ids=["state-last", "books-last", "greeks-last"],
+)
+async def test_options_bot_forgets_the_market_and_books_it_could_have_chosen_from_at_a_drop(
+    order: tuple[str, ...],
+):
+    # At the drop the bot holds a session state, Greeks and books it could choose from.
+    # The new connection's order goes out only after its own Greeks, session state and
+    # books, whichever comes last.
+    exchange = UnfinishedFirstResume(order)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert orders_on(exchange, 1, "new") == []
+    [new] = orders_on(exchange, 2, "new")
+    for type_ in ("option_greeks", "session_state", "book"):
+        assert first_sent(exchange, 2, type_) < new, type_
+    assert len(payloads(exchange, "new")) == 1
+    assert exchange.resting == {}
+
+
+class ClosedOnSubscribe:
+    """A session whose subscribe is cut off by a drop after it recorded the contracts."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append(type_)
+        raise ConnectionClosed(None, None)
+
+
+async def test_options_bot_does_not_subscribe_again_after_a_subscribe_cut_off_by_a_drop():
+    # ReconnectingSession records the contracts before sending, so the next session
+    # subscribes to them by itself: the bot must not subscribe to them a second time.
+    example = load_example("options_bot.py")
+    session = ClosedOnSubscribe()
+    bot = example.OptionsBot(session, None, "SPY", "opt-test", False, None)
+    bot.subscribe_to = ["SPY261120P00665000"]
+    await bot.subscribe()
+    assert session.sent == ["subscribe"]
+    assert bot.subscribe_to == []
+
+
 def test_the_reconnecting_examples_bound_each_close_of_the_connection():
     # ReconnectingSession finishes closing even when the wait for it is cut short, so
     # each connection's own close is bounded by CLOSE_SECONDS.
