@@ -59,7 +59,7 @@ before; an id that is not a well-formed option symbol is treated as an equity's.
 instruments is a `ValueError`. The option chain is not part of a replay: fetch it with
 `HistoryClient.fetch_option_chain`. The Greeks follow the history contract of
 qte-platform #2298, whose server build is live; the sessions cached before it, 15 to
-21 October 2026, have all been upgraded and serve them.
+21 October 2026, have all been upgraded and serve their Greeks.
 
 Errors. A stream the service holds with no messages, such as an equity with no trades
 that day, adds nothing. A per-instrument channel the service answers unavailable when it

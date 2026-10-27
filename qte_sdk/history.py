@@ -51,10 +51,10 @@ They are built with the session's `book`, so they are ready when its `book` is. 
 session with options cached before that build kept no Greeks and no chain, and nothing
 for any channel on which a listed contract published nothing (a contract that quoted but
 never traded has no `trades`) until an upgrade of that session was run. Those were the
-sessions of 15 to 21 October 2026, and all five have been upgraded, so every session now
-serves its chain and Greeks and an unavailable answer is final. An upgrade is run by
-hand, never automatically: it adds the missing objects and leaves every object already
-cached, and its `ETag`, unchanged.
+sessions of 15 to 21 October 2026, and all five have been upgraded, so every session
+with options now serves its chain and Greeks and an unavailable answer is final. An
+upgrade is run by hand, never automatically: it adds the missing objects and leaves
+every object already cached, and its `ETag`, unchanged.
 
 A session that has closed but is not ready yet is `pending`: `fetch` waits and asks again
 as the service's `Retry-After` header says, up to `max_wait` seconds in all, then raises
