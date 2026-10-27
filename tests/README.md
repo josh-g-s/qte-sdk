@@ -33,6 +33,8 @@ What runs depends on the binary's stage, read from its `-h` output:
 - Stage 1 (no `-link-credential-file` flag): the section-0 checks only. A close from the exchange reaches the client with the same code and reason, an upgrade with no upstream is refused with HTTP 503, heartbeats pass through both ways, and after a SIGTERM restart the client sees 1006, redials and resumes. The handover scenarios skip, each with the reason.
 - Stage 2: everything, including the handover outcomes of section 3 step 7 (a completed switch, a late promotion, an abort at drain, confirm or promote, and no exchange confirmed live).
 
+To check a binary you expect to be stage 2, also set `QTE_GATEWAY_REQUIRE_STAGE_2=1`: the handover scenarios then fail on a stage-1 binary instead of skipping.
+
 The tests start the binary themselves with every flag it needs (`gateway_command` in `tests/gateway_target.py` holds them all, in one place). They write a throwaway link credential into a temporary folder and give the gateway a random upstream header, so no real secret is used or needed. The gateway's own log for a failed run is quoted in the failure.
 
 Tests marked fake-only (they check the fake gateway itself, or a contract break a real gateway cannot be made to show) skip in binary mode. The 45 s silence close (4000) is not run: it takes 45 s and needs a stage-2 gateway.

@@ -224,6 +224,12 @@ class Link:
             await self.send("heartbeat", {}, build=self.source)
         self.owed = 0
 
+    @property
+    def close_sent(self) -> tuple[int, str] | None:
+        """The close frame really sent on this connection (code, reason), if any."""
+        sent = self.ws.protocol.close_sent
+        return None if sent is None else (sent.code, sent.reason)
+
     async def record_until_closed(self) -> None:
         """Record everything the client sends until it closes."""
         try:
@@ -276,7 +282,10 @@ class Gateway:
     which tells the client the script is over. After a completed switch the book has an
     empty wall, as after the feed gap a real handover leaves. `seq_jump` breaks the
     contract: the counter skips that many seqs at the switch. `resume` answers the client's
-    resume, as a `ReconnectingSession` sends one.
+    resume, as a `ReconnectingSession` sends one. `switch_reply` is what the switch command
+    would have answered the operator at the outcome (`gateway_target.SWITCH_RESULTS`); the
+    fake makes it up, so a broken outcome shows in it as in the frames. On leaving `serve`
+    it checks how the handover ended (`assert_handover_ended`).
     """
 
     def __init__(
@@ -316,11 +325,13 @@ class Gateway:
         self.order_arrived = asyncio.Event()
         self.hold_started: float | None = None
         self.released_at: float | None = None
+        self.switch_reply: tuple[int, dict] | None = None
 
     @asynccontextmanager
     async def serve(self) -> AsyncIterator[str]:
         async with serving(self, process_request=self.process_request) as url:
             yield url
+        assert_handover_ended(self, self.switch_reply)
 
     def process_request(self, connection: Any, request: Any) -> Any:
         # No exchange confirmed live: every upgrade is refused until one is (step 7).
@@ -381,6 +392,7 @@ class Gateway:
             deadline = self.hold_started + self.hold
             while (left := deadline - loop.time()) > 0:
                 await asyncio.sleep(left)
+            self.switch_reply = switch_reply_for(self.outcome)
             if self.outcome == "no_live":
                 # Held to the hold limit, then closed as on any upstream loss (step 7).
                 self.closed_with = (1001, "no live exchange")
@@ -426,6 +438,25 @@ class Gateway:
 SWITCHED = ["switch", "late_promote"]
 RESUMED = ["abort_drain", "abort_confirm", "abort_promote"]
 OUTCOMES = [*SWITCHED, *RESUMED, "no_live"]
+# The `abort_step` and `abort_reason` (section 2b) each aborting outcome ends with: the hold
+# limit runs out while the gateway waits for link_drained, applied or promoted, and at no
+# live, B's control connection closes after promote.
+ABORTS = {
+    "abort_drain": ("drain", "hold_limit"),
+    "abort_confirm": ("confirm", "hold_limit"),
+    "abort_promote": ("promote", "hold_limit"),
+    "no_live": ("promote", "connection_lost"),
+}
+
+
+def switch_reply_for(outcome: str) -> tuple[int, dict]:
+    """The switch command's reply at `outcome`, as the fake gateway gives it: promoted at M
+    for a switch or a late promotion, aborted for the rest. No exchange confirmed live is
+    an abort too: any failure before step 5's promoted aborts the switch (step 7)."""
+    if outcome in SWITCHED:
+        return 200, {"result": "promoted", "seq": M}
+    step, reason = ABORTS[outcome]
+    return 200, {"result": "aborted", "abort_step": step, "abort_reason": reason}
 
 
 class RealClock(Clock):
@@ -449,7 +480,9 @@ class BinaryGateway:
     control messages (`behaviours`), so each outcome of step 7 happens. It reads, for the
     tests, what the fake gateway records: `connections`, `link.sent` (the frames the gateway
     stamped), the orders each build took, `held`, `hold_started` (A's `link_drain`, at or
-    after the gateway's hold start) and `released_at` (B's promoted, or A's resume)."""
+    after the gateway's hold start) and `released_at` (B's promoted, or A's resume). On
+    leaving `serve` it awaits the switch command's reply and checks how the handover ended
+    (`assert_handover_ended`)."""
 
     def __init__(
         self,
@@ -527,16 +560,29 @@ class BinaryGateway:
                 try:
                     async with self.tap.serving() as url:
                         yield url
+                    try:
+                        assert_handover_ended(self, await self._switch_reply())
+                    except AssertionError as error:
+                        drained = "link_drain" in the_rig.a.marks
+                        raise AssertionError(
+                            f"{error}; link_drain reached A: {drained}; "
+                            f"gateway log: {the_rig.tail()}"
+                        ) from error
                 finally:
                     for task in self._tasks:
                         task.cancel()
-                    if "link_drain" not in the_rig.a.marks and self.switch_task is not None:
-                        if self.switch_task.done() and not self.switch_task.cancelled():
-                            answer = self.switch_task.result()
-                            raise AssertionError(
-                                f"no link_drain reached A; the switch command answered "
-                                f"{answer}; gateway log: {the_rig.tail()}"
-                            )
+                    if self.switch_task is not None and not self.switch_task.done():
+                        self.switch_task.cancel()
+
+    async def _switch_reply(self) -> tuple[int, dict] | None:
+        """The switch command's reply (None if none was sent), raising whatever the command
+        raised; one still pending well past the hold limit fails the test."""
+        if self.switch_task is None:
+            return None
+        await asyncio.wait([self.switch_task], timeout=HOLD_LIMIT + 5)
+        if not self.switch_task.done():
+            raise AssertionError("the switch command was never answered")
+        return self.switch_task.result()
 
     def _spawn(self, coroutine: Any) -> None:
         task = asyncio.create_task(coroutine)
@@ -617,6 +663,7 @@ class BinaryGateway:
                         continue
                     await ws.send(json.dumps({"type": "link_drained", "n": message["n"]}))
                 elif kind == "new":
+                    exchange.mark("order")  # when the first order reached this exchange
                     self.orders.append(message)
                     if self.hold_started is not None:
                         self.held.append(message)
@@ -701,6 +748,41 @@ def assert_nothing_link_only_reached_the_client(gateway: Any) -> None:
     assert frames
     assert not [f for f in frames if "src_seq" in f]
     assert not [f["type"] for f in frames if f["type"] in LINK_ONLY_TYPES]
+
+
+def assert_handover_ended(gateway: Any, reply: tuple[int, dict] | None) -> None:
+    """How a scenario's handover ended, checked as the gateway stops, on both targets.
+
+    The switch command answered promoted at M for a switch or a late promotion, and aborted
+    at the outcome's step for its reason (`ABORTS`) for an abort or no exchange confirmed
+    live; with no handover it was never sent. Each client connection got exactly one
+    session_ack and one calendar, its own exchange's: the gateway never passes on the new
+    live's handshake at the switch, nor a resumed live's. On a real gateway, a late
+    promotion sent A no resume (step 7)."""
+    if not gateway.handover:
+        assert reply is None, reply
+        connections = 1
+    else:
+        assert reply is not None, "no switch command reply"
+        code, body = reply
+        if gateway.outcome in SWITCHED:
+            assert (code, body.get("result"), body.get("seq")) == (200, "promoted", M), reply
+        else:
+            fields = (code, body.get("result"), body.get("abort_step"), body.get("abort_reason"))
+            assert fields == (200, "aborted", *ABORTS[gateway.outcome]), reply
+        # No exchange confirmed live: the held connection, then the redial B served.
+        connections = 2 if gateway.outcome == "no_live" else 1
+    frames = frames_sent(gateway)
+    types = [f["type"] for f in frames]
+    assert (types.count("session_ack"), types.count("calendar")) == (connections, connections)
+    # Passed on unchanged: both exchanges send the same ack and calendar.
+    assert all(f["payload"] == ACK for f in frames if f["type"] == "session_ack")
+    assert all(f["payload"] == CALENDAR for f in frames if f["type"] == "calendar")
+    if not FAKE and gateway.handover and gateway.outcome in SWITCHED:
+        a, b = gateway.rig.a, gateway.rig.b
+        assert not [m for m in a.control_received if m["type"] == "resume"]
+        # A late promotion is B's answer to abort_promote; a plain switch sends none.
+        assert ("abort_promote" in b.marks) == (gateway.outcome == "late_promote")
 
 
 @asynccontextmanager
@@ -1018,6 +1100,9 @@ async def test_an_aborted_handover_changes_nothing(kind, hold, outcome):
     plain = await run(make_gateway(handover=False), kind)
     assert aborted.released_at is not None and aborted.hold_started is not None
     assert aborted.released_at - aborted.hold_started >= hold
+    # The order was held: sent before the old live resumed, answered only after.
+    assert seen.sent_at is not None and seen.answered_at is not None
+    assert seen.sent_at < aborted.released_at <= seen.answered_at
     # The held order went back to A, which answered it; B saw nothing.
     assert aborted.held and aborted.a.orders == aborted.held and not aborted.b.orders
     assert aborted.link is not None
@@ -1039,6 +1124,9 @@ async def test_an_aborted_handover_changes_nothing(kind, hold, outcome):
         # At promote, the abort reached B (and B had not appended, so it stayed a follower).
         assert ("abort_promote" in b.marks) == (outcome == "abort_promote")
         assert not aborted.link_errors
+        # The gateway held the order to its hold limit, which began before A's link_drain,
+        # and only then sent it to A, so A did not take it in the hold.
+        assert a.marks["order"] - aborted.hold_started >= HOLD_LIMIT - 0.25
 
 
 async def test_no_exchange_confirmed_live_closes_the_held_client_then_refuses_until_one_is():
@@ -1066,7 +1154,9 @@ async def test_no_exchange_confirmed_live_closes_the_held_client_then_refuses_un
     assert seen.last_report_seq == M
     if FAKE:
         assert gateway.orders  # the fake took the order into its hold
-        assert gateway.closed_with is not None and gateway.closed_with[0] == 1001
+        # The close frame the fake really sent on the held connection.
+        assert gateway.links[0].close_sent is not None
+        assert gateway.links[0].close_sent[0] == 1001
         assert gateway.released_at - gateway.hold_started >= MAX_HOLD
         assert len(refusals) == gateway.refused == 3
         served = gateway.links[-1]

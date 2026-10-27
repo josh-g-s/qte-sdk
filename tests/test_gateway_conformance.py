@@ -40,7 +40,6 @@ from gateway_target import (
 from link_exchange import (
     CONTROL_PATH,
     LINK_HEADER,
-    STATUS_EVERY,
     Behaviour,
     EventLog,
     LinkExchange,
@@ -353,21 +352,28 @@ async def test_link_status_comes_every_250_ms_on_the_control_connection():
     async with driving() as d:
         for exchange, role in ((d.a, "live"), (d.b, "follower")):
             statuses = []
+            arrived = []  # loop time of each
+            loop = asyncio.get_running_loop()
             async with await d.control(exchange) as ws:
                 try:
                     async with asyncio.timeout(window):
                         while True:
                             statuses.append(json.loads(await ws.recv()))
+                            arrived.append(loop.time())
                 except TimeoutError:
                     pass
             assert {s["type"] for s in statuses} == {"link_status"}
             assert {s["role"] for s in statuses} == {role}
             assert all(s["ready"] and s["log_id"] == SCRIPTED_LOG for s in statuses)
             assert all(s["folded_seq"] == s["log_tail_seq"] == M for s in statuses)
-            # One at once, then one every 250 ms: 5 in a second. A count in a window, not
-            # the gaps, so a slow reader that takes two at once does not fail it.
-            expected = 1 + window / STATUS_EVERY
-            assert expected - 2 <= len(statuses) <= expected, len(statuses)
+            # One at once, then one every 250 ms (section 2's interval, not the fake's own):
+            # 5 in a second, the last at the window's edge. A short gap is not checked, so a
+            # slow reader that takes two at once does not fail it; a long one is, so a burst
+            # then silence does.
+            expected = 1 + window / 0.25
+            assert expected - 1 <= len(statuses) <= expected, len(statuses)
+            gaps = [arrived[i + 1] - arrived[i] for i in range(len(arrived) - 1)]
+            assert max(gaps) < 0.25 + 0.2, gaps
 
 
 async def test_a_wrong_link_header_gets_401_and_a_follower_without_one_403():

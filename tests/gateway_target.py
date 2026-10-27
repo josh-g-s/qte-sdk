@@ -50,6 +50,9 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 GATEWAY_BIN_ENV = "QTE_GATEWAY_BIN"
 GATEWAY_BIN = os.environ.get(GATEWAY_BIN_ENV) or None
 FAKE = GATEWAY_BIN is None
+# Set to 1, a binary that is not stage 2 fails the handover scenarios instead of skipping them.
+REQUIRE_STAGE_2_ENV = "QTE_GATEWAY_REQUIRE_STAGE_2"
+REQUIRE_STAGE_2 = os.environ.get(REQUIRE_STAGE_2_ENV) == "1"
 
 # The switch command on the loopback-only -switch-addr listener (qte-core for G3, v0.13).
 # It answers 200 {"result": "promoted", "seq": M}, 200 {"result": "aborted", "abort_step",
@@ -95,12 +98,15 @@ def binary_stage() -> int:
 
 def needs_stage_2() -> None:
     """Skip the calling test unless the target can hold a handover: the fake always can,
-    a binary only from stage 2."""
+    a binary only from stage 2. With `REQUIRE_STAGE_2_ENV` set to 1 it fails instead."""
     if not FAKE and binary_stage() < 2:
-        pytest.skip(
+        reason = (
             f"needs a stage-2 gateway: {GATEWAY_BIN} has no -link-credential-file "
             "(stage 1, section 0 only)"
         )
+        if REQUIRE_STAGE_2:
+            pytest.fail(f"{reason}; {REQUIRE_STAGE_2_ENV}=1")
+        pytest.skip(reason)
 
 
 def free_port() -> int:
