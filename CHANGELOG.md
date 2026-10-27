@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.79
+**Version:** 0.80
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- Close reasons the contract fixes, `exchange stopping` (1001), `sequencer stopped` (1011) and `credential revoked` (1008), are now shown in errors instead of `<withheld>`. `ReconnectingSession` no longer reconnects after a 1008 `credential revoked` close, sent when your token is revoked or rotated: it raises the `ConnectionClosedError` at once. New constants `qte_sdk.connection.CREDENTIAL_REVOKED_CLOSE_CODE` and `CREDENTIAL_REVOKED_CLOSE_REASON` (#329).
 - The README, the quickstart, both copies of AGENTS.md and the automatic execution page name v1.5.1 as the latest release, and their install lines use the v1.5.1 zip (#291).
 - The quickstart and the packaged AGENTS.md say that in Winter's practice week, 26 to 30 October 2026, Market Making obligation breaches only warn, Options ones included, and the daily loss halts stay live, citing qte-platform DL-162 and DL-163 (#293).
 - The quickstart, the packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a stock split does: positions scaled at the ex-date open with a fraction paid in cash and no report, so query the account again after that open; ordinary working tickets stopped `TICKET_SPLIT_CANCELLED`; history not split-adjusted. The current case is MTUM's 4-for-1 at the 5 November 2026 open (#295).

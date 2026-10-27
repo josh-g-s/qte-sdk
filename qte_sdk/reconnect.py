@@ -139,7 +139,9 @@ response or with HTTP 5xx, 408 or 429, and a session that closed before it was
 acknowledged or before its resume was answered, and a link presumed dead
 (`LivenessTimeout`). Anything else stops the session and is raised from the iteration,
 because trying again would give the same answer: every `SessionRejected` (for example a
-token the exchange does not accept), including `ContractVersionMismatch`; `AuthNotSent`,
+token the exchange does not accept), including `ContractVersionMismatch`; a close with
+code 1008 and reason `credential revoked`, sent when your token is revoked or rotated, as a
+`ConnectionClosedError` (get a new token: the old one is refused); `AuthNotSent`,
 when the
 `auth` message itself could not be encoded or sent; a certificate that failed
 verification; a handshake refused with any other status, which usually means a wrong URL,
@@ -178,6 +180,7 @@ from qte_sdk.connection import (
     ReportGap,
     ResumeComplete,
     SessionRejected,
+    _credential_revoked,
 )
 from qte_sdk.contract.v1.session_pb2 import (
     Calendar,
@@ -300,10 +303,14 @@ def is_retryable(error: BaseException) -> bool:
     (other than a certificate that failed verification), a handshake answered with a
     malformed response or with HTTP 5xx, 408 or 429, a session that closed before it was
     acknowledged or before its resume was answered, and a link presumed dead. False for
-    everything else, including every `SessionRejected` and
-    `AuthNotSent`.
+    everything else, including every `SessionRejected`, `AuthNotSent` and a close
+    because the token was revoked.
     """
     if isinstance(error, SessionRejected | AuthNotSent | ssl.SSLCertVerificationError):
+        return False
+    if _credential_revoked(error) or (
+        isinstance(error, SessionNotAcknowledged) and error.credential_revoked
+    ):
         return False
     if isinstance(error, HandshakeFailed):
         status = error.status_code
