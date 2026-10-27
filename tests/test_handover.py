@@ -39,7 +39,7 @@ from test_resume import SCRIPTED_LOG, TERM, term_calendar
 from test_session import ack, synthetic_token
 from test_tickets import state_payload
 from websockets.asyncio.server import ServerConnection, serve
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
 from qte_sdk.account import AccountReports
 from qte_sdk.connection import (
@@ -756,6 +756,20 @@ def assert_resumed_with_nothing_resent(gateway: Restarting, rs: ReconnectingSess
     assert rs.last_report_seq == 5
 
 
+def assert_disconnected_as(end: str, events: list[Any]) -> None:
+    """The one Disconnected tells the two ends apart: a 1001 close is a normal close, with
+    no error; a drop is an error, with no close frame received."""
+    (disconnected,) = [e for e in events if isinstance(e, Disconnected)]
+    if end == "1001":
+        assert disconnected == Disconnected(None)
+    else:
+        assert isinstance(disconnected.error, ConnectionClosedError)
+        assert disconnected.error.rcvd is None
+    # Either way the first redial follows the disconnect, with no attempt failed yet.
+    first = next(e for e in events if isinstance(e, Retrying))
+    assert first.error is None
+
+
 def assert_replayed_then_live(events: list[Any]) -> None:
     tail = [
         f"{e.type}:{e.report_seq}" if isinstance(e, Received) else type(e).__name__ for e in events
@@ -777,7 +791,7 @@ async def test_a_gateway_restart_is_retried_and_resumed_from_last_report_seq(end
     # that stops is handled the same.
     gateway = Restarting(end)
     events, clock, rs = await restart_run(gateway)
-    assert sum(isinstance(e, Disconnected) for e in events) == 1
+    assert_disconnected_as(end, events)
     retries = [e for e in events if isinstance(e, Retrying)]
     assert [(r.attempt, r.delay) for r in retries] == [(1, 0.5)]
     assert clock.waits == [0.5]
@@ -790,10 +804,9 @@ async def test_a_gateway_restart_is_retried_and_resumed_from_last_report_seq(end
 async def test_a_run_of_503_refusals_is_retried_then_resumed_from_last_report_seq(end):
     gateway = Restarting(end, refusals=3)
     events, clock, rs = await restart_run(gateway)
-    assert sum(isinstance(e, Disconnected) for e in events) == 1
+    assert_disconnected_as(end, events)
     retries = [e for e in events if isinstance(e, Retrying)]
     assert [(r.attempt, r.delay) for r in retries] == [(1, 0.5), (2, 1.0), (3, 2.0), (4, 4.0)]
-    assert retries[0].error is None
     for retry in retries[1:]:
         assert isinstance(retry.error, HandshakeFailed)
         assert retry.error.status_code == 503
