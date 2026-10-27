@@ -1845,3 +1845,33 @@ def test_a_usage_error_with_no_stray_word_still_says_what_is_wrong(capsys):
     err = capsys.readouterr().err
     assert "argument --url: expected one argument" in err
     assert "not shown" not in err
+
+
+SAFE_USAGE_ERRORS = [
+    "argument --url: expected one argument",
+    "the following arguments are required: command",
+]
+
+
+@pytest.mark.parametrize("message", SAFE_USAGE_ERRORS)
+def test_only_the_exact_safe_usage_errors_are_shown_as_argparse_words_them(message, capsys):
+    token = secrets.token_hex(32)
+    for shown, expected in [(message, message), (f"{message} {token}", None)]:
+        with pytest.raises(SystemExit) as exited:
+            helper._parser().error(shown)
+        assert exited.value.code == 2
+        err = capsys.readouterr().err
+        if expected is not None:
+            assert err.endswith(f": error: {expected}\n")
+        else:
+            assert "not shown since it may be your token" in err
+            for start in range(len(token) - 7):
+                assert token[start : start + 8] not in err
+
+
+def test_no_command_says_a_command_is_required(capsys):
+    with pytest.raises(SystemExit) as exited:
+        helper.main([], ask=never, ask_secret=never, interactive=lambda: True)
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert err.endswith("error: the following arguments are required: command\n")
