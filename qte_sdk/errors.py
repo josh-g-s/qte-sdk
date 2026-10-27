@@ -392,14 +392,12 @@ CODES: dict[str, Entry] = {
     ),
     HISTORY_UNAVAILABLE: Entry(
         "{what}",
-        "Asking again will not change that, except for a session cached before the service's "
-        "options build once an upgrade of that session is run (see docs/errors.md)",
+        "Asking again will not change that",
         "Check the date, instrument and channel against the calendar and the instruments "
         "the exchange lists",
         "A date before the service's coverage, a day with no session, an instrument or "
-        "channel the service does not know, an option contract the session did not list, or "
-        "a channel a contract never published on in a session cached before the options "
-        "build (HTTP 404)",
+        "channel the service does not know, or an option contract the session did not list "
+        "(HTTP 404)",
         "Ask for data that exists",
     ),
     HISTORY_NOT_CLOSED: Entry(
