@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.80
+**Version:** 0.81
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- `token set` and `token check` refuse a value they do not take, such as the token typed after the command, with `QTE-TOKEN-SET-ARGUMENT`, and never print it: before, argparse printed it back in its "unrecognized arguments" line. Any value the command line cannot parse is shown as `(not shown)` (#331).
 - `token set --file` refuses a path with a run of 32 hex digits, the shape of a token the exchange issues, or a control character or line break, as typed or percent-decoded, before it creates or asks for anything, with `QTE-TOKEN-SET-PATH` and without showing the path, since a token typed in place of the path would otherwise be printed back in every message that names it. The message says to remove the token from your shell history (#324).
 - The README, the quickstart, both copies of AGENTS.md and the automatic execution page name v1.5.1 as the latest release, and their install lines use the v1.5.1 zip (#291).
 - The quickstart and the packaged AGENTS.md say that in Winter's practice week, 26 to 30 October 2026, Market Making obligation breaches only warn, Options ones included, and the daily loss halts stay live, citing qte-platform DL-162 and DL-163 (#293).

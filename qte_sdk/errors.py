@@ -43,6 +43,7 @@ TOKEN_UNCHECKED = "QTE-TOKEN-UNCHECKED"
 TOKEN_MALFORMED = "QTE-TOKEN-MALFORMED"
 TOKEN_NO_TERMINAL = "QTE-TOKEN-NO-TERMINAL"
 TOKEN_SET_PATH = "QTE-TOKEN-SET-PATH"
+TOKEN_SET_ARGUMENT = "QTE-TOKEN-SET-ARGUMENT"
 TOKEN_SET_WRITE = "QTE-TOKEN-SET-WRITE"
 # ADDRESS
 ADDRESS_MISSING = "QTE-ADDRESS-MISSING"
@@ -172,6 +173,16 @@ CODES: dict[str, Entry] = {
         "{fix}",
         "`token set` was pointed at a link, a folder, a .gitignore, or a file it cannot rewrite",
         "Edit the file by hand, or choose another path with --file PATH",
+    ),
+    TOKEN_SET_ARGUMENT: Entry(
+        "`token {command}` was given a value it does not take, not shown since it may be "
+        "your token, so nothing was changed",
+        "The token is never taken on the command line, where your shell history and any log "
+        "would keep it",
+        "Run `python -m qte_sdk.token {command}` with nothing after it; `set` asks for the "
+        "token. If you typed your token, clear it from your shell history",
+        "`token set` or `token check` was given a value it does not take, such as the token",
+        "Run the command with nothing after it; `set` asks for the token",
     ),
     TOKEN_SET_WRITE: Entry(
         "could not {action} {path} ({strerror})",

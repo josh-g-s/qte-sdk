@@ -63,6 +63,7 @@ can never come.
 import argparse
 import getpass
 import os
+import re
 import secrets
 import shlex
 import sys
@@ -70,6 +71,7 @@ import unicodedata
 import warnings
 from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 from urllib.parse import unquote
 
 from qte_sdk import _fileaccess
@@ -135,10 +137,20 @@ def main(
     """Run the command in `argv` and return its exit status. `ask`, `ask_secret` and
     `interactive` read the answers and tell whether a person is at the keyboard; tests
     replace them."""
-    args = _parser().parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = _parser()
+    try:
+        args = parser.parse_args(argv)
+    except _UsageError as error:
+        error.parser.print_usage(sys.stderr)
+        print(f"{error.parser.prog}: error: {_not_shown(error.message, argv)}", file=sys.stderr)
+        return 2
     if interactive is None:
         interactive = _has_terminal
     try:
+        if args.extra:
+            raise _Refused(_errors.TOKEN_SET_ARGUMENT, command=args.command)
         if args.command == "check":
             return _check(json_output=args.json)
         if not interactive():
@@ -156,8 +168,36 @@ def main(
     return 1
 
 
+class _UsageError(Exception):
+    def __init__(self, parser: argparse.ArgumentParser, message: str) -> None:
+        super().__init__(message)
+        self.parser = parser
+        self.message = message
+
+
+class _Parser(argparse.ArgumentParser):
+    """An `ArgumentParser` whose errors are raised, so `main` can print them without what
+    was typed."""
+
+    def error(self, message: str) -> NoReturn:
+        raise _UsageError(self, message)
+
+
+# The words of the command line itself; anything else typed may be a token.
+_KNOWN_WORDS = frozenset({"set", "check", "--url", "--file", "--json", "-h", "--help"})
+
+
+def _not_shown(message: str, argv: list[str]) -> str:
+    """`message` with each value typed in `argv` replaced, since argparse quotes what it
+    could not parse (an unknown command, say) and that may be the token."""
+    for typed in sorted(set(argv) - _KNOWN_WORDS, key=len, reverse=True):
+        if typed:
+            message = re.sub(rf"(?<![\w-]){re.escape(typed)}(?![\w-])", "(not shown)", message)
+    return message
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="python -m qte_sdk.token",
         description="Set up the exchange address and your token for qte_sdk.",
     )
@@ -182,6 +222,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=f"store only the token, in PATH (default {DEFAULT_TOKEN_FILE})",
     )
+    set_.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
     set_.color = False
     check = commands.add_parser(
         "check",
@@ -189,6 +230,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Say where the SDK would take the token and the address from.",
     )
     check.color = False
+    check.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
     check.add_argument(
         "--json",
         action="store_true",

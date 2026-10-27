@@ -1886,3 +1886,51 @@ def test_windows_is_unchanged_by_the_writable_check(windows, tmp_path, monkeypat
     assert writable_warnings(resolve_token) == []
     assert run(["check"]) == 0
     assert WRITABLE not in capsys.readouterr().out
+
+
+TOKEN = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["set", TOKEN],
+        ["set", TOKEN, "--url", "wss://example.test"],
+        ["set", "--file", "tokenfile", TOKEN],
+        ["check", TOKEN],
+        ["check", "--json", TOKEN],
+    ],
+    ids=["set", "set --url", "set --file", "check", "check --json"],
+)
+def test_a_value_after_the_command_is_refused_and_never_printed(
+    argv, home, tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert run(argv) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith(f"error: QTE-TOKEN-SET-ARGUMENT: `token {argv[0]}` was given a value")
+    assert TOKEN not in err
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [[TOKEN], ["set", f"--bogus={TOKEN}"], ["--bogus", TOKEN, "set"]],
+    ids=["as the command", "in an unknown option", "after an unknown option"],
+)
+def test_argparse_errors_never_print_what_was_typed(argv, home, tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert helper.main(argv) == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "error:" in err and "(not shown)" in err
+    assert TOKEN not in err
+
+
+def test_argparse_errors_keep_the_words_of_the_command_line(capsys):
+    assert helper.main(["set", "--url"]) == 2
+    assert "argument --url: expected one argument" in capsys.readouterr().err
+    assert helper.main(["--bogus"]) == 2
+    assert "the following arguments are required: command" in capsys.readouterr().err

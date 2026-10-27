@@ -608,6 +608,10 @@ def token_set_path(token: str, ctx: Context) -> str:
     return ctx.cli(["set", "--file", ".gitignore"], interactive=lambda: True)
 
 
+def token_set_argument(token: str, ctx: Context) -> str:
+    return ctx.cli(["set", token], interactive=lambda: True)
+
+
 def token_set_write(token: str, ctx: Context) -> str:
     def full(*args: object) -> None:
         raise OSError(28, "No space left on device")
@@ -1086,6 +1090,7 @@ CASES: dict[str, Case] = {
     errors.TOKEN_MALFORMED: token_malformed,
     errors.TOKEN_NO_TERMINAL: token_no_terminal,
     errors.TOKEN_SET_PATH: token_set_path,
+    errors.TOKEN_SET_ARGUMENT: token_set_argument,
     errors.TOKEN_SET_WRITE: token_set_write,
     errors.ADDRESS_MISSING: address_missing,
     errors.ADDRESS_INVALID: address_invalid,
