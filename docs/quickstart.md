@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.79
+**Version:** 0.80
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -221,6 +221,8 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+A program meant to run for hours, overnight included, starts from `qte_sdk.reconnect.ReconnectingSession` (step 9) instead, as the worked examples `examples/quote_both_sides.py`, `examples/options_bot.py` and `examples/print_book.py` do, though each of them still stops after `--seconds` (30 by default), so a long-running bot sets its own run length or loops.
 
 `session.info.unscored` is `True` when nothing in this session counts towards any score. `session.info.session_id` names the session, for your logs and when you ask for help. It is unique only within one run of the exchange: after the exchange restarts, an id can come round again, so never use it as a key across restarts or days.
 
@@ -607,7 +609,7 @@ A `reject` can also carry `CURE_WINDOW`, a reason you otherwise see on `order_ca
 
 ## 9. If the connection drops
 
-Iterating a session ends normally when the exchange closes the connection, and raises `websockets.exceptions.ConnectionClosedError` if it drops. A session from `open_session` does not reconnect, and neither do the worked examples: open a new session yourself. Your orders may still be resting after a drop, so check before you trade again.
+Iterating a session ends normally when the exchange closes the connection, and raises `websockets.exceptions.ConnectionClosedError` if it drops. A session from `open_session` does not reconnect, and neither do the worked examples `examples/take_liquidity.py`, `examples/smoke_test.py` and `examples/fundamentals_pod.py`: open a new session yourself, or use `ReconnectingSession` below, as `examples/quote_both_sides.py`, `examples/options_bot.py` and `examples/print_book.py` do. Your orders may still be resting after a drop, so check before you trade again.
 
 The exchange sends a heartbeat at a regular interval, at any hour, so a working connection is never silent for long. The SDK absorbs heartbeats: they never appear among your events, and you send nothing back. Once the first heartbeat has arrived, if nothing at all arrives for `liveness_timeout` seconds, the SDK treats the link as dead, drops it and raises `qte_sdk.connection.LivenessTimeout`. The check starts only with that first heartbeat, so an exchange that does not send heartbeats is never dropped for being quiet. The default, 45 seconds, is the SDK's own choice, not a value the exchange sends; pass `liveness_timeout=` to `open_session` or `ReconnectingSession` to change it, or `None` to turn the check off.
 
