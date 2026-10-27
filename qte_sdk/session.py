@@ -1162,7 +1162,11 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
             text = f"could not send auth: {type(error).__name__}; details withheld"
         else:
             text = f"could not send auth: {type(error).__name__}: {error}"
-        replacement: BaseException = kind(text, close_code=_received_close_code(error))
+        replacement: BaseException = kind(
+            text,
+            close_code=_received_close_code(error),
+            credential_revoked=_credential_revoked(error),
+        )
     except BaseException as error:
         # Cancellation and interrupts keep their type, so they behave as they otherwise would.
         replacement = type(error)(*error.args)
@@ -1401,5 +1405,11 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
         return type(error)(error.reason_code, detail, reason_name=name)
     withheld = f"{type(error).__name__}; details withheld, since they repeated the token"
     if isinstance(error, SessionNotAcknowledged):
-        return type(error)(withheld, close_code=error.close_code)
-    return SessionNotAcknowledged(withheld, close_code=_received_close_code(error))
+        return type(error)(
+            withheld, close_code=error.close_code, credential_revoked=error.credential_revoked
+        )
+    return SessionNotAcknowledged(
+        withheld,
+        close_code=_received_close_code(error),
+        credential_revoked=_credential_revoked(error),
+    )

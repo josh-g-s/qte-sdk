@@ -141,11 +141,11 @@ acknowledged or before its resume was answered, and a link presumed dead
 because trying again would give the same answer: every `SessionRejected` (for example a
 token the exchange does not accept), including `ContractVersionMismatch`; a close with
 code 1008 and reason `credential revoked`, sent when your token is revoked or rotated, as a
-`ConnectionClosedError` (get a new token: the old one is refused); `AuthNotSent`,
-when the
-`auth` message itself could not be encoded or sent; a certificate that failed
-verification; a handshake refused with any other status, which usually means a wrong URL,
-or whose negotiation failed; and any error in the SDK or your own code.
+`ConnectionClosedError`, or while connecting or resuming as a `SessionNotAcknowledged` or
+`ResumeNotAcknowledged` whose `credential_revoked` is True (get a new token: the old one is
+refused); `AuthNotSent`, when the `auth` message itself could not be encoded or sent; a
+certificate that failed verification; a handshake refused with any other status, which
+usually means a wrong URL, or whose negotiation failed; and any error in the SDK or your own code.
 
 The token is resolved once, when the session is created, and kept for re-authentication in
 a wrapper that no repr, str or traceback shows. It is sent only in `auth` messages. An

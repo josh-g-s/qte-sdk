@@ -47,7 +47,11 @@ from qte_sdk.session import (
     TOKEN_FILE_ENV_VAR,
     AuthNotSent,
     MissingToken,
+    ResumeNotAcknowledged,
     SessionNotAcknowledged,
+    _Secret,
+    _send_auth,
+    _without_token,
 )
 
 # The fake exchange. Each connection runs the next script in turn; the last one repeats.
@@ -1510,6 +1514,36 @@ async def _revoke_before_resume_ack(ws: ServerConnection, exchange: Exchange) ->
     await ws.send(ack())
     await exchange.recv(ws)
     await ws.close(1008, "credential revoked")
+
+
+def _revoked() -> ConnectionClosedError:
+    return ConnectionClosedError(Close(1008, "credential revoked"), None)
+
+
+class _RevokedWhileSending:
+    async def send(self, *args: object) -> None:
+        raise _revoked()
+
+
+async def test_a_credential_revoked_while_sending_auth_is_not_retried():
+    with pytest.raises(SessionNotAcknowledged) as caught:
+        await _send_auth(_RevokedWhileSending(), _Secret(synthetic_token()))
+    assert caught.value.credential_revoked
+    assert not is_retryable(caught.value)
+
+
+@pytest.mark.parametrize("kind", [SessionNotAcknowledged, ResumeNotAcknowledged, None])
+def test_withholding_the_token_keeps_a_credential_revoked(kind):
+    token = synthetic_token()
+    if kind is None:
+        error: BaseException = _revoked()
+    else:
+        error = kind("closed", close_code=1008, credential_revoked=True)
+    error.__context__ = ValueError(token)
+    replacement = _without_token(error, _Secret(token))
+    assert replacement is not None and token not in str(replacement)
+    assert replacement.credential_revoked
+    assert not is_retryable(replacement)
 
 
 @pytest.mark.parametrize("script", [_revoke_before_ack, _revoke_before_resume_ack])
