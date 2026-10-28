@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.67
+**Version:** 1.68
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of 1.2.0 or later, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With an earlier release, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
@@ -15,7 +15,7 @@ This file is for anyone building a trading program for the Queen's Tower Exchang
 - Install the SDK into a virtual environment in the person's own project folder, with Python 3.11 or later.
 - macOS and Linux: `python3 -m venv .venv`, then `source .venv/bin/activate`, then `pip install "git+https://github.com/josh-g-s/qte-sdk"`.
 - Windows, in PowerShell: `py -m venv .venv`, then `.venv\Scripts\Activate.ps1`, then the same `pip install`. Use `py`, not `python3`: on Windows `python3` is often only a stub that offers the Microsoft Store. In cmd, activate with `.venv\Scripts\activate.bat`. If PowerShell says running scripts is disabled, the person runs `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. Once the virtual environment is active, `python` and `pip` are its own on every system, so the commands in this file work as written.
-- Without git (pip says it cannot find the command `git`): install a release from its zip, `pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.5.1.zip`. Later releases have the same address with their own tag, and `python -m qte_sdk.update` prints it. To stay on one release with git, add its tag: `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"`.
+- Without git (pip says it cannot find the command `git`): install a release from its zip, `pip install https://github.com/josh-g-s/qte-sdk/archive/refs/tags/v1.6.0.zip`. Later releases have the same address with their own tag, and `python -m qte_sdk.update` prints it. To stay on one release with git, add its tag: `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"`.
 - An install brings the `qte_sdk` package only, with no `docs/` or `examples/` folder, so read the docs by the GitHub links in this file. Clone this repository, or unzip that release's source, only to read or run the worked examples in `examples/`; copy that folder into the project folder that holds `.env` and run the examples from there, since `.env` is read only from the working directory.
 
 ## Updates
