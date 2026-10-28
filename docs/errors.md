@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.23
+**Version:** 0.24
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -239,6 +239,12 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 - Raised as: a WARNING from the `qte_sdk.reconnect` logger, with `old_log_id`, `new_log_id` and `cursor`, logged by a `ReconnectingSession` when it forgets its report cursor for this reason.
 - Cause: A new session's `session_ack` named a different event log (`log_id`, 16 lowercase hex characters) from the one the report cursor was counted under: the exchange started a new log, for a new term or a fresh start. Report numbers belong to one log, so the old cursor would skip the new log's first reports. The cursor was reset, as at a term change: with a resume the session asks from 0 and gets a snapshot of your resting orders; with `resume=False` it counts the new log's reports from the first it reads. A `log_id` that is absent or malformed is unknown: it resets the cursor too, as the contract asks, but without this warning.
 - Fix: Nothing to retry. Treat the resting orders you track as unknown until a snapshot loads them: with a resume, until the next `ResumeComplete`; with `resume=False`, which never gets one, until you call `resume(0)` on a session of your own. Check your positions with `send_account_query` before you trade. With `Session.resume` on your own, pass your saved `last_report_seq` only when `info.log_id` is known and equal to the one it was counted under, and 0 otherwise.
+
+### QTE-SESSION-UNANSWERED
+
+- Raised as: a WARNING from the `qte_sdk.reconnect` logger, with `count` and `refs` (each request's message type and `request_ref`, never its contents), logged by a `ReconnectingSession` when a session drops; the same requests are in that `Disconnected`'s `unanswered`, as (message type, request_ref) pairs. The log shortens a ref of 32 hex digits, such as one `new_request_ref` made, to its first 12 and `...`, since a log withholds anything shaped like a token; `unanswered` has it whole.
+- Cause: These requests were sent on the session that dropped and got no answer echoing their `request_ref` (`accepted`, `reject`, `order_cancelled`, `account_state`, `ticket_accepted`, `ticket_reject`, `break_request_state` or `break_request_reject`). They are unconfirmed, not lost: each may or may not have reached the exchange, and a resume that omits one does not prove it is gone, since one still waiting out its order delay can be applied after `ResumeComplete`. A `reject` with no `request_ref` cannot be matched, so its request stays listed. A ref sent again while still listed is listed once, under its first message type, until the first answer echoing it; give each request its own ref.
+- Fix: After `ResumeComplete`, settle each against `RestingOrders`, your fills and (after a snapshot) your position from `send_account_query`, then check again after one order delay. Never resend an order only because it is not resting. Send a `cancel` again if its target still rests. Never repeat an `amend` as sent: it sets the remaining size, so work out the size you want from what now rests.
 
 ## CONNECT
 

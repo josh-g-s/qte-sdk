@@ -17,7 +17,7 @@ from websockets.frames import Close
 from websockets.protocol import State
 
 import qte_sdk.reconnect
-from qte_sdk import update
+from qte_sdk import errors, update
 from qte_sdk.connection import (
     Connection,
     ContractVersionMismatch,
@@ -1255,7 +1255,12 @@ async def test_a_reject_replayed_after_a_reconnect_never_names_a_later_order(mon
     from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 
     caught: list[str] = []
-    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    # The drop's QTE-SESSION-UNANSWERED for "r" is not the warning this test counts.
+    monkeypatch.setattr(
+        pacing,
+        "_emit",
+        lambda message, code, **_: code == errors.SESSION_UNANSWERED or caught.append(message),
+    )
     reject = {
         "request_ref": "r",
         "request_type": "NEW",
