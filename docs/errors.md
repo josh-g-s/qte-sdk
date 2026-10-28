@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.19
+**Version:** 0.21
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -80,8 +80,14 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 ### QTE-TOKEN-MALFORMED
 
 - Raised as: `token set` refuses the token; `qte_sdk.history.TokenMalformed`, a `ValueError`, from `HistoryClient` for a token an HTTP header cannot carry.
-- Cause: The token typed or pasted has a space, quote or control character, which no token has, or (for `HistoryClient`) a newline, a control character or a letter outside ASCII. It was probably copied wrongly. The message never shows the token.
-- Fix: Copy the token again and run `python -m qte_sdk.token set`.
+- Cause: A trading token is 64 characters, 0-9 and a-f, on one line, so this always means the paste picked up something extra or lost part of the token. `token set` first removes spaces and line breaks around the token, then refuses a token with a space (a non-breaking one included, or one after a label such as `Token:`), a quote, a `#`, or an invisible or control character (a zero-width space, say, or the character a Windows terminal can insert for Ctrl+V). `HistoryClient` refuses a token with a control or invisible character, a newline, or a character outside ASCII. The message says how many characters the token has and which of those kinds it found; it never shows the token, any part of it, where the character is, or its codepoint.
+- Fix: Copy the token again from plain text, or type it, and paste it only at the hidden prompt of `python -m qte_sdk.token set`; never paste it anywhere else.
+
+### QTE-TOKEN-UNUSUAL
+
+- Raised as: a `warning:` line on stderr from `token set`, after it saves the token. `set` still exits 0.
+- Cause: The token entered has none of the characters `QTE-TOKEN-MALFORMED` refuses, but it is not 64 characters of 0-9 and a-f, such as one cut short or one in capitals. The message gives its length and whether it has characters outside 0-9 and a-f, never the token or any part of it. It is only a warning, so a future token format still works.
+- Fix: If the exchange refuses the token, copy it again from plain text, or type it, and run `python -m qte_sdk.token set` again.
 
 ### QTE-TOKEN-NO-TERMINAL
 
@@ -188,9 +194,9 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 ### QTE-SESSION-NOT-ACKNOWLEDGED
 
-- Raised as: `qte_sdk.session.SessionNotAcknowledged`, with `close_code`. A `ReconnectingSession` retries it.
+- Raised as: `qte_sdk.session.SessionNotAcknowledged`, with `close_code` and `credential_revoked`. A `ReconnectingSession` retries it, unless `credential_revoked` is True (a close with code 1008 and reason `credential revoked`).
 - Cause: The connection closed, or `session_ack` could not be read, before the session was acknowledged; the message gives the close code, and the reason when it is one the SDK knows, such as `term change`.
-- Fix: Try again in a few seconds. If it keeps happening, run `python examples/smoke_test.py` and send its output to the course team.
+- Fix: Try again in a few seconds; if `credential_revoked` is True, get a new token instead, since the old one is refused. If it keeps happening, run `python examples/smoke_test.py` and send its output to the course team.
 
 ### QTE-SESSION-AUTH-NOT-SENT
 
@@ -214,7 +220,7 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 - Raised as: `qte_sdk.session.ResumeNotAcknowledged`, a `SessionNotAcknowledged`, from `Session.resume`.
 - Cause: The connection ended, or the `resume_ack` could not be read, before the exchange answered the resume. Reports sent while you were away were not replayed.
-- Fix: Open a new session and resume from the same `last_report_seq` (a `ReconnectingSession` does this).
+- Fix: Open a new session and resume from the same `last_report_seq` (a `ReconnectingSession` does this). If `credential_revoked` is True, get a new token first: the old one is refused, and a `ReconnectingSession` stops.
 
 ### QTE-SESSION-RESUME-TIMEOUT
 
