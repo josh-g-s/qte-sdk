@@ -618,7 +618,9 @@ def token_set_path(token: str, ctx: Context) -> str:
 
 
 def token_set_argument(token: str, ctx: Context) -> str:
-    return ctx.cli(["set", token], interactive=lambda: True)
+    # "--" keeps a token that starts with "-" (1 in 64 from token_urlsafe) a value, not an
+    # unknown option; test_token covers that case.
+    return ctx.cli(["set", "--", token], interactive=lambda: True)
 
 
 def token_set_write(token: str, ctx: Context) -> str:
