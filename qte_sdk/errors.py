@@ -41,6 +41,7 @@ TOKEN_FILE_UNREADABLE = "QTE-TOKEN-FILE-UNREADABLE"
 TOKEN_SHARED = "QTE-TOKEN-SHARED"
 TOKEN_UNCHECKED = "QTE-TOKEN-UNCHECKED"
 TOKEN_MALFORMED = "QTE-TOKEN-MALFORMED"
+TOKEN_UNUSUAL = "QTE-TOKEN-UNUSUAL"
 TOKEN_NO_TERMINAL = "QTE-TOKEN-NO-TERMINAL"
 TOKEN_SET_PATH = "QTE-TOKEN-SET-PATH"
 TOKEN_SET_WRITE = "QTE-TOKEN-SET-WRITE"
@@ -152,12 +153,25 @@ CODES: dict[str, Entry] = {
         f"Keep the file in {_PROFILE}",
     ),
     TOKEN_MALFORMED: Entry(
-        "the token has a character no token has, such as a space, a quote, a control "
-        "character or a letter outside ASCII",
-        "It was probably copied wrongly, and would be refused",
-        f"Copy it again and run {_TOKEN_SET}",
-        "The token entered, or the one HistoryClient was given, holds a character no token has",
-        "Copy the token again",
+        "the token {where} is {length} {characters} long and has {found}, which no token has",
+        "A trading token is 64 characters, 0-9 and a-f, on one line, so this one picked up "
+        "something extra or lost part of itself when it was copied",
+        "Copy it again from plain text, or type it, and paste it only at the hidden prompt of "
+        f"{_TOKEN_SET}; never paste it anywhere else",
+        "The token entered, or the one HistoryClient was given, holds a character no token "
+        "has; a trading token is 64 characters, 0-9 and a-f, on one line",
+        f"Copy the token again from plain text, or type it, at the hidden prompt of {_TOKEN_SET}",
+    ),
+    TOKEN_UNUSUAL: Entry(
+        "the token entered is {length} {characters} long and has {found}, but a trading token "
+        "is 64 characters, 0-9 and a-f",
+        "It was saved anyway, in case the token format has changed, but it may have been "
+        "copied wrongly",
+        "If the exchange refuses it, copy it again from plain text, or type it, and run "
+        f"{_TOKEN_SET} again",
+        "`token set` saved a token that is not 64 characters of 0-9 and a-f, such as one cut "
+        "short or one in capitals",
+        "If the exchange refuses the token, copy it again and run `token set` again",
     ),
     TOKEN_NO_TERMINAL: Entry(
         f"{_TOKEN_SET} needs a terminal to read the token without showing it",
@@ -610,12 +624,15 @@ HANDSHAKE_STEPS: dict[str, tuple[str, str]] = {
 FIELDS = frozenset(
     {
         "action",
+        "characters",
         "command",
         "cursor",
         "fix",
+        "found",
         "instrument",
         "kind",
         "latest",
+        "length",
         "line",
         "name",
         "new_log_id",
@@ -766,6 +783,45 @@ def token_shaped(text: str) -> bool:
     forms = {text, unquote(text)}
     forms |= {flatten(form) for form in forms} | {repr(form) for form in forms}
     return any(_MINTED_TOKEN.search(form) for form in forms)
+
+
+# What `token_faults` names each kind of character a token never has as, in this order.
+# A kind is named, never the character or its codepoint, so a message cannot leak it.
+_SPACE = "a space"
+_QUOTE = "a quote"
+_HASH = "a #"
+_INVISIBLE = "an invisible or control character"
+_NOT_ASCII = "a character outside ASCII"
+_FAULT_ORDER = (_SPACE, _QUOTE, _HASH, _INVISIBLE, _NOT_ASCII)
+
+
+def token_faults(value: str, /, *, ascii_only: bool = False) -> dict[str, Any]:
+    """The `length`, `characters` and `found` fields of a `QTE-TOKEN-MALFORMED` message for
+    `value`: its length, "character" or "characters" to follow it, and the kinds of
+    character in it that no token has (a space, a quote, a #, an invisible or control
+    character, and with `ascii_only` a character outside ASCII), joined as a phrase. No
+    field holds the token, any part of it, a position or a
+    codepoint."""
+    kinds = set()
+    for c in value:
+        if unicodedata.category(c).startswith("C"):
+            kinds.add(_INVISIBLE)
+        elif c.isspace() or not c.isprintable():
+            kinds.add(_SPACE)
+        elif c in "'\"":
+            kinds.add(_QUOTE)
+        elif c == "#":
+            kinds.add(_HASH)
+        elif ascii_only and not c.isascii():
+            kinds.add(_NOT_ASCII)
+    named = [kind for kind in _FAULT_ORDER if kind in kinds] or ["a character"]
+    found = named[0] if len(named) == 1 else ", ".join(named[:-1]) + " and " + named[-1]
+    return {"length": len(value), "characters": characters(len(value)), "found": found}
+
+
+def characters(length: int, /) -> str:
+    """ "character" or "characters", whichever follows `length` in a message."""
+    return "character" if length == 1 else "characters"
 
 
 def withheld(withhold: Callable[[str], bool], /, **fields: Any) -> dict[str, Any]:
