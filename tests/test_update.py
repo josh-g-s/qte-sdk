@@ -631,6 +631,26 @@ def test_an_editable_install_imported_from_its_source_folder_is_compared(
     assert str(source) not in result.message
 
 
+def test_a_package_path_that_cannot_be_resolved_is_not_the_one_imported(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    text = json.dumps(git_install())
+    monkeypatch.setattr(
+        update.metadata, "distribution", lambda name: FakeDistribution(text, package="/a\0b")
+    )
+    repository = answer(monkeypatch, refs_with((tag_for(bumped(VERSION, 0)), MAIN)))
+    result = check_for_update()
+    assert result.status is Status.UNKNOWN
+    assert "not the one pip installed" in result.message
+    assert repository.requests == []
+
+
+@pytest.mark.parametrize("url", ["https://example.com/qte-sdk", "file://elsewhere.example/qte-sdk"])
+def test_an_editable_install_recorded_at_an_address_not_a_local_folder_has_no_source(url: str):
+    record = json.dumps({"url": url, "dir_info": {"editable": True}})
+    assert update._editable_source(record) is None
+
+
 def test_an_editable_install_of_another_folder_is_not_the_one_imported(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -867,6 +887,14 @@ def test_an_unexpected_failure_cannot_tell_and_shows_only_its_kind(
     assert result.status is Status.UNKNOWN
     assert result.message.endswith("the check failed (LookupError)")
     assert result.installed_commit == INSTALLED
+
+
+def test_a_read_that_fails_in_any_other_way_cannot_tell_and_shows_only_its_kind():
+    def broken(timeout: float) -> bytes:
+        raise KeyboardInterrupt  # not an Exception: still reported, not raised in the thread
+
+    with pytest.raises(update._CannotTell, match=r"the check failed \(KeyboardInterrupt\)$"):
+        update._fetch(broken, 5)
 
 
 class SlowResponse(FakeResponse):
@@ -1526,6 +1554,14 @@ def test_a_recommended_release_not_above_the_installed_one_or_not_tagged_is_igno
     assert result.message == behind_message(newer, COMMAND)
 
 
+def test_releases_json_is_not_read_once_the_check_s_time_is_up(monkeypatch: pytest.MonkeyPatch):
+    fetched: list[Any] = []
+    monkeypatch.setattr(update, "_fetch", lambda *args: fetched.append(args) or b"[]")
+    tagged = {tag_for(bumped(VERSION, 2)): (update._number(bumped(VERSION, 2)), INSTALLED)}
+    assert update._recommendation(VERSION, tagged, time.monotonic() - 1) is None
+    assert fetched == []
+
+
 def test_releases_json_never_changes_the_latest_release_or_makes_a_current_install_behind(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2025,6 +2061,27 @@ def test_the_automatic_warning_is_recorded_as_logger_warning_would_record_it(
     assert record.exc_info is None and record.stack_info is None
 
 
+def test_a_logger_that_cannot_find_its_caller_still_records_the_warning(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Lost(logging.Logger):
+        def findCaller(self, stack_info: bool = False, stacklevel: int = 1) -> Any:
+            raise ValueError("no frame")
+
+    logger = Lost(update.logger.name)
+    monkeypatch.setattr(update, "logger", logger)
+    got = Records()
+    logger.addHandler(got)
+    warn("behind")
+    [record] = got.records
+    assert (record.pathname, record.lineno, record.funcName) == (
+        "(unknown file)",
+        0,
+        "(unknown function)",
+    )
+    assert record.getMessage() == "behind"
+
+
 def test_the_warning_honours_levels_filters_and_disabled(
     monkeypatch: pytest.MonkeyPatch, lone: logging.Logger
 ):
@@ -2312,6 +2369,169 @@ def test_a_pipe_the_program_made_non_blocking_is_not_written(pipe: Any, lone: lo
     assert read_all(read) == b""
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: FIFOs, sockets and devices")
+def test_only_a_fifo_a_socket_or_a_device_other_than_null_may_wait_when_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    monkeypatch.chdir(tmp_path)  # a short relative path: a socket's path is limited
+    listening = socket.socket(socket.AF_UNIX)
+    try:
+        listening.bind("socket")
+        assert update._path_may_wait(str(fifo))
+        assert update._path_may_wait("socket")
+    finally:
+        listening.close()
+    assert update._path_may_wait("/dev/zero")
+    assert not update._path_may_wait(os.devnull)
+    assert not update._path_may_wait(str(tmp_path / "missing.log"))
+    (tmp_path / "file.log").write_text("")
+    assert not update._path_may_wait(str(tmp_path / "file.log"))
+    assert not update._path_may_wait(str(tmp_path))
+    # When the null device cannot be found to compare with, any device may wait.
+    monkeypatch.setattr(os, "devnull", str(tmp_path / "no-null-device"))
+    assert update._path_may_wait("/dev/null")
+    # On Windows nothing is a FIFO in the file system: the FIFO is not looked at.
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert not update._path_may_wait(str(fifo))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: sockets and devices")
+def test_a_file_handler_not_yet_opened_on_a_socket_or_a_device_is_skipped_but_null_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lone: logging.Logger
+):
+    monkeypatch.chdir(tmp_path)
+    listening = socket.socket(socket.AF_UNIX)
+    try:
+        listening.bind("socket")
+        on_socket = logging.FileHandler("socket", delay=True)
+        assert update._route(on_socket) == ("skip", None)
+    finally:
+        listening.close()
+    assert update._route(logging.FileHandler("/dev/zero", delay=True)) == ("skip", None)
+    null = logging.FileHandler(os.devnull, delay=True)
+    assert update._route(null) == ("handle", None)
+    lone.addHandler(null)
+    try:
+        warn_in_a_thread("behind")
+        assert null.stream is not None  # opened, and written, as for a file
+    finally:
+        null.close()
+
+
+def test_a_stream_that_cannot_say_whether_it_is_closed_is_skipped(
+    lone: logging.Logger, capsys: pytest.CaptureFixture[str]
+):
+    detached = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    detached.detach()  # its `closed` now raises ValueError
+    handler = logging.StreamHandler(detached)
+    got = Records()
+    lone.addHandler(handler)
+    lone.addHandler(got)
+    assert update._route(handler) == ("skip", None)
+    warn("behind")
+    assert [r.getMessage() for r in got.records] == ["behind"]
+    assert capsys.readouterr().err == ""  # no report of a failed write
+
+
+def test_a_stream_that_cannot_say_where_it_writes_is_written_through_its_write(
+    pipe: Any, monkeypatch: pytest.MonkeyPatch
+):
+    read, stream = pipe
+
+    def cannot_say(stream: Any) -> bool:
+        raise RuntimeError("cannot say")
+
+    monkeypatch.setattr(update, "_writes_to_its_fd", cannot_say)
+    assert update._route(logging.StreamHandler(stream)) == ("ready", stream.fileno())
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="a filter returns a record from 3.12")
+@pytest.mark.parametrize("wrapper", [None, *WRAPPERS])
+def test_a_handler_filter_that_returns_a_new_record_has_that_record_written_on_a_pipe(
+    pipe: Any, lone: logging.Logger, wrapper: str | None
+):
+    read, stream = pipe
+    handler = logging.StreamHandler(stream if wrapper is None else WRAPPERS[wrapper](stream))
+
+    def replace_it(record: logging.LogRecord) -> logging.LogRecord:
+        replaced = logging.makeLogRecord(record.__dict__)
+        replaced.msg, replaced.args = "replaced", ()
+        return replaced
+
+    handler.addFilter(replace_it)
+    lone.addHandler(handler)
+    warn_in_a_thread("behind")
+    newline = b"\r\n" if sys.platform == "win32" else b"\n"
+    assert read_all(read) == b"replaced" + newline
+
+
+@pytest.mark.parametrize("wrapper", [None, *WRAPPERS])
+def test_a_handler_filter_that_refuses_the_record_keeps_it_off_a_pipe(
+    pipe: Any, lone: logging.Logger, wrapper: str | None
+):
+    read, stream = pipe
+    wrapped = None if wrapper is None else WRAPPERS[wrapper](stream)
+    handler = logging.StreamHandler(stream if wrapped is None else wrapped)
+    handler.addFilter(lambda record: False)
+    got = Records()
+    lone.addHandler(handler)
+    lone.addHandler(got)
+    warn_in_a_thread("behind")
+    assert read_all(read) == b""
+    assert wrapped is None or wrapped.written == []
+    assert [r.getMessage() for r in got.records] == ["behind"]
+
+
+def test_a_pipe_whose_blocking_cannot_be_read_is_still_written(
+    pipe: Any, lone: logging.Logger, monkeypatch: pytest.MonkeyPatch
+):
+    # As on Windows before Python 3.12, for a pipe.
+    read, stream = pipe
+
+    def cannot_say(fd: int) -> bool:
+        raise OSError("cannot say")
+
+    lone.addHandler(logging.StreamHandler(stream))
+    # raising=False: Windows before Python 3.12 has no os.get_blocking at all.
+    monkeypatch.setattr(os, "get_blocking", cannot_say, raising=False)
+    warn_in_a_thread("behind")
+    newline = b"\r\n" if sys.platform == "win32" else b"\n"
+    assert read_all(read) == b"behind" + newline
+
+
+class Failing(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        raise RuntimeError("cannot format")
+
+
+class RaisingWrapper(ColoramaLike):
+    def write(self, text: str) -> None:
+        raise OSError("cannot write")
+
+
+@pytest.mark.parametrize("wrapper", [None, "raising"])
+def test_a_line_that_fails_on_a_pipe_raises_nothing_and_other_handlers_get_the_record(
+    pipe: Any, lone: logging.Logger, capsys: pytest.CaptureFixture[str], wrapper: str | None
+):
+    read, stream = pipe
+    if wrapper is None:
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(Failing())
+    else:
+        handler = logging.StreamHandler(RaisingWrapper(stream))
+    got = Records()
+    lone.addHandler(handler)
+    lone.addHandler(got)
+    # Not in a thread, so an exception would reach the test: the pipe is empty, so a
+    # line this short cannot wait.
+    warn("behind")
+    assert [r.getMessage() for r in got.records] == ["behind"]
+    assert read_all(read) == b""
+    assert capsys.readouterr().err == ""
+
+
 def test_a_stream_handler_on_a_string_gets_its_formatted_line(lone: logging.Logger):
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
@@ -2445,6 +2665,15 @@ def test_a_line_over_512_bytes_is_dropped_on_a_pipe_not_cut(pipe: Any, lone: log
     assert read_all(read) == b"x" * (512 - newline) + b"\r\n"[-newline:]
     warn_in_a_thread("y" * (513 - newline))
     assert read_all(read) == b""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: select on a descriptor")
+def test_a_descriptor_select_cannot_look_at_is_taken_as_full():
+    read, write = os.pipe()
+    os.close(read)
+    os.close(write)
+    assert not update._can_take(write, 1)  # just closed: OSError
+    assert not update._can_take(-1, 1)  # not a descriptor: ValueError
 
 
 @pytest.mark.parametrize(
@@ -2593,6 +2822,43 @@ def test_a_lock_left_by_a_program_that_stopped_is_cleared_for_the_next(
     assert len(repository.requests) == 1
     # The lock is released after each decision.
     assert not lock.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: a symbolic link needs no privilege")
+def test_a_lock_that_cannot_be_looked_at_is_left_and_the_program_does_not_check(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    # A lock that is a link to nothing: it exists, but has no time to be judged old by.
+    automatic.parent.mkdir(parents=True)
+    lock = automatic.parent / "update-check.lock"
+    lock.symlink_to(automatic.parent / "nothing")
+    assert not update._claim_the_day()
+    assert lock.is_symlink()
+    assert not automatic.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: Windows cannot remove a file held open")
+def test_a_lock_removed_by_another_program_meanwhile_is_no_error(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    lock = automatic.parent / "update-check.lock"
+
+    def cleared_by_another(stamp: Path) -> bool:
+        lock.unlink()  # as another program does with a lock it finds old
+        return True
+
+    monkeypatch.setattr(update, "_claim_with_the_lock", cleared_by_another)
+    assert update._claim_the_day()
+    assert not lock.exists()
+
+
+def test_a_day_that_cannot_be_recorded_is_not_claimed(
+    monkeypatch: pytest.MonkeyPatch, automatic: Path
+):
+    automatic.mkdir(parents=True)  # the record is a folder: it can be neither read nor written
+    assert not update._claim_the_day()
+    assert automatic.is_dir()
+    assert not (automatic.parent / "update-check.lock").exists()
 
 
 def test_releases_json_is_read_no_further_than_one_byte_past_its_limit(
