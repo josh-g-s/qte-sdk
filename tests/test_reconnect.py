@@ -674,6 +674,14 @@ async def test_a_session_rejected_while_open_is_flagged_then_raised():
         (HandshakeFailed("InvalidStatus", 401), False),
         (SessionRejected(ReasonCodes.NOT_AUTHENTICATED, None), False),
         (SessionRejected(ReasonCodes.EXCHANGE_OUTAGE, None), False),
+        (
+            SessionRejected(
+                ReasonCodes.NO_MARKET_ACCESS,
+                "the AGENTIC_AI arm is not open for trading this term "
+                "(term configuration open_arms)",
+            ),
+            False,
+        ),
         (ContractVersionMismatch(ReasonCodes.VERSION_MISMATCH, None), False),
         (ValueError("a bug"), False),
         (asyncio.CancelledError(), False),

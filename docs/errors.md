@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.25
+**Version:** 0.26
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -196,7 +196,8 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 | `reason_name` | Fix |
 |---|---|
 | `NOT_AUTHENTICATED` | Run `python -m qte_sdk.token check`. If the token is found and still refused, ask the Head of Technology for a new one |
-| `TEAM_DISABLED`, `NO_MARKET_ACCESS` | Ask the Head of Technology about your team's access |
+| `NO_MARKET_ACCESS` with the detail "the ... arm is not open for trading this term (term configuration open_arms)" | Your team's arm does not trade this term (the term configuration's open_arms). Do not retry or ask for a new token: the arms open for trading change only at a later term |
+| `TEAM_DISABLED`, any other `NO_MARKET_ACCESS` | Ask the Head of Technology about your team's access |
 | `EXCHANGE_OUTAGE` | Wait for the exchange's outage to end, then connect again |
 | Any other | Ask the course team, quoting the whole message |
 

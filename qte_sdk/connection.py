@@ -543,9 +543,12 @@ class SessionRejected(QteError, Exception):
             except ValueError:  # a code from a newer contract
                 reason_name = str(reason_code)
         name = plain(reason_name)
-        step = _errors.SESSION_REJECTED_STEPS.get(
-            reason_name, _errors.SESSION_REJECTED_DEFAULT_STEP.format(reason_name=name)
-        )
+        if reason_name == "NO_MARKET_ACCESS" and detail and _errors.CLOSED_ARM_DETAIL.match(detail):
+            step = _errors.CLOSED_ARM_STEP
+        else:
+            step = _errors.SESSION_REJECTED_STEPS.get(
+                reason_name, _errors.SESSION_REJECTED_DEFAULT_STEP.format(reason_name=name)
+            )
         reason = plain(f"{reason_name}: {detail}" if detail else reason_name)
         super().__init__(
             f"{reason_name}: {detail}" if detail else reason_name,

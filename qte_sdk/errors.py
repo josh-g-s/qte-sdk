@@ -621,6 +621,14 @@ SESSION_REJECTED_STEPS: dict[str, str] = {
     "NO_MARKET_ACCESS": "Ask the Head of Technology about your team's access",
     "EXCHANGE_OUTAGE": "Wait for the exchange's outage to end, then connect again",
 }
+# A NO_MARKET_ACCESS session_reject whose detail is the contract's fixed closed-arm text
+# (contract 01, "the AGENTIC_AI arm is not open for trading this term (term configuration
+# open_arms)"): the team's arm does not trade this term, so the step is not the Head's.
+CLOSED_ARM_DETAIL = re.compile(r"the [A-Z_]+ arm is not open for trading this term\b")
+CLOSED_ARM_STEP = (
+    "Your team's arm does not trade this term (the term configuration's open_arms). Do not "
+    "retry or ask for a new token: the arms open for trading change only at a later term"
+)
 SESSION_REJECTED_DEFAULT_STEP = (
     f"Look up {{reason_name}} under {SESSION_REJECTED} in docs/errors.md"
 )
