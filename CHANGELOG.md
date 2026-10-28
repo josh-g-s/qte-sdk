@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.97
+**Version:** 0.98
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- `qte_sdk.errors.order_reject_step` gives the next step for an order `reject`, by its reason's name or number (`ORDER_REJECT_STEPS`, listed under Order rejects in docs/errors.md). For `STRATEGY_NOT_REGISTERED` it says that each new term starts with no registrations, so the Team Lead registers the strategy again on the console (Strategy registration, Register a new strategy, Submit). `examples/quote_both_sides.py` prints it once per reason in a run, and the smoke test gives it for a rejected test order. The quickstart and both copies of AGENTS.md say the same.
 - The quickstart and both copies of AGENTS.md say that a close during an exchange handover leaves the held messages unsent, that the 1001 close keeps its reason `exchange stopping` though a reconnect normally succeeds within seconds, how to track unanswered orders, cancels and amends and settle each against resting orders, fills and position before acting again, and that after a switch or a rollback a resume may be answered with a replay or a snapshot.
 - The quickstart and both copies of AGENTS.md say what a program sees across an exchange handover (an order answered up to 2 seconds late, about 4 if the handover is called off, no disconnect except in four rare cases (a flood of messages in the hold, a program not reading, a very long subscription history, or a replayed subscription the new exchange answers differently), no report gap, a heartbeat gap of up to about 30 seconds), with no live exchange (a 1001 close, then HTTP 503 until one is live), and across a gateway restart (a 1006 drop that `ReconnectingSession` resumes from by itself) (#306).
 - `Disconnected` gains `unanswered`: the requests sent on the dropped session that carry a `request_ref` and got no answer, as (message type, request_ref) pairs, empty by default, so existing code is unchanged. `ReconnectingSession` fills it and logs the new `QTE-SESSION-UNANSWERED` warning with their count and refs, never their contents; they are unconfirmed, and the quickstart, both copies of AGENTS.md and docs/errors.md say how to settle them after `ResumeComplete`. The 1001 close now reads "the exchange is stopping or switching; a ReconnectingSession connects again, and after a switch that normally succeeds within seconds" (#343).

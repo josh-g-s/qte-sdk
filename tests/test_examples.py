@@ -35,7 +35,7 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 import qte_sdk
-from qte_sdk import _fileaccess
+from qte_sdk import _fileaccess, errors
 from qte_sdk import replay as qte_replay
 from qte_sdk import update as qte_update
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
@@ -1224,6 +1224,27 @@ async def test_quote_both_sides_prints_rejects_and_still_exits_cleanly():
     assert "REJECTED new: MARKET_CLOSED" in out
     # Rejected sides are retried no faster than --requote-seconds allows.
     assert 2 <= exchange.types().count("new") <= 12
+
+
+async def test_quote_both_sides_prints_a_reject_s_next_step_once_however_often_it_retries():
+    exchange = FakeExchange(reject_new="STRATEGY_NOT_REGISTERED")
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--seconds", "1", "--requote-seconds", "0.2", "--drain-seconds", "1"),
+        )
+    assert code == 0, out + err
+    assert out.count("REJECTED new: STRATEGY_NOT_REGISTERED") >= 2
+    step = errors.order_reject_step("STRATEGY_NOT_REGISTERED")
+    assert out.count(f"next step for STRATEGY_NOT_REGISTERED: {step}") == 1
+    assert out.count("Register a new strategy") == 1
+    # The retries go on as for any reject: a side rejected once is sent again.
+    sides = [m["payload"]["side"] for m in exchange.received if m["type"] == "new"]
+    assert max(sides.count(side) for side in set(sides)) >= 2
+    assert len(sides) <= 12
 
 
 async def test_quote_both_sides_retries_a_reject_with_no_further_book():
@@ -3327,6 +3348,10 @@ async def test_the_smoke_test_reports_a_rejected_test_order_by_its_reason(
     assert returned == code, out + err
     assert found["test-order"][0] == status
     assert reason in found["test-order"][1]
+    step = errors.order_reject_step(reason)
+    assert (step is not None) == (reason == "STRATEGY_NOT_REGISTERED")
+    if step is not None:
+        assert found["test-order"][1].endswith(f". {step}")
     assert "cancel" not in exchange.types()
 
 

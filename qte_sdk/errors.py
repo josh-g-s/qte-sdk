@@ -14,8 +14,8 @@ Catch `QteError` for any SDK exception that has a code, or `QteWarning` for any 
 warning. Each exception also keeps the base class it had before codes were added, such as
 `ValueError` or `TimeoutError`, so existing `except` clauses keep working.
 
-No message ever holds the token. This module imports nothing from the rest of the SDK, so
-every module can import it.
+No message ever holds the token. This module imports nothing from the rest of the SDK when
+it loads, so every module can import it.
 """
 
 import os
@@ -28,10 +28,12 @@ from urllib.parse import unquote
 
 __all__ = [
     "CODES",
+    "ORDER_REJECT_STEPS",
     "RETIRED",
     "Entry",
     "QteError",
     "QteWarning",
+    "order_reject_step",
     "render",
 ]
 
@@ -623,6 +625,17 @@ SESSION_REJECTED_DEFAULT_STEP = (
     f"Look up {{reason_name}} under {SESSION_REJECTED} in docs/errors.md"
 )
 
+# The next step for each `reason_code` name of an order `reject` that has one. A reject is an
+# event, not an SDK error, so it has no code; docs/errors.md lists these under Order rejects.
+ORDER_REJECT_STEPS: dict[str, str] = {
+    "STRATEGY_NOT_REGISTERED": (
+        "This strategy ID has no live registration on this term. Each new term starts with "
+        "none, so your Team Lead must register it again on the console: Strategy "
+        "registration, Register a new strategy, Submit. Orders sent after it is admitted no "
+        "longer get this reject"
+    ),
+}
+
 # Why and the next step for a QTE-CONNECT-HANDSHAKE-FAILED, by kind of HTTP status.
 HANDSHAKE_STEPS: dict[str, tuple[str, str]] = {
     "refused": (
@@ -758,6 +771,21 @@ def next_step(code: str, /, *, withhold: Callable[[str], bool] | None = None, **
         if entry is not None:
             return entry.fix.strip().rstrip(".")
         return f"See {code} in docs/errors.md"
+
+
+def order_reject_step(reason: str | int, /) -> str | None:
+    """The next step for an order `reject` whose reason is `reason`, a name such as
+    "STRATEGY_NOT_REGISTERED" or its number, without a full stop; None when the SDK has no
+    step for it. Never raises."""
+    if isinstance(reason, int) and not isinstance(reason, bool):
+        try:
+            # Imported here, so that this module still imports nothing at load time.
+            from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+
+            reason = ReasonCodes.ReasonCode.Name(reason)
+        except Exception:
+            return None
+    return ORDER_REJECT_STEPS.get(reason) if isinstance(reason, str) else None
 
 
 def what(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any) -> str:
