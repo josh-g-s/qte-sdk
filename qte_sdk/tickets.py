@@ -229,10 +229,13 @@ child orders still resting when a desk's ticket stops depends on why it stopped:
   standing and `stopped_mark` 0, since there is no valid mark at the open. No child is
   resting then, since the close before cancelled each one `SESSION_CLOSE`. Send a new
   ticket in post-split shares if you still want the trade. A cure ticket is not stopped
-  but adjusted: its next state keeps `TICKET_WORKING` with `shares` the shares filled plus
-  the unfilled shares scaled (and, under `SERVICE`, `due_shares` scaled), while
-  `filled_shares`, `decision_price` and `average_fill_price` stay pre-split and
-  `progress` is empty from then on.
+  but adjusted: while at least one unfilled share remains after scaling, its next state
+  keeps `TICKET_WORKING` with `shares` the shares filled plus the unfilled shares scaled
+  (and, under `SERVICE`, `due_shares` scaled), while `decision_price` stays pre-split,
+  `filled_shares` and `average_fill_price` stay pre-split until the next fill (fills are
+  not rescaled, so later ones mix in post-split shares and prices), and `progress` is
+  empty from then on; read `remaining_shares` for what remains. Scaled to no unfilled
+  share, it ends `TICKET_COMPLETE` if it has fills, else `TICKET_SPLIT_CANCELLED`.
 
 Every send checks what it can before sending, and raises `ValueError` or `TypeError`
 and sends nothing if a check fails: `request_ref` is 1 to 32 bytes of UTF-8, `instrument`
