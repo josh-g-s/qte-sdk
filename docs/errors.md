@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.16
+**Version:** 0.22
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -19,6 +19,7 @@ The last line of a traceback is the class name and then this message. The code i
 - Catch `qte_sdk.errors.QteError` for any SDK exception that has a code, or filter on `qte_sdk.errors.QteWarning` for any such warning. Each exception keeps the base class it had before codes were added (`MissingToken` is still a `ValueError`, `LivenessTimeout` a `TimeoutError`), so an existing `except` clause still catches it.
 - To filter warnings by text, match the code, which is at the start: `warnings.filterwarnings("ignore", message="QTE-DOTENV")`. Filtering by class, such as `DotenvNotIgnored`, works as before.
 - No message ever holds your token. Text from the exchange or the history service, such as a rejection's detail, is flattened to one line in the message and kept as sent in the exception's attribute (`detail`, or `message` for a history error), and is withheld if it repeats any part of the token. Text you gave, such as an instrument, a message type, a replay's date or channel, or the path of a `.env` or token file, is withheld from the message if it holds the token, as written, percent-encoded or escaped. Where the SDK has no token to look for, as in the git warning before the `.env` is read or a `Session`'s `repr`, text holding a run of 32 hex digits, the shape of the exchange's tokens, is withheld instead.
+- The exchange's refusal of an order, a ticket, a break request or an account query is an event your loop reads, not an SDK error, and has no `QTE-` code. Only a refusal of the session itself (its `auth` or a resume) or one with `VERSION_MISMATCH` raises, with a `QTE-SESSION-` code below: a `reject` names its reason with `reason_code_name`, and a `ticket_reject` or `break_request_reject` with `qte_sdk.tickets.ticket_reason_code_name`. Two reasons refuse only a pod's `break_request`: `BREAK_REQUEST_NOT_IN_BREAK` (1721), sent outside an inter-term break (before the close of a term's final session, or from the next term's first session on; in Winter the break runs from the close on Friday 4 December 2026), so send it again only once the break has begun; and `BREAK_REQUEST_EXISTS` (1722), when the pod already holds a pending or approved request in that instrument, so withdraw that one with `send_break_request_withdraw` first if you mean to replace it. The `qte_sdk.tickets` docstring lists the others.
 - A code never changes once released. A code no longer used is listed under [Retired codes](#retired-codes) and never reused.
 
 ## Exit codes
@@ -30,7 +31,7 @@ The last line of a traceback is the class name and then this message. The code i
 | `python -m qte_sdk.update` | The SDK is the latest release | A newer release is out (`QTE-UPDATE-AVAILABLE`) | It cannot tell whether the SDK is current. Also a usage error or a bad `--timeout` | |
 | `python examples/smoke_test.py` | No check failed | A check failed, or the SDK is too old to check itself | No token or no usable address, so it could not connect. Also a usage error | 130 on Ctrl+C; 128 plus the signal's number on SIGTERM or SIGHUP |
 
-`token check` exiting 1 is a report, not a refusal: a session still only warns about a tracked `.env` or, on Windows, a shared file, and still uses it. Exit 2 with a `usage:` line on stderr is a mistake on the command line, for every command here. `token check` looks afresh each time it runs, so `token.main(["check"])` gives the same answer when a program calls it twice, or after opening a session; it never prints a path that holds the token. Before this release `token check` exited 0 even when it printed a warning.
+`token check` exiting 1 is a report, not a refusal: a session still only warns about a tracked `.env` or, on Windows, a shared file, and still uses it. Exit 2 with a `usage:` line on stderr is a mistake on the command line, for every command here. For `python -m qte_sdk.token`, that error never repeats a word of the command line it did not expect, since a token pasted there would be one: it says to run `python -m qte_sdk.token set` and paste the token at the hidden prompt, and to remove the token from the shell history. `token check` looks afresh each time it runs, so `token.main(["check"])` gives the same answer when a program calls it twice, or after opening a session; it never prints a path that holds the token. Before this release `token check` exited 0 even when it printed a warning.
 
 With `--json`, each command exits with the same status, which the document gives as `exit_code` (see [JSON output](#json-output)). Each command also exits 2, with `error: QTE-LOG-FORMAT-INVALID: ...` on stderr and nothing on stdout, when `QTE_LOG_FORMAT` is neither `json` nor `text` (and `--json` is not given).
 
@@ -79,8 +80,14 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 ### QTE-TOKEN-MALFORMED
 
 - Raised as: `token set` refuses the token; `qte_sdk.history.TokenMalformed`, a `ValueError`, from `HistoryClient` for a token an HTTP header cannot carry.
-- Cause: The token typed or pasted has a space, quote or control character, which no token has, or (for `HistoryClient`) a newline, a control character or a letter outside ASCII. It was probably copied wrongly. The message never shows the token.
-- Fix: Copy the token again and run `python -m qte_sdk.token set`.
+- Cause: A trading token is 64 characters, 0-9 and a-f, on one line, so this always means the paste picked up something extra or lost part of the token. `token set` first removes spaces and line breaks around the token, then refuses a token with a space (a non-breaking one included, or one after a label such as `Token:`), a quote, a `#`, or an invisible or control character (a zero-width space, say, or the character a Windows terminal can insert for Ctrl+V). `HistoryClient` refuses a token with a control or invisible character, a newline, or a character outside ASCII. The message says how many characters the token has and which of those kinds it found; it never shows the token, any part of it, where the character is, or its codepoint.
+- Fix: Copy the token again from plain text, or type it, and paste it only at the hidden prompt of `python -m qte_sdk.token set`; never paste it anywhere else.
+
+### QTE-TOKEN-UNUSUAL
+
+- Raised as: a `warning:` line on stderr from `token set`, after it saves the token. `set` still exits 0.
+- Cause: The token entered has none of the characters `QTE-TOKEN-MALFORMED` refuses, but it is not 64 characters of 0-9 and a-f, such as one cut short or one in capitals. The message gives its length and whether it has characters outside 0-9 and a-f, never the token or any part of it. It is only a warning, so a future token format still works.
+- Fix: If the exchange refuses the token, copy it again from plain text, or type it, and run `python -m qte_sdk.token set` again.
 
 ### QTE-TOKEN-NO-TERMINAL
 
@@ -91,7 +98,7 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 ### QTE-TOKEN-SET-PATH
 
 - Raised as: `token set` refuses the destination; nothing is changed.
-- Cause: The `.env` is a symbolic link, not a regular file, not UTF-8 text, or would grow past the 64 KiB the SDK reads; or the `--file` path is a folder, a symbolic link or a `.gitignore`.
+- Cause: The `.env` is a symbolic link, not a regular file, not UTF-8 text, or would grow past the 64 KiB the SDK reads; or the `--file` path is a folder, a symbolic link or a `.gitignore`, or has a run of 32 hex digits like a token or a control character or line break (not shown, since it may be your token).
 - Fix: Edit the file by hand, or choose another path with `--file PATH`.
 
 ### QTE-TOKEN-SET-WRITE
@@ -181,15 +188,15 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 ### QTE-SESSION-VERSION-MISMATCH
 
-- Raised as: `qte_sdk.connection.ContractVersionMismatch`, a `SessionRejected`, on a `session_reject`, a `reject` or a `ticket_reject` with `VERSION_MISMATCH`, during a session too.
+- Raised as: `qte_sdk.connection.ContractVersionMismatch`, a `SessionRejected`, on a `session_reject`, a `reject`, a `ticket_reject` or a `break_request_reject` with `VERSION_MISMATCH`, during a session too.
 - Cause: The exchange does not serve the contract version this SDK sends, so nothing sent can work.
 - Fix: Run `python -m qte_sdk.update` and the command it prints.
 
 ### QTE-SESSION-NOT-ACKNOWLEDGED
 
-- Raised as: `qte_sdk.session.SessionNotAcknowledged`, with `close_code`. A `ReconnectingSession` retries it.
+- Raised as: `qte_sdk.session.SessionNotAcknowledged`, with `close_code` and `credential_revoked`. A `ReconnectingSession` retries it, unless `credential_revoked` is True (a close with code 1008 and reason `credential revoked`).
 - Cause: The connection closed, or `session_ack` could not be read, before the session was acknowledged; the message gives the close code, and the reason when it is one the SDK knows, such as `term change`.
-- Fix: Try again in a few seconds. If it keeps happening, run `python examples/smoke_test.py` and send its output to the course team.
+- Fix: Try again in a few seconds; if `credential_revoked` is True, get a new token instead, since the old one is refused. If it keeps happening, run `python examples/smoke_test.py` and send its output to the course team.
 
 ### QTE-SESSION-AUTH-NOT-SENT
 
@@ -213,7 +220,7 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 - Raised as: `qte_sdk.session.ResumeNotAcknowledged`, a `SessionNotAcknowledged`, from `Session.resume`.
 - Cause: The connection ended, or the `resume_ack` could not be read, before the exchange answered the resume. Reports sent while you were away were not replayed.
-- Fix: Open a new session and resume from the same `last_report_seq` (a `ReconnectingSession` does this).
+- Fix: Open a new session and resume from the same `last_report_seq` (a `ReconnectingSession` does this). If `credential_revoked` is True, get a new token first: the old one is refused, and a `ReconnectingSession` stops.
 
 ### QTE-SESSION-RESUME-TIMEOUT
 
@@ -285,7 +292,7 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 ### QTE-HISTORY-UNAVAILABLE
 
 - Raised as: `qte_sdk.history.HistoryUnavailable`, a `HistoryError`.
-- Cause: The data will never exist (HTTP 404): a date before the service's coverage, a day with no session, an instrument or channel the service does not know, `option_greeks` of an equity, an option contract the session's chain did not list, or the option chain of a session with none. Asking again does not change that, with one exception: a session with options cached before the service's options build (qte-platform #2298, now live), from 15 October 2026, answers its Greeks, its chain and any channel on which a listed contract published nothing (a contract that quoted but never traded has no `trades`) unavailable until an upgrade of that session is run (an upgrade adds the missing objects and leaves every object already cached unchanged). 15 and 16 October 2026 have been upgraded; 19, 20 and 21 October are due an upgrade later, so their unavailable answer is not final yet. Any other such session's answer is final unless an upgrade of it is announced. `fetch` raises it for such a channel, and so does a default `replay` of the contract; `replay(..., skip_unavailable=True)` skips that channel instead.
+- Cause: The data will never exist (HTTP 404): a date before the service's coverage, a day with no session, an instrument or channel the service does not know, `option_greeks` of an equity, an option contract the session's chain did not list, or the option chain of a session with none. Asking again does not change that. The sessions with options cached before the service's options build (qte-platform #2298, now live), 15 to 21 October 2026, have all been upgraded (an upgrade adds the missing objects and leaves every object already cached unchanged), so they serve their Greeks and chain and their answer is final too. `fetch` raises it for an unavailable channel, and so does a default `replay` of the contract; `replay(..., skip_unavailable=True)` skips that channel instead.
 - Fix: Check the date against the calendar, and the instrument and channel against the instruments the exchange lists; for an option contract, check it is in that session's chain (`fetch_option_chain`), and ask for `option_greeks` only of an option contract.
 
 ### QTE-HISTORY-NOT-CLOSED
