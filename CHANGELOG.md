@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.84
+**Version:** 0.85
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -18,6 +18,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - VWAP is offered from 26 October 2026: the quickstart, the packaged AGENTS.md, docs/automatic-execution.md and the `qte_sdk.tickets` docstrings say so, that a 1713 refusal's `reason_detail` says why and ends "TWAP is available", that the exchange never switches a refused VWAP ticket to TWAP, and which tickets keep VWAP. `examples/fundamentals_pod.py` prints the refusal's `reason_detail` in place of a fixed text (#298).
 - `examples/quote_both_sides.py`, `examples/options_bot.py` and `examples/print_book.py` reconnect with `ReconnectingSession` after a drop: they stop sending while down, never resend an order that was in flight, take their own orders from the resting view after the resume, and wait for a fresh book before sending again. The quickstart and both copies of AGENTS.md point a long-running bot at `ReconnectingSession` and say each example still stops after `--seconds` (#303).
 - The SDK's wire contract is pinned to qte-platform 7e47b07b (approved by the Head, 27 Oct 2026), and four new messages decode as named types: `term_close_fill` (`TermCloseFill`), `term_end` (`TermEnd`), `break_request_state` (`BreakRequestState`) and `break_request_reject` (`BreakRequestReject`). `AccountReports` and `covers` treat a team's `term_close_fill` as a report that changes the account, so it is applied once on either side of an `account_state` that covers it; `qte_sdk.account.is_term_close_fill` and `term_close_position_change` help apply it. `qte_sdk.tickets` adds `send_break_request` and `send_break_request_withdraw`, checked before sending like `send_ticket`, and `is_break_request_event` and `break_request_ref_of`, with the reason codes 1721 and 1722. The quickstart, both copies of AGENTS.md, docs/automatic-execution.md and docs/errors.md say what arrives at the term-end close and how a pod sends break requests, and `examples/smoke_test.py` counts term-close fills and break request answers (#301).
+- `python -m qte_sdk.token set` explains a `QTE-TOKEN-MALFORMED` refusal: the message gives the token's length and the kinds of character no token has that it found (a space, a quote, a #, an invisible or control character), never the token, a position or a codepoint, and says a trading token is 64 characters, 0-9 and a-f, and to copy it again from plain text and paste it only at the hidden prompt. It no longer claims to refuse a letter outside ASCII. A token that passes but is not 64 characters of 0-9 and a-f, such as one cut short or in capitals, is still saved, with a new `QTE-TOKEN-UNUSUAL` warning on stderr giving its length and whether it has characters outside 0-9 and a-f. `HistoryClient`'s refusal gives the same length and kinds (#317).
 
 ## 1.5.1
 
