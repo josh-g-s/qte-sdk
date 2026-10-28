@@ -60,9 +60,9 @@
     "platforms": []
   },
   {
-    "version": "1.5.2",
+    "version": "1.6.0",
     "recommended": true,
-    "why": "the guidance says what MTUM's 4-for-1 split at the 5 November open does to positions, tickets and history (query the account again after it), and the quoting, options and book examples reconnect",
+    "why": "the guidance says what MTUM's 4-for-1 split on 5 November does to positions, tickets and history; term-close fills decode; no reconnect after a revoked token; the main examples reconnect",
     "platforms": []
   }
 ]

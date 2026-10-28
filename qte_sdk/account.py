@@ -59,10 +59,11 @@ An `account_state` carries:
   `state.HasField("cash")`;
 - `as_of_report_seq`, the highest report sequence number the team had been assigned
   when the state was read. Each private order report (`accepted`, a delayed `reject`,
-  `execution`, `order_cancelled`, `order_state`, `risk_notice`) carries a `report_seq`
-  on its envelope. The cut is for account effects only: an `execution` or `risk_notice`
-  whose `report_seq` is at or below `as_of_report_seq` is already in the cash, positions
-  and summary of the reply, so do not apply its account effect again, while `accepted`,
+  `execution`, `order_cancelled`, `order_state`, `risk_notice`, `term_close_fill`)
+  carries a `report_seq` on its envelope. The cut is for account effects only: an
+  `execution`, `risk_notice` or `term_close_fill` whose `report_seq` is at or below
+  `as_of_report_seq` is already in the cash, positions and summary of the reply, so do
+  not apply its account effect again, while `accepted`,
   `reject`, `order_cancelled` and `order_state` still apply whatever their `report_seq`,
   since the reply holds no resting-order state. It is absent when the team has had no
   private report this term, and then every report applies. Each event the SDK delivers
@@ -95,12 +96,31 @@ it returns, in order:
             if is_account_state(item):
                 ...  # replace your account with the reply's cash and positions
             else:
-                ...  # apply the report: a fill's size, a risk notice
+                ...  # apply the report: a fill's size, a risk notice, a term-close fill
 
 `covers(state, event)` is the rule on its own, for a program that keeps the reply itself.
 Report numbers start again each term, so a reply says nothing about a later term's
 reports: before you trade in a new term (the calendar's `term_start` and `term_end` name
 it), query again and wait for the reply.
+
+The term-end close. At the official close of a term's final session (in Winter, Friday 4
+December 2026), the exchange closes every remaining position of every Market Making and
+Market Taking team, and of every Agentic AI team in a term that sets `term_end.agentic_ai`
+(Winter does not), with one `term_close_fill` per instrument: a fee-free closing fill at
+the instrument's official close (`TermCloseFill`). It carries `instrument`, `side`
+(`SELL` closes a long, `BUY` a short), `size`, `price`, `proceeds` (the signed cash
+booked: `size` times `price`, positive on a `SELL` and negative on a `BUY`),
+`session_date`, `frozen` and `prior_close` (the close's data-quality flags) and `house`
+(False on a team's own). It is not an `execution`: it has no `strat_id`, order id or
+exec id, takes no fee and moves no resting order. It is numbered with `report_seq` like
+an `execution`, replayed by a resume, and covered by `as_of_report_seq`, so `covers` and
+`AccountReports` treat it as a report that changes the account: apply its position
+change (`term_close_position_change`) and add its `proceeds` to cash. Fundamentals and
+Execution teams are not closed this way. After the close, query the account again with
+`send_account_query` and take its positions and cash as the term's last word. A Director
+session is also sent the house's closes, with `house` True and no `report_seq`, and a
+`term_end` once the term has ended; neither is a team's report, and `AccountReports`
+ignores both.
 """
 
 from typing import TypeGuard
@@ -108,11 +128,18 @@ from typing import TypeGuard
 from qte_sdk.connection import Disconnected, Event, Received
 from qte_sdk.contract.v1.common_pb2 import (
     ACCOUNT_QUERY,
+    BUY,
     LAST_OFFICIAL_CLOSE,
     LIVE_MARK,
+    SELL,
     ValuationBasis,
 )
-from qte_sdk.contract.v1.order_events_pb2 import AccountState, AccountSummary, PositionValue
+from qte_sdk.contract.v1.order_events_pb2 import (
+    AccountState,
+    AccountSummary,
+    PositionValue,
+    TermCloseFill,
+)
 from qte_sdk.contract.v1.session_pb2 import AccountQuery
 from qte_sdk.orders import Sender, _ref, new_request_ref, request_ref_of
 
@@ -120,17 +147,24 @@ __all__ = [
     "ACCOUNT_REPORT_TYPES",
     "LAST_OFFICIAL_CLOSE",
     "LIVE_MARK",
+    "TERM_CLOSE_FILL_TYPE",
     "AccountReports",
     "AccountState",
     "AccountSummary",
     "PositionValue",
+    "TermCloseFill",
     "ValuationBasis",
     "covers",
     "is_account_state",
+    "is_term_close_fill",
     "send_account_query",
+    "term_close_position_change",
 ]
 
-ACCOUNT_REPORT_TYPES = frozenset({"execution", "risk_notice"})
+TERM_CLOSE_FILL_TYPE = "term_close_fill"
+"""The envelope `type` token of a position closed by the term-end close."""
+
+ACCOUNT_REPORT_TYPES = frozenset({"execution", "risk_notice", TERM_CLOSE_FILL_TYPE})
 """The private reports that change the account, and so the only ones an `account_state`
 can already include. The others (`accepted`, `reject`, `order_cancelled`, `order_state`)
 change only your resting orders, which a reply does not hold."""
@@ -158,13 +192,31 @@ def is_account_state(event: Event) -> TypeGuard[Received]:
     return isinstance(event, Received) and event.type == "account_state"
 
 
+def is_term_close_fill(event: Event) -> TypeGuard[Received]:
+    """Whether `event` is a decoded `term_close_fill`, a position the term-end close
+    closed. Its `message` is then a `TermCloseFill`."""
+    return isinstance(event, Received) and event.type == TERM_CLOSE_FILL_TYPE
+
+
+def term_close_position_change(fill: TermCloseFill) -> int:
+    """The signed change a `term_close_fill` makes to the position in its instrument, in
+    shares: `size` for a `BUY` (closing a short) and minus `size` for a `SELL` (closing a
+    long). Added to the position held before it, it leaves 0. Its cash change is
+    `fill.proceeds`, already signed. Raises `ValueError` for a side that is neither."""
+    if fill.side == BUY:
+        return fill.size
+    if fill.side == SELL:
+        return -fill.size
+    raise ValueError(f"a term_close_fill's side must be BUY or SELL, got {fill.side!r}")
+
+
 def covers(state: AccountState | None, event: object) -> bool:
     """Whether the reply `state` already includes the effect of `event` on the account.
 
-    True only for an `execution` or `risk_notice` whose `report_seq` is at or below the
-    reply's `as_of_report_seq`: its effect on cash, positions and summary is already in the
-    reply, so do not apply it again. This holds wherever the event arrives in the stream,
-    before the reply or after it.
+    True only for an `execution`, `risk_notice` or `term_close_fill` whose `report_seq` is
+    at or below the reply's `as_of_report_seq`: its effect on cash, positions and summary
+    is already in the reply, so do not apply it again. This holds wherever the event
+    arrives in the stream, before the reply or after it.
 
     False means the reply does not include it, so apply it as usual. That is always the
     answer for:
@@ -173,13 +225,15 @@ def covers(state: AccountState | None, event: object) -> bool:
       apply to your view of your resting orders whatever their `report_seq`;
     - any event when `state` is None, or has no `as_of_report_seq`, which the exchange
       leaves out when your team has had no private report this term;
-    - an event with no `report_seq`. Every `execution` and `risk_notice` carries one, so
+    - an event with no `report_seq`. Every `execution`, `risk_notice` and team's
+      `term_close_fill` carries one, so
       such an event comes from an exchange that does not number its reports, and that
       exchange sends no `as_of_report_seq` either, so every report applies. The reply can
       then be ordered against the reports only by when they arrive, which the exchange
       does not promise, so trust it fully only when none of your orders can fill meanwhile.
 
-    A `DecodeFailed` for an `execution` or `risk_notice` is judged the same way: when this
+    A `DecodeFailed` for an `execution`, `risk_notice` or `term_close_fill` is judged the
+    same way: when this
     is True, the reply already includes what it would have told you. Report numbers start
     again each term, so a reply from an earlier term covers nothing in a later one. This
     function cannot tell the terms apart, so query again in each new term.
@@ -193,8 +247,9 @@ def covers(state: AccountState | None, event: object) -> bool:
 
 
 class AccountReports:
-    """Sorts your team's `execution` and `risk_notice` reports against its `account_state`
-    replies, so that a program that keeps its own account applies each report once.
+    """Sorts your team's `execution`, `risk_notice` and `term_close_fill` reports against
+    its `account_state` replies, so that a program that keeps its own account applies each
+    report once.
 
     Send the query with `query` and pass every event of your one loop to `update`, which
     returns what to apply to your account now, in order:
@@ -204,11 +259,14 @@ class AccountReports:
       Replace your account with the reply's cash and positions, then apply those reports
       again: you applied them once already, to the account the reply replaces. The reply
       becomes `state`;
-    - for an `execution` or `risk_notice`: the event itself, unless `state` already
-      includes it (see `covers`), and nothing if it does;
+    - for an `execution`, `risk_notice` or `term_close_fill`: the event itself, unless
+      `state` already includes it (see `covers`), and nothing if it does. A
+      `term_close_fill` is applied exactly as a fill is: its position change
+      (`term_close_position_change`) and its `proceeds` to cash, once;
     - for anything else: nothing. That includes any other `account_state`: a reply to an
       earlier query that a later one replaced, or to a query sent with
-      `send_account_query`. Take a reply as your account only when `update` returns it.
+      `send_account_query`, and a house `term_close_fill` (`house` True, sent to a
+      Director session only). Take a reply as your account only when `update` returns it.
       Apply `accepted`, `reject`, `order_cancelled` and `order_state` to your resting
       orders as usual (`qte_sdk.resting.RestingOrders` does).
 
@@ -279,6 +337,8 @@ class AccountReports:
             return []
         if event.type not in ACCOUNT_REPORT_TYPES:
             return []
+        if isinstance(state, TermCloseFill) and state.house:
+            return []  # the house's account, not the team's
         if self._awaiting is not None and event.report_seq is not None:
             self._held.append(event)
         return [] if covers(self.state, event) else [event]

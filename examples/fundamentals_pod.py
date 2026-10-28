@@ -24,7 +24,8 @@ What it does, in order:
    ticket with `TICKET_ALGORITHM_UNAVAILABLE` (1713, no current VWAP profile for the
    instrument), it prints the refusal's `reason_detail` and, by this example's own
    choice, sends it once more as TWAP: the exchange never does that for you. Any other
-   reject is printed by name and the example stops with status 0. It prints the
+   reject is printed by name and the example stops with status 0; on
+   `TICKET_THESIS_NOT_FILED` (1700) it also prints what to pass instead. It prints the
    `ticket_accepted`'s ticket id, `algorithm` and `executor` (`SERVICE` or `DESK`).
 5. It prints each `ticket_state` of that ticket: status, `filled_shares` of the ticket's
    shares, `due_shares`, `activity` and `behind_schedule`, until the status is anything
@@ -75,7 +76,10 @@ runs for a session should use `qte_sdk.reconnect.ReconnectingSession`, whose
 states rebuild it.
 
 An opening or increasing ticket names the filed thesis that covers it with --thesis-id
-and --thesis-version; a reducing ticket may leave both out. Whether a ticket is accepted
+and --thesis-version; a reducing ticket may leave both out. The Team Lead files and signs
+the thesis on the Research page of the Team Lead console, which gives its ID and version;
+`t-aapl` above is a placeholder the exchange refuses with `TICKET_THESIS_NOT_FILED` (1700).
+Whether a ticket is accepted
 (its thesis, its size against the position, its limit, the schedule) is for the exchange
 to judge.
 """
@@ -99,6 +103,7 @@ from qte_sdk.connection import (
     Received,
     SeqGap,
     SessionRejected,
+    describe_close,
 )
 from qte_sdk.contract.v1.common_pb2 import (
     AUTO_EXECUTION,
@@ -300,6 +305,13 @@ class Pod:
             print(
                 f"REJECTED: {unknown or reason}{detail}; any ticket already working is unaffected"
             )
+            if message.reason_code == TicketReasonCodes.TICKET_THESIS_NOT_FILED:
+                print(
+                    "  an opening ticket needs your pod's own filed thesis: pass its ID and its "
+                    "latest signed version, from the Research page of the Team Lead console, as "
+                    "--thesis-id and --thesis-version (t-aapl is a placeholder); a reducing "
+                    "ticket needs none"
+                )
             self.rejected = True
         elif isinstance(message, TicketAccepted) and ref is not None and ref == self.ticket_ref:
             self.ticket_id = message.ticket_id
@@ -550,10 +562,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
-    except ConnectionClosedError:
+    except ConnectionClosedError as error:
         return fail(
-            "the connection dropped, and this example does not reconnect. A ticket sent "
-            "may still be working: reconnect and read its ticket_state"
+            f"the connection dropped with {describe_close(error)}. This example does not "
+            "reconnect. A ticket sent may still be working: reconnect and read its ticket_state"
         )
     except KeyboardInterrupt:
         # The ticket, if one was accepted, keeps working on the exchange.

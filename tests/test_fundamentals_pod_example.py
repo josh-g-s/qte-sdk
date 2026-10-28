@@ -292,6 +292,34 @@ async def test_the_1713_message_prints_the_refusals_reason_detail():
     assert [t["algorithm"] for t in exchange.tickets()] == ["VWAP", "TWAP"]
 
 
+async def test_a_1700_refusal_prints_what_thesis_to_pass():
+    exchange = PodExchange(
+        route=route_payload(),
+        accounts=[account(None)],
+        after=HAPPY,
+        reject="TICKET_THESIS_NOT_FILED",
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    assert "REJECTED: TICKET_THESIS_NOT_FILED;" in out
+    assert "from the Research page of the Team Lead console" in out
+    assert "(t-aapl is a placeholder)" in out
+    assert len(exchange.tickets()) == 1
+
+
+async def test_another_refusal_prints_no_thesis_hint():
+    exchange = PodExchange(
+        route=route_payload(),
+        accounts=[account(None)],
+        after=HAPPY,
+        reject="TICKET_INSTRUMENT_WORKING",
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    assert "REJECTED: TICKET_INSTRUMENT_WORKING;" in out
+    assert "Team Lead console" not in out
+
+
 async def test_a_status_this_sdk_does_not_know_is_a_stop_named_as_sent():
     after = [
         ("ticket_state", state(10, activity="TAKING")),

@@ -233,12 +233,53 @@ child orders still resting when a desk's ticket stops depends on why it stopped:
 Every send checks what it can before sending, and raises `ValueError` or `TypeError`
 and sends nothing if a check fails: `request_ref` is 1 to 32 bytes of UTF-8, `instrument`
 and `thesis_id` at most 32 bytes, none containing NUL; a ticket id is a string of decimal
-digits; `notes` is at most 280 characters with no NUL; an ordinary ticket has a
+digits, as is a `break_request_id`; `notes` is at most 280 characters with no NUL, and a
+`risk_statement` 1 to 280; a break request's `instrument` and `thesis_id` are 1 to 32
+bytes, not empty; an ordinary ticket has a
 `limit_price` and a cure ticket has none; `algorithm` is `TWAP` or `VWAP`; `cure` and
 `replacing` are bools. Whether a
-ticket is accepted (its thesis, its size against the position, its limit against the
+ticket is accepted (its thesis, refused `TICKET_THESIS_NOT_FILED` (1700) when missing
+or not current, its size against the position, its limit against the
 wall, the schedule against the term, a VWAP profile) is for the exchange to judge. Prices
 are integers in micro-dollars, and `shares` is a whole number of shares.
+
+Break requests (SPEC 23.7). In an inter-term break, after the close of a term's final
+session and before the next term's first session, a pod may ask the Directors to have the
+exchange reduce one of its positions at the break days' official closes. In Winter that
+is from the close on Friday 4 December 2026, and the break days are 7 to 31 December. A
+break request is not a ticket: no desk or service works it, it carries no limit price and
+no urgency, and no `ticket_accepted` or `ticket_state` is sent for it.
+
+- `break_request` (`send_break_request`): one request in one instrument, on the side that
+  reduces the position, for at most the position's shares, naming the thesis the position
+  was opened under and a `risk_statement` of 1 to 280 characters. A pod holds at most one
+  pending or approved request in each instrument. A request is never amended: withdraw
+  it and send a new one, which needs its own approval.
+- `break_request_withdraw` (`send_break_request_withdraw`): withdraw one of the pod's own
+  requests that is pending or approved, at any time.
+
+The exchange answers with a `break_request_state` (`BreakRequestState`) or a
+`break_request_reject` (`BreakRequestReject`); pick them out with `is_break_request_event`
+and match them with `break_request_ref_of`. A `break_request_state` is the whole state of
+one request, sent to the pod's sessions only at each change: its acceptance
+(`BREAK_REQUEST_PENDING`, echoing the `request_ref`), the Directors' approval
+(`BREAK_REQUEST_APPROVED`) or refusal (`BREAK_REQUEST_REFUSED`, with `decided_time` and
+`decision_reason`, and no `request_ref`), and its withdrawal (`BREAK_REQUEST_WITHDRAWN`,
+echoing the withdrawal's `request_ref`). A refused or withdrawn request never changes
+again. `BREAK_REQUEST_FILLED` and `BREAK_REQUEST_EXPIRED` are defined but not sent yet,
+and an approved request is not filled yet: that is qte-platform #2059's second part.
+Neither answer carries a `report_seq` or is replayed by a resume, and a session that
+connects after a change is not sent the request's state, so keep each state as it
+arrives. A `break_request_reject` refuses one message and logs nothing; its
+`request_kind` says which (`BREAK_REQUEST_SUBMIT` or `BREAK_REQUEST_WITHDRAW`), and its
+`reason_code` is a `TicketReasonCodes.TicketReasonCode`, named by
+`ticket_reason_code_name`. Two codes are its own: `BREAK_REQUEST_NOT_IN_BREAK` (1721), a
+request sent outside a break (before the final close, or from the next term's first
+session on), and `BREAK_REQUEST_EXISTS` (1722), a request in an instrument where the pod
+already holds a pending or approved one. A side that does not reduce the position, a
+flat position or more shares than the position is `TICKET_CROSSES_ZERO`; a withdrawal
+naming no request of the pod is `TICKET_NOT_FOUND`, and one of a request already refused
+or withdrawn `TICKET_NOT_WORKING`.
 """
 
 from collections.abc import Iterator
@@ -248,6 +289,10 @@ from google.protobuf.message import Message
 
 from qte_sdk.connection import Disconnected, Event, Received
 from qte_sdk.contract.v1.common_pb2 import (
+    BREAK_REQUEST_APPROVED,
+    BREAK_REQUEST_PENDING,
+    BREAK_REQUEST_REFUSED,
+    BREAK_REQUEST_WITHDRAWN,
     TICKET_WORKING,
     TWAP,
     URGENCY_HIGH,
@@ -259,8 +304,16 @@ from qte_sdk.contract.v1.common_pb2 import (
     TicketReasonCodes,
     TicketUrgency,
 )
-from qte_sdk.contract.v1.order_entry_pb2 import CancelTicket, RaiseTicketUrgency, SubmitTicket
+from qte_sdk.contract.v1.order_entry_pb2 import (
+    CancelTicket,
+    RaiseTicketUrgency,
+    SubmitBreakRequest,
+    SubmitTicket,
+    WithdrawBreakRequest,
+)
 from qte_sdk.contract.v1.order_events_pb2 import (
+    BreakRequestReject,
+    BreakRequestState,
     Execution,
     TicketAccepted,
     TicketReject,
@@ -270,6 +323,11 @@ from qte_sdk.contract.v1.session_pb2 import ExecutionRoute
 from qte_sdk.orders import Sender, _id, _ref, _side, _ticket_id
 
 __all__ = [
+    "BREAK_REQUEST_APPROVED",
+    "BREAK_REQUEST_EVENT_TYPES",
+    "BREAK_REQUEST_PENDING",
+    "BREAK_REQUEST_REFUSED",
+    "BREAK_REQUEST_WITHDRAWN",
     "EXECUTION_ROUTE_TYPE",
     "TICKET_EVENT_TYPES",
     "TWAP",
@@ -277,11 +335,16 @@ __all__ = [
     "URGENCY_LOW",
     "URGENCY_MEDIUM",
     "VWAP",
+    "BreakRequestEvent",
     "LatestTickets",
     "TicketEvent",
+    "break_request_ref_of",
+    "is_break_request_event",
     "is_execution_route",
     "is_ticket_event",
     "parent_ticket_of",
+    "send_break_request",
+    "send_break_request_withdraw",
     "send_ticket",
     "send_ticket_cancel",
     "send_ticket_urgency",
@@ -296,12 +359,18 @@ TICKET_EVENT_TYPES = frozenset({"ticket_accepted", "ticket_reject", "ticket_stat
 
 TicketEvent = TicketAccepted | TicketReject | TicketState
 
+# The envelope `type` tokens of the exchange's answers about break requests.
+BREAK_REQUEST_EVENT_TYPES = frozenset({"break_request_reject", "break_request_state"})
+
+BreakRequestEvent = BreakRequestReject | BreakRequestState
+
 # The envelope `type` token of the routing a pod's tickets get, sent to a pod only.
 EXECUTION_ROUTE_TYPE = "execution_route"
 
 _URGENCIES = (URGENCY_HIGH, URGENCY_MEDIUM, URGENCY_LOW)
 _ALGORITHMS = (TWAP, VWAP)
 _NOTES_MAX_CHARS = 280
+_RISK_STATEMENT_MAX_CHARS = 280
 
 
 def _urgency(urgency: TicketUrgency) -> TicketUrgency:
@@ -344,8 +413,13 @@ async def send_ticket(
     order's side: the exchange works out from the pod's position whether the ticket
     increases or reduces it. An opening or increasing ticket names the filed thesis that
     covers it in `thesis_id` and `thesis_version`, which go together; a reducing ticket
-    may leave both out. `notes` is free text for the desk, at most 280 characters; a
-    ticket the service works ignores it.
+    may leave both out. From the Winter term, an opening or increasing ticket with no
+    thesis, one that does not cover its instrument and side, or a version a later revision
+    has replaced is refused `TICKET_THESIS_NOT_FILED` (1700), whose `reason_detail` says
+    what is missing (SPEC.md 23.1). The Team Lead files and signs the thesis on the
+    Research page of the Team Lead console, which gives its ID and version; `t-aapl` in
+    these docs is a placeholder the exchange refuses. `notes` is free text for the desk,
+    at most 280 characters; a ticket the service works ignores it.
 
     `algorithm` is `TWAP` or `VWAP`; left out (None), the ticket carries
     `TICKET_ALGORITHM_UNSPECIFIED`, which the exchange reads as TWAP. Only the service
@@ -451,6 +525,103 @@ async def send_ticket_urgency(
     return ref
 
 
+async def send_break_request(
+    conn: Sender,
+    *,
+    instrument: str,
+    side: Side,
+    shares: int,
+    thesis_id: str,
+    thesis_version: int,
+    risk_statement: str,
+    request_ref: str | None = None,
+) -> str:
+    """Send `break_request`: ask the Directors to have the exchange reduce one of the pod's
+    positions at the official closes of the inter-term break's days (SPEC 23.7). Returns
+    its `request_ref`, which the `break_request_state` or `break_request_reject` answering
+    it echoes.
+
+    Timing: the exchange takes a request only in an inter-term break, after the close of
+    the term's final session (not at that instant) and before the next term's first
+    session. In Winter that is from the close on Friday 4 December 2026; the break days
+    are 7 to 31 December. Sent at any other time it is refused `BREAK_REQUEST_NOT_IN_BREAK`
+    (1721). A pod holds at most one pending or approved request in each instrument;
+    another is refused `BREAK_REQUEST_EXISTS` (1722).
+
+    `side` is the side that reduces the position, `SELL` for a long and `BUY` for a short,
+    and `shares` at most the position when it is sent (`TICKET_CROSSES_ZERO` otherwise).
+    `thesis_id` and `thesis_version` name the thesis the position was opened under, a
+    version since superseded included. `risk_statement` is the risk that needs the
+    reduction during the break, 1 to 280 characters with no NUL, logged and shown to the
+    Directors. There is no limit price and no urgency, and a request is never amended:
+    withdraw it with `send_break_request_withdraw` and send a new one.
+    """
+    ref = _ref(request_ref)
+    _id("instrument", instrument)
+    _side(side)
+    _id("thesis_id", thesis_id)
+    if not isinstance(risk_statement, str):
+        raise TypeError("risk_statement must be a str")
+    if not 1 <= len(risk_statement) <= _RISK_STATEMENT_MAX_CHARS:
+        raise ValueError(
+            f"risk_statement must be 1 to {_RISK_STATEMENT_MAX_CHARS} characters, "
+            f"got {len(risk_statement)}"
+        )
+    if "\0" in risk_statement:
+        raise ValueError("risk_statement must not contain the NUL character")
+    msg = SubmitBreakRequest(
+        request_ref=ref,
+        instrument=instrument,
+        side=side,
+        shares=shares,
+        thesis_id=thesis_id,
+        thesis_version=thesis_version,
+        risk_statement=risk_statement,
+    )
+    await conn.send("break_request", msg)
+    return ref
+
+
+async def send_break_request_withdraw(
+    conn: Sender,
+    *,
+    break_request_id: str,
+    request_ref: str | None = None,
+) -> str:
+    """Send `break_request_withdraw`: withdraw one of the pod's own break requests that is
+    pending or approved. Returns its `request_ref`. It may be sent at any time, and takes
+    effect from the first break-day closing window that begins after it.
+
+    `break_request_id` is the id a `break_request_state` gave the request. One that names
+    no request of this pod is refused `TICKET_NOT_FOUND`, and a request already refused
+    or withdrawn `TICKET_NOT_WORKING`. A withdrawal taken is answered with the request's
+    `break_request_state`, `BREAK_REQUEST_WITHDRAWN`, echoing this `request_ref`."""
+    ref = _ref(request_ref)
+    msg = WithdrawBreakRequest(
+        request_ref=ref, break_request_id=_ticket_id("break_request_id", break_request_id)
+    )
+    await conn.send("break_request_withdraw", msg)
+    return ref
+
+
+def is_break_request_event(event: Event) -> TypeGuard[Received]:
+    """Whether `event` is a decoded break request answer, one of
+    `BREAK_REQUEST_EVENT_TYPES`. Its `message` is then one of `BreakRequestEvent`."""
+    return isinstance(event, Received) and event.type in BREAK_REQUEST_EVENT_TYPES
+
+
+def break_request_ref_of(message: Message) -> str | None:
+    """The `request_ref` a break request answer echoes, or None when it carries none.
+
+    A `break_request_reject` echoes one unless the exchange could not read it or it was
+    empty. A `break_request_state` echoes the `break_request`'s on acceptance and the
+    `break_request_withdraw`'s on withdrawal, and carries none for the Directors'
+    decision."""
+    if isinstance(message, BreakRequestReject | BreakRequestState):
+        return message.request_ref if message.HasField("request_ref") else None
+    return None
+
+
 def is_ticket_event(event: Event) -> TypeGuard[Received]:
     """Whether `event` is a decoded ticket answer, one of `TICKET_EVENT_TYPES`. Its
     `message` is then one of `TicketEvent`."""
@@ -476,8 +647,8 @@ def ticket_request_ref_of(message: Message) -> str | None:
 
 
 def ticket_reason_code_name(code: int) -> str:
-    """The name of a `ticket_reject` reason code, or its number as text when this SDK
-    does not know it. A reason token this SDK does not recognise decodes as
+    """The name of a `ticket_reject` or `break_request_reject` reason code, or its number
+    as text when this SDK does not know it. A reason token this SDK does not recognise decodes as
     `TICKET_REASON_CODE_UNSPECIFIED` (0); the event's `unknown_enum_names()` keeps it."""
     try:
         return TicketReasonCodes.TicketReasonCode.Name(code)

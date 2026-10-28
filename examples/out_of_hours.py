@@ -38,7 +38,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.calendar import Calendar, next_session
-from qte_sdk.connection import SessionRejected
+from qte_sdk.connection import SessionRejected, describe_close
 from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
 from qte_sdk.market_data import (
     OfficialClose,
@@ -230,8 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         return fail(f"the exchange refused the session: {error}")
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
-    except ConnectionClosedError:
-        return fail("the connection dropped, and this example does not reconnect: run it again")
+    except ConnectionClosedError as error:
+        return fail(
+            f"the connection dropped with {describe_close(error)}. This example does not "
+            "reconnect: run it again"
+        )
     except KeyboardInterrupt:
         return 130
 

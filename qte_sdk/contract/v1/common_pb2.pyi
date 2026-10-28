@@ -169,6 +169,22 @@ class TicketRequestKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     TICKET_REQUEST_SUBMIT: _ClassVar[TicketRequestKind]
     TICKET_REQUEST_CANCEL: _ClassVar[TicketRequestKind]
     TICKET_REQUEST_URGENCY: _ClassVar[TicketRequestKind]
+
+class BreakRequestKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    BREAK_REQUEST_KIND_UNSPECIFIED: _ClassVar[BreakRequestKind]
+    BREAK_REQUEST_SUBMIT: _ClassVar[BreakRequestKind]
+    BREAK_REQUEST_WITHDRAW: _ClassVar[BreakRequestKind]
+
+class BreakRequestStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    BREAK_REQUEST_STATUS_UNSPECIFIED: _ClassVar[BreakRequestStatus]
+    BREAK_REQUEST_PENDING: _ClassVar[BreakRequestStatus]
+    BREAK_REQUEST_APPROVED: _ClassVar[BreakRequestStatus]
+    BREAK_REQUEST_REFUSED: _ClassVar[BreakRequestStatus]
+    BREAK_REQUEST_WITHDRAWN: _ClassVar[BreakRequestStatus]
+    BREAK_REQUEST_FILLED: _ClassVar[BreakRequestStatus]
+    BREAK_REQUEST_EXPIRED: _ClassVar[BreakRequestStatus]
 SIDE_UNSPECIFIED: Side
 BUY: Side
 SELL: Side
@@ -277,6 +293,16 @@ TICKET_REQUEST_KIND_UNSPECIFIED: TicketRequestKind
 TICKET_REQUEST_SUBMIT: TicketRequestKind
 TICKET_REQUEST_CANCEL: TicketRequestKind
 TICKET_REQUEST_URGENCY: TicketRequestKind
+BREAK_REQUEST_KIND_UNSPECIFIED: BreakRequestKind
+BREAK_REQUEST_SUBMIT: BreakRequestKind
+BREAK_REQUEST_WITHDRAW: BreakRequestKind
+BREAK_REQUEST_STATUS_UNSPECIFIED: BreakRequestStatus
+BREAK_REQUEST_PENDING: BreakRequestStatus
+BREAK_REQUEST_APPROVED: BreakRequestStatus
+BREAK_REQUEST_REFUSED: BreakRequestStatus
+BREAK_REQUEST_WITHDRAWN: BreakRequestStatus
+BREAK_REQUEST_FILLED: BreakRequestStatus
+BREAK_REQUEST_EXPIRED: BreakRequestStatus
 
 class TicketReasonCodes(_message.Message):
     __slots__ = ()
@@ -317,6 +343,8 @@ class TicketReasonCodes(_message.Message):
         TICKET_RAISE_PENDING: _ClassVar[TicketReasonCodes.TicketReasonCode]
         TICKET_CURE_NOT_AMENDABLE: _ClassVar[TicketReasonCodes.TicketReasonCode]
         TICKET_AMEND_AT_OR_BELOW_FILLED: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        BREAK_REQUEST_NOT_IN_BREAK: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        BREAK_REQUEST_EXISTS: _ClassVar[TicketReasonCodes.TicketReasonCode]
     TICKET_REASON_CODE_UNSPECIFIED: TicketReasonCodes.TicketReasonCode
     NOT_AUTHENTICATED: TicketReasonCodes.TicketReasonCode
     VERSION_MISMATCH: TicketReasonCodes.TicketReasonCode
@@ -352,6 +380,8 @@ class TicketReasonCodes(_message.Message):
     TICKET_RAISE_PENDING: TicketReasonCodes.TicketReasonCode
     TICKET_CURE_NOT_AMENDABLE: TicketReasonCodes.TicketReasonCode
     TICKET_AMEND_AT_OR_BELOW_FILLED: TicketReasonCodes.TicketReasonCode
+    BREAK_REQUEST_NOT_IN_BREAK: TicketReasonCodes.TicketReasonCode
+    BREAK_REQUEST_EXISTS: TicketReasonCodes.TicketReasonCode
     def __init__(self) -> None: ...
 
 class ReasonCodes(_message.Message):
