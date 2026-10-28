@@ -48,21 +48,18 @@ in memory.
 
 Options. An option contract is named by its OCC symbol, such as `SPY261120C00650000` (see
 `qte_sdk.options`), and its `book`, `trades` and `mark` are merged as an equity's are.
-`option_greeks` is not in the default `channels`, since a session cached before the
-history service served Greeks has none and would fail the replay; name it to get them. A
-session with options cached before that build (from 15 October 2026) also holds a
-contract's object only for a channel on which it published something: a contract that
-quoted but never traded has no `trades`, and that channel answers `HistoryUnavailable`,
-which fails a default replay. Pass `skip_unavailable=True` to skip such a channel, or
-name in `channels` only those the contracts published on. `option_greeks` is fetched only
+`option_greeks` is not in the default `channels`; name it to get them. A channel the
+service answers `HistoryUnavailable` for fails a default replay. Pass
+`skip_unavailable=True` to skip such a channel, or name in `channels` only those the
+service holds. `option_greeks` is fetched only
 for the instruments that are option symbols (`qte_sdk.options.is_option_symbol`), since
 an equity has no Greeks, so `channels=CHANNELS` over equities alone replays what it did
 before; an id that is not a well-formed option symbol is treated as an equity's. Naming
 `option_greeks` as the only per-instrument channel with no option symbol among the
 instruments is a `ValueError`. The option chain is not part of a replay: fetch it with
 `HistoryClient.fetch_option_chain`. The Greeks follow the history contract of
-qte-platform #2298, whose server build is live; for a session cached before it that
-has not been upgraded since, `option_greeks` raises `HistoryUnavailable`.
+qte-platform #2298, whose server build is live; the sessions cached before it, 15 to
+21 October 2026, have all been upgraded and serve their Greeks.
 
 Errors. A stream the service holds with no messages, such as an equity with no trades
 that day, adds nothing. A per-instrument channel the service answers unavailable when it
@@ -144,10 +141,9 @@ def replay(
     `DEFAULT_CHANNELS`, is all but `option_greeks`. `speed` paces the replay: None (the
     default) for as fast as you read it, or a positive number, 1.0 for the pace the
     session ran at. `skip_unavailable=True` skips a per-instrument channel of an
-    instrument that the service answers `HistoryUnavailable` (such as a contract's
-    `trades` on a session cached before the options build, if it never traded) instead
-    of raising, so an instrument id the service does not know then adds nothing rather
-    than failing; `session_state` still raises. Raises `TypeError` or `ValueError` at
+    instrument that the service answers `HistoryUnavailable` instead of raising, so an
+    instrument id the service does not know then adds nothing rather than failing;
+    `session_state` still raises. Raises `TypeError` or `ValueError` at
     once, before any download, for arguments it cannot use, a date that does not parse
     included. `ReplayOutOfOrder`, also
     a `ValueError`, comes later, while the replay runs, if a stream's times go back.
@@ -308,8 +304,7 @@ async def _replay(
             try:
                 await advance(_Stream(items, rank, instrument))
             except HistoryUnavailable as error:
-                # A per-instrument channel the service does not hold, such as a contract's
-                # trades on a session cached before the options build: skipped if asked.
+                # A per-instrument channel the service does not hold: skipped if asked.
                 # One answered unavailable only on a resume, after data came, still raises.
                 if not (skip_unavailable and error._at_open and channel in _PER_INSTRUMENT):
                     raise
