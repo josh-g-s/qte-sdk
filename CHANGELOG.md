@@ -1,12 +1,14 @@
 # Changelog
 
-**Version:** 0.94
+**Version:** 0.95
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+- The quickstart and both copies of AGENTS.md say what a program sees across an exchange handover (an order answered up to 2 seconds late, about 4 if the handover is called off, no disconnect except in four rare cases (a flood of messages in the hold, a program not reading, a very long subscription history, or a replayed subscription the new exchange answers differently), no report gap, a heartbeat gap of up to about 30 seconds), with no live exchange (a 1001 close, then HTTP 503 until one is live), and across a gateway restart (a 1006 drop that `ReconnectingSession` resumes from by itself) (#306).
 
 ## 1.6.0
 
