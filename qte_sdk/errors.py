@@ -68,6 +68,7 @@ SESSION_RESUME_REJECTED = "QTE-SESSION-RESUME-REJECTED"
 SESSION_RESUME_NOT_ACKNOWLEDGED = "QTE-SESSION-RESUME-NOT-ACKNOWLEDGED"
 SESSION_RESUME_TIMEOUT = "QTE-SESSION-RESUME-TIMEOUT"
 SESSION_LOG_CHANGED = "QTE-SESSION-LOG-CHANGED"
+SESSION_UNANSWERED = "QTE-SESSION-UNANSWERED"
 # CONNECT
 CONNECT_HANDSHAKE_FAILED = "QTE-CONNECT-HANDSHAKE-FAILED"
 CONNECT_LIVENESS_TIMEOUT = "QTE-CONNECT-LIVENESS-TIMEOUT"
@@ -364,6 +365,17 @@ CODES: dict[str, Entry] = {
         "the one its report cursor was counted under",
         "Wait for the snapshot, then check positions",
     ),
+    SESSION_UNANSWERED: Entry(
+        "the connection dropped with {count} requests unconfirmed: {refs}",
+        "Each may or may not have reached the exchange, and a resume that omits one does "
+        "not prove it is gone",
+        "After ResumeComplete, settle each against RestingOrders, your fills and (after a "
+        "snapshot) send_account_query, then again after one order delay; never resend an "
+        "order only because it is not resting",
+        "A ReconnectingSession's session dropped before the exchange answered these requests "
+        "(listed in Disconnected.unanswered as message type and request_ref)",
+        "Settle each after ResumeComplete, again after one order delay; never resend blind",
+    ),
     CONNECT_HANDSHAKE_FAILED: Entry(
         "the opening handshake failed ({kind}{status}); details withheld",
         "{why}",
@@ -638,6 +650,7 @@ FIELDS = frozenset(
         "action",
         "characters",
         "command",
+        "count",
         "cursor",
         "fix",
         "found",
@@ -653,6 +666,7 @@ FIELDS = frozenset(
         "problem",
         "reason",
         "reason_name",
+        "refs",
         "seconds",
         "source",
         "status",

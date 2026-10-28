@@ -133,6 +133,17 @@ and the exchange replays, the replayed reports say what became of it; a snapshot
 whether it rests now. While no session is up, `send` raises
 `NotConnected` rather than queueing the message.
 
+Each `Disconnected` names, in `unanswered`, the requests sent through `send` on that session
+that carry a `request_ref` and got no answer echoing it: each as its message type and
+`request_ref`, in the order sent. An `accepted`, `reject`, `order_cancelled`,
+`account_state`, `ticket_accepted`, `ticket_reject`, `break_request_state` or
+`break_request_reject` echoing the ref answers it. A `reject` with no `request_ref` answers
+nothing, so its request stays listed. When any are listed, `QTE-SESSION-UNANSWERED` is
+logged at WARNING through the `qte_sdk.reconnect` logger, with their count and refs and
+never their contents. They are unconfirmed, not lost: each may or may not have reached the
+exchange, and a resume that omits one does not prove it is gone. The list starts empty on
+each session.
+
 Which failures are retried (`is_retryable`): a dropped or closed connection, a connection
 that could not be opened (`OSError` or a timeout), a handshake answered with a malformed
 response or with HTTP 5xx, 408 or 429, and a session that closed before it was
@@ -155,6 +166,7 @@ error this module delivers or raises that would repeat the token has it replaced
 import asyncio
 import functools
 import logging
+import os
 import random
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -182,6 +194,7 @@ from qte_sdk.connection import (
     SessionRejected,
     _credential_revoked,
 )
+from qte_sdk.contract.v1.order_events_pb2 import AccountState
 from qte_sdk.contract.v1.session_pb2 import (
     Calendar,
     Instruments,
@@ -190,11 +203,13 @@ from qte_sdk.contract.v1.session_pb2 import (
     Unsubscribe,
 )
 from qte_sdk.errors import QteError
+from qte_sdk.orders import request_ref_of
 from qte_sdk.pacing import Pacer
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import (
     DEFAULT_ACK_TIMEOUT,
     DEFAULT_CALENDAR_TIMEOUT,
+    TOKEN_ENV_VAR,
     AuthNotSent,
     ResumeNotAcknowledged,
     ResumeRejected,
@@ -212,6 +227,7 @@ from qte_sdk.session import (
     resolve_token,
     resolve_url,
 )
+from qte_sdk.tickets import break_request_ref_of, ticket_request_ref_of
 
 __all__ = [
     "DEFAULT_BACKOFF",
@@ -410,6 +426,9 @@ class ReconnectingSession:
         # Set when the exchange closed the current attempt's connection for a term change,
         # which an attempt checks even when a cancellation hides the error that said so.
         self._term_change_seen = False
+        # Each request_ref sent on the current session and not yet answered, mapped to its
+        # message type, in the order sent: what its Disconnected names in `unanswered`.
+        self._unanswered: dict[str, str] = {}
         # Checked last, once every attribute its repr reads is set.
         self._pacing = _pacing._checked(pacing)
 
@@ -537,7 +556,7 @@ class ReconnectingSession:
         failure: BaseException
         try:
             session._chain_halts.sent(type_, payload)
-            await session.connection.send(type_, payload)
+            await self._send_noted(session, type_, payload)
         except BaseException as error:
             failure = error
         else:
@@ -552,8 +571,26 @@ class ReconnectingSession:
         if self._session is not session or not self._up:
             return False
         session._chain_halts.sent(type_, payload)
-        await session.connection.send(type_, payload)
+        await self._send_noted(session, type_, payload)
         return True
+
+    async def _send_noted(self, session: Session, type_: str, payload: Message) -> None:
+        """Send on `session`, noting a `request_ref` the message carries as unanswered.
+
+        Noted before the send, since its answer can be read before the send returns. A send
+        that fails with an error, such as a connection already closed, wrote nothing, so the
+        note is taken back; a cancellation may come after the frame was written, so the
+        note stays."""
+        ref = getattr(payload, "request_ref", "")
+        noted = isinstance(ref, str) and ref != "" and ref not in self._unanswered
+        if noted:
+            self._unanswered[ref] = type_
+        try:
+            await session.connection.send(type_, payload)
+        except Exception:
+            if noted and self._session is session:
+                self._unanswered.pop(ref, None)
+            raise
 
     def _not_connected(self, type_: str) -> "NotConnected":
         # The type is the caller's text: withheld if it holds the token, in the arguments
@@ -604,7 +641,7 @@ class ReconnectingSession:
                         if acknowledged:
                             # The session was up, if only briefly: whatever it had received
                             # is lost, so this is a disconnect like any other.
-                            disconnected = Disconnected(failure)
+                            disconnected = Disconnected(failure, self._take_unanswered())
                             if self.resting is not None:
                                 self.resting.apply(disconnected)
                             yield disconnected
@@ -620,6 +657,8 @@ class ReconnectingSession:
                 self._instrument_table = session.instrument_table
                 if self._calendar is not None:
                     self._enter_term(_term_of(self._calendar), strict=False)
+                # Nothing noted for an earlier session carries over to this one.
+                self._unanswered.clear()
                 self._up = True
                 connected = Connected(session.info, self.instruments, reconnected, resumed)
                 if self.resting is not None:
@@ -646,6 +685,10 @@ class ReconnectingSession:
                             # already have been read ahead while this one waited to be
                             # delivered, and an older one must never replace it.
                             self._instrument_table = session.instrument_table
+                        if isinstance(event, Received):
+                            answered = _answered_ref(event.message)
+                            if answered is not None:
+                                self._unanswered.pop(answered, None)
                         if self.resting is not None:
                             self.resting.apply(event)
                         yield event
@@ -657,7 +700,7 @@ class ReconnectingSession:
                         self._forget_cursor()
                 # Uncertainty is flagged before anything else, the close included.
                 self._up = False
-                disconnected = Disconnected(failure)
+                disconnected = Disconnected(failure, self._take_unanswered())
                 if self.resting is not None:
                     self.resting.apply(disconnected)
                 await self._close_session(session)
@@ -994,6 +1037,41 @@ class ReconnectingSession:
         self._reports_log_id = None
         self._chain_halts._new_term()
 
+    def _take_unanswered(self) -> tuple[tuple[str, str], ...]:
+        """The requests sent on the session that ended and not answered, as (message type,
+        request_ref) in the order sent, for its `Disconnected`; forgotten here, so none
+        carries over to the next session. When there are any, `QTE-SESSION-UNANSWERED` is
+        logged, with their count and refs and never their contents, from a thread of its
+        own (see `qte_sdk.pacing._warn`).
+
+        A ref or type that holds the token is withheld from the log on its own. Text only
+        shaped like a token is shown, unlike in other warnings: `new_request_ref` makes 32
+        hex digits, the shape of a token, and a ref of at most 32 bytes cannot hold a whole
+        one."""
+        unanswered = tuple((type_, ref) for ref, type_ in self._unanswered.items())
+        self._unanswered.clear()
+        if unanswered:
+            secrets = [self._secret]
+            env_token = os.environ.get(TOKEN_ENV_VAR)
+            if env_token:
+                secrets.append(_Secret(env_token))
+
+            def holds_token(text: str) -> bool:
+                return any(_text_holds_token(text, secret) for secret in secrets)
+
+            def shown(text: str) -> str:
+                return _errors.WITHHELD if holds_token(text) else text
+
+            _pacing._warn(
+                _errors.SESSION_UNANSWERED,
+                short_what=f"the connection dropped with {len(unanswered)} requests unconfirmed",
+                target=_log,
+                withhold=holds_token,
+                count=len(unanswered),
+                refs=", ".join(f"{shown(type_)} {shown(ref)}" for type_, ref in unanswered),
+            )
+        return unanswered
+
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):
             return True
@@ -1027,6 +1105,16 @@ def _closed_at_term_change(error: BaseException | None) -> bool:
     else:
         return False
     return code == TERM_CHANGE_CLOSE_CODE
+
+
+def _answered_ref(message: Message) -> str | None:
+    """The `request_ref` an answer to a request echoes, or None when `message` echoes none:
+    `accepted`, `reject`, `order_cancelled`, `account_state`, `ticket_accepted`,
+    `ticket_reject`, `break_request_state` and `break_request_reject` can."""
+    if isinstance(message, AccountState):
+        return message.request_ref or None
+    ref = request_ref_of(message) or ticket_request_ref_of(message)
+    return ref or break_request_ref_of(message) or None
 
 
 def _calendar_wait(ack_timeout: float | None) -> float:
