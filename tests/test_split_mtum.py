@@ -533,7 +533,8 @@ async def test_a_held_4_november_book_stays_pre_split_until_a_5_november_book_re
     """books.py keeps a book until a later one and never clears at a close. 05, "When a
     `book` is published", rule 2: the first grid publication of the 5 November session
     carries MTUM's book if it has one; with its quote emptied at the open (DL-103 item 5)
-    that book has no wall and condition `REFERENCE_UNAVAILABLE`."""
+    that book has no wall and condition `REFERENCE_UNAVAILABLE` (qte-core confirmed on 28 Oct
+    2026: the publisher clears its last-book set at the session open)."""
     pre = book(NOV4_CLOSE, ["240110000"], ["240140000"], "LIVE")
     empty = book(NOV5_OPEN + 100, [], [], "REFERENCE_UNAVAILABLE")
     quoted = book(NOV5_FIRST_QUOTE, ["60030000"], ["60040000"], "LIVE")
