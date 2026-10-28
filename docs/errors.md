@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.24
+**Version:** 0.25
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -21,6 +21,14 @@ The last line of a traceback is the class name and then this message. The code i
 - No message ever holds your token. Text from the exchange or the history service, such as a rejection's detail, is flattened to one line in the message and kept as sent in the exception's attribute (`detail`, or `message` for a history error), and is withheld if it repeats any part of the token. Text you gave, such as an instrument, a message type, a replay's date or channel, or the path of a `.env` or token file, is withheld from the message if it holds the token, as written, percent-encoded or escaped. Where the SDK has no token to look for, as in the git warning before the `.env` is read or a `Session`'s `repr`, text holding a run of 32 hex digits, the shape of the exchange's tokens, is withheld instead.
 - The exchange's refusal of an order, a ticket, a break request or an account query is an event your loop reads, not an SDK error, and has no `QTE-` code. Only a refusal of the session itself (its `auth` or a resume) or one with `VERSION_MISMATCH` raises, with a `QTE-SESSION-` code below: a `reject` names its reason with `reason_code_name`, and a `ticket_reject` or `break_request_reject` with `qte_sdk.tickets.ticket_reason_code_name`. Two reasons refuse only a pod's `break_request`: `BREAK_REQUEST_NOT_IN_BREAK` (1721), sent outside an inter-term break (before the close of a term's final session, or from the next term's first session on; in Winter the break runs from the close on Friday 4 December 2026), so send it again only once the break has begun; and `BREAK_REQUEST_EXISTS` (1722), when the pod already holds a pending or approved request in that instrument, so withdraw that one with `send_break_request_withdraw` first if you mean to replace it. The `qte_sdk.tickets` docstring lists the others.
 - A code never changes once released. A code no longer used is listed under [Retired codes](#retired-codes) and never reused.
+
+## Order rejects
+
+The exchange's `reject` of an order is an event, with no `QTE-` code, whose `reason_code` says why. For the reasons below, `qte_sdk.errors.order_reject_step(reason)` returns the next step (from `qte_sdk.errors.ORDER_REJECT_STEPS`), given the reason's name or number; for any other it returns `None`.
+
+| `reason_code` | Next step |
+|---|---|
+| `STRATEGY_NOT_REGISTERED` | This strategy ID has no live registration on this term. Each new term starts with none, and retiring a registration ends it, so your Team Lead must register it again on the console: Strategy registration, Register a new strategy, Submit. After a retirement the new version must be above every version your team has held under this strategy ID, or it is refused VERSION_NOT_NEW. Orders sent after it is accepted no longer get this reject |
 
 ## Exit codes
 

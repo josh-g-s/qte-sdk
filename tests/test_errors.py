@@ -180,6 +180,30 @@ def test_every_docs_entry_says_its_cause_and_fix():
         assert cause and fix, code
 
 
+def test_the_order_rejects_table_in_docs_errors_md_matches_the_registry():
+    text = DOCS.read_text(encoding="utf-8")
+    section = text.split("\n## Order rejects\n", 1)[1].split("\n## ", 1)[0]
+    rows = re.findall(r"^\| `([A-Z_]+)` \| (.+) \|$", section, flags=re.MULTILINE)
+    assert dict(rows) == errors.ORDER_REJECT_STEPS
+
+
+def test_an_order_reject_s_step_is_found_by_its_name_or_number_and_none_otherwise():
+    from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+
+    step = errors.order_reject_step("STRATEGY_NOT_REGISTERED")
+    assert step is not None
+    for words in ("Each new term starts with none", "your Team Lead must register it again"):
+        assert words in step
+    assert "Strategy registration, Register a new strategy, Submit" in step
+    assert not step.endswith(".")
+    assert errors.order_reject_step(ReasonCodes.STRATEGY_NOT_REGISTERED) == step
+    assert errors.order_reject_step(1100) == step
+    for unknown in ("MARKET_CLOSED", "OUTSIDE_DECLARED_SCOPE", "NO_SUCH_REASON", ""):
+        assert errors.order_reject_step(unknown) is None
+    for unknown in (ReasonCodes.MARKET_CLOSED, 0, -1, 999_999, True, None, 1.5):
+        assert errors.order_reject_step(unknown) is None  # type: ignore[arg-type]
+
+
 def source_files() -> list[Path]:
     return sorted((ROOT / "qte_sdk").rglob("*.py")) + sorted((ROOT / "examples").glob("*.py"))
 
