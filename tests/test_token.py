@@ -2089,14 +2089,50 @@ def test_windows_is_unchanged_by_the_writable_check(windows, tmp_path, monkeypat
     assert WRITABLE not in capsys.readouterr().out
 
 
-# Command lines a token pasted in the wrong place makes, each with the token at {}.
+TOKEN = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["set", TOKEN],
+        ["set", TOKEN, "--url", "wss://example.test"],
+        ["set", "--file", "tokenfile", TOKEN],
+        ["check", TOKEN],
+        ["check", "--json", TOKEN],
+        ["check", TOKEN, "--json", TOKEN],
+        ["set", TOKEN, "--url", "wss://example.test", TOKEN],
+    ],
+    ids=[
+        "set",
+        "set --url",
+        "set --file",
+        "check",
+        "check --json",
+        "check, interleaved",
+        "set, interleaved",
+    ],
+)
+def test_a_value_after_the_command_is_refused_and_never_printed(
+    argv, home, tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert helper.main(argv, interactive=lambda: True) == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    usage, refusal = err.splitlines()
+    assert usage.startswith(f"usage: python -m qte_sdk.token {argv[0]} ")
+    assert refusal.startswith(f"error: QTE-TOKEN-SET-ARGUMENT: `token {argv[0]}` was given a value")
+    assert TOKEN not in err
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+# Command lines a token pasted in the wrong place makes, each with the token at {}. A token
+# after the command is refused before argparse sees it as a mistake (see above).
 TOKEN_ON_THE_COMMAND_LINE = {
-    "after set": ["set", "{}"],
     "as the command": ["{}"],
-    "after check": ["check", "{}"],
-    "after check --json": ["check", "--json", "{}"],
     "as an unknown option": ["set", "--token={}"],
-    "after --url": ["set", "--url=wss://example.test", "{}"],
     "as --json's value": ["check", "--json={}"],
     "as an abbreviated --json's value": ["check", "--j={}"],
     "as --help's value": ["set", "--help={}"],
