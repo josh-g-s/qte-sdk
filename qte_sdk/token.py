@@ -146,11 +146,14 @@ def main(
         error.parser.print_usage(sys.stderr)
         print(f"{error.parser.prog}: error: {_not_shown(error.message, argv)}", file=sys.stderr)
         return 2
+    if args.extra:
+        # A mistake on the command line, so exit 2 like argparse, with nothing on stdout.
+        args.subparser.print_usage(sys.stderr)
+        print(f"error: {render(_errors.TOKEN_SET_ARGUMENT, command=args.command)}", file=sys.stderr)
+        return 2
     if interactive is None:
         interactive = _has_terminal
     try:
-        if args.extra:
-            raise _Refused(_errors.TOKEN_SET_ARGUMENT, command=args.command)
         if args.command == "check":
             return _check(json_output=args.json)
         if not interactive():
@@ -187,12 +190,26 @@ class _Parser(argparse.ArgumentParser):
 _KNOWN_WORDS = frozenset({"set", "check", "--url", "--file", "--json", "-h", "--help"})
 
 
+# A quoted value in an argparse message, as repr() writes it.
+_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+# Messages whose whole tail is what was typed.
+_TYPED_TAIL = re.compile(r"(unrecognized arguments|ambiguous option): .*", re.DOTALL)
+_UNREADABLE = (
+    "the command line could not be read; what was typed is not shown, since it may be your token"
+)
+
+
 def _not_shown(message: str, argv: list[str]) -> str:
-    """`message` with each value typed in `argv` replaced, since argparse quotes what it
-    could not parse (an unknown command, say) and that may be the token."""
-    for typed in sorted(set(argv) - _KNOWN_WORDS, key=len, reverse=True):
-        if typed:
-            message = re.sub(rf"(?<![\w-]){re.escape(typed)}(?![\w-])", "(not shown)", message)
+    """`message` without anything typed in `argv`, since argparse quotes what it could not
+    parse (an unknown command, say) and that may be the token. Each quoted value and the
+    tail of an "unrecognized arguments" or "ambiguous option" message becomes `(not shown)`;
+    if any form of what was typed is still there, the whole message is replaced."""
+    message = _QUOTED.sub(lambda m: m[0] if m[0][1:-1] in _KNOWN_WORDS else "(not shown)", message)
+    message = _TYPED_TAIL.sub(r"\1: (not shown)", message)
+    for typed in argv:
+        forms = {typed, typed.partition("=")[2], repr(typed)[1:-1]} - _KNOWN_WORDS
+        if any(len(form) >= 4 and form in message for form in forms):
+            return _UNREADABLE
     return message
 
 
@@ -223,6 +240,7 @@ def _parser() -> argparse.ArgumentParser:
         help=f"store only the token, in PATH (default {DEFAULT_TOKEN_FILE})",
     )
     set_.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
+    set_.set_defaults(subparser=set_)
     set_.color = False
     check = commands.add_parser(
         "check",
@@ -231,6 +249,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     check.color = False
     check.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
+    check.set_defaults(subparser=check)
     check.add_argument(
         "--json",
         action="store_true",

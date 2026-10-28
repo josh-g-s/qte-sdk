@@ -1907,26 +1907,52 @@ def test_a_value_after_the_command_is_refused_and_never_printed(
 ):
     monkeypatch.chdir(tmp_path)
     before = sorted(tmp_path.rglob("*"))
-    assert run(argv) == 1
+    assert helper.main(argv, interactive=lambda: True) == 2
     out, err = capsys.readouterr()
     assert out == ""
-    assert err.startswith(f"error: QTE-TOKEN-SET-ARGUMENT: `token {argv[0]}` was given a value")
+    usage, refusal = err.splitlines()
+    assert usage.startswith(f"usage: python -m qte_sdk.token {argv[0]} ")
+    assert refusal.startswith(f"error: QTE-TOKEN-SET-ARGUMENT: `token {argv[0]}` was given a value")
     assert TOKEN not in err
     assert sorted(tmp_path.rglob("*")) == before
 
 
 @pytest.mark.parametrize(
     "argv",
-    [[TOKEN], ["set", f"--bogus={TOKEN}"], ["--bogus", TOKEN, "set"]],
-    ids=["as the command", "in an unknown option", "after an unknown option"],
+    [
+        [TOKEN],
+        [TOKEN + "\\x"],
+        [TOKEN + "\n'\""],
+        ["set", f"--bogus={TOKEN}"],
+        ["--bogus", TOKEN, "set"],
+        ["check", f"--json={TOKEN}"],
+        ["check", f"--j={TOKEN}"],
+        ["set", f"--help={TOKEN}"],
+        ["set", f"--he={TOKEN}"],
+        [f"-h={TOKEN}"],
+        [f"--{TOKEN}", "set"],
+    ],
+    ids=[
+        "as the command",
+        "escaped",
+        "with a newline and quotes",
+        "in an unknown option",
+        "after an unknown option",
+        "attached to --json",
+        "attached to an abbreviation",
+        "attached to --help",
+        "attached to an abbreviated --help",
+        "attached to -h",
+        "as an option name",
+    ],
 )
 def test_argparse_errors_never_print_what_was_typed(argv, home, tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert helper.main(argv) == 2
     out, err = capsys.readouterr()
     assert out == ""
-    assert "error:" in err and "(not shown)" in err
-    assert TOKEN not in err
+    assert "error:" in err and "not shown" in err
+    assert TOKEN not in err and TOKEN[:16] not in err
 
 
 def test_argparse_errors_keep_the_words_of_the_command_line(capsys):
