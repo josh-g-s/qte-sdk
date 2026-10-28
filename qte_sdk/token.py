@@ -44,11 +44,21 @@ ignore, or, on Windows, a file others may read, change or replace); and 2 when i
 not tell (git could not say whether it ignores the `.env`, or Windows would not let it
 fully check the file the token is in). Exit 1 is a report: sessions still only warn about
 what `check` warns about. It looks afresh each time, even where the SDK has already warned
-once in the same process, and it never prints a path that holds the token. With `--json` it
-prints one JSON document instead, with the same exit status (docs/errors.md gives its keys).
+once in the same process, and it never prints a path that holds the token. `set --file`
+refuses a path with a run of 32 hex digits, the shape of a token, without showing it.
+`check --json` prints one JSON document instead, with the same exit status (docs/errors.md
+gives its keys).
 A `QTE_LOG_FORMAT` other than json or text makes it exit 2 with `QTE-LOG-FORMAT-INVALID`.
-`set` exits with 0 when it saved, 1 when it refused, and 130 if stopped. Either exits with
-2, after a `usage:` line, if the command line is wrong.
+`set` refuses a token with a space, a quote, a #, or an invisible or control character,
+and says its length and which of those kinds it found. A token without them that is not 64
+characters of 0-9 and a-f, the shape of a trading token, is saved, with a
+`QTE-TOKEN-UNUSUAL` warning on stderr that gives its length and whether it has other
+characters, such as capitals; it is only a warning, so a future token format still works.
+Spaces and line breaks around a pasted token are removed before either check. Neither the
+refusal nor the warning ever shows the token or any part of it. `set` exits with 0 when it
+saved, 1 when it refused, and 130 if stopped. Either exits with 2, after a `usage:` line, if
+the command line is wrong; that error never repeats a word it did not expect, since a token
+pasted onto the command line would be one.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
@@ -61,12 +71,15 @@ can never come.
 import argparse
 import getpass
 import os
+import re
 import secrets
 import shlex
 import sys
+import unicodedata
 import warnings
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import unquote
 
 from qte_sdk import _fileaccess
 from qte_sdk import dotenv as dotenv_module
@@ -94,6 +107,7 @@ from qte_sdk.session import (
     TOKEN_FILE_ENV_VAR,
     URL_ENV_VAR,
     MissingURL,
+    _detached,
     _find_token,
     _missing_token,
     _redact,
@@ -152,8 +166,33 @@ def main(
     return 1
 
 
+# The only usage errors shown as argparse words them: none holds a word of the command line.
+_SAFE_USAGE_ERROR = re.compile(
+    r"argument --url: expected one argument|the following arguments are required: command"
+)
+
+_ARGUMENT_WITHHELD = (
+    "the command line has a word this command does not take, not shown since it may be "
+    "your token. A token is never given on the command line: run "
+    "python -m qte_sdk.token set and paste it at the hidden prompt. If you typed your "
+    "token on the command line, remove it from your shell history"
+)
+
+
+class _Parser(argparse.ArgumentParser):
+    """An `ArgumentParser` whose usage errors never repeat a word of the command line:
+    argparse's own can ("unrecognized arguments: ...", "invalid choice: ...", "ignored
+    explicit argument ..."), and the word is the token when one is pasted there. Only the
+    errors in `_SAFE_USAGE_ERROR` are shown as they are; any other gives one fixed text."""
+
+    def error(self, message: str):  # type: ignore[override]
+        if not _SAFE_USAGE_ERROR.fullmatch(message):
+            message = _ARGUMENT_WITHHELD
+        super().error(message)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="python -m qte_sdk.token",
         description="Set up the exchange address and your token for qte_sdk.",
     )
@@ -238,7 +277,7 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     lines = _existing_lines(path)
     _refuse_if_tracked(_on_disk(path))
     address = _ask_address(url, ask)
-    secret = _ask_token(ask_secret)
+    secret, unusual = _ask_token(ask_secret)
     _offer_gitignore(path, ask)
     text = _merge(lines, {URL_ENV_VAR: address, TOKEN_ENV_VAR: secret.value})
     if len(text.encode("utf-8")) > MAX_DOTENV_SIZE:
@@ -254,6 +293,8 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     del text, secret, lines
     print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}{_privacy(path)}")
     print("Run your programs from this folder, so the SDK finds it.")
+    if unusual:
+        print(unusual, file=sys.stderr)
     if os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR):
         print(
             f"Note: {TOKEN_ENV_VAR} or {TOKEN_FILE_ENV_VAR} is set in this terminal, and the "
@@ -323,17 +364,56 @@ def _ask_address(url: str | None, ask: Prompt) -> str:
     return url
 
 
-def _ask_token(ask_secret: Prompt) -> _Secret:
+def _ask_token(ask_secret: Prompt) -> tuple[_Secret, str | None]:
+    """Read the token, and refuse one that is empty or has a character no token has. Return
+    it with the warning to print once it is saved, if it is not shaped like a trading token,
+    or None. Neither the refusal nor the warning holds the token or any part of it."""
     secret = _read_secret(ask_secret)
-    problem = None
-    if not secret.value:
-        problem = _Refused(_errors.TOKEN_MISSING, where="what was entered")
-    elif not _is_plain(secret.value):
-        problem = _Refused(_errors.TOKEN_MALFORMED)
+    problem = interrupted = None
+    try:
+        if not secret.value:
+            problem = _Refused(_errors.TOKEN_MISSING, where="what was entered")
+        elif not _is_plain(secret.value):
+            problem = _Refused(
+                _errors.TOKEN_MALFORMED, where="entered", **_errors.token_faults(secret.value)
+            )
+        else:
+            unusual = _unusual(secret.value)
+    except BaseException as error:
+        # A Ctrl-C during these checks: their frames hold the token, so they are dropped.
+        interrupted = _detached(error)
+    if interrupted is not None:
+        del secret
+        raise interrupted
     if problem is not None:
         del secret
         raise problem
-    return secret
+    return secret, unusual
+
+
+# A trading token: 32 random bytes as 64 lowercase hex digits (qte-platform's
+# credential.NewToken).
+_TRADING_TOKEN_LENGTH = 64
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _unusual(value: str) -> str | None:
+    """The `QTE-TOKEN-UNUSUAL` warning for a token that passed `_is_plain` but is not 64
+    characters of 0-9 and a-f, or None. Only a warning, so a future token format still
+    works: it gives the length and whether a character falls outside 0-9 and a-f, never the
+    token or any part of it."""
+    outside = not set(value) <= _HEX_DIGITS
+    if len(value) == _TRADING_TOKEN_LENGTH and not outside:
+        return None
+    found = (
+        "characters outside 0-9 and a-f (capital letters count)" if outside else "only 0-9 and a-f"
+    )
+    return "warning: " + render(
+        _errors.TOKEN_UNUSUAL,
+        length=len(value),
+        characters=_errors.characters(len(value)),
+        found=found,
+    )
 
 
 def _read_secret(ask_secret: Prompt) -> _Secret:
@@ -501,6 +581,25 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
     path = Path(target).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
+    # A token typed in place of the path: refused before anything is made, and never shown,
+    # since every later message names the path, and .gitignore would be given its name. A
+    # line break or other control character is refused too: no path needs one, and a token
+    # split by them has no run to find. Each is looked for however often it was encoded.
+    if _looks_like_a_token(target):
+        raise _Refused(
+            _errors.TOKEN_SET_PATH,
+            path="the --file path",
+            problem=(
+                "has a run of 32 hex digits or a control character, not shown "
+                "since it may be your token"
+            ),
+            fix=(
+                "A token is never given on the command line: run python -m qte_sdk.token set "
+                "--file with the path of the file to write, and paste the token at the hidden "
+                "prompt. If you typed your token on the command line, remove it from your "
+                "shell history. If it is a real path, choose one without such a run"
+            ),
+        )
     if path.is_symlink() or path.is_dir():
         raise _not_a_file(path)
     directory = path.parent
@@ -524,10 +623,12 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             fix="Choose another path with --file PATH",
         )
     _refuse_if_tracked(path)
-    secret = _ask_token(ask_secret)
+    secret, unusual = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")
     del secret
     print(f"Saved the token to {path}{_privacy(path, sets_address=False)}")
+    if unusual:
+        print(unusual, file=sys.stderr)
     interrupted = False
     try:
         _offer_gitignore(path, ask)
@@ -547,6 +648,28 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             + _unset_advice([TOKEN_ENV_VAR], "to use the token file")
         )
     return 0
+
+
+def _looks_like_a_token(target: str) -> bool:
+    """Whether the `--file` path `target` may be a token: shaped like one (see
+    `errors.token_shaped`) or holding a control character or a line or paragraph break, as
+    typed or percent-decoded any number of times. Both are also looked for with every
+    character outside ASCII taken out, again and again with the decoding, since a token's
+    digits and a %0A are all ASCII and an invisible character between them would hide
+    them. Other characters outside ASCII, such as a no-break space or a joiner, are in real
+    names, so they are allowed. Each step that changes the text shortens it, so this ends."""
+    decoded = [target]
+    while unquote(decoded[-1]) != decoded[-1]:
+        decoded.append(unquote(decoded[-1]))
+    ascii_only = [target]
+    while (form := "".join(c for c in unquote(ascii_only[-1]) if c.isascii())) != ascii_only[-1]:
+        ascii_only.append(form)
+    forms = decoded + ascii_only
+    return any(
+        _errors.token_shaped(form)
+        or any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in form)
+        for form in forms
+    )
 
 
 def _not_a_file(path: Path) -> _Refused:
