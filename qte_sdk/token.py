@@ -49,8 +49,16 @@ refuses a path with a run of 32 hex digits, the shape of a token, without showin
 `check --json` prints one JSON document instead, with the same exit status (docs/errors.md
 gives its keys).
 A `QTE_LOG_FORMAT` other than json or text makes it exit 2 with `QTE-LOG-FORMAT-INVALID`.
-`set` exits with 0 when it saved, 1 when it refused, and 130 if stopped. Either exits with
-2, after a `usage:` line, if the command line is wrong.
+`set` refuses a token with a space, a quote, a #, or an invisible or control character,
+and says its length and which of those kinds it found. A token without them that is not 64
+characters of 0-9 and a-f, the shape of a trading token, is saved, with a
+`QTE-TOKEN-UNUSUAL` warning on stderr that gives its length and whether it has other
+characters, such as capitals; it is only a warning, so a future token format still works.
+Spaces and line breaks around a pasted token are removed before either check. Neither the
+refusal nor the warning ever shows the token or any part of it. `set` exits with 0 when it
+saved, 1 when it refused, and 130 if stopped. Either exits with 2, after a `usage:` line, if
+the command line is wrong; that error never repeats a word it did not expect, since a token
+pasted onto the command line would be one.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
@@ -71,7 +79,6 @@ import unicodedata
 import warnings
 from collections.abc import Callable
 from pathlib import Path
-from typing import NoReturn
 from urllib.parse import unquote
 
 from qte_sdk import _fileaccess
@@ -100,6 +107,7 @@ from qte_sdk.session import (
     TOKEN_FILE_ENV_VAR,
     URL_ENV_VAR,
     MissingURL,
+    _detached,
     _find_token,
     _missing_token,
     _redact,
@@ -137,15 +145,7 @@ def main(
     """Run the command in `argv` and return its exit status. `ask`, `ask_secret` and
     `interactive` read the answers and tell whether a person is at the keyboard; tests
     replace them."""
-    if argv is None:
-        argv = sys.argv[1:]
-    parser = _parser()
-    try:
-        args = parser.parse_args(argv)
-    except _UsageError as error:
-        error.parser.print_usage(sys.stderr)
-        print(f"{error.parser.prog}: error: {_not_shown(error.message, argv)}", file=sys.stderr)
-        return 2
+    args = _parser().parse_args(argv)
     if args.extra:
         # A mistake on the command line, so exit 2 like argparse, with nothing on stdout.
         args.subparser.print_usage(sys.stderr)
@@ -171,54 +171,29 @@ def main(
     return 1
 
 
-class _UsageError(Exception):
-    def __init__(self, parser: argparse.ArgumentParser, message: str) -> None:
-        super().__init__(message)
-        self.parser = parser
-        self.message = message
+# The only usage errors shown as argparse words them: none holds a word of the command line.
+_SAFE_USAGE_ERROR = re.compile(
+    r"argument --url: expected one argument|the following arguments are required: command"
+)
+
+_ARGUMENT_WITHHELD = (
+    "the command line has a word this command does not take, not shown since it may be "
+    "your token. A token is never given on the command line: run "
+    "python -m qte_sdk.token set and paste it at the hidden prompt. If you typed your "
+    "token on the command line, remove it from your shell history"
+)
 
 
 class _Parser(argparse.ArgumentParser):
-    """An `ArgumentParser` whose errors are raised, so `main` can print them without what
-    was typed."""
+    """An `ArgumentParser` whose usage errors never repeat a word of the command line:
+    argparse's own can ("unrecognized arguments: ...", "invalid choice: ...", "ignored
+    explicit argument ..."), and the word is the token when one is pasted there. Only the
+    errors in `_SAFE_USAGE_ERROR` are shown as they are; any other gives one fixed text."""
 
-    def error(self, message: str) -> NoReturn:
-        raise _UsageError(self, message)
-
-
-# The words of the command line itself; anything else typed may be a token.
-_KNOWN_WORDS = frozenset({"set", "check", "--url", "--file", "--json", "-h", "--help"})
-
-
-# A quoted value in an argparse message, as repr() writes it.
-_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
-# A word of the command line standing alone, quoted or not, as argparse lists the choices.
-_KNOWN_WORD = re.compile(
-    r"(?<![\w-])(?:"
-    + "|".join(re.escape(word) for word in sorted(_KNOWN_WORDS, key=len, reverse=True))
-    + r")(?![\w-])"
-)
-# Messages whose whole tail is what was typed.
-_TYPED_TAIL = re.compile(r"(unrecognized arguments|ambiguous option): .*", re.DOTALL)
-_UNREADABLE = (
-    "the command line could not be read; what was typed is not shown, since it may be your token"
-)
-
-
-def _not_shown(message: str, argv: list[str]) -> str:
-    """`message` without anything typed in `argv`, since argparse quotes what it could not
-    parse (an unknown command, say) and that may be the token. Each quoted value and the
-    tail of an "unrecognized arguments" or "ambiguous option" message becomes `(not shown)`;
-    if any form of what was typed is still there, outside the words of the command line
-    (so a typo such as "chec" is not found inside "check"), the whole message is replaced."""
-    message = _QUOTED.sub(lambda m: m[0] if m[0][1:-1] in _KNOWN_WORDS else "(not shown)", message)
-    message = _TYPED_TAIL.sub(r"\1: (not shown)", message)
-    rest = _KNOWN_WORD.sub(" ", _QUOTED.sub(" ", message))
-    for typed in argv:
-        forms = {typed, typed.partition("=")[2], repr(typed)[1:-1]} - _KNOWN_WORDS
-        if any(len(form) >= 4 and form in rest for form in forms):
-            return _UNREADABLE
-    return message
+    def error(self, message: str):  # type: ignore[override]
+        if not _SAFE_USAGE_ERROR.fullmatch(message):
+            message = _ARGUMENT_WITHHELD
+        super().error(message)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -311,7 +286,7 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     lines = _existing_lines(path)
     _refuse_if_tracked(_on_disk(path))
     address = _ask_address(url, ask)
-    secret = _ask_token(ask_secret)
+    secret, unusual = _ask_token(ask_secret)
     _offer_gitignore(path, ask)
     text = _merge(lines, {URL_ENV_VAR: address, TOKEN_ENV_VAR: secret.value})
     if len(text.encode("utf-8")) > MAX_DOTENV_SIZE:
@@ -327,6 +302,8 @@ def _set_dotenv(url: str | None, ask: Prompt, ask_secret: Prompt) -> int:
     del text, secret, lines
     print(f"Saved {URL_ENV_VAR} and {TOKEN_ENV_VAR} to {path}{_privacy(path)}")
     print("Run your programs from this folder, so the SDK finds it.")
+    if unusual:
+        print(unusual, file=sys.stderr)
     if os.environ.get(TOKEN_ENV_VAR) or os.environ.get(TOKEN_FILE_ENV_VAR):
         print(
             f"Note: {TOKEN_ENV_VAR} or {TOKEN_FILE_ENV_VAR} is set in this terminal, and the "
@@ -396,17 +373,56 @@ def _ask_address(url: str | None, ask: Prompt) -> str:
     return url
 
 
-def _ask_token(ask_secret: Prompt) -> _Secret:
+def _ask_token(ask_secret: Prompt) -> tuple[_Secret, str | None]:
+    """Read the token, and refuse one that is empty or has a character no token has. Return
+    it with the warning to print once it is saved, if it is not shaped like a trading token,
+    or None. Neither the refusal nor the warning holds the token or any part of it."""
     secret = _read_secret(ask_secret)
-    problem = None
-    if not secret.value:
-        problem = _Refused(_errors.TOKEN_MISSING, where="what was entered")
-    elif not _is_plain(secret.value):
-        problem = _Refused(_errors.TOKEN_MALFORMED)
+    problem = interrupted = None
+    try:
+        if not secret.value:
+            problem = _Refused(_errors.TOKEN_MISSING, where="what was entered")
+        elif not _is_plain(secret.value):
+            problem = _Refused(
+                _errors.TOKEN_MALFORMED, where="entered", **_errors.token_faults(secret.value)
+            )
+        else:
+            unusual = _unusual(secret.value)
+    except BaseException as error:
+        # A Ctrl-C during these checks: their frames hold the token, so they are dropped.
+        interrupted = _detached(error)
+    if interrupted is not None:
+        del secret
+        raise interrupted
     if problem is not None:
         del secret
         raise problem
-    return secret
+    return secret, unusual
+
+
+# A trading token: 32 random bytes as 64 lowercase hex digits (qte-platform's
+# credential.NewToken).
+_TRADING_TOKEN_LENGTH = 64
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _unusual(value: str) -> str | None:
+    """The `QTE-TOKEN-UNUSUAL` warning for a token that passed `_is_plain` but is not 64
+    characters of 0-9 and a-f, or None. Only a warning, so a future token format still
+    works: it gives the length and whether a character falls outside 0-9 and a-f, never the
+    token or any part of it."""
+    outside = not set(value) <= _HEX_DIGITS
+    if len(value) == _TRADING_TOKEN_LENGTH and not outside:
+        return None
+    found = (
+        "characters outside 0-9 and a-f (capital letters count)" if outside else "only 0-9 and a-f"
+    )
+    return "warning: " + render(
+        _errors.TOKEN_UNUSUAL,
+        length=len(value),
+        characters=_errors.characters(len(value)),
+        found=found,
+    )
 
 
 def _read_secret(ask_secret: Prompt) -> _Secret:
@@ -616,10 +632,12 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             fix="Choose another path with --file PATH",
         )
     _refuse_if_tracked(path)
-    secret = _ask_token(ask_secret)
+    secret, unusual = _ask_token(ask_secret)
     _write_private(path, secret.value + "\n")
     del secret
     print(f"Saved the token to {path}{_privacy(path, sets_address=False)}")
+    if unusual:
+        print(unusual, file=sys.stderr)
     interrupted = False
     try:
         _offer_gitignore(path, ask)

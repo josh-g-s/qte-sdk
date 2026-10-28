@@ -10,15 +10,18 @@ import shutil
 import stat
 import subprocess
 import sys
+import traceback
 import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import unquote
 
 import pytest
 
 from qte_sdk import _fileaccess
 from qte_sdk import dotenv as dotenv_module
+from qte_sdk import errors as errors_module
 from qte_sdk import token as helper
 from qte_sdk.session import TOKEN_ENV_VAR, TOKEN_FILE_ENV_VAR, URL_ENV_VAR, resolve_token
 
@@ -211,10 +214,182 @@ def test_an_odd_token_is_refused_without_echoing_it(pasted: str, capsys):
         assert pasted not in out + err
 
 
+# What a trading token looks like: 64 characters, 0-9 and a-f (qte-platform's
+# credential.NewToken). Each case is built around a fresh one.
+HEX = "0123456789abcdef"
+
+
+def trading_token() -> str:
+    return secrets.token_hex(32)
+
+
+def assert_nothing_of(pasted: str, text: str) -> None:
+    """Neither `pasted` nor any 8 characters of it, as typed or as stripped, is in `text`."""
+    for form in {pasted, pasted.strip()}:
+        assert form not in text
+        assert_token_absent(form, text)
+
+
+# Each paste, with the length `set` sees once it strips the paste, and the kinds it names.
+REFUSED = {
+    "a non-breaking space": (lambda t: t[:32] + "\u00a0" + t[32:], 65, "a space"),
+    "a zero-width space": (lambda t: t + "\u200b", 65, "an invisible or control character"),
+    "double quotes": (lambda t: f'"{t}"', 66, "a quote"),
+    "single quotes": (lambda t: f"'{t}'", 66, "a quote"),
+    "a label": (lambda t: f"Token: {t}", 71, "a space"),
+    "a label with an accent": (lambda t: f"Clé {t}", 68, "a space"),
+    "a Windows Ctrl+V": (lambda t: "\x16" + t, 65, "an invisible or control character"),
+    "a #": (lambda t: "#" + t, 65, "a #"),
+    "a comment": (lambda t: t + " # ours", 71, "a space and a #"),
+    "several kinds": (
+        lambda t: f"Token: '{t}'\u200b#",
+        75,
+        "a space, a quote, a # and an invisible or control character",
+    ),
+}
+
+
+def test_a_zero_width_space_is_not_printable_so_it_is_refused():
+    assert not "\u200b".isprintable()
+    assert not helper._is_plain(trading_token() + "\u200b")
+
+
+@pytest.mark.parametrize("case", REFUSED)
+def test_a_token_with_a_character_no_token_has_is_refused_with_a_hint(case: str, capsys):
+    make, length, found = REFUSED[case]
+    pasted = make(trading_token())
+    assert run(["set"], ask=answers(URL), ask_secret=answers(pasted)) == 1
+    assert not dotenv().exists()
+    out, err = capsys.readouterr()
+    assert err.startswith("error: QTE-TOKEN-MALFORMED: ")
+    assert f"is {length} characters long and has {found}, which no token has" in err
+    assert "64 characters, 0-9 and a-f" in err
+    assert "warning:" not in err
+    assert_nothing_of(pasted, out + err)
+    with pytest.raises(helper._Refused) as refused:
+        helper._ask_token(answers(pasted))
+    assert refused.value.fields == {
+        "where": "entered",
+        "length": length,
+        "characters": "characters",
+        "found": found,
+    }
+    assert_nothing_of(pasted, str(refused.value) + repr(refused.value.args))
+
+
+def test_a_length_of_one_is_one_character():
+    faults = errors_module.token_faults("x")
+    assert faults["characters"] == "character"
+    shown = errors_module.render(errors_module.TOKEN_MALFORMED, where="entered", **faults)
+    assert " is 1 character long " in shown
+    shown = errors_module.render(
+        errors_module.TOKEN_UNUSUAL, length=1, characters="character", found="only 0-9 and a-f"
+    )
+    assert " is 1 character long " in shown
+    assert errors_module.token_faults("xy")["characters"] == "characters"
+
+
+def test_the_hint_names_kinds_but_never_a_codepoint_or_a_position(capsys):
+    token = trading_token()
+    pasted = token[:10] + "\u200b" + token[10:]
+    assert run(["set"], ask=answers(URL), ask_secret=answers(pasted)) == 1
+    err = capsys.readouterr().err
+    for leak in ("200b", "200B", "\\u", "U+", "position", "at character", "11"):
+        assert leak not in err
+
+
+class Interrupt(BaseException):
+    """Stands for a Ctrl-C."""
+
+
+def test_an_interruption_while_the_hint_is_made_shows_no_frame_holding_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def interrupted(_: str) -> str:
+        raise Interrupt
+
+    monkeypatch.setattr(errors_module, "unicodedata", SimpleNamespace(category=interrupted))
+    pasted = "Token: " + trading_token()
+    with pytest.raises(Interrupt) as caught:
+        helper._ask_token(answers(pasted))
+    rendered = traceback.TracebackException.from_exception(caught.value, capture_locals=True)
+    frames = [frame for frame in rendered.stack if frame.filename != __file__]
+    assert [frame.name for frame in frames] == ["_ask_token"]
+    assert_nothing_of(pasted, "\n".join(f"{frame.name} {frame.locals}" for frame in frames))
+
+
+# Each paste that passes the check but is not shaped like a trading token, with what the
+# warning says of it.
+WARNED = {
+    "cut short": (lambda t: t[:40], "is 40 characters long and has only 0-9 and a-f, but"),
+    "in capitals": (
+        lambda t: t.upper(),
+        "is 64 characters long and has characters outside 0-9 and a-f (capital letters count), but",
+    ),
+    "with a non-hex letter": (
+        lambda t: t[:63] + "g",
+        "is 64 characters long and has characters outside 0-9 and a-f (capital letters count), but",
+    ),
+    "too long": (lambda t: t + "0", "is 65 characters long and has only 0-9 and a-f, but"),
+}
+
+
+@pytest.mark.parametrize("case", WARNED)
+@pytest.mark.parametrize("to_file", [False, True], ids=["dotenv", "file"])
+def test_an_unusual_token_is_saved_with_a_warning(case: str, to_file: bool, home, capsys):
+    make, said = WARNED[case]
+    pasted = make(trading_token())
+    argv = ["set", "--file"] if to_file else ["set"]
+    ask = answers("n") if to_file else answers(URL)
+    assert run(argv, ask=ask, ask_secret=answers(pasted)) == 0
+    if to_file:
+        assert (home / ".qte" / "token").read_text() == pasted + "\n"
+    else:
+        assert resolve_token() == pasted
+    out, err = capsys.readouterr()
+    warning = [line for line in err.splitlines() if line.startswith("warning: ")]
+    assert len(warning) == 1
+    assert warning[0].startswith("warning: QTE-TOKEN-UNUSUAL: the token entered is ")
+    assert said in warning[0]
+    found = said.split(" and has ", 1)[1].removesuffix(", but")
+    assert warning[0] == "warning: " + errors_module.render(
+        errors_module.TOKEN_UNUSUAL,
+        length=len(pasted),
+        characters="character" if len(pasted) == 1 else "characters",
+        found=found,
+    )
+    assert "a trading token is 64 characters, 0-9 and a-f" in warning[0]
+    assert "It was saved anyway" in warning[0]
+    assert "error:" not in err
+    assert_nothing_of(pasted, out + err)
+
+
+def test_a_trading_token_gets_neither_a_refusal_nor_a_warning(capsys):
+    token = trading_token()
+    assert set(token) <= set(HEX) and len(token) == 64
+    assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    assert resolve_token() == token
+    out, err = capsys.readouterr()
+    assert "warning:" not in err
+    assert "error:" not in err
+    assert "QTE-TOKEN-MALFORMED" not in out + err
+    assert_nothing_of(token, out + err)
+
+
 def test_surrounding_whitespace_from_a_paste_is_removed():
     token = synthetic_token()
     assert run(["set"], ask=answers(URL), ask_secret=answers(f"  {token}\n")) == 0
     assert resolve_token() == token
+
+
+@pytest.mark.parametrize("around", [" ", "\t", "\n", "\r\n", "\u00a0"])
+def test_spaces_around_a_trading_token_are_removed_with_no_warning(around: str, capsys):
+    token = trading_token()
+    pasted = around + token + around
+    assert run(["set"], ask=answers(URL), ask_secret=answers(pasted)) == 0
+    assert resolve_token() == token
+    err = capsys.readouterr().err
+    assert "warning:" not in err and "error:" not in err
 
 
 def test_set_needs_a_terminal_and_asks_for_nothing_without_one(capsys):
@@ -1943,104 +2118,75 @@ def test_a_value_after_the_command_is_refused_and_never_printed(
     assert sorted(tmp_path.rglob("*")) == before
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        [TOKEN],
-        [TOKEN + "\\x"],
-        [TOKEN + "\n'\""],
-        ["set", f"--bogus={TOKEN}"],
-        ["--bogus", TOKEN, "set"],
-        ["check", f"--json={TOKEN}"],
-        ["check", f"--j={TOKEN}"],
-        ["set", f"--help={TOKEN}"],
-        ["set", f"--he={TOKEN}"],
-        [f"-h={TOKEN}"],
-        [f"--{TOKEN}", "set"],
-    ],
-    ids=[
-        "as the command",
-        "escaped",
-        "with a newline and quotes",
-        "in an unknown option",
-        "after an unknown option",
-        "attached to --json",
-        "attached to an abbreviation",
-        "attached to --help",
-        "attached to an abbreviated --help",
-        "attached to -h",
-        "as an option name",
-    ],
-)
-def test_argparse_errors_never_print_what_was_typed(argv, home, tmp_path, capsys, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    assert helper.main(argv) == 2
+# Command lines a token pasted in the wrong place makes, each with the token at {}. A token
+# after the command is refused before argparse sees it as a mistake (see above).
+TOKEN_ON_THE_COMMAND_LINE = {
+    "as the command": ["{}"],
+    "as an unknown option": ["set", "--token={}"],
+    "as --json's value": ["check", "--json={}"],
+    "as an abbreviated --json's value": ["check", "--j={}"],
+    "as --help's value": ["set", "--help={}"],
+    "as -h's value": ["check", "-h={}"],
+    "joined to -h": ["check", "-h{}"],
+    "with a newline": ["{}\n"],
+    "as an ambiguous option's value": ["set", "--=x", "{}"],
+}
+
+
+@pytest.mark.parametrize("case", TOKEN_ON_THE_COMMAND_LINE)
+def test_a_token_on_the_command_line_is_never_repeated(case: str, capsys):
+    token = secrets.token_hex(32)
+    argv = [word.format(token) for word in TOKEN_ON_THE_COMMAND_LINE[case]]
+    with pytest.raises(SystemExit) as exited:
+        helper.main(argv, ask=never, ask_secret=never, interactive=lambda: True)
     out, err = capsys.readouterr()
-    assert out == ""
-    assert "error:" in err and "not shown" in err
-    assert TOKEN not in err and TOKEN[:16] not in err
+    if exited.value.code == 0:
+        # Newer Pythons read -h<token> as -h: the help, which holds nothing typed.
+        assert case == "joined to -h" and out.startswith("usage: ") and err == ""
+    else:
+        assert exited.value.code == 2
+        assert out == ""
+        assert err.startswith("usage: ")
+        assert "not shown since it may be your token" in err
+        assert "remove it from your shell history" in err
+    for start in range(len(token) - 7):
+        assert token[start : start + 8] not in out + err
 
 
-def test_argparse_errors_keep_the_words_of_the_command_line(capsys):
-    assert helper.main(["set", "--url"]) == 2
-    assert "argument --url: expected one argument" in capsys.readouterr().err
-    assert helper.main(["--bogus"]) == 2
-    assert "the following arguments are required: command" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    ("message", "argv", "expected"),
-    [
-        (
-            "argument command: invalid choice: 'DEMO_SECRET' (choose from 'set', 'check')",
-            [],
-            "argument command: invalid choice: (not shown) (choose from 'set', 'check')",
-        ),
-        (
-            "argument command: invalid choice: 'DEMO\\\\x\\n\\'\"' (choose from set, check)",
-            [],
-            "argument command: invalid choice: (not shown) (choose from set, check)",
-        ),
-        ("unrecognized arguments: DEMO_SECRET --x", [], "unrecognized arguments: (not shown)"),
-        ("ambiguous option: --DEMO_SECRET could match", [], "ambiguous option: (not shown)"),
-        ("argument --json: something DEMO_SECRET", ["DEMO_SECRET"], helper._UNREADABLE),
-        ("argument --json: something DEMO_SECRET", ["--json=DEMO_SECRET"], helper._UNREADABLE),
-        ("argument --json: something DEMO\\\\x", ["DEMO\\x"], helper._UNREADABLE),
-        (
-            "argument command: invalid choice: 'chec' (choose from 'set', 'check')",
-            ["chec"],
-            "argument command: invalid choice: (not shown) (choose from 'set', 'check')",
-        ),
-        (
-            "argument command: invalid choice: 'chec' (choose from set, check)",
-            ["chec"],
-            "argument command: invalid choice: (not shown) (choose from set, check)",
-        ),
-        (
-            "argument --url: expected one argument",
-            ["set", "--url"],
-            "argument --url: expected one argument",
-        ),
-    ],
-    ids=[
-        "quoted value",
-        "repr-escaped quoted value",
-        "unrecognized arguments tail",
-        "ambiguous option tail",
-        "fallback for what was typed",
-        "fallback for the = form",
-        "fallback for the repr form",
-        "a typo of a known word, quoted choices",
-        "a typo of a known word, unquoted choices",
-        "known words survive",
-    ],
-)
-def test_not_shown_removes_each_form_of_what_was_typed(message, argv, expected):
-    assert helper._not_shown(message, argv) == expected
-
-
-def test_a_typo_of_a_command_names_the_choices_and_hides_the_typo(capsys):
-    assert helper.main(["chec"]) == 2
+def test_a_usage_error_with_no_stray_word_still_says_what_is_wrong(capsys):
+    with pytest.raises(SystemExit) as exited:
+        helper.main(["set", "--url"], ask=never, ask_secret=never, interactive=lambda: True)
+    assert exited.value.code == 2
     err = capsys.readouterr().err
-    assert "error: argument command: invalid choice: (not shown) (choose from " in err
-    assert "check" in err and helper._UNREADABLE not in err
+    assert "argument --url: expected one argument" in err
+    assert "not shown" not in err
+
+
+SAFE_USAGE_ERRORS = [
+    "argument --url: expected one argument",
+    "the following arguments are required: command",
+]
+
+
+@pytest.mark.parametrize("message", SAFE_USAGE_ERRORS)
+def test_only_the_exact_safe_usage_errors_are_shown_as_argparse_words_them(message, capsys):
+    token = secrets.token_hex(32)
+    for shown, expected in [(message, message), (f"{message} {token}", None)]:
+        with pytest.raises(SystemExit) as exited:
+            helper._parser().error(shown)
+        assert exited.value.code == 2
+        err = capsys.readouterr().err
+        if expected is not None:
+            assert err.endswith(f": error: {expected}\n")
+        else:
+            assert "not shown since it may be your token" in err
+            for start in range(len(token) - 7):
+                assert token[start : start + 8] not in err
+
+
+def test_no_command_says_a_command_is_required(capsys):
+    with pytest.raises(SystemExit) as exited:
+        helper.main([], ask=never, ask_secret=never, interactive=lambda: True)
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert err.endswith("error: the following arguments are required: command\n")

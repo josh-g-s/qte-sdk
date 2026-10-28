@@ -4938,3 +4938,64 @@ def test_the_reconnecting_examples_bound_each_close_of_the_connection():
         source = (EXAMPLES_DIR / name).read_text()
         assert source.count("ReconnectingSession(") == 1, name
         assert source.count("close_timeout=CLOSE_SECONDS") == 1, name
+
+
+# The arguments each example that does not reconnect needs to run, and the line of its
+# output that reports a dropped connection.
+NO_RECONNECT_ARGS = {
+    "take_liquidity.py": (
+        "--instrument", INSTRUMENT, "--strat-id", "close-test", "--side", "buy", "--seconds", "5"
+    ),
+    "fundamentals_pod.py": (
+        "--instrument", "AAPL", "--side", "buy", "--shares", "500", "--limit", "201.50",
+        "--thesis-id", "t-aapl", "--thesis-version", "1",
+    ),
+    "out_of_hours.py": ("--instrument", INSTRUMENT, "--seconds", "5"),
+    "smoke_test.py": ("--instruments", INSTRUMENT, "--seconds", "1"),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", sorted(NO_RECONNECT_ARGS))
+@pytest.mark.parametrize(
+    ("code", "reason", "expected"),
+    [
+        (1008, "too many messages during a switch", "close code 1008: the gateway closed you"),
+        (1008, "credential revoked", 'close code 1008, reason "credential revoked": your token'),
+        (1011, "sequencer stopped", 'close code 1011, reason "sequencer stopped": the exchange'),
+    ],
+    ids=["1008-switch", "1008-revoked", "1011"],
+)
+async def test_each_example_that_does_not_reconnect_names_the_close_code(
+    name: str, code: int, reason: str, expected: str
+):
+    # The exchange acknowledges the session, waits briefly for the client's first message,
+    # then closes the connection with `code`.
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        ack = {
+            "session_id": "s-1",
+            "team": "team-a",
+            "server_time": "1",
+            "contract_version": CONTRACT_VERSION,
+            "unscored": True,
+        }
+        await ws.send(
+            json.dumps(
+                {"version": CONTRACT_VERSION, "type": "session_ack", "payload": ack, "seq": 1}
+            )
+        )
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(0.5):
+                await ws.recv()
+        await ws.close(code, reason)
+
+    token = synthetic_token()
+    async with serve_local(handler) as url:
+        status, out, err = await run_example(
+            name, url, token, *NO_RECONNECT_ARGS[name], QTE_STRAT_ID="close-test"
+        )
+    assert status != 0, out + err
+    assert expected in out + err
+    assert token not in out + err
+    if code == 1008 and reason != "credential revoked":
+        assert reason not in out + err  # a reason the SDK does not show yet is withheld
