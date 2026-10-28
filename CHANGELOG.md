@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.92
+**Version:** 0.93
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- The quickstart, both copies of AGENTS.md and the `qte_sdk.tickets` docstrings say what a program sees across a stock split: a book held over the ex-date is the last session's, in pre-split prices, until the first grid point at the open sends a new book with no wall and `REFERENCE_UNAVAILABLE` until the first live quote (check `grid_time`); a cure ticket's `shares` counts the shares filled plus the unfilled shares scaled by the split, `decision_price` stays pre-split, `filled_shares` and `average_fill_price` stay pre-split until the next fill and then mix units, `progress` is emptied, and `remaining_shares` gives the remainder; a cure scaled to no unfilled share ends `TICKET_COMPLETE` or `TICKET_SPLIT_CANCELLED`. New tests check the MTUM 4-for-1 split paths (#340).
 - `examples/take_liquidity.py`, `examples/fundamentals_pod.py`, `examples/out_of_hours.py` and `examples/smoke_test.py` name the close code when the connection drops, with a short cause when the code is known, from the new `qte_sdk.connection.describe_close`; a 1006 means no close frame arrived. Both copies of AGENTS.md and the `open_session` docstring list the closes to expect, and say that only `ReconnectingSession` handles them for you (#328).
 - Close reasons the contract fixes, `exchange stopping` (1001), `sequencer stopped` (1011) and `credential revoked` (1008), are now shown in errors instead of `<withheld>`. `ReconnectingSession` no longer reconnects after a 1008 `credential revoked` close, sent when your token is revoked or rotated: it raises the `ConnectionClosedError` at once, or, while connecting or resuming, a `SessionNotAcknowledged` or `ResumeNotAcknowledged` with the new attribute `credential_revoked` True. New constants `qte_sdk.connection.CREDENTIAL_REVOKED_CLOSE_CODE` and `CREDENTIAL_REVOKED_CLOSE_REASON` (#329).
 - `token set` and `token check` refuse a value they do not take, such as the token typed after the command, with `QTE-TOKEN-SET-ARGUMENT` as a usage error (exit 2), and never print it, wherever it falls among the options: the message now names the mistake and its error code (#331).
