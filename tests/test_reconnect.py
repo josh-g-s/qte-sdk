@@ -47,7 +47,11 @@ from qte_sdk.session import (
     TOKEN_FILE_ENV_VAR,
     AuthNotSent,
     MissingToken,
+    ResumeNotAcknowledged,
     SessionNotAcknowledged,
+    _Secret,
+    _send_auth,
+    _without_token,
 )
 
 # The fake exchange. Each connection runs the next script in turn; the last one repeats.
@@ -649,10 +653,17 @@ async def test_a_session_rejected_while_open_is_flagged_then_raised():
     [
         (ConnectionClosedError(None, None), True),
         (ConnectionClosedError(Close(4001, "term change"), None), True),
+        (ConnectionClosedError(Close(1008, "credential revoked"), None), False),
+        (ConnectionClosedError(Close(1008, "too many messages during a switch"), None), True),
+        (ConnectionClosedError(Close(1008, "<withheld>"), None), True),
+        (ConnectionClosedError(Close(1011, "credential revoked"), None), True),
+        (ConnectionClosedError(None, Close(1008, "credential revoked")), True),
         (ConnectionRefusedError(), True),
         (ssl.SSLCertVerificationError(), False),
         (TimeoutError(), True),
         (SessionNotAcknowledged("closed"), True),
+        (SessionNotAcknowledged("closed", close_code=1008, credential_revoked=True), False),
+        (SessionNotAcknowledged("closed", close_code=1008), True),
         (AuthNotSent("could not send auth"), False),
         (HandshakeFailed("InvalidMessage", None), True),
         (HandshakeFailed("InvalidHeader", None), False),
@@ -1473,3 +1484,78 @@ async def test_a_chain_halt_read_before_the_ack_shares_the_reconnecting_sessions
                         break
     assert len(caught) == 1
     assert "halted the options chain on SPY" in caught[0]
+
+
+async def test_a_revoked_credential_stops_the_session_without_reconnecting():
+    async def revoke(ws: ServerConnection, exchange: Exchange) -> None:
+        await ws.close(1008, "credential revoked")
+
+    exchange = Exchange(session(then=revoke), session())
+    events: list[object] = []
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        with pytest.raises(ConnectionClosedError) as caught:
+            async with rs:
+                async for event in rs:
+                    events.append(event)
+    assert caught.value.rcvd is not None
+    assert (caught.value.rcvd.code, caught.value.rcvd.reason) == (1008, "credential revoked")
+    assert [type(e) for e in events] == [Connected, *RESUMED, Disconnected]
+    assert exchange.connections == 1
+
+
+async def _revoke_before_ack(ws: ServerConnection, exchange: Exchange) -> None:
+    await exchange.recv(ws)
+    await ws.close(1008, "credential revoked")
+
+
+async def _revoke_before_resume_ack(ws: ServerConnection, exchange: Exchange) -> None:
+    await exchange.recv(ws)
+    await ws.send(ack())
+    await exchange.recv(ws)
+    await ws.close(1008, "credential revoked")
+
+
+def _revoked() -> ConnectionClosedError:
+    return ConnectionClosedError(Close(1008, "credential revoked"), None)
+
+
+class _RevokedWhileSending:
+    async def send(self, *args: object) -> None:
+        raise _revoked()
+
+
+async def test_a_credential_revoked_while_sending_auth_is_not_retried():
+    with pytest.raises(SessionNotAcknowledged) as caught:
+        await _send_auth(_RevokedWhileSending(), _Secret(synthetic_token()))
+    assert caught.value.credential_revoked
+    assert not is_retryable(caught.value)
+
+
+@pytest.mark.parametrize("kind", [SessionNotAcknowledged, ResumeNotAcknowledged, None])
+def test_withholding_the_token_keeps_a_credential_revoked(kind):
+    token = synthetic_token()
+    if kind is None:
+        error: BaseException = _revoked()
+    else:
+        error = kind("closed", close_code=1008, credential_revoked=True)
+    error.__context__ = ValueError(token)
+    replacement = _without_token(error, _Secret(token))
+    assert replacement is not None and token not in str(replacement)
+    assert replacement.credential_revoked
+    assert not is_retryable(replacement)
+
+
+@pytest.mark.parametrize("script", [_revoke_before_ack, _revoke_before_resume_ack])
+async def test_a_credential_revoked_while_connecting_is_not_retried(script: Script):
+    exchange = Exchange(script, session())
+    async with serve_local(exchange) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
+        with pytest.raises(SessionNotAcknowledged) as caught:
+            async with rs:
+                async for _ in rs:
+                    pass
+    assert caught.value.credential_revoked
+    assert caught.value.close_code == 1008
+    assert 'reason "credential revoked"' in str(caught.value)
+    assert exchange.connections == 1

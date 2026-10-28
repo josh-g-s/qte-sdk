@@ -54,6 +54,7 @@ from qte_sdk.connection import (
     SessionRejected,
     Unknown,
     _close_detail,
+    _credential_revoked,
     _received_close_code,
 )
 from qte_sdk.contract.v1.common_pb2 import RESUME, ReasonCodes
@@ -102,14 +103,19 @@ class SessionNotAcknowledged(QteError, Exception):
 
     `close_code` is the close code the exchange sent, when it closed the connection, for
     example `qte_sdk.connection.TERM_CHANGE_CLOSE_CODE`; otherwise None.
+    `credential_revoked` is True when that close said the token was revoked
+    (`qte_sdk.connection.CREDENTIAL_REVOKED_CLOSE_REASON`): connecting again with it fails.
     """
 
     code = _errors.SESSION_NOT_ACKNOWLEDGED
 
-    def __init__(self, *args: object, close_code: int | None = None) -> None:
+    def __init__(
+        self, *args: object, close_code: int | None = None, credential_revoked: bool = False
+    ) -> None:
         what = plain(" ".join(map(str, args))) or "the connection ended first"
         super().__init__(*args, fields={"what": what})
         self.close_code = close_code
+        self.credential_revoked = credential_revoked
 
 
 class AuthNotSent(SessionNotAcknowledged):
@@ -643,6 +649,7 @@ class Session:
             raise ResumeNotAcknowledged(
                 f"the connection closed before resume_ack{detail}",
                 close_code=_received_close_code(failure),
+                credential_revoked=_credential_revoked(failure),
             )
         if isinstance(answer, DecodeFailed):
             raise ResumeNotAcknowledged(f"resume_ack could not be decoded: {answer.error}")
@@ -1155,7 +1162,11 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
             text = f"could not send auth: {type(error).__name__}; details withheld"
         else:
             text = f"could not send auth: {type(error).__name__}: {error}"
-        replacement: BaseException = kind(text, close_code=_received_close_code(error))
+        replacement: BaseException = kind(
+            text,
+            close_code=_received_close_code(error),
+            credential_revoked=_credential_revoked(error),
+        )
     except BaseException as error:
         # Cancellation and interrupts keep their type, so they behave as they otherwise would.
         replacement = type(error)(*error.args)
@@ -1169,6 +1180,7 @@ async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
     events = conn.events()
     detail = ""
     close_code: int | None = None
+    revoked = False
     try:
         async for event in events:
             if isinstance(event, Received):
@@ -1192,10 +1204,13 @@ async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
         # and could echo the token.
         detail = _close_detail(error)
         close_code = _received_close_code(error)
+        revoked = _credential_revoked(error)
     finally:
         await events.aclose()
     raise SessionNotAcknowledged(
-        f"the connection closed before session_ack{detail}", close_code=close_code
+        f"the connection closed before session_ack{detail}",
+        close_code=close_code,
+        credential_revoked=revoked,
     )
 
 
@@ -1390,5 +1405,11 @@ def _without_token(error: BaseException, secret: _Secret) -> BaseException | Non
         return type(error)(error.reason_code, detail, reason_name=name)
     withheld = f"{type(error).__name__}; details withheld, since they repeated the token"
     if isinstance(error, SessionNotAcknowledged):
-        return type(error)(withheld, close_code=error.close_code)
-    return SessionNotAcknowledged(withheld, close_code=_received_close_code(error))
+        return type(error)(
+            withheld, close_code=error.close_code, credential_revoked=error.credential_revoked
+        )
+    return SessionNotAcknowledged(
+        withheld,
+        close_code=_received_close_code(error),
+        credential_revoked=_credential_revoked(error),
+    )

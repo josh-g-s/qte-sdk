@@ -12,7 +12,8 @@ import pytest
 from fake_exchange import LoopClock, exchange, frame, serve_local, silent_server
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection, serve
-from websockets.exceptions import ConnectionClosedError, InvalidHandshake
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError, InvalidHandshake
+from websockets.frames import Close
 
 from qte_sdk.connection import (
     TERM_CHANGE_CLOSE_CODE,
@@ -24,6 +25,8 @@ from qte_sdk.connection import (
     SeqGap,
     SessionRejected,
     Unknown,
+    _close_detail,
+    _without_close_reasons,
 )
 from qte_sdk.contract import codec
 from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT, ReasonCodes
@@ -939,3 +942,54 @@ async def test_received_built_positionally_still_works_and_equals_a_decoded_even
     assert built.unknown_enum_names() == {}
     assert event.payload is not None
     assert event == built
+
+
+@pytest.mark.parametrize("reason", ["exchange stopping", "sequencer stopped", "credential revoked"])
+def test_the_contracts_fixed_close_reasons_are_kept_in_errors(reason: str):
+    error = _without_close_reasons(ConnectionClosedError(Close(1008, reason), None))
+    assert error.rcvd == Close(1008, reason)
+    assert _close_detail(error) == f' (close code 1008, reason "{reason}")'
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"), [(1011, "sequencer stopped"), (1008, "credential revoked")]
+)
+async def test_the_contracts_fixed_close_reasons_are_kept(code: int, reason: str):
+    async def close_with(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(code, reason)
+
+    async with serve_local(close_with) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=secrets.token_hex(16)))
+            with pytest.raises(ConnectionClosed) as caught:
+                [event async for event in conn]
+    assert caught.value.rcvd is not None
+    assert (caught.value.rcvd.code, caught.value.rcvd.reason) == (code, reason)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "credential revoked {token}",
+        "Credential revoked",
+        "exchange stopping ",
+        "sequencer stopped.",
+    ],
+)
+async def test_a_fixed_close_reason_with_anything_added_is_withheld(reason: str):
+    token = secrets.token_hex(16)
+    reason = reason.format(token=token)
+
+    async def close_with(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(1008, reason)
+
+    async with serve_local(close_with) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=token))
+            with pytest.raises(ConnectionClosedError) as caught:
+                [event async for event in conn]
+    assert caught.value.rcvd is not None
+    assert (caught.value.rcvd.code, caught.value.rcvd.reason) == (1008, "<withheld>")
+    assert_withheld(caught.value, token)

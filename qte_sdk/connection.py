@@ -190,9 +190,24 @@ next begins, after every message already queued for it. Its reason text is
 `term change`. Report numbers start again in the new term, so reconnect and resume from 0,
 whatever the next session's calendar says."""
 
+CREDENTIAL_REVOKED_CLOSE_CODE = 1008
+CREDENTIAL_REVOKED_CLOSE_REASON = "credential revoked"
+"""The close code and reason text the exchange sends on every connection authenticated
+with a token that has just been revoked or rotated. Reconnecting with the same token is
+refused, so get a new token instead: `ReconnectingSession` does not retry this close."""
+
 # Close reasons whose exact text is fixed by the contract or by `websockets` itself, so
 # they cannot carry the token and are kept. Any other reason is withheld.
-_KNOWN_CLOSE_REASONS = frozenset({"heartbeat timeout", "term change", "keepalive ping timeout"})
+_KNOWN_CLOSE_REASONS = frozenset(
+    {
+        "heartbeat timeout",
+        "term change",
+        "keepalive ping timeout",
+        "exchange stopping",
+        "sequencer stopped",
+        CREDENTIAL_REVOKED_CLOSE_REASON,
+    }
+)
 
 
 def _without_close_reasons(error: ConnectionClosed) -> ConnectionClosed:
@@ -216,6 +231,16 @@ def _received_close_code(error: BaseException | None) -> int | None:
     if isinstance(error, ConnectionClosed) and error.rcvd is not None:
         return error.rcvd.code
     return None
+
+
+def _credential_revoked(error: BaseException | None) -> bool:
+    """Whether `error` is a close the peer sent because the token was revoked."""
+    close = error.rcvd if isinstance(error, ConnectionClosed) else None
+    return (
+        close is not None
+        and close.code == CREDENTIAL_REVOKED_CLOSE_CODE
+        and close.reason == CREDENTIAL_REVOKED_CLOSE_REASON
+    )
 
 
 def _close_detail(error: ConnectionClosed) -> str:
