@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.19
+**Version:** 0.20
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -194,9 +194,9 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 ### QTE-SESSION-NOT-ACKNOWLEDGED
 
-- Raised as: `qte_sdk.session.SessionNotAcknowledged`, with `close_code`. A `ReconnectingSession` retries it.
+- Raised as: `qte_sdk.session.SessionNotAcknowledged`, with `close_code` and `credential_revoked`. A `ReconnectingSession` retries it, unless `credential_revoked` is True (a close with code 1008 and reason `credential revoked`).
 - Cause: The connection closed, or `session_ack` could not be read, before the session was acknowledged; the message gives the close code, and the reason when it is one the SDK knows, such as `term change`.
-- Fix: Try again in a few seconds. If it keeps happening, run `python examples/smoke_test.py` and send its output to the course team.
+- Fix: Try again in a few seconds; if `credential_revoked` is True, get a new token instead, since the old one is refused. If it keeps happening, run `python examples/smoke_test.py` and send its output to the course team.
 
 ### QTE-SESSION-AUTH-NOT-SENT
 
@@ -220,7 +220,7 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 - Raised as: `qte_sdk.session.ResumeNotAcknowledged`, a `SessionNotAcknowledged`, from `Session.resume`.
 - Cause: The connection ended, or the `resume_ack` could not be read, before the exchange answered the resume. Reports sent while you were away were not replayed.
-- Fix: Open a new session and resume from the same `last_report_seq` (a `ReconnectingSession` does this).
+- Fix: Open a new session and resume from the same `last_report_seq` (a `ReconnectingSession` does this). If `credential_revoked` is True, get a new token first: the old one is refused, and a `ReconnectingSession` stops.
 
 ### QTE-SESSION-RESUME-TIMEOUT
 

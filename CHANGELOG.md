@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.83
+**Version:** 0.85
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,8 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- `examples/take_liquidity.py`, `examples/fundamentals_pod.py`, `examples/out_of_hours.py` and `examples/smoke_test.py` name the close code when the connection drops, with a short cause when the code is known, from the new `qte_sdk.connection.describe_close`; a 1006 means no close frame arrived. Both copies of AGENTS.md and the `open_session` docstring list the closes to expect, and say that only `ReconnectingSession` handles them for you (#328).
+- Close reasons the contract fixes, `exchange stopping` (1001), `sequencer stopped` (1011) and `credential revoked` (1008), are now shown in errors instead of `<withheld>`. `ReconnectingSession` no longer reconnects after a 1008 `credential revoked` close, sent when your token is revoked or rotated: it raises the `ConnectionClosedError` at once, or, while connecting or resuming, a `SessionNotAcknowledged` or `ResumeNotAcknowledged` with the new attribute `credential_revoked` True. New constants `qte_sdk.connection.CREDENTIAL_REVOKED_CLOSE_CODE` and `CREDENTIAL_REVOKED_CLOSE_REASON` (#329).
 - Docs only: the README, the quickstart and both copies of AGENTS.md say Winter's practice week runs as two terms, the second, `2026-10-28`, from the Wednesday 28 October 2026 open with no registrations (qte-platform G-254, #2834), so a Team Lead registers again before trading on 28 October and again before 2 November (#323).
 - `token set --file` refuses a path with a run of 32 hex digits, the shape of a token the exchange issues, or a control character or line break, as typed or percent-decoded, before it creates or asks for anything, with `QTE-TOKEN-SET-PATH` and without showing the path, since a token typed in place of the path would otherwise be printed back in every message that names it. The message says to remove the token from your shell history (#324).
 - The README, the quickstart, both copies of AGENTS.md and the automatic execution page name v1.5.1 as the latest release, and their install lines use the v1.5.1 zip (#291).

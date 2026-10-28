@@ -293,8 +293,9 @@ CODES: dict[str, Entry] = {
     SESSION_NOT_ACKNOWLEDGED: Entry(
         "{what}",
         "No session was opened",
-        "Try again in a few seconds (a ReconnectingSession does); if it keeps happening, "
-        "run python examples/smoke_test.py and send its output to the course team",
+        "Try again in a few seconds (a ReconnectingSession does), unless the reason is "
+        "credential revoked: then get a new token, since the old one is refused. If it keeps "
+        "happening, run python examples/smoke_test.py and send its output to the course team",
         "The connection ended, or session_ack could not be read, before the session was "
         "acknowledged",
         "Try again",
@@ -325,7 +326,8 @@ CODES: dict[str, Entry] = {
     SESSION_RESUME_NOT_ACKNOWLEDGED: Entry(
         "{what}",
         "Reports sent while you were away were not replayed",
-        "Open a new session and resume from the same last_report_seq",
+        "Open a new session and resume from the same last_report_seq, unless the reason is "
+        "credential revoked: then get a new token first, since the old one is refused",
         "The connection ended, or resume_ack could not be read, before the resume was answered",
         "Resume again on a new session",
     ),
