@@ -66,6 +66,7 @@ def test_every_parser_turns_colour_off():
             text.count("argparse.ArgumentParser(")
             + text.count(".add_parser(")
             + text.count("= Parser(")  # the smoke test's subclass
+            + text.count("= _Parser(")  # qte_sdk.token's subclass
         )
         assert text.count(".color = False") == parsers, path
 
