@@ -120,9 +120,9 @@ A tick's `filled_shares` counts the fills stamped at or before it, and an end po
 the ticket's final `filled_shares`. Every `ticket_state` carries the whole list, the
 connect-time set included, so each one replaces the list held and is never appended to:
 read `state.progress` from the state `LatestTickets` holds. The list is empty when the
-exchange holds no history for the ticket, and from a split adjustment of the ticket on,
-which no ticket sent today has. An exchange that does not send it yet (qte-platform
-#2349) reads the same: empty.
+exchange holds no history for the ticket, and from a split adjustment of the ticket on
+(a cure ticket still working at a split's open, as MTUM's on 5 November 2026 may
+be). An exchange that does not send it yet (qte-platform #2349) reads the same: empty.
 
 A `ticket_reject` refuses one message and changes nothing: it never stops a ticket. A
 ticket stops only by a `ticket_state` whose `status` is not `TICKET_WORKING`, and a
@@ -228,7 +228,14 @@ child orders still resting when a desk's ticket stops depends on why it stopped:
   ex-date cancels every working ordinary ticket in the instrument, with its fills so far
   standing and `stopped_mark` 0, since there is no valid mark at the open. No child is
   resting then, since the close before cancelled each one `SESSION_CLOSE`. Send a new
-  ticket in post-split shares if you still want the trade.
+  ticket in post-split shares if you still want the trade. A cure ticket is not stopped
+  but adjusted: while at least one unfilled share remains after scaling, its next state
+  keeps `TICKET_WORKING` with `shares` the shares filled plus the unfilled shares scaled
+  (and, under `SERVICE`, `due_shares` scaled), while `decision_price` stays pre-split,
+  `filled_shares` and `average_fill_price` stay pre-split until the next fill (fills are
+  not rescaled, so later ones mix in post-split shares and prices), and `progress` is
+  empty from then on; read `remaining_shares` for what remains. Scaled to no unfilled
+  share, it ends `TICKET_COMPLETE` if it has fills, else `TICKET_SPLIT_CANCELLED`.
 
 Every send checks what it can before sending, and raises `ValueError` or `TypeError`
 and sends nothing if a check fails: `request_ref` is 1 to 32 bytes of UTF-8, `instrument`
