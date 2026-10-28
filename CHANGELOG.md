@@ -1,12 +1,16 @@
 # Changelog
 
-**Version:** 0.100
+**Version:** 0.101
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+## 1.6.2
+
+**Check your code only if you act on the next step of a `SessionRejected` or an order reject.** 1.6.2 gives better next steps for two refusals: a team whose arm does not trade this term (from 2 November 2026, Agentic AI) is told at sign-in not to retry or ask for a new token, and an order `reject` of `STRATEGY_NOT_REGISTERED` says what to do (`qte_sdk.errors.order_reject_step`). It also brings the guidance on exchange handovers, gateway restarts and the requests a dropped session left unanswered (`Disconnected.unanswered`). Update with `python -m qte_sdk.update` and follow what it prints.
 
 - A `session_reject` of `NO_MARKET_ACCESS` whose detail says the team's arm is not open for trading this term (the term configuration's `open_arms`; from 2 Nov 2026, Agentic AI) now gives its own step: a term rule, so do not retry or ask for a new token. Any other `NO_MARKET_ACCESS` keeps the step to ask the Head of Technology. docs/errors.md, docs/out-of-hours.md and both copies of AGENTS.md say the same.
 - `qte_sdk.errors.order_reject_step` gives the next step for an order `reject`, by its reason's name or number (`ORDER_REJECT_STEPS`, listed under Order rejects in docs/errors.md). For `STRATEGY_NOT_REGISTERED` it says that each new term starts with no registrations and a retirement ends one, so the Team Lead registers the strategy again on the console (Strategy registration, Register a new strategy, Submit), after a retirement with a version above every one held under that strategy ID. `examples/quote_both_sides.py` prints it once per reason in a run, and the smoke test gives it for a rejected test order. The quickstart and both copies of AGENTS.md say the same.
