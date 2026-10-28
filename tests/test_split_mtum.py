@@ -67,6 +67,10 @@ NOV5_FIRST_QUOTE = NOV5_OPEN + 60_000
 # P / 4 ends in .5, so the half-even rounding of the scaled close is exercised.
 CLOSE_NOV4 = 240_123_458
 
+CASH = 5_000_000_000
+NOV4_AFTER = NOV4_CLOSE + 60_000  # a query after the 4 November close
+OUTSIDE = "LAST_OFFICIAL_CLOSE"  # the valuation basis outside a session
+
 
 def round_half_even_div(n: int, d: int) -> int:
     """`n / d` rounded half to even, for positive integers."""
@@ -134,11 +138,13 @@ def account_state(
     session_date: str,
     as_of: int,
     previous_close_equity: int,
+    basis: str = "LIVE_MARK",
 ) -> str:
     """03-outbound-order-events.md, `account_state` and `PositionValue`, with `summary`
     an `account_summary` (same file, `account_summary`) embedded whole. Inside a session
-    `valuation_basis` is `LIVE_MARK`, and a position with no valid mark yet is valued at
-    the last official close ("The valuation basis", "Before a valid mark in a session").
+    `valuation_basis` is `LIVE_MARK` (outside one, `LAST_OFFICIAL_CLOSE`), and a position
+    with no valid mark yet is valued at the last official close ("The valuation basis",
+    "Before a valid mark in a session").
     The reply carries no `report_seq` of its own ("Ordering")."""
     equity = cash + mtum * mtum_price
     summary = {
@@ -156,12 +162,28 @@ def account_state(
         "summary": summary,
         "cash": str(cash),
         "positions": [{"instrument": "MTUM", "quantity": str(mtum), "price": str(mtum_price)}],
-        "valuation_basis": "LIVE_MARK",
+        "valuation_basis": basis,
         "session_date": session_date,
         "as_of": str(as_of),
         "as_of_report_seq": str(as_of_report_seq),
     }
     return frame("account_state", payload)
+
+
+def progress(accepted: int, due: int, filled: int) -> list[dict[str, str]]:
+    """11-ticket-messages.md, "Progress (issue #2346)": a point at every 30-minute tick of
+    the 4 November session at or after `accepted_time`, through its close. Due and filled
+    climb evenly to the totals at the close (illustrative values)."""
+    ticks = [t for t in range(NOV4_OPEN, NOV4_CLOSE + 1, 1_800_000) if t >= accepted]
+    n = len(ticks)
+    return [
+        {
+            "time": str(t),
+            "due_shares": str(due * (i + 1) // n),
+            "filled_shares": str(filled * (i + 1) // n),
+        }
+        for i, t in enumerate(ticks)
+    ]
 
 
 def ticket_state(update_time: int, **fields: Any) -> dict[str, Any]:
@@ -199,10 +221,7 @@ def ticket_state(update_time: int, **fields: Any) -> dict[str, Any]:
         "config_version": 1,
         "last_assessment_time": str(NOV4_CLOSE),
         "filled_notional": str(600 * 240_200_000),
-        "progress": [
-            {"time": str(NOV4_CLOSE - 1_800_000), "due_shares": "900", "filled_shares": "600"},
-            {"time": str(NOV4_CLOSE), "due_shares": "1000", "filled_shares": "600"},
-        ],
+        "progress": progress(NOV4_OPEN + 600_000, 1000, 600),
     }
     payload.update(fields)
     return payload
@@ -242,7 +261,7 @@ async def test_the_split_posts_no_report_so_account_reports_keeps_the_pre_split_
     ref = await reports.query(rec)
     events = await received(
         *numbered(
-            account_state(ref, 40, 137, CLOSE_NOV4, 5_000_000_000, "2026-11-04", NOV4_CLOSE, 0),
+            account_state(ref, 40, 137, CLOSE_NOV4, CASH, "2026-11-04", NOV4_AFTER, 0, OUTSIDE),
             # 5 November open: the split stops the ordinary ticket (11-ticket-messages.md,
             # choice 17). Nothing else reaches the team: SplitPosting has no wire message.
             frame(
@@ -252,6 +271,8 @@ async def test_the_split_posts_no_report_so_account_reports_keeps_the_pre_split_
                     status="TICKET_SPLIT_CANCELLED",
                     stopped_time=str(NOV5_OPEN),
                     stopped_mark="0",
+                    progress=progress(NOV4_OPEN + 600_000, 1000, 600)
+                    + [{"time": str(NOV5_OPEN), "due_shares": "1000", "filled_shares": "600"}],
                 ),
             ),
         )
@@ -270,7 +291,7 @@ async def test_the_query_after_the_open_brings_the_scaled_position_and_close():
     rec = Recorder()
     first = await reports.query(rec)
     [before] = await received(
-        account_state(first, 40, 137, CLOSE_NOV4, 5_000_000_000, "2026-11-04", NOV4_CLOSE, 0)
+        account_state(first, 40, 137, CLOSE_NOV4, CASH, "2026-11-04", NOV4_AFTER, 0, OUTSIDE)
     )
     reports.update(before)
 
@@ -356,6 +377,34 @@ async def test_reports_around_the_post_split_reply_are_cut_by_as_of_report_seq()
     fill = post_split.message
     assert isinstance(fill, Execution)
     assert (fill.fill_size, fill.fill_price) == (40, 60_040_000)
+
+
+async def test_a_post_split_fill_before_the_reply_is_held_and_returned_after_it():
+    """A post-split fill (report 41) that arrives while the query is out is held and given
+    back after the reply, which reads the account at report 40 (03-outbound-order-events.md,
+    `account_state`, "Ordering")."""
+    reports = AccountReports()
+    ref = await reports.query(Recorder())
+    early_fill, reply = await received(
+        *numbered(
+            execution(41, 40, 60_040_000, NOV5_FIRST_QUOTE + 1_000),
+            account_state(
+                ref,
+                40,
+                split_quantity(137),
+                SCALED_CLOSE,
+                CASH,
+                "2026-11-05",
+                NOV5_QUERY,
+                CASH + 137 * CLOSE_NOV4,
+            ),
+        )
+    )
+    assert reports.update(early_fill) == [early_fill]
+    assert reports.update(reply) == [reply, early_fill]
+    [mtum] = reports.state.positions
+    # The program adds the fill to the reply's post-split position: 548 + 40, never 137 + 40.
+    assert mtum.quantity + early_fill.message.fill_size == 588
 
 
 # Path 2: resting orders, ordinary tickets and the first live quote.
@@ -568,6 +617,8 @@ async def test_a_surviving_cure_ticket_reports_mixed_units_and_keeps_working():
         algorithm="TWAP",
         cure=True,
         cure_deadline_date="2026-11-05",
+        accepted_time=str(NOV4_CLOSE - 3_600_000),
+        progress=progress(NOV4_CLOSE - 3_600_000, 400, 300),
         thesis_id=None,
         thesis_version=None,
     )
