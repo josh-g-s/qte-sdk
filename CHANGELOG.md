@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.90
+**Version:** 0.91
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -24,6 +24,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - The quickstart, both copies of AGENTS.md, docs/errors.md and the `qte_sdk.history` and `qte_sdk.replay` docstrings say that all five sessions with options cached before the history service's options build, 15 to 21 October 2026, have been upgraded and serve option chains and Greeks, so an unavailable answer is final for every session; the QTE-HISTORY-UNAVAILABLE message drops its upgrade exception (#319).
 - `python -m qte_sdk.token` no longer repeats a token pasted onto its command line: argparse's "unrecognized arguments" and "invalid choice" errors are replaced by one that names no word it did not expect, says to paste the token at the hidden prompt of `token set`, and to remove it from the shell history (#321).
 - The quickstart and both copies of AGENTS.md say that a resume covers only what the exchange had applied when it answered, replays as well as snapshots, and what the trading examples do when an order still in its order delay is missing from it; `examples/quote_both_sides.py` names each order by its request_ref when the connection drops, `examples/options_bot.py` no longer subscribes twice after a subscribe cut off by a drop, and the quickstart lists `examples/out_of_hours.py` among the examples that do not reconnect (#308).
+- Tests only: a gateway conformance suite. The handover and restart scenarios, and new section-0 checks (close codes passed on, 503 with no upstream, heartbeats both ways), run against the in-test fake gateway by default, or against a real `qte-gateway` binary named by `QTE_GATEWAY_BIN`, in front of two fake exchanges that speak the exchange side of the hot-switch link protocol v0.12. A stage-1 binary runs the section-0 checks and skips the handover ones, with a reason. tests/README.md says how (#311).
 
 ## 1.5.1
 
