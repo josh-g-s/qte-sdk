@@ -105,7 +105,7 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 - Raised as: `token set` or `token check` refuses to run, as a usage error: exit 2, a `usage:` line and this message on stderr, nothing on stdout (even with `--json`), and nothing changed.
 - Cause: The command was given a value it does not take, such as the token itself (`python -m qte_sdk.token set <token>`). The value is not shown, since it may be your token.
-- Fix: Run the command with nothing after it; `set` asks for the token. If you typed your token, clear it from your shell history.
+- Fix: Run the command again without that value, keeping any options such as `--file PATH`; `set` asks for the token. If you typed your token, clear it from your shell history.
 
 ### QTE-TOKEN-SET-WRITE
 

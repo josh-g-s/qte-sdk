@@ -193,10 +193,11 @@ CODES: dict[str, Entry] = {
         "your token, so nothing was changed",
         "The token is never taken on the command line, where your shell history and any log "
         "would keep it",
-        "Run `python -m qte_sdk.token {command}` with nothing after it; `set` asks for the "
-        "token. If you typed your token, clear it from your shell history",
+        "Run `python -m qte_sdk.token {command}` again without that value, keeping any "
+        "options; `set` asks for the token. If you typed your token, clear it from your shell "
+        "history",
         "`token set` or `token check` was given a value it does not take, such as the token",
-        "Run the command with nothing after it; `set` asks for the token",
+        "Run the command again without that value, keeping any options; `set` asks for the token",
     ),
     TOKEN_SET_WRITE: Entry(
         "could not {action} {path} ({strerror})",

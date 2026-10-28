@@ -2100,8 +2100,18 @@ TOKEN = "0123456789abcdef0123456789abcdef"
         ["set", "--file", "tokenfile", TOKEN],
         ["check", TOKEN],
         ["check", "--json", TOKEN],
+        ["check", TOKEN, "--json", TOKEN],
+        ["set", TOKEN, "--url", "wss://example.test", TOKEN],
     ],
-    ids=["set", "set --url", "set --file", "check", "check --json"],
+    ids=[
+        "set",
+        "set --url",
+        "set --file",
+        "check",
+        "check --json",
+        "check, interleaved",
+        "set, interleaved",
+    ],
 )
 def test_a_value_after_the_command_is_refused_and_never_printed(
     argv, home, tmp_path, capsys, monkeypatch
