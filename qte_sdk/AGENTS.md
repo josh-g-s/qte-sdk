@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.64
+**Version:** 1.65
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of 1.2.0 or later, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With an earlier release, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
@@ -55,6 +55,7 @@ Never build these into code as constants. They are set by the exchange and can c
 - the minimum time an order must rest before it may be cancelled or amended;
 - the price collar;
 - each instrument's tick and lot size, its sector for the Fundamentals sector limit, and which instruments your team may trade. Read them from the instruments table the exchange sends after the calendar (`session.wait_for_instrument_table()`, then `qte_sdk.instruments`), and never hard-code the list of instruments;
+- for a Market Making or Options Market Making desk, the market maker minimum per side. From Wednesday 28 October 2026, a Market Making desk must display at least one round lot of its instrument at its best bid and at its best offer, each side on its own, for a second to count towards its presence, and an Options Market Making desk at least 1 contract on each obligated side. Each name's round lot is shown in the console's obligations panel; this SDK cannot read it yet. The minimum is not scaled, and there is no exemption where one round lot is more than the desk's name cap allows; size at other prices does not make up for an undersized best bid or offer, a fill that takes a side below it fails the next second unless the desk restores it, and orders need not be multiples of the round lot. The round lot is not `lot_size`: `lot_size` in the instruments table is the smallest order size and the step order sizes go in, set by the exchange (currently 1 share or 1 contract), and every order must still respect it. `examples/quote_both_sides.py` quotes 1 share per side unless told otherwise, below the minimum wherever the round lot is more than 1 share: a Market Making desk passes `--size` equal to its name's round lot.
 - your team's message budgets. Pass the values your team was given to `qte_sdk.pacing.Budget`, never invented numbers;
 - the heartbeat interval, and how long the exchange waits before it drops a silent connection (the SDK's `liveness_timeout` is a client-side setting, not one of these);
 - trading days, holidays and hours. Read them from the calendar the exchange sends after you authenticate (`session.wait_for_calendar()`, then `qte_sdk.calendar.next_open` and `next_close`).
