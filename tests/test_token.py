@@ -592,6 +592,32 @@ TOKEN_AS_PATH: dict[str, Callable[[str, Path], str]] = {
 }
 
 
+# A path with a line or paragraph break or a control character and no token: refused for
+# that character alone, as typed or found only by percent-decoding.
+BREAK_IN_PATH = {
+    "U+2028": "notes\u2028token.txt",
+    "U+2029": "notes\u2029token.txt",
+    "NEL": "notes\x85token.txt",
+    "NEL percent-encoded": "notes%C2%85token.txt",
+    "U+2028 percent-encoded twice": "notes%25E2%2580%25A8token.txt",
+    "U+2029 percent-encoded twice": "notes%25E2%2580%25A9token.txt",
+}
+
+
+@pytest.mark.parametrize("target", BREAK_IN_PATH.values(), ids=BREAK_IN_PATH.keys())
+def test_set_file_refuses_a_path_with_a_break_even_with_no_token(
+    target: str, home: Path, tmp_path: Path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert run(["set", "--file", target]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith("error: QTE-TOKEN-SET-PATH: the --file path has a run of 32 hex ")
+    assert "notes" not in err
+    assert sorted(tmp_path.rglob("*")) == before
+
+
 @pytest.mark.parametrize("shape", TOKEN_AS_PATH.values(), ids=TOKEN_AS_PATH.keys())
 def test_set_file_refuses_a_token_given_as_the_path_without_showing_it(
     shape: Callable[[str, Path], str], home: Path, tmp_path: Path, capsys
