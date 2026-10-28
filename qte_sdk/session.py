@@ -1047,6 +1047,25 @@ async def open_session(
     It also starts the SDK's update check in the background, at most once a day, which
     logs a WARNING when a newer release is out and never delays or fails the session; set
     `QTE_UPDATE_CHECK=0` to turn it off (see `qte_sdk.update`).
+
+    The session does not reconnect. Iterating it ends quietly on a normal close (1000, 1001,
+    or a close frame with no code) and raises a `ConnectionClosedError` on any other close.
+    The closes to expect:
+
+    - 1001 `exchange stopping`: the exchange is stopping.
+    - 1002: a protocol error.
+    - 1008 `credential revoked`: do not reconnect with that credential. Also 1008 `too many
+      messages during a switch` or `too many link_drain messages`: the SDK does not show
+      these two reasons yet (they arrive with the gateway's contract), so they appear as
+      `<withheld>`.
+    - 1009: a message too large.
+    - 1011 `sequencer stopped`.
+    - 4000 `heartbeat timeout` and 4001 `term change`.
+    - 1006: a drop with no close frame.
+
+    Only `qte_sdk.reconnect.ReconnectingSession` handles them for you: it reconnects after
+    each, and stops on 1008 `credential revoked`. `qte_sdk.connection.describe_close` names
+    a close's code and its cause in one line.
     """
     # A mistake can put the token in the address: held so that no repr shows it, and passed
     # on without this frame keeping it as text, whatever is raised here.
