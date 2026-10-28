@@ -139,10 +139,10 @@ that carry a `request_ref` and got no answer echoing it: each as its message typ
 `account_state`, `ticket_accepted`, `ticket_reject`, `break_request_state` or
 `break_request_reject` echoing the ref answers it. A `reject` with no `request_ref` answers
 nothing, so its request stays listed. When any are listed, `QTE-SESSION-UNANSWERED` is
-logged at WARNING through the `qte_sdk.reconnect` logger, with their count and refs and
-never their contents. They are unconfirmed, not lost: each may or may not have reached the
-exchange, and a resume that omits one does not prove it is gone. The list starts empty on
-each session.
+logged at WARNING through the `qte_sdk.reconnect` logger, with their count and refs (one of
+32 hex digits shortened to its first 12) and never their contents. They are unconfirmed,
+not lost: each may or may not have reached the exchange, and a resume that omits one does
+not prove it is gone. The list starts empty on each session.
 
 Which failures are retried (`is_retryable`): a dropped or closed connection, a connection
 that could not be opened (`OSError` or a timeout), a handshake answered with a malformed
@@ -168,6 +168,7 @@ import functools
 import logging
 import os
 import random
+import re
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -577,20 +578,32 @@ class ReconnectingSession:
     async def _send_noted(self, session: Session, type_: str, payload: Message) -> None:
         """Send on `session`, noting a `request_ref` the message carries as unanswered.
 
-        Noted before the send, since its answer can be read before the send returns. A send
-        that fails with an error, such as a connection already closed, wrote nothing, so the
-        note is taken back; a cancellation may come after the frame was written, so the
-        note stays."""
+        Noted before the send, since its answer can be read before the send returns. The
+        note stays when the send fails as a connection does (closed, an `OSError`, a timeout)
+        or is cancelled: the frame may have been written before that. Any other error, such
+        as a message that could not be encoded, came before anything was written, so the
+        note is taken back."""
         ref = getattr(payload, "request_ref", "")
         noted = isinstance(ref, str) and ref != "" and ref not in self._unanswered
         if noted:
             self._unanswered[ref] = type_
+        failure: BaseException
         try:
             await session.connection.send(type_, payload)
-        except Exception:
-            if noted and self._session is session:
-                self._unanswered.pop(ref, None)
-            raise
+        except BaseException as error:
+            failure = error
+        else:
+            return
+        # Not this frame's copy of the message either: it may be `auth`.
+        del payload
+        if (
+            noted
+            and self._session is session
+            and isinstance(failure, Exception)
+            and not isinstance(failure, ConnectionClosed | OSError | TimeoutError)
+        ):
+            self._unanswered.pop(ref, None)
+        raise failure
 
     def _not_connected(self, type_: str) -> "NotConnected":
         # The type is the caller's text: withheld if it holds the token, in the arguments
@@ -1044,10 +1057,10 @@ class ReconnectingSession:
         logged, with their count and refs and never their contents, from a thread of its
         own (see `qte_sdk.pacing._warn`).
 
-        A ref or type that holds the token is withheld from the log on its own. Text only
-        shaped like a token is shown, unlike in other warnings: `new_request_ref` makes 32
-        hex digits, the shape of a token, and a ref of at most 32 bytes cannot hold a whole
-        one."""
+        The log shortens each run of 32 hex digits in a ref, such as a whole ref that
+        `new_request_ref` made, to its first 12 and `...`: every SDK log withholds text
+        shaped like a token, which would hide the whole list. `Disconnected.unanswered`
+        keeps each ref whole. A ref or type that holds the token is withheld on its own."""
         unanswered = tuple((type_, ref) for ref, type_ in self._unanswered.items())
         self._unanswered.clear()
         if unanswered:
@@ -1056,17 +1069,15 @@ class ReconnectingSession:
             if env_token:
                 secrets.append(_Secret(env_token))
 
-            def holds_token(text: str) -> bool:
-                return any(_text_holds_token(text, secret) for secret in secrets)
-
             def shown(text: str) -> str:
-                return _errors.WITHHELD if holds_token(text) else text
+                if any(_text_holds_token(text, secret) for secret in secrets):
+                    return _errors.WITHHELD
+                return _HEX_RUN.sub(lambda run: run.group()[:12] + "...", text)
 
             _pacing._warn(
                 _errors.SESSION_UNANSWERED,
                 short_what=f"the connection dropped with {len(unanswered)} requests unconfirmed",
                 target=_log,
-                withhold=holds_token,
                 count=len(unanswered),
                 refs=", ".join(f"{shown(type_)} {shown(ref)}" for type_, ref in unanswered),
             )
@@ -1090,6 +1101,10 @@ class ReconnectingSession:
 _CLOSED = object()
 
 _log = logging.getLogger(__name__)
+
+# A run of 32 hex digits, the shape of a token the exchange issues and of a ref that
+# `new_request_ref` makes, which the warning naming unanswered refs shortens.
+_HEX_RUN = re.compile(r"[0-9A-Fa-f]{32}")
 
 # Seconds to spend reading what a connection that a send found closed still holds. The
 # frames it received before closing are already queued, so this is only a bound.

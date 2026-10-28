@@ -892,14 +892,12 @@ def _warn(
     *,
     short_what: str | None = None,
     target: logging.Logger | None = None,
-    withhold: Callable[[str], bool] | None = None,
     **fields: Any,
 ) -> None:
     """Log `code`'s message at WARNING through `target`, by default this module's logger
     (`qte_sdk.options` passes its own), with `code`, its next
     step and `fields` on the record, for a JSON formatter (see `qte_sdk.logs`). Any field
-    that holds the token is withheld, as `qte_sdk.dotenv.withholding` tells, or as
-    `withhold` does when given. Whether the logger is enabled is asked in the
+    that holds the token is withheld. Whether the logger is enabled is asked in the
     warning's thread too: asking can wait for logging's lock.
 
     It carries a short form too, for a line over 512 bytes, which a stderr pipe, socket or
@@ -911,8 +909,7 @@ def _warn(
     # Imported here: qte_sdk.dotenv is not needed until a warning is logged.
     from qte_sdk.dotenv import withholding
 
-    if withhold is None:
-        withhold = withholding()
+    withhold = withholding()
     step = _errors.next_step(code, withhold=withhold, **fields)
     what = short_what or _errors.what(code, withhold=withhold, **fields)
     # The record's own fields too, not only the message: a handler may show them as given.

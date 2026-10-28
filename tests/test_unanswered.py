@@ -232,7 +232,9 @@ async def test_no_warning_when_every_request_was_answered(caplog):
     assert records == []
 
 
-def test_a_ref_shaped_like_a_token_is_shown_and_one_holding_the_token_withheld(monkeypatch):
+def test_a_ref_shaped_like_a_token_is_shortened_and_one_holding_the_token_withheld(
+    monkeypatch,
+):
     from qte_sdk import pacing
 
     caught: list[tuple[str, dict]] = []
@@ -244,10 +246,28 @@ def test_a_ref_shaped_like_a_token_is_shown_and_one_holding_the_token_withheld(m
     # The shape new_request_ref makes: 32 hex digits, as a token is.
     made = "0123456789abcdef0123456789abcdef"
     rs._unanswered = {made: "new", token: "cancel"}
+    # The event keeps each ref whole.
     assert rs._take_unanswered() == (("new", made), ("cancel", token))
     [(message, fields)] = caught
-    assert fields["refs"] == f"new {made}, cancel {errors.WITHHELD}"
+    assert fields["refs"] == f"new 0123456789ab..., cancel {errors.WITHHELD}"
     assert token not in message
+
+
+async def test_a_json_log_line_shows_a_shortened_made_ref(caplog):
+    from qte_sdk.logs import JsonFormatter
+
+    made = "0123456789abcdef0123456789abcdef"
+    rs = ReconnectingSession("ws://127.0.0.1:1", synthetic_token())
+    rs._unanswered = {made: "new"}
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        rs._take_unanswered()
+        [record] = unanswered_records(caplog)
+    line = json.loads(JsonFormatter().format(record))
+    assert line["fields"] == {"count": 1, "refs": "new 0123456789ab..."}
+    assert line["message"].startswith(
+        "the connection dropped with 1 requests unconfirmed: new 0123456789ab"
+    )
+    assert made not in line["message"]
 
 
 def test_disconnected_lists_nothing_by_default():
@@ -269,20 +289,31 @@ class _Session:
         self.connection = _Wire(error)
 
 
-async def test_a_send_that_failed_with_an_error_is_not_listed():
+async def test_a_send_that_failed_before_writing_anything_is_not_listed():
     rs = ReconnectingSession("ws://127.0.0.1:1", synthetic_token())
-    session = _Session(ConnectionClosedOK(Close(1000, ""), None))
+    # As for a message that could not be encoded.
+    session = _Session(ValueError("cannot encode"))
     rs._session = session  # type: ignore[assignment]
-    with pytest.raises(ConnectionClosedOK):
+    with pytest.raises(ValueError):
         await rs._send_noted(session, "new", NewOrder(request_ref="n1"))  # type: ignore[arg-type]
     assert rs._unanswered == {}
 
 
-async def test_a_send_cancelled_after_it_began_stays_listed():
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionClosedOK(Close(1000, ""), None),
+        ConnectionResetError(),
+        TimeoutError(),
+        asyncio.CancelledError(),
+    ],
+)
+async def test_a_send_that_failed_as_a_connection_does_stays_listed(error: BaseException):
+    # The frame may have been written before the connection failed or the send was cut off.
     rs = ReconnectingSession("ws://127.0.0.1:1", synthetic_token())
-    session = _Session(asyncio.CancelledError())
+    session = _Session(error)
     rs._session = session  # type: ignore[assignment]
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(type(error)):
         await rs._send_noted(session, "new", NewOrder(request_ref="n1"))  # type: ignore[arg-type]
     assert rs._unanswered == {"n1": "new"}
 
