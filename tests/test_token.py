@@ -15,6 +15,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote
 
 import pytest
 
@@ -718,6 +719,119 @@ def test_set_file_takes_a_path(tmp_path, capsys):
 
 def test_set_file_refuses_a_directory(tmp_path):
     assert run(["set", "--file", str(tmp_path)]) == 1
+
+
+def minted_token() -> str:
+    """A token as the exchange issues it: 32 random bytes as 64 hex digits."""
+    return secrets.token_hex(32)
+
+
+TOKEN_AS_PATH: dict[str, Callable[[str, Path], str]] = {
+    "the token alone": lambda t, d: t,
+    "in capitals": lambda t, d: t.upper(),
+    "with a label": lambda t, d: f"Token:{t}",
+    "as a file name": lambda t, d: str(d / f"{t}.txt"),
+    "as a folder": lambda t, d: str(d / t / "qte-token"),
+    "under the home folder": lambda t, d: f"~/{t}",
+    "percent-encoded": lambda t, d: "".join(f"%{ord(c):02x}" for c in t),
+    "with a line break": lambda t, d: f"{t[:32]}\n{t[32:]}",
+    "wrapped in lines of 16": lambda t, d: "\n".join(t[i : i + 16] for i in range(0, 64, 16)),
+    "with a tab": lambda t, d: f"{t[:20]}\t{t[20:]}",
+    "percent-encoded twice": lambda t, d: str(d / "".join(f"%25{ord(c):02x}" for c in t)),
+    "every other digit encoded twice": lambda t, d: "".join(
+        f"%25{ord(c):02x}" if i % 2 else c for i, c in enumerate(t)
+    ),
+    "wrapped with %0A": lambda t, d: "%0A".join(t[i : i + 16] for i in range(0, 64, 16)),
+    "wrapped with NEL": lambda t, d: "\x85".join(t[i : i + 16] for i in range(0, 64, 16)),
+    "wrapped with U+2028": lambda t, d: "\u2028".join(t[i : i + 16] for i in range(0, 64, 16)),
+    "split by zero-width spaces": lambda t, d: "\u200b".join(t[i : i + 8] for i in range(0, 64, 8)),
+    "split by no-break spaces": lambda t, d: "\u00a0".join(t[i : i + 8] for i in range(0, 64, 8)),
+    "split by a combining joiner": lambda t, d: "\u034f".join(
+        t[i : i + 8] for i in range(0, 64, 8)
+    ),
+    "split by a variation selector": lambda t, d: "\ufe0f".join(
+        t[i : i + 8] for i in range(0, 64, 8)
+    ),
+    "a %0A split by a combining joiner": lambda t, d: "%\u034f0A".join(
+        t[i : i + 8] for i in range(0, 64, 8)
+    ),
+    "a %09 split by a variation selector": lambda t, d: "%\ufe0f09".join(
+        t[i : i + 8] for i in range(0, 64, 8)
+    ),
+    "an escape split by a zero-width space": lambda t, d: "".join(
+        f"%\u200b25{ord(c):02x}" if i % 16 == 15 else c for i, c in enumerate(t)
+    ),
+    "a digit encoded nine times": lambda t, d: "".join(
+        "%" + "25" * 8 + f"{ord(c):02x}" if i % 10 == 9 else c for i, c in enumerate(t)
+    ),
+}
+
+
+# A path with a line or paragraph break or a control character and no token: refused for
+# that character alone, as typed or found only by percent-decoding.
+BREAK_IN_PATH = {
+    "U+2028": "notes\u2028token.txt",
+    "U+2029": "notes\u2029token.txt",
+    "NEL": "notes\x85token.txt",
+    "NEL percent-encoded": "notes%C2%85token.txt",
+    "U+2028 percent-encoded twice": "notes%25E2%2580%25A8token.txt",
+    "U+2029 percent-encoded twice": "notes%25E2%2580%25A9token.txt",
+}
+
+
+@pytest.mark.parametrize("target", BREAK_IN_PATH.values(), ids=BREAK_IN_PATH.keys())
+def test_set_file_refuses_a_path_with_a_break_even_with_no_token(
+    target: str, home: Path, tmp_path: Path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert run(["set", "--file", target]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith("error: QTE-TOKEN-SET-PATH: the --file path has a run of 32 hex ")
+    assert "notes" not in err
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("shape", TOKEN_AS_PATH.values(), ids=TOKEN_AS_PATH.keys())
+def test_set_file_refuses_a_token_given_as_the_path_without_showing_it(
+    shape: Callable[[str, Path], str], home: Path, tmp_path: Path, capsys
+):
+    token = minted_token()
+    target = shape(token, tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert run(["set", "--file", target]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith("error: QTE-TOKEN-SET-PATH: the --file path has a run of 32 hex ")
+    assert "remove it from your shell history" in err
+    for shown in (err, unquote(err), unquote(unquote(err))):
+        assert_token_absent(token, shown.lower())
+    # Refused before anything is made, and before the token prompt.
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Jean\u00a0Dupont",
+        "\u067e\u0631\u0648\u0698\u0647\u200c\u0647\u0627",
+        "\U0001f469\u200d\U0001f4bb",
+        "caf\u00e9 token",
+    ],
+)
+def test_set_file_takes_a_path_with_unprinted_characters_in_real_names(name, tmp_path):
+    path = tmp_path / name / "qte-token"
+    token = synthetic_token()
+    assert run(["set", "--file", str(path)], ask_secret=answers(token)) == 0
+    assert path.read_text() == token + "\n"
+
+
+def test_set_file_takes_a_path_with_a_short_run_of_hex_digits(tmp_path, capsys):
+    path = tmp_path / f"qte-{secrets.token_hex(15)}" / "token"
+    token = synthetic_token()
+    assert run(["set", "--file", str(path)], ask_secret=answers(token)) == 0
+    assert path.read_text() == token + "\n"
 
 
 @needs_git

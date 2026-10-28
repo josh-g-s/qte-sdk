@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.80
+**Version:** 0.82
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,8 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- Docs only: the README, the quickstart and both copies of AGENTS.md say Winter's practice week runs as two terms, the second, `2026-10-28`, from the Wednesday 28 October 2026 open with no registrations (qte-platform G-254, #2834), so a Team Lead registers again before trading on 28 October and again before 2 November (#323).
+- `token set --file` refuses a path with a run of 32 hex digits, the shape of a token the exchange issues, or a control character or line break, as typed or percent-decoded, before it creates or asks for anything, with `QTE-TOKEN-SET-PATH` and without showing the path, since a token typed in place of the path would otherwise be printed back in every message that names it. The message says to remove the token from your shell history (#324).
 - The README, the quickstart, both copies of AGENTS.md and the automatic execution page name v1.5.1 as the latest release, and their install lines use the v1.5.1 zip (#291).
 - The quickstart and the packaged AGENTS.md say that in Winter's practice week, 26 to 30 October 2026, Market Making obligation breaches only warn, Options ones included, and the daily loss halts stay live, citing qte-platform DL-162 and DL-163 (#293).
 - The quickstart, the packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a stock split does: positions scaled at the ex-date open with a fraction paid in cash and no report, so query the account again after that open; ordinary working tickets stopped `TICKET_SPLIT_CANCELLED`; history not split-adjusted. The current case is MTUM's 4-for-1 at the 5 November 2026 open (#295).

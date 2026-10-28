@@ -44,8 +44,10 @@ ignore, or, on Windows, a file others may read, change or replace); and 2 when i
 not tell (git could not say whether it ignores the `.env`, or Windows would not let it
 fully check the file the token is in). Exit 1 is a report: sessions still only warn about
 what `check` warns about. It looks afresh each time, even where the SDK has already warned
-once in the same process, and it never prints a path that holds the token. With `--json` it
-prints one JSON document instead, with the same exit status (docs/errors.md gives its keys).
+once in the same process, and it never prints a path that holds the token. `set --file`
+refuses a path with a run of 32 hex digits, the shape of a token, without showing it.
+`check --json` prints one JSON document instead, with the same exit status (docs/errors.md
+gives its keys).
 A `QTE_LOG_FORMAT` other than json or text makes it exit 2 with `QTE-LOG-FORMAT-INVALID`.
 `set` refuses a token with a space, a quote, a #, or an invisible or control character,
 and says its length and which of those kinds it found. A token without them that is not 64
@@ -71,9 +73,11 @@ import os
 import secrets
 import shlex
 import sys
+import unicodedata
 import warnings
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import unquote
 
 from qte_sdk import _fileaccess
 from qte_sdk import dotenv as dotenv_module
@@ -550,6 +554,25 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
     path = Path(target).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
+    # A token typed in place of the path: refused before anything is made, and never shown,
+    # since every later message names the path, and .gitignore would be given its name. A
+    # line break or other control character is refused too: no path needs one, and a token
+    # split by them has no run to find. Each is looked for however often it was encoded.
+    if _looks_like_a_token(target):
+        raise _Refused(
+            _errors.TOKEN_SET_PATH,
+            path="the --file path",
+            problem=(
+                "has a run of 32 hex digits or a control character, not shown "
+                "since it may be your token"
+            ),
+            fix=(
+                "A token is never given on the command line: run python -m qte_sdk.token set "
+                "--file with the path of the file to write, and paste the token at the hidden "
+                "prompt. If you typed your token on the command line, remove it from your "
+                "shell history. If it is a real path, choose one without such a run"
+            ),
+        )
     if path.is_symlink() or path.is_dir():
         raise _not_a_file(path)
     directory = path.parent
@@ -598,6 +621,28 @@ def _set_file(target: str, ask: Prompt, ask_secret: Prompt) -> int:
             + _unset_advice([TOKEN_ENV_VAR], "to use the token file")
         )
     return 0
+
+
+def _looks_like_a_token(target: str) -> bool:
+    """Whether the `--file` path `target` may be a token: shaped like one (see
+    `errors.token_shaped`) or holding a control character or a line or paragraph break, as
+    typed or percent-decoded any number of times. Both are also looked for with every
+    character outside ASCII taken out, again and again with the decoding, since a token's
+    digits and a %0A are all ASCII and an invisible character between them would hide
+    them. Other characters outside ASCII, such as a no-break space or a joiner, are in real
+    names, so they are allowed. Each step that changes the text shortens it, so this ends."""
+    decoded = [target]
+    while unquote(decoded[-1]) != decoded[-1]:
+        decoded.append(unquote(decoded[-1]))
+    ascii_only = [target]
+    while (form := "".join(c for c in unquote(ascii_only[-1]) if c.isascii())) != ascii_only[-1]:
+        ascii_only.append(form)
+    forms = decoded + ascii_only
+    return any(
+        _errors.token_shaped(form)
+        or any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in form)
+        for form in forms
+    )
 
 
 def _not_a_file(path: Path) -> _Refused:
