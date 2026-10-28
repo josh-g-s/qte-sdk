@@ -10,7 +10,9 @@ permissions:
 jobs:
   check:
     if: github.repository == 'josh-g-s/qte-sdk'
-    runs-on: ubuntu-latest
+    # vars.CI_RUNNER (the self-hosted `beast` label) or, unset, ubuntu-latest. Only a
+    # maintainer can push a tag, so no fork code reaches this runner.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:

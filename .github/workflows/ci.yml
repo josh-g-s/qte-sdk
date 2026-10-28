@@ -12,9 +12,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Runner pool: the Linux jobs run on vars.CI_RUNNER (the self-hosted `beast` label, as in
+# qte-platform) or, unset, on ubuntu-latest. A pull request from a fork always runs on
+# ubuntu-latest: this repository is public, and a fork's code must never run on the beast.
+# The Windows jobs stay on windows-latest. Undo: delete the CI_RUNNER repository variable.
+# A self-hosted runner shares /tmp with the other runners on its host, so jobs write only
+# under $RUNNER_TEMP.
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,7 +31,7 @@ jobs:
       - run: ruff format --check .
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -170,7 +176,7 @@ jobs:
           python "%GITHUB_WORKSPACE%\scripts\check_student_install.py" update update-cmd.txt %errorlevel%
 
   test-websockets-floor:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -183,7 +189,7 @@ jobs:
       - run: pytest
 
   wheel:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -193,12 +199,12 @@ jobs:
       - run: python -m build
       - name: Install the wheel into a clean virtualenv and import it
         run: |
-          python -m venv /tmp/wheel-venv
-          /tmp/wheel-venv/bin/pip install dist/*.whl
-          cd /tmp
-          /tmp/wheel-venv/bin/python -c "import qte_sdk; print(qte_sdk.__version__)"
-          /tmp/wheel-venv/bin/python -c "from qte_sdk.contract import codec; from qte_sdk.contract.v1 import envelope_pb2, market_data_pb2, order_entry_pb2, order_events_pb2, session_pb2"
-          /tmp/wheel-venv/bin/python -c "from qte_sdk.connection import Connection"
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/pip" install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -c "import qte_sdk; print(qte_sdk.__version__)"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -c "from qte_sdk.contract import codec; from qte_sdk.contract.v1 import envelope_pb2, market_data_pb2, order_entry_pb2, order_events_pb2, session_pb2"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -c "from qte_sdk.connection import Connection"
       - name: Run the test suite from the unpacked sdist in a clean virtualenv
         run: |
           mkdir "$RUNNER_TEMP/sdist"
@@ -209,7 +215,7 @@ jobs:
           "$RUNNER_TEMP/sdist-venv/bin/pytest"
 
   contract-drift:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
