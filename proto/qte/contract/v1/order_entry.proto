@@ -1,11 +1,12 @@
 // Inbound order entry.
 //
-// **Version:** 1.12
+// **Version:** 1.13
 //
 // Message types on the envelope `type` field: `new`, `cancel`, `amend`,
 // `mass_cancel`, and, from a Fundamentals pod only, `ticket`, `ticket_cancel`
-// and `ticket_urgency`, and, from a Director session only, `house_ticket` and
-// `house_ticket_cancel` (see the end of this file). Every new, cancel, amend and mass-cancel message is released
+// and `ticket_urgency`, and `break_request` and `break_request_withdraw`, and,
+// from a Director session only, `house_ticket` and `house_ticket_cancel` (see
+// the end of this file). Every new, cancel, amend and mass-cancel message is released
 // to the engine delta_oe after gateway receipt (SPEC 8.1, SPEC 8.2); nothing
 // about that timing is a field here.
 //
@@ -273,4 +274,39 @@ message SubmitHouseTicket {
 message CancelHouseTicket {
   string request_ref = 1; // id, 1 to 32 bytes. Client correlation id, echoed on the response
   string ticket_id = 2;   // id, decimal digits only. The house ticket to cancel
+}
+
+// A Fundamentals pod's request to reduce a position in an inter-term break,
+// filled by the engine at break-day official closes once the Directors
+// approve it (SPEC 23.7). It is accepted only after the close of a term's
+// final session and before the next term's first session
+// (BREAK_REQUEST_NOT_IN_BREAK otherwise), it only reduces a position (side
+// opposite to the position, shares at most the position when it is sent;
+// TICKET_CROSSES_ZERO otherwise), and a pod holds at most one pending or
+// approved request in each instrument (BREAK_REQUEST_EXISTS). It carries no
+// limit price and no urgency. A request is never amended: the pod withdraws
+// it and sends a new one. An accepted request is answered with a
+// break_request_state, a refused one with a break_request_reject.
+message SubmitBreakRequest {
+  string request_ref = 1; // id, 1 to 32 bytes. Client correlation id, echoed on the response
+  string instrument = 2;  // id, at most 32 bytes. SPEC 3.1
+  Side side = 3;          // BUY or SELL: the side that reduces the position. SPEC 23.7
+  int64 shares = 4;       // int64-qty, a whole number of shares, positive. SPEC 23.7
+  // The thesis of the position the request reduces, and its version
+  // (SPEC 23.1, SPEC 23.7).
+  string thesis_id = 5;   // id, at most 32 bytes
+  int32 thesis_version = 6; // positive
+  // The risk requiring reduction during the break, 1 to 280 characters, with
+  // no NUL character. Logged and shown to the Directors. SPEC 23.7
+  string risk_statement = 7;
+}
+
+// Withdraws one of the pod's own break requests that is pending or approved,
+// at any time. The withdrawal takes effect from the first closing window
+// that begins after it (SPEC 23.7). A break_request_id that names no request
+// of this pod is TICKET_NOT_FOUND; a request already refused or withdrawn is
+// TICKET_NOT_WORKING.
+message WithdrawBreakRequest {
+  string request_ref = 1;      // id, 1 to 32 bytes. Client correlation id, echoed on the response
+  string break_request_id = 2; // id, decimal digits only. The request to withdraw
 }

@@ -348,3 +348,77 @@ class TicketProgressPoint(_message.Message):
     due_shares: int
     filled_shares: int
     def __init__(self, time: _Optional[int] = ..., due_shares: _Optional[int] = ..., filled_shares: _Optional[int] = ...) -> None: ...
+
+class BreakRequestReject(_message.Message):
+    __slots__ = ("request_ref", "request_kind", "reason_code", "reason_detail", "receipt_time")
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_KIND_FIELD_NUMBER: _ClassVar[int]
+    REASON_CODE_FIELD_NUMBER: _ClassVar[int]
+    REASON_DETAIL_FIELD_NUMBER: _ClassVar[int]
+    RECEIPT_TIME_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    request_kind: _common_pb2.BreakRequestKind
+    reason_code: _common_pb2.TicketReasonCodes.TicketReasonCode
+    reason_detail: str
+    receipt_time: int
+    def __init__(self, request_ref: _Optional[str] = ..., request_kind: _Optional[_Union[_common_pb2.BreakRequestKind, str]] = ..., reason_code: _Optional[_Union[_common_pb2.TicketReasonCodes.TicketReasonCode, str]] = ..., reason_detail: _Optional[str] = ..., receipt_time: _Optional[int] = ...) -> None: ...
+
+class BreakRequestState(_message.Message):
+    __slots__ = ("break_request_id", "request_ref", "instrument", "side", "shares", "thesis_id", "thesis_version", "risk_statement", "status", "accepted_time", "decided_time", "decision_reason", "update_time")
+    BREAK_REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    SIDE_FIELD_NUMBER: _ClassVar[int]
+    SHARES_FIELD_NUMBER: _ClassVar[int]
+    THESIS_ID_FIELD_NUMBER: _ClassVar[int]
+    THESIS_VERSION_FIELD_NUMBER: _ClassVar[int]
+    RISK_STATEMENT_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    ACCEPTED_TIME_FIELD_NUMBER: _ClassVar[int]
+    DECIDED_TIME_FIELD_NUMBER: _ClassVar[int]
+    DECISION_REASON_FIELD_NUMBER: _ClassVar[int]
+    UPDATE_TIME_FIELD_NUMBER: _ClassVar[int]
+    break_request_id: str
+    request_ref: str
+    instrument: str
+    side: _common_pb2.Side
+    shares: int
+    thesis_id: str
+    thesis_version: int
+    risk_statement: str
+    status: _common_pb2.BreakRequestStatus
+    accepted_time: int
+    decided_time: int
+    decision_reason: str
+    update_time: int
+    def __init__(self, break_request_id: _Optional[str] = ..., request_ref: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., risk_statement: _Optional[str] = ..., status: _Optional[_Union[_common_pb2.BreakRequestStatus, str]] = ..., accepted_time: _Optional[int] = ..., decided_time: _Optional[int] = ..., decision_reason: _Optional[str] = ..., update_time: _Optional[int] = ...) -> None: ...
+
+class TermCloseFill(_message.Message):
+    __slots__ = ("instrument", "side", "size", "price", "proceeds", "session_date", "frozen", "prior_close", "house")
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    SIDE_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    PRICE_FIELD_NUMBER: _ClassVar[int]
+    PROCEEDS_FIELD_NUMBER: _ClassVar[int]
+    SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
+    FROZEN_FIELD_NUMBER: _ClassVar[int]
+    PRIOR_CLOSE_FIELD_NUMBER: _ClassVar[int]
+    HOUSE_FIELD_NUMBER: _ClassVar[int]
+    instrument: str
+    side: _common_pb2.Side
+    size: int
+    price: int
+    proceeds: int
+    session_date: str
+    frozen: bool
+    prior_close: bool
+    house: bool
+    def __init__(self, instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., size: _Optional[int] = ..., price: _Optional[int] = ..., proceeds: _Optional[int] = ..., session_date: _Optional[str] = ..., frozen: bool = ..., prior_close: bool = ..., house: bool = ...) -> None: ...
+
+class TermEnd(_message.Message):
+    __slots__ = ("session_date", "term_id")
+    SESSION_DATE_FIELD_NUMBER: _ClassVar[int]
+    TERM_ID_FIELD_NUMBER: _ClassVar[int]
+    session_date: str
+    term_id: str
+    def __init__(self, session_date: _Optional[str] = ..., term_id: _Optional[str] = ...) -> None: ...
