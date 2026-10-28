@@ -1,12 +1,16 @@
 # Changelog
 
-**Version:** 0.93
+**Version:** 0.94
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
 Changes merged since the last release are listed under "Unreleased" at the top. A release renames that heading to its number, such as `## 1.0.1`, and starts a new empty "Unreleased" section above it. (The `**Version:**` line above is this file's own revision, not the SDK's.)
 
 ## Unreleased
+
+## 1.6.0
+
+**Check your code if you keep your own account, reconnect after a revoked token, or read term-end messages and, if you run a market-making desk, quote at least one round lot of each name per side (see below).** 1.6.0 brings the guidance that ships inside the package up to date before MTUM's 4-for-1 split at the 5 November 2026 open: the packaged AGENTS.md and the `AccountReports`, `qte_sdk.history` and `qte_sdk.replay` docstrings say what a split does to your positions, tickets and history, and that a program keeping its account with `AccountReports` must query `account_state` again after the open of a split's ex-date. The wire contract is pinned to a newer exchange contract, so the term-end close's `term_close_fill` and `term_end` and the break request answers decode as named types; `AccountReports` applies a team's `term_close_fill` itself, and a program that keeps its own account must apply it too (`qte_sdk.account.term_close_position_change` helps). `ReconnectingSession` no longer reconnects after a 1008 `credential revoked` close, sent when your token is revoked or rotated: it raises instead, so set the new token and start again. Errors now show the close reasons the contract fixes, the examples name the close code when a connection drops, and the quoting, options and book examples reconnect and resume by themselves with `ReconnectingSession`: if your bot started from one of them and stops on a dropped connection, compare it with the new example. The guidance also says VWAP is offered from 26 October 2026 and what a 1713 refusal means. Update with `python -m qte_sdk.update` and follow what it prints.
 
 - The quickstart, both copies of AGENTS.md and the `qte_sdk.tickets` docstrings say what a program sees across a stock split: a book held over the ex-date is the last session's, in pre-split prices, until the first grid point at the open sends a new book with no wall and `REFERENCE_UNAVAILABLE` until the first live quote (check `grid_time`); a cure ticket's `shares` counts the shares filled plus the unfilled shares scaled by the split, `decision_price` stays pre-split, `filled_shares` and `average_fill_price` stay pre-split until the next fill and then mix units, `progress` is emptied, and `remaining_shares` gives the remainder; a cure scaled to no unfilled share ends `TICKET_COMPLETE` or `TICKET_SPLIT_CANCELLED`. New tests check the MTUM 4-for-1 split paths (#340).
 - `examples/take_liquidity.py`, `examples/fundamentals_pod.py`, `examples/out_of_hours.py` and `examples/smoke_test.py` name the close code when the connection drops, with a short cause when the code is known, from the new `qte_sdk.connection.describe_close`; a 1006 means no close frame arrived. Both copies of AGENTS.md and the `open_session` docstring list the closes to expect, and say that only `ReconnectingSession` handles them for you (#328).
