@@ -10,14 +10,18 @@ import shutil
 import stat
 import subprocess
 import sys
+import traceback
 import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import unquote
 
 import pytest
 
 from qte_sdk import _fileaccess
 from qte_sdk import dotenv as dotenv_module
+from qte_sdk import errors as errors_module
 from qte_sdk import token as helper
 from qte_sdk.session import TOKEN_ENV_VAR, TOKEN_FILE_ENV_VAR, URL_ENV_VAR, resolve_token
 
@@ -210,10 +214,182 @@ def test_an_odd_token_is_refused_without_echoing_it(pasted: str, capsys):
         assert pasted not in out + err
 
 
+# What a trading token looks like: 64 characters, 0-9 and a-f (qte-platform's
+# credential.NewToken). Each case is built around a fresh one.
+HEX = "0123456789abcdef"
+
+
+def trading_token() -> str:
+    return secrets.token_hex(32)
+
+
+def assert_nothing_of(pasted: str, text: str) -> None:
+    """Neither `pasted` nor any 8 characters of it, as typed or as stripped, is in `text`."""
+    for form in {pasted, pasted.strip()}:
+        assert form not in text
+        assert_token_absent(form, text)
+
+
+# Each paste, with the length `set` sees once it strips the paste, and the kinds it names.
+REFUSED = {
+    "a non-breaking space": (lambda t: t[:32] + "\u00a0" + t[32:], 65, "a space"),
+    "a zero-width space": (lambda t: t + "\u200b", 65, "an invisible or control character"),
+    "double quotes": (lambda t: f'"{t}"', 66, "a quote"),
+    "single quotes": (lambda t: f"'{t}'", 66, "a quote"),
+    "a label": (lambda t: f"Token: {t}", 71, "a space"),
+    "a label with an accent": (lambda t: f"Clé {t}", 68, "a space"),
+    "a Windows Ctrl+V": (lambda t: "\x16" + t, 65, "an invisible or control character"),
+    "a #": (lambda t: "#" + t, 65, "a #"),
+    "a comment": (lambda t: t + " # ours", 71, "a space and a #"),
+    "several kinds": (
+        lambda t: f"Token: '{t}'\u200b#",
+        75,
+        "a space, a quote, a # and an invisible or control character",
+    ),
+}
+
+
+def test_a_zero_width_space_is_not_printable_so_it_is_refused():
+    assert not "\u200b".isprintable()
+    assert not helper._is_plain(trading_token() + "\u200b")
+
+
+@pytest.mark.parametrize("case", REFUSED)
+def test_a_token_with_a_character_no_token_has_is_refused_with_a_hint(case: str, capsys):
+    make, length, found = REFUSED[case]
+    pasted = make(trading_token())
+    assert run(["set"], ask=answers(URL), ask_secret=answers(pasted)) == 1
+    assert not dotenv().exists()
+    out, err = capsys.readouterr()
+    assert err.startswith("error: QTE-TOKEN-MALFORMED: ")
+    assert f"is {length} characters long and has {found}, which no token has" in err
+    assert "64 characters, 0-9 and a-f" in err
+    assert "warning:" not in err
+    assert_nothing_of(pasted, out + err)
+    with pytest.raises(helper._Refused) as refused:
+        helper._ask_token(answers(pasted))
+    assert refused.value.fields == {
+        "where": "entered",
+        "length": length,
+        "characters": "characters",
+        "found": found,
+    }
+    assert_nothing_of(pasted, str(refused.value) + repr(refused.value.args))
+
+
+def test_a_length_of_one_is_one_character():
+    faults = errors_module.token_faults("x")
+    assert faults["characters"] == "character"
+    shown = errors_module.render(errors_module.TOKEN_MALFORMED, where="entered", **faults)
+    assert " is 1 character long " in shown
+    shown = errors_module.render(
+        errors_module.TOKEN_UNUSUAL, length=1, characters="character", found="only 0-9 and a-f"
+    )
+    assert " is 1 character long " in shown
+    assert errors_module.token_faults("xy")["characters"] == "characters"
+
+
+def test_the_hint_names_kinds_but_never_a_codepoint_or_a_position(capsys):
+    token = trading_token()
+    pasted = token[:10] + "\u200b" + token[10:]
+    assert run(["set"], ask=answers(URL), ask_secret=answers(pasted)) == 1
+    err = capsys.readouterr().err
+    for leak in ("200b", "200B", "\\u", "U+", "position", "at character", "11"):
+        assert leak not in err
+
+
+class Interrupt(BaseException):
+    """Stands for a Ctrl-C."""
+
+
+def test_an_interruption_while_the_hint_is_made_shows_no_frame_holding_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def interrupted(_: str) -> str:
+        raise Interrupt
+
+    monkeypatch.setattr(errors_module, "unicodedata", SimpleNamespace(category=interrupted))
+    pasted = "Token: " + trading_token()
+    with pytest.raises(Interrupt) as caught:
+        helper._ask_token(answers(pasted))
+    rendered = traceback.TracebackException.from_exception(caught.value, capture_locals=True)
+    frames = [frame for frame in rendered.stack if frame.filename != __file__]
+    assert [frame.name for frame in frames] == ["_ask_token"]
+    assert_nothing_of(pasted, "\n".join(f"{frame.name} {frame.locals}" for frame in frames))
+
+
+# Each paste that passes the check but is not shaped like a trading token, with what the
+# warning says of it.
+WARNED = {
+    "cut short": (lambda t: t[:40], "is 40 characters long and has only 0-9 and a-f, but"),
+    "in capitals": (
+        lambda t: t.upper(),
+        "is 64 characters long and has characters outside 0-9 and a-f (capital letters count), but",
+    ),
+    "with a non-hex letter": (
+        lambda t: t[:63] + "g",
+        "is 64 characters long and has characters outside 0-9 and a-f (capital letters count), but",
+    ),
+    "too long": (lambda t: t + "0", "is 65 characters long and has only 0-9 and a-f, but"),
+}
+
+
+@pytest.mark.parametrize("case", WARNED)
+@pytest.mark.parametrize("to_file", [False, True], ids=["dotenv", "file"])
+def test_an_unusual_token_is_saved_with_a_warning(case: str, to_file: bool, home, capsys):
+    make, said = WARNED[case]
+    pasted = make(trading_token())
+    argv = ["set", "--file"] if to_file else ["set"]
+    ask = answers("n") if to_file else answers(URL)
+    assert run(argv, ask=ask, ask_secret=answers(pasted)) == 0
+    if to_file:
+        assert (home / ".qte" / "token").read_text() == pasted + "\n"
+    else:
+        assert resolve_token() == pasted
+    out, err = capsys.readouterr()
+    warning = [line for line in err.splitlines() if line.startswith("warning: ")]
+    assert len(warning) == 1
+    assert warning[0].startswith("warning: QTE-TOKEN-UNUSUAL: the token entered is ")
+    assert said in warning[0]
+    found = said.split(" and has ", 1)[1].removesuffix(", but")
+    assert warning[0] == "warning: " + errors_module.render(
+        errors_module.TOKEN_UNUSUAL,
+        length=len(pasted),
+        characters="character" if len(pasted) == 1 else "characters",
+        found=found,
+    )
+    assert "a trading token is 64 characters, 0-9 and a-f" in warning[0]
+    assert "It was saved anyway" in warning[0]
+    assert "error:" not in err
+    assert_nothing_of(pasted, out + err)
+
+
+def test_a_trading_token_gets_neither_a_refusal_nor_a_warning(capsys):
+    token = trading_token()
+    assert set(token) <= set(HEX) and len(token) == 64
+    assert run(["set"], ask=answers(URL), ask_secret=answers(token)) == 0
+    assert resolve_token() == token
+    out, err = capsys.readouterr()
+    assert "warning:" not in err
+    assert "error:" not in err
+    assert "QTE-TOKEN-MALFORMED" not in out + err
+    assert_nothing_of(token, out + err)
+
+
 def test_surrounding_whitespace_from_a_paste_is_removed():
     token = synthetic_token()
     assert run(["set"], ask=answers(URL), ask_secret=answers(f"  {token}\n")) == 0
     assert resolve_token() == token
+
+
+@pytest.mark.parametrize("around", [" ", "\t", "\n", "\r\n", "\u00a0"])
+def test_spaces_around_a_trading_token_are_removed_with_no_warning(around: str, capsys):
+    token = trading_token()
+    pasted = around + token + around
+    assert run(["set"], ask=answers(URL), ask_secret=answers(pasted)) == 0
+    assert resolve_token() == token
+    err = capsys.readouterr().err
+    assert "warning:" not in err and "error:" not in err
 
 
 def test_set_needs_a_terminal_and_asks_for_nothing_without_one(capsys):
@@ -543,6 +719,119 @@ def test_set_file_takes_a_path(tmp_path, capsys):
 
 def test_set_file_refuses_a_directory(tmp_path):
     assert run(["set", "--file", str(tmp_path)]) == 1
+
+
+def minted_token() -> str:
+    """A token as the exchange issues it: 32 random bytes as 64 hex digits."""
+    return secrets.token_hex(32)
+
+
+TOKEN_AS_PATH: dict[str, Callable[[str, Path], str]] = {
+    "the token alone": lambda t, d: t,
+    "in capitals": lambda t, d: t.upper(),
+    "with a label": lambda t, d: f"Token:{t}",
+    "as a file name": lambda t, d: str(d / f"{t}.txt"),
+    "as a folder": lambda t, d: str(d / t / "qte-token"),
+    "under the home folder": lambda t, d: f"~/{t}",
+    "percent-encoded": lambda t, d: "".join(f"%{ord(c):02x}" for c in t),
+    "with a line break": lambda t, d: f"{t[:32]}\n{t[32:]}",
+    "wrapped in lines of 16": lambda t, d: "\n".join(t[i : i + 16] for i in range(0, 64, 16)),
+    "with a tab": lambda t, d: f"{t[:20]}\t{t[20:]}",
+    "percent-encoded twice": lambda t, d: str(d / "".join(f"%25{ord(c):02x}" for c in t)),
+    "every other digit encoded twice": lambda t, d: "".join(
+        f"%25{ord(c):02x}" if i % 2 else c for i, c in enumerate(t)
+    ),
+    "wrapped with %0A": lambda t, d: "%0A".join(t[i : i + 16] for i in range(0, 64, 16)),
+    "wrapped with NEL": lambda t, d: "\x85".join(t[i : i + 16] for i in range(0, 64, 16)),
+    "wrapped with U+2028": lambda t, d: "\u2028".join(t[i : i + 16] for i in range(0, 64, 16)),
+    "split by zero-width spaces": lambda t, d: "\u200b".join(t[i : i + 8] for i in range(0, 64, 8)),
+    "split by no-break spaces": lambda t, d: "\u00a0".join(t[i : i + 8] for i in range(0, 64, 8)),
+    "split by a combining joiner": lambda t, d: "\u034f".join(
+        t[i : i + 8] for i in range(0, 64, 8)
+    ),
+    "split by a variation selector": lambda t, d: "\ufe0f".join(
+        t[i : i + 8] for i in range(0, 64, 8)
+    ),
+    "a %0A split by a combining joiner": lambda t, d: "%\u034f0A".join(
+        t[i : i + 8] for i in range(0, 64, 8)
+    ),
+    "a %09 split by a variation selector": lambda t, d: "%\ufe0f09".join(
+        t[i : i + 8] for i in range(0, 64, 8)
+    ),
+    "an escape split by a zero-width space": lambda t, d: "".join(
+        f"%\u200b25{ord(c):02x}" if i % 16 == 15 else c for i, c in enumerate(t)
+    ),
+    "a digit encoded nine times": lambda t, d: "".join(
+        "%" + "25" * 8 + f"{ord(c):02x}" if i % 10 == 9 else c for i, c in enumerate(t)
+    ),
+}
+
+
+# A path with a line or paragraph break or a control character and no token: refused for
+# that character alone, as typed or found only by percent-decoding.
+BREAK_IN_PATH = {
+    "U+2028": "notes\u2028token.txt",
+    "U+2029": "notes\u2029token.txt",
+    "NEL": "notes\x85token.txt",
+    "NEL percent-encoded": "notes%C2%85token.txt",
+    "U+2028 percent-encoded twice": "notes%25E2%2580%25A8token.txt",
+    "U+2029 percent-encoded twice": "notes%25E2%2580%25A9token.txt",
+}
+
+
+@pytest.mark.parametrize("target", BREAK_IN_PATH.values(), ids=BREAK_IN_PATH.keys())
+def test_set_file_refuses_a_path_with_a_break_even_with_no_token(
+    target: str, home: Path, tmp_path: Path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert run(["set", "--file", target]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith("error: QTE-TOKEN-SET-PATH: the --file path has a run of 32 hex ")
+    assert "notes" not in err
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("shape", TOKEN_AS_PATH.values(), ids=TOKEN_AS_PATH.keys())
+def test_set_file_refuses_a_token_given_as_the_path_without_showing_it(
+    shape: Callable[[str, Path], str], home: Path, tmp_path: Path, capsys
+):
+    token = minted_token()
+    target = shape(token, tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert run(["set", "--file", target]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.startswith("error: QTE-TOKEN-SET-PATH: the --file path has a run of 32 hex ")
+    assert "remove it from your shell history" in err
+    for shown in (err, unquote(err), unquote(unquote(err))):
+        assert_token_absent(token, shown.lower())
+    # Refused before anything is made, and before the token prompt.
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Jean\u00a0Dupont",
+        "\u067e\u0631\u0648\u0698\u0647\u200c\u0647\u0627",
+        "\U0001f469\u200d\U0001f4bb",
+        "caf\u00e9 token",
+    ],
+)
+def test_set_file_takes_a_path_with_unprinted_characters_in_real_names(name, tmp_path):
+    path = tmp_path / name / "qte-token"
+    token = synthetic_token()
+    assert run(["set", "--file", str(path)], ask_secret=answers(token)) == 0
+    assert path.read_text() == token + "\n"
+
+
+def test_set_file_takes_a_path_with_a_short_run_of_hex_digits(tmp_path, capsys):
+    path = tmp_path / f"qte-{secrets.token_hex(15)}" / "token"
+    token = synthetic_token()
+    assert run(["set", "--file", str(path)], ask_secret=answers(token)) == 0
+    assert path.read_text() == token + "\n"
 
 
 @needs_git
@@ -1798,3 +2087,116 @@ def test_windows_is_unchanged_by_the_writable_check(windows, tmp_path, monkeypat
     assert writable_warnings(resolve_token) == []
     assert run(["check"]) == 0
     assert WRITABLE not in capsys.readouterr().out
+
+
+TOKEN = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["set", TOKEN],
+        ["set", TOKEN, "--url", "wss://example.test"],
+        ["set", "--file", "tokenfile", TOKEN],
+        ["check", TOKEN],
+        ["check", "--json", TOKEN],
+        ["check", TOKEN, "--json", TOKEN],
+        ["set", TOKEN, "--url", "wss://example.test", TOKEN],
+    ],
+    ids=[
+        "set",
+        "set --url",
+        "set --file",
+        "check",
+        "check --json",
+        "check, interleaved",
+        "set, interleaved",
+    ],
+)
+def test_a_value_after_the_command_is_refused_and_never_printed(
+    argv, home, tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert helper.main(argv, interactive=lambda: True) == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    usage, refusal = err.splitlines()
+    assert usage.startswith(f"usage: python -m qte_sdk.token {argv[0]} ")
+    assert refusal.startswith(f"error: QTE-TOKEN-SET-ARGUMENT: `token {argv[0]}` was given a value")
+    assert TOKEN not in err
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+# Command lines a token pasted in the wrong place makes, each with the token at {}. A token
+# after the command is refused before argparse sees it as a mistake (see above).
+TOKEN_ON_THE_COMMAND_LINE = {
+    "as the command": ["{}"],
+    "as an unknown option": ["set", "--token={}"],
+    "as --json's value": ["check", "--json={}"],
+    "as an abbreviated --json's value": ["check", "--j={}"],
+    "as --help's value": ["set", "--help={}"],
+    "as -h's value": ["check", "-h={}"],
+    "joined to -h": ["check", "-h{}"],
+    "with a newline": ["{}\n"],
+    "as an ambiguous option's value": ["set", "--=x", "{}"],
+}
+
+
+@pytest.mark.parametrize("case", TOKEN_ON_THE_COMMAND_LINE)
+def test_a_token_on_the_command_line_is_never_repeated(case: str, capsys):
+    token = secrets.token_hex(32)
+    argv = [word.format(token) for word in TOKEN_ON_THE_COMMAND_LINE[case]]
+    with pytest.raises(SystemExit) as exited:
+        helper.main(argv, ask=never, ask_secret=never, interactive=lambda: True)
+    out, err = capsys.readouterr()
+    if exited.value.code == 0:
+        # Newer Pythons read -h<token> as -h: the help, which holds nothing typed.
+        assert case == "joined to -h" and out.startswith("usage: ") and err == ""
+    else:
+        assert exited.value.code == 2
+        assert out == ""
+        assert err.startswith("usage: ")
+        assert "not shown since it may be your token" in err
+        assert "remove it from your shell history" in err
+    for start in range(len(token) - 7):
+        assert token[start : start + 8] not in out + err
+
+
+def test_a_usage_error_with_no_stray_word_still_says_what_is_wrong(capsys):
+    with pytest.raises(SystemExit) as exited:
+        helper.main(["set", "--url"], ask=never, ask_secret=never, interactive=lambda: True)
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert "argument --url: expected one argument" in err
+    assert "not shown" not in err
+
+
+SAFE_USAGE_ERRORS = [
+    "argument --url: expected one argument",
+    "the following arguments are required: command",
+]
+
+
+@pytest.mark.parametrize("message", SAFE_USAGE_ERRORS)
+def test_only_the_exact_safe_usage_errors_are_shown_as_argparse_words_them(message, capsys):
+    token = secrets.token_hex(32)
+    for shown, expected in [(message, message), (f"{message} {token}", None)]:
+        with pytest.raises(SystemExit) as exited:
+            helper._parser().error(shown)
+        assert exited.value.code == 2
+        err = capsys.readouterr().err
+        if expected is not None:
+            assert err.endswith(f": error: {expected}\n")
+        else:
+            assert "not shown since it may be your token" in err
+            for start in range(len(token) - 7):
+                assert token[start : start + 8] not in err
+
+
+def test_no_command_says_a_command_is_required(capsys):
+    with pytest.raises(SystemExit) as exited:
+        helper.main([], ask=never, ask_secret=never, interactive=lambda: True)
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert err.endswith("error: the following arguments are required: command\n")

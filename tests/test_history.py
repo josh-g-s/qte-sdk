@@ -21,12 +21,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
-from qte_sdk import history
+from qte_sdk import errors, history
 from qte_sdk.connection import DecodeFailed, Unknown
 from qte_sdk.contract.v1.market_data_pb2 import (
     OPTION_GREEKS_UNAVAILABLE,
@@ -55,6 +56,7 @@ from qte_sdk.history import (
     HistoryUnavailable,
     Manifest,
     MissingHistoryURL,
+    TokenMalformed,
 )
 from qte_sdk.options import is_option_symbol
 from qte_sdk.session import MissingToken
@@ -1042,6 +1044,49 @@ def test_a_token_is_required(monkeypatch):
     monkeypatch.delenv("QTE_TOKEN_FILE", raising=False)
     with pytest.raises(MissingToken):
         HistoryClient("https://history.example.test")
+
+
+@pytest.mark.parametrize(
+    ("make", "found"),
+    [
+        (lambda t: t + "\n", "an invisible or control character"),
+        (lambda t: t + "\u200b", "an invisible or control character"),
+        (lambda t: t[:32] + "\u00a0" + t[32:], "a space"),
+        (lambda t: t + "\u00e9", "a character outside ASCII"),
+    ],
+)
+def test_a_malformed_token_says_its_length_and_kinds_but_never_the_token(make, found):
+    token = make(secrets.token_hex(32))
+    with pytest.raises(TokenMalformed) as raised:
+        HistoryClient("https://history.example.test", token)
+    message = str(raised.value)
+    assert message.startswith("QTE-TOKEN-MALFORMED: the token given to HistoryClient is 65 ")
+    assert f"and has {found}, which no token has" in message
+    assert "64 characters, 0-9 and a-f" in message
+    for text in (message, repr(raised.value.args), repr(raised.value.fields)):
+        for start in range(len(token) - 7):
+            assert token[start : start + 8] not in text
+
+
+def test_an_interruption_while_a_malformed_token_is_described_shows_no_frame_holding_it(
+    monkeypatch,
+):
+    class Interrupt(BaseException):
+        pass
+
+    def interrupted(_):
+        raise Interrupt
+
+    monkeypatch.setattr(errors, "unicodedata", SimpleNamespace(category=interrupted))
+    token = secrets.token_hex(32) + "\n"
+    with pytest.raises(Interrupt) as caught:
+        HistoryClient("https://history.example.test", token)
+    rendered = traceback.TracebackException.from_exception(caught.value, capture_locals=True)
+    frames = [frame for frame in rendered.stack if frame.filename != __file__]
+    assert [frame.name for frame in frames] == ["__init__"]
+    text = "\n".join(f"{frame.name} {frame.locals}" for frame in frames)
+    for start in range(len(token) - 7):
+        assert token[start : start + 8] not in text
 
 
 @pytest.mark.parametrize(

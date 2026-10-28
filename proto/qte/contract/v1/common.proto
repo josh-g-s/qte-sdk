@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.28
+// **Version:** 1.30
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -149,7 +149,7 @@ enum LimitKind {
   LIMIT_INSTRUMENT = 3;    // One instrument's position notional; Fundamentals' entry cap, projected exposure. SPEC 11.1, SPEC 23.6
   LIMIT_INSTRUMENT_HARD = 4; // Fundamentals' hard per-instrument cap. SPEC 11.1
   LIMIT_SECTOR = 5;        // One GICS sector's notional (Fundamentals). SPEC 11.1
-  LIMIT_SHORT_OF_GROSS = 6; // Short notional against its share of gross (Fundamentals). SPEC 11.1
+  LIMIT_SHORT_OF_GROSS = 6; // Short notional against the short limit, a share of the filled gross or, where the term sets it, of the risk base (Fundamentals). SPEC 11.1
   LIMIT_VEGA = 7;          // Vega against the sqrt(T) schedule (Options). SPEC 11.1, SPEC 18.7
   LIMIT_GAMMA_DOLLAR = 8;  // Whole book: sum over underlyings of abs(gamma dollars) (Options). SPEC 11.1, SPEC 18.7
   LIMIT_NET_DELTA_UNDERLYING = 9; // Absolute net delta of one underlying (Options). SPEC 11.1
@@ -349,11 +349,47 @@ enum TicketRequestKind {
   TICKET_REQUEST_URGENCY = 3;
 }
 
-// The reason codes a `ticket_reject` carries. A separate enum from
-// `ReasonCodes.ReasonCode`, so that the order-entry reasons stay exactly the
-// set the exchange's event log defines. Every value that also exists in
-// `ReasonCodes.ReasonCode` has the same name and the same number there; the
-// values from 1700 are specific to tickets. Like `ReasonCodes.ReasonCode`,
+// Which inbound break request message a `break_request_reject` answers.
+//
+// This enum is closed: adding a value later is a breaking change.
+enum BreakRequestKind {
+  BREAK_REQUEST_KIND_UNSPECIFIED = 0;
+  // A `break_request`.
+  BREAK_REQUEST_SUBMIT = 1;
+  // A `break_request_withdraw`.
+  BREAK_REQUEST_WITHDRAW = 2;
+}
+
+// A Fundamentals pod's break request's status (SPEC 23.7): pending until the
+// Directors approve or refuse it, and withdrawn once the pod withdraws it. A
+// refused or withdrawn request never changes again.
+//
+// This enum is open to extension: adding a value later is an additive change,
+// not a breaking one.
+enum BreakRequestStatus {
+  BREAK_REQUEST_STATUS_UNSPECIFIED = 0;
+  // Accepted and awaiting the Directors' decision.
+  BREAK_REQUEST_PENDING = 1;
+  // The Directors approved it; it fills at break-day official closes.
+  BREAK_REQUEST_APPROVED = 2;
+  // The Directors refused it, with a reason.
+  BREAK_REQUEST_REFUSED = 3;
+  // The pod withdrew it, pending or approved.
+  BREAK_REQUEST_WITHDRAWN = 4;
+  // Every share filled. Not yet sent.
+  BREAK_REQUEST_FILLED = 5;
+  // Shares unfilled at the last break-day close before the next term's
+  // first session expired. Not yet sent.
+  BREAK_REQUEST_EXPIRED = 6;
+  // 7-15 reserved for growth.
+}
+
+// The reason codes a `ticket_reject` or a `break_request_reject` carries. A
+// separate enum from `ReasonCodes.ReasonCode`, so that the order-entry
+// reasons stay exactly the set the exchange's event log defines. Every value
+// that also exists in `ReasonCodes.ReasonCode` has the same name and the same
+// number there; the values from 1700 are specific to tickets and break
+// requests. Like `ReasonCodes.ReasonCode`,
 // this enum is open to extension: adding a value later is an additive change.
 //
 // Nesting inside a message gives the enum its own scope, as `ReasonCodes` does.
@@ -454,7 +490,15 @@ message TicketReasonCodes {
     // has filled, so the replacement would have none: cancel instead
     // (SPEC 23.4).
     TICKET_AMEND_AT_OR_BELOW_FILLED = 1720;
-    // 1721-1799 reserved for band 1700 growth.
+    // A break_request sent outside an inter-term break: before the close of
+    // its term's final session, or from the next term's first session on
+    // (SPEC 23.7).
+    BREAK_REQUEST_NOT_IN_BREAK = 1721;
+    // A break_request in an instrument where the pod already holds a request
+    // that is pending or approved (SPEC 23.7: "a pod holds at most one
+    // request in each instrument").
+    BREAK_REQUEST_EXISTS = 1722;
+    // 1723-1799 reserved for band 1700 growth.
   }
 }
 
