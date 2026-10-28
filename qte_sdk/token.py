@@ -145,7 +145,16 @@ def main(
     """Run the command in `argv` and return its exit status. `ask`, `ask_secret` and
     `interactive` read the answers and tell whether a person is at the keyboard; tests
     replace them."""
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args, rest = parser.parse_known_args(argv)
+    if any(word.startswith("-") for word in rest):
+        # An option no command takes; _Parser withholds the words, as parse_args would.
+        parser.error(f"unrecognized arguments: {' '.join(rest)}")
+    if args.extra or rest:
+        # A mistake on the command line, so exit 2 like argparse, with nothing on stdout.
+        args.subparser.print_usage(sys.stderr)
+        print(f"error: {render(_errors.TOKEN_SET_ARGUMENT, command=args.command)}", file=sys.stderr)
+        return 2
     if interactive is None:
         interactive = _has_terminal
     try:
@@ -217,6 +226,8 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=f"store only the token, in PATH (default {DEFAULT_TOKEN_FILE})",
     )
+    set_.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
+    set_.set_defaults(subparser=set_)
     set_.color = False
     check = commands.add_parser(
         "check",
@@ -224,6 +235,8 @@ def _parser() -> argparse.ArgumentParser:
         description="Say where the SDK would take the token and the address from.",
     )
     check.color = False
+    check.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
+    check.set_defaults(subparser=check)
     check.add_argument(
         "--json",
         action="store_true",
