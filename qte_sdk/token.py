@@ -192,6 +192,12 @@ _KNOWN_WORDS = frozenset({"set", "check", "--url", "--file", "--json", "-h", "--
 
 # A quoted value in an argparse message, as repr() writes it.
 _QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+# A word of the command line standing alone, quoted or not, as argparse lists the choices.
+_KNOWN_WORD = re.compile(
+    r"(?<![\w-])(?:"
+    + "|".join(re.escape(word) for word in sorted(_KNOWN_WORDS, key=len, reverse=True))
+    + r")(?![\w-])"
+)
 # Messages whose whole tail is what was typed.
 _TYPED_TAIL = re.compile(r"(unrecognized arguments|ambiguous option): .*", re.DOTALL)
 _UNREADABLE = (
@@ -203,12 +209,14 @@ def _not_shown(message: str, argv: list[str]) -> str:
     """`message` without anything typed in `argv`, since argparse quotes what it could not
     parse (an unknown command, say) and that may be the token. Each quoted value and the
     tail of an "unrecognized arguments" or "ambiguous option" message becomes `(not shown)`;
-    if any form of what was typed is still there, the whole message is replaced."""
+    if any form of what was typed is still there, outside the words of the command line
+    (so a typo such as "chec" is not found inside "check"), the whole message is replaced."""
     message = _QUOTED.sub(lambda m: m[0] if m[0][1:-1] in _KNOWN_WORDS else "(not shown)", message)
     message = _TYPED_TAIL.sub(r"\1: (not shown)", message)
+    rest = _KNOWN_WORD.sub(" ", _QUOTED.sub(" ", message))
     for typed in argv:
         forms = {typed, typed.partition("=")[2], repr(typed)[1:-1]} - _KNOWN_WORDS
-        if any(len(form) >= 4 and form in message for form in forms):
+        if any(len(form) >= 4 and form in rest for form in forms):
             return _UNREADABLE
     return message
 

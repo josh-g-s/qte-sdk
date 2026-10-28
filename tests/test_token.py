@@ -1960,3 +1960,61 @@ def test_argparse_errors_keep_the_words_of_the_command_line(capsys):
     assert "argument --url: expected one argument" in capsys.readouterr().err
     assert helper.main(["--bogus"]) == 2
     assert "the following arguments are required: command" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("message", "argv", "expected"),
+    [
+        (
+            "argument command: invalid choice: 'DEMO_SECRET' (choose from 'set', 'check')",
+            [],
+            "argument command: invalid choice: (not shown) (choose from 'set', 'check')",
+        ),
+        (
+            "argument command: invalid choice: 'DEMO\\\\x\\n\\'\"' (choose from set, check)",
+            [],
+            "argument command: invalid choice: (not shown) (choose from set, check)",
+        ),
+        ("unrecognized arguments: DEMO_SECRET --x", [], "unrecognized arguments: (not shown)"),
+        ("ambiguous option: --DEMO_SECRET could match", [], "ambiguous option: (not shown)"),
+        ("argument --json: something DEMO_SECRET", ["DEMO_SECRET"], helper._UNREADABLE),
+        ("argument --json: something DEMO_SECRET", ["--json=DEMO_SECRET"], helper._UNREADABLE),
+        ("argument --json: something DEMO\\\\x", ["DEMO\\x"], helper._UNREADABLE),
+        (
+            "argument command: invalid choice: 'chec' (choose from 'set', 'check')",
+            ["chec"],
+            "argument command: invalid choice: (not shown) (choose from 'set', 'check')",
+        ),
+        (
+            "argument command: invalid choice: 'chec' (choose from set, check)",
+            ["chec"],
+            "argument command: invalid choice: (not shown) (choose from set, check)",
+        ),
+        (
+            "argument --url: expected one argument",
+            ["set", "--url"],
+            "argument --url: expected one argument",
+        ),
+    ],
+    ids=[
+        "quoted value",
+        "repr-escaped quoted value",
+        "unrecognized arguments tail",
+        "ambiguous option tail",
+        "fallback for what was typed",
+        "fallback for the = form",
+        "fallback for the repr form",
+        "a typo of a known word, quoted choices",
+        "a typo of a known word, unquoted choices",
+        "known words survive",
+    ],
+)
+def test_not_shown_removes_each_form_of_what_was_typed(message, argv, expected):
+    assert helper._not_shown(message, argv) == expected
+
+
+def test_a_typo_of_a_command_names_the_choices_and_hides_the_typo(capsys):
+    assert helper.main(["chec"]) == 2
+    err = capsys.readouterr().err
+    assert "error: argument command: invalid choice: (not shown) (choose from " in err
+    assert "check" in err and helper._UNREADABLE not in err
