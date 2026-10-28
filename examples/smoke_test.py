@@ -144,6 +144,7 @@ try:
         ReportGap,
         SessionRejected,
         Unknown,
+        describe_close,
     )
     from qte_sdk.contract.v1.common_pb2 import (
         BUY,
@@ -1225,8 +1226,12 @@ def check_feed(report: Report, watcher: Watcher) -> None:
     if watcher.undecodable:
         problems.append(f"{watcher.undecodable} message(s) could not be decoded")
     if watcher.failure is not None:
+        if isinstance(watcher.failure, ConnectionClosed):
+            how = f"with {describe_close(watcher.failure)}"
+        else:
+            how = f"({type(watcher.failure).__name__})"
         problems.append(
-            f"the connection dropped ({type(watcher.failure).__name__}); this one-shot check "
+            f"the connection dropped {how}; this one-shot check "
             "does not reconnect (a long-running program reconnects with ReconnectingSession: "
             "docs/quickstart.md step 9)"
         )

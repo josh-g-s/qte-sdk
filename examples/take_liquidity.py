@@ -41,7 +41,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.books import LatestBooks
-from qte_sdk.connection import SessionRejected
+from qte_sdk.connection import SessionRejected, describe_close
 from qte_sdk.contract.v1.common_pb2 import BUY, MARKET, SELL, Liquidity
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, Reject
 from qte_sdk.market_data import Book, DecodeFailed, SeqGap, as_market_data, subscribe
@@ -276,12 +276,12 @@ def main(argv: list[str] | None = None) -> int:
         return fail(f"the exchange refused the session: {error}")
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
-    except ConnectionClosedError:
+    except ConnectionClosedError as error:
         return fail(
-            "the connection dropped, so the order's outcome may not be known, and this "
-            "example does not reconnect (a long-running program reconnects with "
-            "ReconnectingSession: docs/quickstart.md step 9). Check your fills before "
-            "running this again"
+            f"the connection dropped with {describe_close(error)}. The order's outcome may "
+            "not be known, and this example does not reconnect (a long-running program "
+            "reconnects with ReconnectingSession: docs/quickstart.md step 9). Check your "
+            "fills before running this again"
         )
     except KeyboardInterrupt:
         return 130

@@ -255,6 +255,58 @@ def _close_detail(error: ConnectionClosed) -> str:
     return f" (close code {close.code})"
 
 
+# What each close code the exchange may send means, keyed by code, then by reason text (None
+# for any other reason, or a withheld one). Only reasons in `_KNOWN_CLOSE_REASONS` are keys,
+# so no other reason is ever shown.
+_CLOSE_CAUSES: dict[int, dict[str | None, str]] = {
+    1001: {None: "the exchange is stopping; connect again once it is back"},
+    1002: {None: "a protocol error: the exchange could not read a message this client sent"},
+    CREDENTIAL_REVOKED_CLOSE_CODE: {
+        CREDENTIAL_REVOKED_CLOSE_REASON: (
+            "your token was revoked or rotated; get a new token, and do not connect again "
+            "with this one"
+        ),
+        None: (
+            "the gateway closed you during a switch (too many messages were queued), or the "
+            "credential was revoked"
+        ),
+    },
+    1009: {None: "a message was too large"},
+    1011: {
+        "sequencer stopped": "the exchange's sequencer stopped; reconnect and resume",
+        "keepalive ping timeout": "a keepalive ping went unanswered; keep your loop reading",
+        None: "an error on the exchange",
+    },
+    HEARTBEAT_TIMEOUT_CLOSE_CODE: {
+        None: "the exchange had nothing from this client for too long; keep your loop reading"
+    },
+    TERM_CHANGE_CLOSE_CODE: {None: "a new term began; reconnect, and report numbers start again"},
+}
+
+
+def describe_close(error: ConnectionClosed) -> str:
+    """The close the exchange sent, in one line for a person or an agent: its code, its
+    reason if the SDK shows it, and a short cause when the code is known, for example
+    `close code 1011, reason "sequencer stopped": the exchange's sequencer stopped;
+    reconnect and resume`. A connection that ended with no close frame from the exchange is
+    reported as 1006. A reason the SDK does not show is left out, since it could echo the
+    token. `open_session` lists the closes to expect."""
+    close = error.rcvd
+    if close is None:
+        text = "close code 1006: the connection dropped with no close frame from the exchange"
+        if error.sent is not None and error.sent.reason == "keepalive ping timeout":
+            # websockets closes the connection itself when its own ping goes unanswered.
+            text += "; this client gave up after its keepalive ping went unanswered"
+        return text
+    known = close.reason if close.reason in _KNOWN_CLOSE_REASONS else None
+    text = f"close code {close.code}"
+    if known is not None:
+        text += f', reason "{known}"'
+    causes = _CLOSE_CAUSES.get(close.code, {})
+    cause = causes.get(known, causes.get(None))
+    return text if cause is None else f"{text}: {cause}"
+
+
 def _exception_name(exc_info: Any) -> str:
     if isinstance(exc_info, BaseException):
         return type(exc_info).__name__
