@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.21
+**Version:** 0.22
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -31,7 +31,7 @@ The last line of a traceback is the class name and then this message. The code i
 | `python -m qte_sdk.update` | The SDK is the latest release | A newer release is out (`QTE-UPDATE-AVAILABLE`) | It cannot tell whether the SDK is current. Also a usage error or a bad `--timeout` | |
 | `python examples/smoke_test.py` | No check failed | A check failed, or the SDK is too old to check itself | No token or no usable address, so it could not connect. Also a usage error | 130 on Ctrl+C; 128 plus the signal's number on SIGTERM or SIGHUP |
 
-`token check` exiting 1 is a report, not a refusal: a session still only warns about a tracked `.env` or, on Windows, a shared file, and still uses it. Exit 2 with a `usage:` line on stderr is a mistake on the command line, for every command here. `token check` looks afresh each time it runs, so `token.main(["check"])` gives the same answer when a program calls it twice, or after opening a session; it never prints a path that holds the token. Before this release `token check` exited 0 even when it printed a warning.
+`token check` exiting 1 is a report, not a refusal: a session still only warns about a tracked `.env` or, on Windows, a shared file, and still uses it. Exit 2 with a `usage:` line on stderr is a mistake on the command line, for every command here. For `python -m qte_sdk.token`, that error never repeats a word of the command line it did not expect, since a token pasted there would be one: it says to run `python -m qte_sdk.token set` and paste the token at the hidden prompt, and to remove the token from the shell history. `token check` looks afresh each time it runs, so `token.main(["check"])` gives the same answer when a program calls it twice, or after opening a session; it never prints a path that holds the token. Before this release `token check` exited 0 even when it printed a warning.
 
 With `--json`, each command exits with the same status, which the document gives as `exit_code` (see [JSON output](#json-output)). Each command also exits 2, with `error: QTE-LOG-FORMAT-INVALID: ...` on stderr and nothing on stdout, when `QTE_LOG_FORMAT` is neither `json` nor `text` (and `--json` is not given).
 

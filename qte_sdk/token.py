@@ -57,7 +57,8 @@ characters, such as capitals; it is only a warning, so a future token format sti
 Spaces and line breaks around a pasted token are removed before either check. Neither the
 refusal nor the warning ever shows the token or any part of it. `set` exits with 0 when it
 saved, 1 when it refused, and 130 if stopped. Either exits with 2, after a `usage:` line, if
-the command line is wrong.
+the command line is wrong; that error never repeats a word it did not expect, since a token
+pasted onto the command line would be one.
 
 The token is never printed, logged or put in an error message, and since it is typed at a
 prompt rather than on the command line, it never reaches your shell history. `set` needs
@@ -70,6 +71,7 @@ can never come.
 import argparse
 import getpass
 import os
+import re
 import secrets
 import shlex
 import sys
@@ -164,8 +166,33 @@ def main(
     return 1
 
 
+# The only usage errors shown as argparse words them: none holds a word of the command line.
+_SAFE_USAGE_ERROR = re.compile(
+    r"argument --url: expected one argument|the following arguments are required: command"
+)
+
+_ARGUMENT_WITHHELD = (
+    "the command line has a word this command does not take, not shown since it may be "
+    "your token. A token is never given on the command line: run "
+    "python -m qte_sdk.token set and paste it at the hidden prompt. If you typed your "
+    "token on the command line, remove it from your shell history"
+)
+
+
+class _Parser(argparse.ArgumentParser):
+    """An `ArgumentParser` whose usage errors never repeat a word of the command line:
+    argparse's own can ("unrecognized arguments: ...", "invalid choice: ...", "ignored
+    explicit argument ..."), and the word is the token when one is pasted there. Only the
+    errors in `_SAFE_USAGE_ERROR` are shown as they are; any other gives one fixed text."""
+
+    def error(self, message: str):  # type: ignore[override]
+        if not _SAFE_USAGE_ERROR.fullmatch(message):
+            message = _ARGUMENT_WITHHELD
+        super().error(message)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="python -m qte_sdk.token",
         description="Set up the exchange address and your token for qte_sdk.",
     )
