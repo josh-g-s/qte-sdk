@@ -1034,8 +1034,8 @@ def test_describe_close_tells_a_revoked_token_from_a_switch_close():
     revoked = describe_close(closed(1008, "credential revoked"))
     assert "get a new token, and do not connect again with this one" in revoked
     switch = (
-        "close code 1008: the gateway closed you during a switch (too many messages were "
-        "queued), or the credential was revoked"
+        "close code 1008: the gateway closed you for a policy reason, most often too many "
+        "messages queued during a switch"
     )
     # Neither switch reason is one the SDK shows yet, so it is withheld, as is any other.
     for reason in ("too many messages during a switch", "too many link_drain messages", ""):

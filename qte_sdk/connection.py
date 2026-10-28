@@ -267,8 +267,8 @@ _CLOSE_CAUSES: dict[int, dict[str | None, str]] = {
             "with this one"
         ),
         None: (
-            "the gateway closed you during a switch (too many messages were queued), or the "
-            "credential was revoked"
+            "the gateway closed you for a policy reason, most often too many messages "
+            "queued during a switch"
         ),
     },
     1009: {None: "a message was too large"},
