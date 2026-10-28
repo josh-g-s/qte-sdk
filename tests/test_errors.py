@@ -97,6 +97,7 @@ FIELD_VALUES: dict[str, object] = {
     "action": "write",
     "characters": "characters",
     "command": "`git rm --cached .env` in /home/student/algo",
+    "count": 2,
     "cursor": 3,
     "fix": "Choose another path with --file PATH",
     "found": "a space and a quote",
@@ -112,6 +113,7 @@ FIELD_VALUES: dict[str, object] = {
     "problem": "is not UTF-8 text",
     "reason": "NOT_AUTHENTICATED: unknown credentials",
     "reason_name": "NOT_AUTHENTICATED",
+    "refs": "new r1, cancel r3",
     "seconds": 10.0,
     "source": "the QTE_URL environment variable",
     "status": ", HTTP 401",
@@ -1090,6 +1092,19 @@ def session_log_changed(token: str, ctx: Context) -> str:
     return caught[0]
 
 
+def session_unanswered(token: str, ctx: Context) -> str:
+    from qte_sdk.reconnect import ReconnectingSession
+
+    caught = caught_warnings(ctx)
+    ctx.monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    session = ReconnectingSession(URL, token)
+    # A new and a cancel sent on the session that dropped, neither answered.
+    session._unanswered = {"r1": "new", "r3": "cancel"}
+    assert session._take_unanswered() == (("new", "r1"), ("cancel", "r3"))
+    assert len(caught) == 1
+    return caught[0]
+
+
 SPY_CALL = "SPY261120C00450000"
 
 
@@ -1123,6 +1138,7 @@ CASES: dict[str, Case] = {
     errors.SESSION_RESUME_NOT_ACKNOWLEDGED: session_resume_not_acknowledged,
     errors.SESSION_RESUME_TIMEOUT: session_resume_timeout,
     errors.SESSION_LOG_CHANGED: session_log_changed,
+    errors.SESSION_UNANSWERED: session_unanswered,
     errors.CONNECT_HANDSHAKE_FAILED: connect_handshake_failed,
     errors.CONNECT_LIVENESS_TIMEOUT: connect_liveness_timeout,
     errors.CONNECT_NO_SESSION: connect_no_session,

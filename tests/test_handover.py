@@ -1143,7 +1143,9 @@ async def test_no_exchange_confirmed_live_closes_the_held_client_then_refuses_un
     seen = await run(gateway, "reconnecting")
     # The close: 1001, which the SDK reads as a normal close.
     (disconnected,) = [e for e in seen.events if isinstance(e, Disconnected)]
-    assert disconnected == Disconnected(None)
+    assert disconnected.error is None
+    # The order sent before the close had no answer, so it is unconfirmed.
+    assert [type_ for type_, _ in disconnected.unanswered] == ["new"]
     retries = [e for e in seen.events if isinstance(e, Retrying)]
     assert retries[0].error is None
     refusals = [r.error for r in retries[1:]]
@@ -1351,7 +1353,9 @@ def assert_disconnected_as(end: str, events: list[Any]) -> None:
     no error; a drop is an error, with no close frame received."""
     (disconnected,) = [e for e in events if isinstance(e, Disconnected)]
     if end == "1001":
-        assert disconnected == Disconnected(None)
+        assert disconnected.error is None
+        # The order sent before the close had no answer, so it is unconfirmed.
+        assert [type_ for type_, _ in disconnected.unanswered] == ["new"]
     else:
         assert isinstance(disconnected.error, ConnectionClosedError)
         assert disconnected.error.rcvd is None
