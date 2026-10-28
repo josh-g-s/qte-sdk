@@ -4,9 +4,10 @@ Read with the scoping note `drafts/hot-switch-client-view.v0.1.md` (qte-sdk lane
 switch keeps the WebSocket open, as test_handover.py checks, except for the clients the
 gateway closes: 1001 "exchange stopping" at the release (history past the bound, or a
 replayed subscribe answered otherwise), 1008 "too many messages during a switch" for a
-client that sends too much in the hold, and 1001 then HTTP 503 for every client while no
-exchange slot is live. Each such client reconnects through `ReconnectingSession` and
-resumes from `last_report_seq` in the same event log.
+client that sends too much in the hold, a drop with no close frame for a client that does
+not read for a quarter of the hold limit (the gateway's write to it stalls), and 1001 then
+HTTP 503 for every client while no exchange slot is live. Each such client reconnects
+through `ReconnectingSession` and resumes from `last_report_seq` in the same event log.
 
 Cases that rest on the gateway's unmerged switch code (qte-platform #2828, G3 and H4) are
 written against the behaviour that code's README describes, and skipped until it merges.

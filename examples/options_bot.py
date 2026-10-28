@@ -84,6 +84,10 @@ level where an order of its strategy already rested, as from an earlier run, and
 was lost, it cannot tell whose order rests there: it cancels nothing and warns instead.
 --seconds and --drain-seconds count the time down too.
 Only the first connection is not retried: if it fails, the example says why and stops.
+The replay or the snapshot covers only what the exchange had applied when it answered: if
+the order was still waiting out its order delay at the drop, it can be applied just after
+that, and the example then reports that nothing of it rests and stops while it does. If
+the order was in flight at the drop, check your resting orders after it stops.
 
 Watching only. With --watch-only (or QTE_WATCH_ONLY=1) it reads the table, subscribes, keeps
 the chain, Greeks and books, and chooses a contract exactly as above, printing the reason for
@@ -532,8 +536,13 @@ class OptionsBot:
         try:
             await subscribe(self.session, self.subscribe_to)
             self.subscribe_to = []
-        except (NotConnected, ConnectionClosed):
+        except NotConnected:
             print("not subscribed yet, the connection is down: subscribing once it is back")
+        except ConnectionClosed:
+            # The session recorded the contracts before the send failed, so the next
+            # session subscribes to them by itself: subscribing again would do it twice.
+            self.subscribe_to = []
+            print("not subscribed yet, the connection is down: the next session subscribes")
 
     def on_disconnected(self, disconnected: Disconnected) -> None:
         self.up = False

@@ -10,10 +10,18 @@ from test_orders import Recorder, received
 from test_session import ack, synthetic_token
 from websockets.asyncio.server import ServerConnection
 
-from qte_sdk.account import ACCOUNT_REPORT_TYPES, AccountReports, covers, is_account_state
+from qte_sdk.account import (
+    ACCOUNT_REPORT_TYPES,
+    TERM_CLOSE_FILL_TYPE,
+    AccountReports,
+    covers,
+    is_account_state,
+    is_term_close_fill,
+    term_close_position_change,
+)
 from qte_sdk.connection import DecodeFailed, Disconnected, Received, SeqGap, Unknown
-from qte_sdk.contract.v1.common_pb2 import BUY
-from qte_sdk.contract.v1.order_events_pb2 import AccountState, Execution
+from qte_sdk.contract.v1.common_pb2 import BUY, SELL, SIDE_UNSPECIFIED
+from qte_sdk.contract.v1.order_events_pb2 import AccountState, Execution, TermCloseFill
 from qte_sdk.contract.v1.session_pb2 import AccountQuery
 from qte_sdk.session import open_session
 
@@ -43,6 +51,23 @@ def fill(report_seq: int | None, size: int, side: str = "BUY") -> str:
 def risk_notice(report_seq: int) -> str:
     payload = {"kind": "LOSS_WARNING", "timestamp": "6"}
     return frame("risk_notice", payload, report_seq=str(report_seq))
+
+
+def term_close(report_seq: int | None, size: int, side: str = "SELL", house: bool = False) -> str:
+    """A `term_close_fill` closing a position of `size` AAPL shares at the official close."""
+    proceeds = size * PRICE if side == "SELL" else -size * PRICE
+    payload = {
+        "instrument": "AAPL",
+        "side": side,
+        "size": str(size),
+        "price": str(PRICE),
+        "proceeds": str(proceeds),
+        "session_date": "2026-12-04",
+        "house": house,
+    }
+    if report_seq is None:
+        return frame("term_close_fill", payload)
+    return frame("term_close_fill", payload, report_seq=str(report_seq))
 
 
 def accepted(report_seq: int) -> str:
@@ -88,13 +113,15 @@ def delayed_reject(report_seq: int) -> str:
     return frame("reject", payload, report_seq=str(report_seq))
 
 
-def reply(request_ref: str, as_of_report_seq: int | None, aapl: int = 0) -> str:
+def reply(
+    request_ref: str, as_of_report_seq: int | None, aapl: int = 0, cash: int = 1_000_000_000
+) -> str:
     payload: dict = {
         "request_ref": request_ref,
         "valuation_basis": "LIVE_MARK",
         "session_date": "2026-10-02",
         "as_of": "1",
-        "cash": "1000000000",
+        "cash": str(cash),
     }
     if aapl:
         payload["positions"] = [{"instrument": "AAPL", "quantity": str(aapl), "price": "1"}]
@@ -166,7 +193,23 @@ async def test_reports_that_do_not_change_the_account_always_apply():
     assert [e.type for e in events] == ["accepted", "reject", "order_state", "order_cancelled"]
     assert all(e.report_seq is not None and e.report_seq <= 100 for e in events)
     assert not any(covers(state, e) for e in events)
-    assert ACCOUNT_REPORT_TYPES == {"execution", "risk_notice"}
+    assert ACCOUNT_REPORT_TYPES == {"execution", "risk_notice", "term_close_fill"}
+
+
+async def test_a_term_close_fill_is_cut_like_a_fill():
+    state = await state_of(5)
+    at, above = await decoded(term_close(5, 40), term_close(6, 40))
+    assert is_term_close_fill(at) and at.type == TERM_CLOSE_FILL_TYPE
+    assert covers(state, at)
+    assert not covers(state, above)
+
+
+async def test_a_house_term_close_fill_is_never_covered():
+    # Sent to a Director session only, unnumbered.
+    state = await state_of(5)
+    [house] = await decoded(term_close(None, 5, "BUY", house=True))
+    assert house.report_seq is None
+    assert not covers(state, house)
 
 
 async def test_with_no_as_of_report_seq_every_report_applies():
@@ -218,6 +261,13 @@ def execution(report_seq: int | None, size: int) -> Received:
         None,
         report_seq=report_seq,
     )
+
+
+def closing(report_seq: int | None, size: int, house: bool = False) -> Received:
+    fill_ = TermCloseFill(
+        instrument="AAPL", side=SELL, size=size, price=PRICE, proceeds=size * PRICE, house=house
+    )
+    return Received("term_close_fill", fill_, None, report_seq=report_seq)
 
 
 def answer(request_ref: str, as_of_report_seq: int | None) -> Received:
@@ -295,6 +345,46 @@ async def test_reports_that_do_not_change_the_account_are_never_returned():
         assert reports.update(event) == []
     the_reply = answer(ref, None)
     assert reports.update(the_reply) == [the_reply]
+
+
+async def test_a_term_close_fill_applies_once_before_and_after_the_reply():
+    reports = AccountReports()
+    first = closing(1, 10)
+    assert reports.update(first) == [first]
+    ref = await reports.query(Recorder())
+    the_reply = answer(ref, 2)
+    assert reports.update(the_reply) == [the_reply]
+    # The reply covers 2, wherever it arrives; 3 is new.
+    assert reports.update(closing(2, 10)) == []
+    later = closing(3, 10)
+    assert reports.update(later) == [later]
+
+
+async def test_a_term_close_fill_the_reply_misses_is_applied_again():
+    reports = AccountReports()
+    ref = await reports.query(Recorder())
+    in_it, not_in_it = closing(3, 10), closing(4, 20)
+    assert reports.update(in_it) == [in_it]
+    assert reports.update(not_in_it) == [not_in_it]
+    the_reply = answer(ref, 3)
+    assert reports.update(the_reply) == [the_reply, not_in_it]
+
+
+async def test_a_house_term_close_fill_is_never_applied_or_held():
+    reports = AccountReports()
+    ref = await reports.query(Recorder())
+    assert reports.update(closing(None, 5, house=True)) == []
+    # Even a numbered one, which the exchange never sends: the house is not the team.
+    assert reports.update(closing(7, 5, house=True)) == []
+    the_reply = answer(ref, None)
+    assert reports.update(the_reply) == [the_reply]
+
+
+def test_a_closing_fill_names_its_position_change():
+    assert term_close_position_change(TermCloseFill(side=SELL, size=40)) == -40
+    assert term_close_position_change(TermCloseFill(side=BUY, size=5)) == 5
+    with pytest.raises(ValueError, match="side must be BUY or SELL"):
+        term_close_position_change(TermCloseFill(side=SIDE_UNSPECIFIED, size=5))
 
 
 async def test_a_reply_to_a_query_not_waited_for_is_not_taken():
@@ -498,11 +588,15 @@ async def test_a_query_that_fails_after_a_later_one_was_sent_leaves_the_later_on
 # Against a scripted exchange: each report counted once, wherever it falls.
 
 
-async def run_program(script) -> tuple[dict[str, int], list[int | str]]:
+async def run_program(
+    script, cash: list[int] | None = None
+) -> tuple[dict[str, int], list[int | str]]:
     """Run the quickstart's loop against an exchange that answers the session, waits for
     the account query the program sends first and then follows `script(ref)`. Returns the
     positions the program ends with and what it applied, in order: "reply" for a reply,
-    a report's number for a report."""
+    a report's number for a report. If `cash` is given, it ends holding the cash the program
+    keeps: the latest reply's, plus the proceeds of each closing fill applied after it (the
+    fills' own cash is left out)."""
 
     async def handler(ws: ServerConnection) -> None:
         await ws.recv()  # auth
@@ -524,6 +618,8 @@ async def run_program(script) -> tuple[dict[str, int], list[int | str]]:
                 for item in account.update(event):
                     if is_account_state(item):
                         positions = {p.instrument: p.quantity for p in item.message.positions}
+                        if cash is not None:
+                            cash[:] = [item.message.cash]
                         applied.append("reply")
                     else:
                         if item.type == "execution":
@@ -532,6 +628,13 @@ async def run_program(script) -> tuple[dict[str, int], list[int | str]]:
                             positions[fill_.instrument] = (
                                 positions.get(fill_.instrument, 0) + change
                             )
+                        elif is_term_close_fill(item):
+                            close = item.message
+                            positions[close.instrument] = positions.get(
+                                close.instrument, 0
+                            ) + term_close_position_change(close)
+                            if cash:  # cash is known once a reply has come
+                                cash[0] += close.proceeds
                         applied.append(item.report_seq)
     return positions, applied
 
@@ -583,3 +686,53 @@ async def test_a_sell_and_risk_notices_cross_the_reply():
     positions, applied = await run_program(script)
     assert positions == {"AAPL": 0}
     assert applied == [1, "reply", 3, 4]
+
+
+async def test_a_term_close_fill_the_reply_covers_is_not_applied_twice():
+    # The final close: 1 to 3 build a long of 6, the close flattens it as report 4, and a
+    # query answered after the close counts it. The reply is flat; 4 arrives after it.
+    def script(ref: str) -> list[str]:
+        return [fill(1, 1), fill(2, 2), fill(3, 3), reply(ref, 4), term_close(4, 6)]
+
+    positions, applied = await run_program(script)
+    assert positions == {}
+    assert applied == [1, 2, 3, "reply"]
+
+
+async def test_a_term_close_fill_the_reply_misses_is_applied_once_on_top_of_it():
+    # The reply was read before the close, at 3, and the close's fill arrives before it.
+    def script(ref: str) -> list[str]:
+        return [fill(1, 1), fill(2, 2), fill(3, 3), term_close(4, 6), reply(ref, 3, aapl=6)]
+
+    positions, applied = await run_program(script)
+    assert positions == {"AAPL": 0}
+    assert applied == [1, 2, 3, 4, "reply", 4]
+
+
+async def test_a_short_closed_by_a_buy_crosses_the_reply():
+    def script(ref: str) -> list[str]:
+        return [fill(1, 5, "SELL"), reply(ref, 1, aapl=-5), term_close(2, 5, "BUY")]
+
+    positions, applied = await run_program(script)
+    assert positions == {"AAPL": 0}
+    assert applied == [1, "reply", 2]
+
+
+async def test_a_closing_fill_s_proceeds_are_added_to_cash_once():
+    # Covered: the reply's cash already holds the SELL's proceeds, so nothing is added.
+    def covered(ref: str) -> list[str]:
+        return [fill(1, 6), reply(ref, 2, cash=1_000_000_000 + 6 * PRICE), term_close(2, 6)]
+
+    cash: list[int] = []
+    positions, applied = await run_program(covered, cash)
+    assert (positions, applied, cash) == ({}, [1, "reply"], [1_000_000_000 + 6 * PRICE])
+
+    # Not covered: a BUY closing a short pays its cost out of the reply's cash, once.
+    def missed(ref: str) -> list[str]:
+        return [fill(1, 5, "SELL"), term_close(2, 5, "BUY"), reply(ref, 1, aapl=-5)]
+
+    cash = []
+    positions, applied = await run_program(missed, cash)
+    assert positions == {"AAPL": 0}
+    assert applied == [1, 2, "reply", 2]
+    assert cash == [1_000_000_000 - 5 * PRICE]

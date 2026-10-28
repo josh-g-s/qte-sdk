@@ -1,6 +1,6 @@
 # Automatic execution
 
-**Version:** 0.26
+**Version:** 0.27
 
 The exchange can work a Fundamentals pod's tickets itself, with its automatic execution service, instead of sending them to the pod's Execution desk. This page says what changes for a pod and a desk while the service is on, what each SDK release shows of it, and the one mistake to avoid: adding ticket fills to a position of your own. The rules in full are in the [`qte_sdk.tickets`](../qte_sdk/tickets.py) docstring.
 
@@ -21,6 +21,8 @@ The exchange can work a Fundamentals pod's tickets itself, with its automatic ex
 | `send_ticket_cancel` | a plain cancel, or `replacing=True` for the cancel that begins an amendment (see "Amending a ticket") | plain cancels only | plain cancels only |
 | `director_stop_pending_time`, while a Director's cancel waits for the next open, and a cure ticket's `cure_deadline_date` | read them | not shown | not shown |
 | Statuses 8 and 9, a Director's cancel or amend (see "A Director's cancel or amend") | `TICKET_CANCELLED_BY_DIRECTOR` and `TICKET_AMENDED_BY_DIRECTOR` | `TICKET_STATUS_UNSPECIFIED`, a stop, with the name in `event.unknown_enum_names()` | `TICKET_STATUS_UNSPECIFIED`, a stop, with the name in `event.unknown_enum_names()` |
+
+The next release after 1.5.1 also reads a pod's break requests (see "Break requests"): 1.5.1 and older decode `break_request_state` and `break_request_reject` as an `Unknown` event, name neither 1721 nor 1722, and have no `send_break_request`.
 
 A status, activity, origin or reason this SDK does not know decodes as its zero value, never as an error, and keeps the name the exchange sent in `event.unknown_enum_names()`. A ticket whose `status` is anything but `TICKET_WORKING` has stopped.
 
@@ -120,6 +122,12 @@ A pod's `ticket_reject` never carries `TICKET_DESK_NOT_EXECUTION` (1717), `TICKE
 
 A house ticket, one a Director places for the house rather than for a pod, carries `house_instruction_id` and no pod, and stops `TICKET_CANCELLED_BY_HOUSE` when a Director cancels it. A pod is never sent one.
 
+## Break requests
+
+A break request is not a ticket: neither the service nor a desk works it, it has no limit price or urgency, and no `ticket_accepted` or `ticket_state` is sent for it. In an inter-term break, after the close of a term's final session and before the next term's first session (in Winter from the close on Friday 4 December 2026; break days 7 to 31 December), a pod asks the Directors to have the exchange reduce a position at the break days' official closes with `send_break_request(session, instrument=..., side=..., shares=..., thesis_id=..., thesis_version=..., risk_statement=...)` from `qte_sdk.tickets`, and withdraws one with `send_break_request_withdraw(session, break_request_id=...)`. The side must reduce the position and the shares be at most the position (`TICKET_CROSSES_ZERO` otherwise), and a pod holds at most one pending or approved request in each instrument. A request is never amended: withdraw it and send a new one.
+
+The answer is a `break_request_state`, the whole state of the request at each change (`BREAK_REQUEST_PENDING` on acceptance, then `BREAK_REQUEST_APPROVED`, `BREAK_REQUEST_REFUSED` with the Directors' `decision_reason`, or `BREAK_REQUEST_WITHDRAWN`), or a `break_request_reject`, whose `reason_code` is a ticket reason: `BREAK_REQUEST_NOT_IN_BREAK` (1721) outside the break, `BREAK_REQUEST_EXISTS` (1722) for a second request in one instrument, `TICKET_NOT_FOUND` or `TICKET_NOT_WORKING` for a withdrawal of a request that is not the pod's or has already ended. Pick them out with `is_break_request_event`; `LatestTickets` does not keep them. Neither carries a `report_seq` or is replayed, and a session that connects later is not sent the state, so keep each one as it arrives. An approved request is not filled yet: `BREAK_REQUEST_FILLED` and `BREAK_REQUEST_EXPIRED` are defined but not sent until qte-platform #2059's second part.
+
 ## Execution desks
 
 The Execution arm is paused, so no desk trades (see "Who works a ticket"). The rules below are those of the exchange's contract for when desks work: a desk works only the tickets routed to it (`executor` `DESK`) and is sent nothing about a ticket the service works: no `ticket_state`, no fills. Its own children's fills name their ticket in `parent_ticket_id`, and the orders the service places never appear in a desk's `RestingOrders`. In a term that sets the exchange's `urgency_clock_stops` (the Winter term does), a `DESK` ticket's schedule clock stops while its instrument is halted or the Directors declare an outage, as a `SERVICE` ticket's does: its `due_shares`, and each progress point's, do not grow during them, though the points still come at every tick. It gets no `revised_completion_time`, and its `planned_completion_time` is not changed (qte-platform #2676).
@@ -134,3 +142,4 @@ The Execution arm is paused, so no desk trades (see "Who works a ticket"). The r
 - Amend with a cancel sent `replacing=True`, then the replacement once the cancel's `ticket_state` shows `TICKET_CANCELLED_BY_POD`. On a 1714 reject of that cancel, send no replacement: the ticket is still working; cancel it plainly to stop it.
 - Before sending, check `routing_in_force` is `ROUTING_SERVICE`: while the service is off a ticket goes to the desk, and from the Winter term it is refused `TICKET_SERVICE_OFF` (1714). While `paused` is true a ticket is accepted and caught up when the pause lifts.
 - Read `paused` and `activity` before deciding a ticket is stuck.
+- In the break between terms, reduce a position with `send_break_request`, not a ticket, and keep each `break_request_state` as it arrives: none is resent.
