@@ -222,8 +222,10 @@ def test_a_base_exception_while_decoding_is_never_reported_as_a_failure(stop, st
         list(Connection("ws://127.0.0.1:1")._handle(book(1)))
 
 
-@pytest.mark.parametrize("type_", ["session_reject", "reject"])
-async def test_a_version_mismatch_raises_a_typed_error_on_either_reject(type_):
+@pytest.mark.parametrize(
+    "type_", ["session_reject", "reject", "ticket_reject", "break_request_reject"]
+)
+async def test_a_version_mismatch_raises_a_typed_error_on_any_reject(type_):
     payload = {"reason_code": "VERSION_MISMATCH", "reason_detail": "contract version not served"}
     async with exchange([frame(type_, payload, 1)]) as url:
         with pytest.raises(ContractVersionMismatch) as info:

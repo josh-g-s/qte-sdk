@@ -856,7 +856,7 @@ class Connection:
             return
 
         event = Received(env.type, message, seq, decoded.payload, report_seq)
-        if env.type in ("session_reject", "reject", "ticket_reject"):
+        if env.type in ("session_reject", "reject", "ticket_reject", "break_request_reject"):
             detail = message.reason_detail if message.HasField("reason_detail") else None
             if message.reason_code == ReasonCodes.VERSION_MISMATCH:
                 raise ContractVersionMismatch(message.reason_code, detail)
