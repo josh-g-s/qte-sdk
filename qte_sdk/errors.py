@@ -366,7 +366,7 @@ CODES: dict[str, Entry] = {
         "Wait for the snapshot, then check positions",
     ),
     SESSION_UNANSWERED: Entry(
-        "the connection dropped with {count} requests unconfirmed: {refs}",
+        "the connection dropped; unconfirmed requests ({count}): {refs}",
         "Each may or may not have reached the exchange, and a resume that omits one does "
         "not prove it is gone",
         "After ResumeComplete, settle each against RestingOrders, your fills and (after a "

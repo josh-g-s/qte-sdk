@@ -416,7 +416,8 @@ class Disconnected(DataUncertain):
 
     `unanswered` names the requests sent on that session that carry a `request_ref` and
     got no answer echoing it, as (message type, request_ref) pairs in the order sent, for
-    example `(("new", "r1"), ("cancel", "r3"))`; empty when there are none. They are
+    example `(("new", "r1"), ("cancel", "r3"))`; empty when there are none. A ref sent
+    again while still unanswered is listed once, until the first answer echoing it. They are
     unconfirmed: each may or may not have reached the exchange (see
     `QTE-SESSION-UNANSWERED` in docs/errors.md for how to settle them).
     """

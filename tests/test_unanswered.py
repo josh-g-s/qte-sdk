@@ -213,7 +213,7 @@ async def test_the_warning_names_the_count_and_refs_and_no_payload(caplog):
     assert record.fields == {"count": 2, "refs": "new n1, cancel c1"}
     message = record.getMessage()
     assert message.startswith(
-        "QTE-SESSION-UNANSWERED: the connection dropped with 2 requests unconfirmed: "
+        "QTE-SESSION-UNANSWERED: the connection dropped; unconfirmed requests (2): "
         "new n1, cancel c1. "
     )
     # Nothing of the messages themselves: no instrument, strategy or price.
@@ -265,9 +265,25 @@ async def test_a_json_log_line_shows_a_shortened_made_ref(caplog):
     line = json.loads(JsonFormatter().format(record))
     assert line["fields"] == {"count": 1, "refs": "new 0123456789ab..."}
     assert line["message"].startswith(
-        "the connection dropped with 1 requests unconfirmed: new 0123456789ab"
+        "the connection dropped; unconfirmed requests (1): new 0123456789ab"
     )
     assert made not in line["message"]
+
+
+def test_the_token_in_qte_token_is_withheld_from_the_log_too(monkeypatch):
+    from qte_sdk import pacing
+    from qte_sdk.session import TOKEN_ENV_VAR
+
+    caught: list[dict] = []
+    monkeypatch.setattr(pacing, "_emit", lambda message, code, **kw: caught.append(kw["fields"]))
+    # A second token, not the one this session holds: only QTE_TOKEN names it.
+    other = synthetic_token()
+    monkeypatch.setenv(TOKEN_ENV_VAR, other)
+    rs = ReconnectingSession("ws://127.0.0.1:1", synthetic_token())
+    rs._unanswered = {other: "new"}
+    assert rs._take_unanswered() == (("new", other),)
+    [fields] = caught
+    assert fields["refs"] == f"new {errors.WITHHELD}"
 
 
 def test_disconnected_lists_nothing_by_default():
@@ -325,3 +341,27 @@ def test_a_1001_close_says_the_exchange_is_stopping_or_switching_and_will_reconn
         "a ReconnectingSession connects again, and after a switch that normally succeeds "
         "within seconds"
     )
+
+
+async def test_a_ref_sent_again_while_unanswered_is_listed_once_under_its_first_type():
+    rs = ReconnectingSession("ws://127.0.0.1:1", synthetic_token())
+    session = _Session(None)
+    rs._session = session  # type: ignore[assignment]
+    await rs._send_noted(session, "new", NewOrder(request_ref="n1"))  # type: ignore[arg-type]
+    await rs._send_noted(session, "cancel", NewOrder(request_ref="n1"))  # type: ignore[arg-type]
+    assert rs._unanswered == {"n1": "new"}
+    # A later send with the same ref that fails before writing anything leaves the first
+    # request listed.
+    session.connection.error = ValueError("cannot encode")
+    with pytest.raises(ValueError):
+        await rs._send_noted(session, "amend", NewOrder(request_ref="n1"))  # type: ignore[arg-type]
+    assert rs._unanswered == {"n1": "new"}
+
+
+async def test_the_first_answer_clears_a_ref_sent_twice():
+    async def send(rs: ReconnectingSession) -> None:
+        await new(rs, "n1")
+        await new(rs, "n1")
+
+    [disconnected] = await drops(Exchange(2, [accepted("n1")]), send)
+    assert disconnected.unanswered == ()

@@ -138,7 +138,11 @@ that carry a `request_ref` and got no answer echoing it: each as its message typ
 `request_ref`, in the order sent. An `accepted`, `reject`, `order_cancelled`,
 `account_state`, `ticket_accepted`, `ticket_reject`, `break_request_state` or
 `break_request_reject` echoing the ref answers it. A `reject` with no `request_ref` answers
-nothing, so its request stays listed. When any are listed, `QTE-SESSION-UNANSWERED` is
+nothing, so its request stays listed. A ref sent again while it is still listed is listed
+once, under the message type it was first sent with, and the first answer echoing it clears
+it: one request can draw several answers (a cancel's `accepted` and its `order_cancelled`),
+so a second request with the same ref cannot be told apart. Give each request its own ref.
+When any are listed, `QTE-SESSION-UNANSWERED` is
 logged at WARNING through the `qte_sdk.reconnect` logger, with their count and refs (one of
 32 hex digits shortened to its first 12) and never their contents. They are unconfirmed,
 not lost: each may or may not have reached the exchange, and a resume that omits one does
@@ -1076,7 +1080,7 @@ class ReconnectingSession:
 
             _pacing._warn(
                 _errors.SESSION_UNANSWERED,
-                short_what=f"the connection dropped with {len(unanswered)} requests unconfirmed",
+                short_what=f"the connection dropped; unconfirmed requests ({len(unanswered)})",
                 target=_log,
                 count=len(unanswered),
                 refs=", ".join(f"{shown(type_)} {shown(ref)}" for type_, ref in unanswered),
