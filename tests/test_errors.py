@@ -274,6 +274,34 @@ def test_a_missing_field_gives_the_cause_rather_than_failing():
     )
 
 
+CLOSED_ARM = "the AGENTIC_AI arm is not open for trading this term (term configuration open_arms)"
+
+
+@pytest.mark.parametrize(
+    ("reason_name", "detail", "closed_arm"),
+    [
+        ("NO_MARKET_ACCESS", CLOSED_ARM, True),
+        ("NO_MARKET_ACCESS", "the FUNDAMENTALS arm is not open for trading this term", True),
+        ("NO_MARKET_ACCESS", "your team may not send orders", False),
+        ("NO_MARKET_ACCESS", None, False),
+        ("TEAM_DISABLED", CLOSED_ARM, False),
+    ],
+)
+def test_a_closed_arm_session_reject_gets_its_own_step(reason_name, detail, closed_arm):
+    error = SessionRejected(1004, detail, reason_name=reason_name)
+    step = error.fields["step"]
+    if closed_arm:
+        assert step == errors.CLOSED_ARM_STEP
+        assert "Head of Technology" not in step
+    else:
+        assert step == errors.SESSION_REJECTED_STEPS[reason_name]
+
+
+def test_the_closed_arm_step_is_in_docs_errors():
+    text = (ROOT / "docs" / "errors.md").read_text(encoding="utf-8")
+    assert f"| {errors.CLOSED_ARM_STEP} |" in text
+
+
 def test_server_text_is_flattened_to_one_line():
     error = SessionRejected(1003, "line one\nline two\x1b[31m.", reason_name="TEAM_DISABLED")
     assert error.detail == "line one\nline two\x1b[31m."
