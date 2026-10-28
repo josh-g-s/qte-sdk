@@ -2161,6 +2161,7 @@ def test_a_token_on_the_command_line_is_never_repeated(case: str, capsys):
         # on: the coded refusal, which shows nothing typed either.
         assert case == "starting with a dash and a digit" and code == 2 and out == ""
         assert "QTE-TOKEN-SET-ARGUMENT" in err and "not shown since it may be your token" in err
+        assert "clear it from your shell history" in err
     elif code == 0:
         # Newer Pythons read -h<token> as -h: the help, which holds nothing typed.
         assert case == "joined to -h" and out.startswith("usage: ") and err == ""
