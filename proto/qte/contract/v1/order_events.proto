@@ -1,13 +1,16 @@
 // Outbound order events.
 //
-// **Version:** 1.26
+// **Version:** 1.29
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
 // `obligation_state`, `account_state`, `risk_notice`, and the
-// ticket answers `ticket_accepted`, `ticket_reject` and `ticket_state` (see
-// the end of this file). These are private to the team whose
-// orders they concern. Each but `account_summary` and `obligation_state` is sent as
+// ticket answers `ticket_accepted`, `ticket_reject` and `ticket_state`, and
+// the break request answers `break_request_reject` and `break_request_state`,
+// and the term-end messages `term_close_fill` and `term_end` (see the end of
+// this file). These are private to the team whose
+// orders they concern; a house `term_close_fill` and every `term_end` go to
+// Director sessions only. Each but `account_summary` and `obligation_state` is sent as
 // soon as the engine records it, not held to the market-data publication grid
 // (SPEC 4.3); `account_summary` is never sent unprompted and is sent only in
 // reply to an `account_query`, and `obligation_state` is sent once per desk per
@@ -155,7 +158,9 @@ message LimitUtilisation {
   // a row is sent for a name with only working tickets. LIMIT_INSTRUMENT_HARD
   // stays the filled position. For LIMIT_SHORT_OF_GROSS, used is held shorts
   // plus unfilled shares of increasing short tickets, and cap is 20% of the
-  // filled gross alone (no unfilled ticket enters it, as at the ticket check).
+  // filled gross alone (no unfilled ticket enters it, as at the ticket check),
+  // or, where the term sets the short limit on the risk base, 20% of that
+  // fixed base.
   // LIMIT_GAMMA_DOLLAR is whole-book, sum of
   // abs(g_i); LIMIT_VEGA_UNDERLYING_AGGREGATE is abs(summed signed vega) of
   // an underlying against the longest live tenor's cap. SPEC 11.1, 18.7, 23.6
@@ -532,4 +537,76 @@ message TicketProgressPoint {
   int64 time = 1;          // timestamp. The tick, or stopped_time for the end point
   int64 due_shares = 2;    // int64-qty. due_shares's rule, as of time
   int64 filled_shares = 3; // int64-qty
+}
+
+// A break request message was refused and nothing was logged. Its reason
+// code is one of `TicketReasonCodes.TicketReasonCode`.
+message BreakRequestReject {
+  // Required, except absent when the message could not be parsed far enough
+  // to read one, or when the client sent an empty string.
+  optional string request_ref = 1; // id
+  BreakRequestKind request_kind = 2; // The kind of the message refused
+  TicketReasonCodes.TicketReasonCode reason_code = 3; // SPEC 23.7
+  optional string reason_detail = 4; // Free text
+  int64 receipt_time = 5; // timestamp. Gateway receipt
+}
+
+// The state of one break request, sent to the pod that sent it whenever the
+// request changes: its acceptance, the Directors' approval or refusal, and
+// its withdrawal (SPEC 23.7). A pod is sent its own requests only. The
+// Director who decided is not named.
+message BreakRequestState {
+  string break_request_id = 1; // id, decimal digits. Immutable; the exchange assigns it at acceptance
+  // Present iff the change answers a message of the pod's: the request_ref
+  // of the break_request on acceptance, or of the break_request_withdraw on
+  // withdrawal.
+  optional string request_ref = 2; // id
+  string instrument = 3;  // id. SPEC 23.7
+  Side side = 4;          // SPEC 23.7
+  int64 shares = 5;       // int64-qty. The request's Q. SPEC 23.7
+  string thesis_id = 6;   // id. SPEC 23.7
+  int32 thesis_version = 7;
+  string risk_statement = 8; // As sent. SPEC 23.7
+  BreakRequestStatus status = 9; // SPEC 23.7
+  int64 accepted_time = 10; // timestamp. SPEC 23.7
+  // Present iff the Directors have decided the request: when they approved
+  // or refused it, and their reason. SPEC 23.7
+  optional int64 decided_time = 11; // timestamp
+  optional string decision_reason = 12;
+  // timestamp. The time of the change this message reports.
+  int64 update_time = 13;
+}
+
+// One position closed by the automatic term-end close at the final session's
+// official close (SPEC 13.5, "Automatic term-end close"): a fee-free synthetic
+// closing fill at the instrument's official closing mark. It is not an
+// `execution`: it carries no strat_id, order id or exec id. A team's is sent to
+// that team's sessions, numbered with report_seq like every private report; the
+// house's is sent to Director sessions only, unnumbered, with house true.
+message TermCloseFill {
+  string instrument = 1; // id. SPEC 13.5
+  Side side = 2;         // The side of the closing fill: SELL closes a long, BUY a short
+  int64 size = 3;        // int64-qty. The position closed, greater than 0
+  int64 price = 4;       // int64-micro. The official close it is closed at. SPEC 7.1, SPEC 13.5
+  // Signed cash booked to the account: positive for a SELL, negative for a
+  // BUY, size times price. SPEC 13.5
+  int64 proceeds = 5; // int64-micro
+  string session_date = 6; // The final session's date, ISO 8601 (YYYY-MM-DD)
+  // The official close is a frozen-mark fallback (SPEC 7.2, "frozen").
+  bool frozen = 7;
+  // The official close is an earlier session's, the final session's own
+  // window having held no valid mark (SPEC 7.2).
+  bool prior_close = 8;
+  // True on a Director session's copy of the house's close, which names no
+  // team; false on a team's own.
+  bool house = 9;
+}
+
+// The term has ended: sent to Director sessions only, once after the final
+// session's term-close reports, and again on every Director auth while the
+// log the gateway serves is the ended term's. It carries no report_seq and is
+// never sent on a team's stream. SPEC 13.5
+message TermEnd {
+  string session_date = 1; // The final session's date, ISO 8601 (YYYY-MM-DD)
+  string term_id = 2;      // id. The term the gateway serves
 }
