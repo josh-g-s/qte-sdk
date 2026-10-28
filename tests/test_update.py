@@ -2494,7 +2494,8 @@ def test_a_pipe_whose_blocking_cannot_be_read_is_still_written(
         raise OSError("cannot say")
 
     lone.addHandler(logging.StreamHandler(stream))
-    monkeypatch.setattr(os, "get_blocking", cannot_say)
+    # raising=False: Windows before Python 3.12 has no os.get_blocking at all.
+    monkeypatch.setattr(os, "get_blocking", cannot_say, raising=False)
     warn_in_a_thread("behind")
     newline = b"\r\n" if sys.platform == "win32" else b"\n"
     assert read_all(read) == b"behind" + newline
@@ -2823,6 +2824,7 @@ def test_a_lock_left_by_a_program_that_stopped_is_cleared_for_the_next(
     assert not lock.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: a symbolic link needs no privilege")
 def test_a_lock_that_cannot_be_looked_at_is_left_and_the_program_does_not_check(
     monkeypatch: pytest.MonkeyPatch, automatic: Path
 ):
@@ -2835,6 +2837,7 @@ def test_a_lock_that_cannot_be_looked_at_is_left_and_the_program_does_not_check(
     assert not automatic.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX: Windows cannot remove a file held open")
 def test_a_lock_removed_by_another_program_meanwhile_is_no_error(
     monkeypatch: pytest.MonkeyPatch, automatic: Path
 ):
