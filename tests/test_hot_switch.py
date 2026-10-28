@@ -9,9 +9,13 @@ not read for a quarter of the hold limit (the gateway's write to it stalls), and
 HTTP 503 for every client while no exchange slot is live. Each such client reconnects
 through `ReconnectingSession` and resumes from `last_report_seq` in the same event log.
 
-Cases that rest on the gateway's unmerged switch code (qte-platform #2828, G3 and H4) are
-written against the behaviour that code's README describes, and skipped until it merges.
-The rest depend only on the SDK and on plain WebSocket behaviour, and run.
+The gateway's behaviour is read from qte-platform's G3 switch, PR #2912 at f05138fa (issue
+#2823): `gateway/README.md` "Stage 2: the switch", `cmd/qte-gateway/session.go` and
+`switch.go`, and contract 01's close code table there. The exchange side is H2, PR #2923 at
+450f1ba9 (issue #2821). G2 (#2828) is merged; G3, H2, H2b (#2859, carrying the follower's
+client connections over the promotion) and H4 (#2862, the rollback follower) are not. Every
+case runs against the stand-in gateway here; the points that H2b or H4 may still settle
+otherwise are named where they are assumed.
 """
 
 import asyncio
@@ -63,14 +67,13 @@ from qte_sdk.reconnect import (
 from qte_sdk.resting import RestingOrders
 from qte_sdk.session import open_session
 
-H4 = pytest.mark.skip(reason="TODO(h4): needs qte-platform #2828, G3 and H4 merged")
-
 HOLD = 0.2  # a short hold; test_handover.py covers the longest, 2 s
 HELD_PRICE = 199_950_000  # an order the client sends in the hold
 END = "999"  # the grid_time of the book that ends a script
 STOPPING = "exchange stopping"
 OVERFLOW = "too many messages during a switch"
-# The gateway's bound on what it queues for one client in the hold (H4 README:548-550).
+# The gateway's bound on what it queues for one client in the hold: past 1024 messages or
+# 4 MiB it closes the client 1008 (#2912 session.go:51-60 and 631-640, README:548-550).
 HOLD_QUEUE_LIMIT = 1024
 
 
@@ -252,9 +255,10 @@ def resumed_once_from(gateway: Closing, rs: ReconnectingSession, cursor: int) ->
 async def test_a_1008_close_in_the_hold_is_a_disconnect_that_is_retried_and_resumed():
     # The SDK has no special case for 1008: like any close but 1000 and 1001, websockets
     # raises it as ConnectionClosedError, which is retryable. The reason text is withheld,
-    # as every close reason the SDK does not know.
-    # TODO(h4): whether B ever sees what was queued for a client closed 1008; this fake
-    # drops it, so B replays nothing after M.
+    # as every close reason the SDK does not know. The gateway closes at once, in the hold,
+    # when the queue passes its bound (#2912 session.go:631-640); one order stands in for
+    # the bound here (it is tested below). The queue goes nowhere (session.go:51-52): the
+    # held order reaches no exchange, so B replays nothing after M.
     gateway = Closing(1008, OVERFLOW, orders=1)
 
     async def react(rs: ReconnectingSession, event: Any) -> None:
@@ -296,11 +300,10 @@ async def test_a_1008_close_ends_an_open_session_with_an_error_not_quietly():
     assert [e.report_seq for e in seen if isinstance(e, Received) and e.report_seq] == [1, 2, M]
 
 
-@H4
 async def test_more_than_the_hold_queue_limit_in_the_hold_is_closed_1008_and_resumed():
-    # TODO(h4): the bound (1024 messages or 4 MiB) and the reason text are from the H4
-    # README (548-550); the close is assumed to come once the client has sent one message
-    # over the bound. The SDK sets no limit of its own: every send succeeds.
+    # The gateway queues 1024 messages and closes on the 1025th (`len(queue) >= 1024`,
+    # #2912 session.go:633), with contract 01's reason text. The SDK sets no limit of its
+    # own: every send succeeds.
     gateway = Closing(1008, OVERFLOW, orders=HOLD_QUEUE_LIMIT + 1)
     sent: list[str] = []
 
@@ -318,7 +321,29 @@ async def test_more_than_the_hold_queue_limit_in_the_hold_is_closed_1008_and_res
     assert incomplete is False
 
 
+async def test_a_client_dropped_as_not_reading_in_the_switch_is_retried_and_resumed():
+    # A client write stuck for a quarter of the hold limit ends the session with no close
+    # frame (#2912 session.go:996-1004, `stop` closes the socket only; README:533-537), so
+    # the client sees 1006, retries at once and resumes from M.
+    gateway = Closing("drop")
+    events, clock, rs, _, incomplete = await drive(gateway)
+    (disconnected,) = [e for e in events if isinstance(e, Disconnected)]
+    assert isinstance(disconnected.error, ConnectionClosedError)
+    assert disconnected.error.rcvd is None
+    retries = [e for e in events if isinstance(e, Retrying)]
+    assert [(r.attempt, r.delay, r.error) for r in retries] == [(1, 0.5, None)]
+    resumed_once_from(gateway, rs, M)
+    assert rs.last_report_seq == M
+    assert incomplete is False
+    assert no_gaps(events)
+
+
 # Case 2: a 1001 at the release, then a resume on B
+#
+# The gateway closes a client 1001 `exchange stopping` at a promoted release only when it
+# gave the client no link to B: its recorded session passed 1024 messages or 4 MiB, or a
+# replayed subscribe was answered otherwise (#2912 README:510-527, session.go:970-978,
+# contract 01's 1001 gateway row). The client resumes on B, keeping its cursor.
 
 
 B_FILL = ("execution", execution("x-4", PRICE, 30, 40), M + 1)  # B fills the resting order
@@ -330,7 +355,10 @@ B_FILL = ("execution", execution("x-4", PRICE, 30, 40), M + 1)  # B fills the re
         pytest.param(
             [("resume_ack", payload_of(resume_ack(True, M + 1)), None), B_FILL], id="replay"
         ),
-        # The note infers a snapshot when the cursor is before B's live fold.
+        # Replay or snapshot is B's choice under contract 01's resume rules ("When replay is
+        # possible"): a snapshot if B's replay window does not hold A's reports to M.
+        # TODO(h2b): which one B gives rests on whether the client server B adopts at its
+        # promotion (#2859 item 2) holds the window from its fold; both are tested.
         pytest.param(
             [
                 ("resume_ack", payload_of(resume_ack(False, M + 1, 1)), None),
@@ -367,30 +395,28 @@ async def test_a_1001_at_the_release_is_resumed_on_b_in_the_same_log(answer):
     assert no_gaps(events)
 
 
-@H4
-async def test_an_order_held_when_the_client_is_closed_at_the_release_is_answered_by_b():
-    # TODO(h4): whether a client closed 1001 at the release has its held messages sent on
-    # to B (README:494-500 says held messages go to B in arrival order; README:510-530
-    # does not say for a client it closes). Assumed here that they are, so B's replay
-    # carries the answer; the client never sends the order again.
+async def test_an_order_held_when_the_client_is_closed_at_the_release_reaches_no_exchange():
+    # A client with no link to B is closed at the release before its queue is sent
+    # anywhere: `release` finds no link to keep and closes it 1001 with the queue unsent
+    # (#2912 session.go:970-978). B never sees the order and its resume carries nothing
+    # past M, so the client learns from the resume that the order was not taken; the SDK
+    # does not send it again.
     gateway = Closing(1001, STOPPING, orders=1)
     ref: list[str] = []
 
     async def react(rs: ReconnectingSession, event: Any) -> None:
         if isinstance(event, Received) and event.report_seq == M and not ref:
             ref.append(await send_order(rs))
-            gateway.answer = [
-                ("resume_ack", payload_of(resume_ack(True, M + 2)), None),
-                ("accepted", accepted(ref[0]), M + 1),
-                ("order_state", order_state(HELD_PRICE, 50), M + 2),
-            ]
 
     events, _, rs, view, incomplete = await drive(gateway, react=react)
+    assert len(ref) == 1
     resumed_once_from(gateway, rs, M)
     assert [m["type"] for m in gateway.links[0].received] == ["auth", "resume", "new"]
-    assert rs.last_report_seq == M + 2
+    assert kinds(events)[-4:] == ["calendar:None", "resume_ack:None", "ResumeComplete", "book:None"]
+    assert rs.last_report_seq == M
     assert incomplete is False
-    assert view.get("AAPL", BUY, HELD_PRICE) is not None
+    assert view.get("AAPL", BUY, HELD_PRICE) is None
+    assert [(o.key.price, o.remaining_size) for o in view] == [(PRICE, 70)]
     assert no_gaps(events)
 
 
@@ -400,8 +426,10 @@ async def test_an_order_held_when_the_client_is_closed_at_the_release_is_answere
 class Subscribed:
     """A gateway whose client subscribes to AAPL: A sends a book, the gateway holds for
     `HOLD` seconds, switches to B, and B sends books for AAPL, the last ending the script.
-    The gateway replays the client's subscription on its own link to B, so the client
-    sends nothing more."""
+    The gateway replays the client's `auth` and subscribes on its own link to B and swallows
+    B's second `session_ack` and `calendar`, so the client sends nothing more (#2912
+    README:494-503). B's first book may show the feed gap: B logs one `CauseLinkDown`
+    start per live link at its promotion (#2923, "Nothing new in the log")."""
 
     def __init__(self) -> None:
         self.links: list[Link] = []
@@ -457,9 +485,14 @@ async def test_subscriptions_are_made_again_after_a_close_at_the_release():
 
 class Rollback:
     """A gateway that switches A to B after report M1 and back to A after report M2, on one
-    connection, holding for `HOLD` seconds at each cut. Each new live build sends the cut's
-    report again, which the client drops. The client's order, sent on report M1, is held
-    and taken by B; B's fill on it is report M2. A then fills the first order once more."""
+    connection, holding for `HOLD` seconds at each cut. A rollback is the same switch with
+    the roles swapped (#2823 "After the switch", #2862 item 2). At each release the client
+    gets the old live's reports up to the cut and the new live's after it, the new live's
+    copy of the cut's report dropped by the gateway (#2912 README:497-499, session.go:436
+    and 1018-1020), so nothing reaches the client twice; the SDK's own drop of a repeat is
+    test_handover.py's `test_a_repeated_report_m_is_dropped_and_no_view_applies_a_duplicate_fill`.
+    The client's order, sent on report M1, is held and taken by B; B's fill on it is report
+    M2. A then fills the first order once more."""
 
     def __init__(self, resume: bool) -> None:
         self.resume = resume
@@ -483,12 +516,10 @@ class Rollback:
         except ConnectionClosed:
             return
 
-    async def cut(self, link: Link, to: str, repeat: tuple[str, dict, int]) -> None:
+    async def cut(self, link: Link, to: str) -> None:
         link.holding = True
         await asyncio.sleep(HOLD)
         link.source = to
-        type_, payload, report_seq = repeat
-        await link.send(type_, payload, report_seq, to)
         await link.release()
 
     async def __call__(self, ws: ServerConnection) -> None:
@@ -505,13 +536,12 @@ class Rollback:
             await asyncio.wait_for(self.order_arrived.wait(), 5)
             assert self.order is not None
             ref = self.order["payload"]["request_ref"]
-            m1 = ("execution", execution("x-3", PRICE, 20, 70), M)
-            await self.cut(link, "B", m1)
+            await self.cut(link, "B")
             await link.send("accepted", accepted(ref), M + 1, "B")
             await link.send("order_state", order_state(HELD_PRICE, 50), M + 2, "B")
             m2 = ("execution", execution(f"x-{M + 3}", HELD_PRICE, 20, 30), M + 3)
             await link.send(*m2, "B")
-            await self.cut(link, "A", m2)
+            await self.cut(link, "A")
             await link.send("execution", execution(f"x-{M + 4}", PRICE, 30, 40), M + 4, "A")
             await link.send("book", book(END), build="A")
             await ws.wait_closed()
@@ -554,14 +584,12 @@ async def test_a_rollback_keeps_seq_and_report_seq_running_with_no_duplicate(kin
         (1, "A"),
         (2, "A"),
         (M, "A"),
-        (M, "B"),
         (M + 1, "B"),
         (M + 2, "B"),
         (M + 3, "B"),
-        (M + 3, "A"),
         (M + 4, "A"),
     ]
-    # Each report delivered once: both repeats dropped.
+    # Each report delivered once.
     reports = [e.report_seq for e in events if isinstance(e, Received) and e.report_seq]
     assert reports == [1, 2, M, M + 1, M + 2, M + 3, M + 4]
     assert last == M + 4
@@ -588,13 +616,17 @@ NO_WRITER_REFUSALS = 20
 @pytest.mark.parametrize(
     ("end", "answer", "resting"),
     [
-        # The flip restart after the close: 1001, then 503s, then an empty snapshot, since
-        # no order rests outside a session.
+        # No exchange confirmed live after a switch: held clients are closed 1001 `exchange
+        # stopping` at the hold limit and upgrades are refused 503 until a slot reports
+        # live (#2912 switch.go:847-858, README:562-566). The live that comes back here
+        # was restarted outside a session (the flip), so its snapshot is empty.
         pytest.param(
             1001, [("resume_ack", payload_of(resume_ack(False, M, 0)), None)], [], id="flip"
         ),
-        # B crashes in the session: the connection is lost with no close frame, then 503s
-        # until a writer is back, whose snapshot still holds the resting order.
+        # B crashes in the session: its link ends with no close frame, so the client's does
+        # too (contract 01, 1006 note), and with no slot reporting live upgrades get 503
+        # (#2912 README:476-478) until a writer is back, whose snapshot still holds the
+        # resting order.
         pytest.param(
             "drop",
             [
@@ -653,10 +685,11 @@ async def test_with_no_writer_503s_are_retried_without_limit_and_sends_fail(end,
 class HeldSwitchExchange(FakeExchange):
     """The examples' fake exchange with a gateway hold in front of it: once `hold_after`
     books are sent and `strat_id` rests on both sides, nothing reaches the client for
-    `hold` seconds, heartbeats included. What the client sends meanwhile waits unread, as
-    the gateway queues it, and is answered after the release. The seq runs on with no gap,
-    as the gateway restamps it. From B's third book on, the best bid is a tick lower, so
-    the client must act on B's books."""
+    `hold` seconds, heartbeats included: the worst case, since the gateway still passes the
+    stopped live's messages and heartbeats on in the hold (#2912 session.go:401-440). What
+    the client sends meanwhile waits unread, as the gateway queues it, and is answered
+    after the release. The seq runs on with no gap, as the gateway restamps it. From B's
+    third book on, the best bid is a tick lower, so the client must act on B's books."""
 
     def __init__(self, *, hold_after: int, hold: float, strat_id: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
