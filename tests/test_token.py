@@ -2133,6 +2133,8 @@ def test_a_value_after_the_command_is_refused_and_never_printed(
 TOKEN_ON_THE_COMMAND_LINE = {
     "as the command": ["{}"],
     "as an unknown option": ["set", "--token={}"],
+    "starting with a dash and a letter": ["set", "-a{}"],
+    "starting with a dash and a digit": ["set", "-1{}"],
     "as --json's value": ["check", "--json={}"],
     "as an abbreviated --json's value": ["check", "--j={}"],
     "as --help's value": ["set", "--help={}"],
@@ -2147,14 +2149,24 @@ TOKEN_ON_THE_COMMAND_LINE = {
 def test_a_token_on_the_command_line_is_never_repeated(case: str, capsys):
     token = secrets.token_hex(32)
     argv = [word.format(token) for word in TOKEN_ON_THE_COMMAND_LINE[case]]
-    with pytest.raises(SystemExit) as exited:
-        helper.main(argv, ask=never, ask_secret=never, interactive=lambda: True)
+    try:
+        code = helper.main(argv, ask=never, ask_secret=never, interactive=lambda: True)
+    except SystemExit as exited:
+        code, refused = exited.code, False
+    else:
+        refused = True
     out, err = capsys.readouterr()
-    if exited.value.code == 0:
+    if refused:
+        # Python 3.14's argparse reads -<digit>... as a negative number, a value it passes
+        # on: the coded refusal, which shows nothing typed either.
+        assert case == "starting with a dash and a digit" and code == 2 and out == ""
+        assert "QTE-TOKEN-SET-ARGUMENT" in err and "not shown since it may be your token" in err
+        assert "clear it from your shell history" in err
+    elif code == 0:
         # Newer Pythons read -h<token> as -h: the help, which holds nothing typed.
         assert case == "joined to -h" and out.startswith("usage: ") and err == ""
     else:
-        assert exited.value.code == 2
+        assert code == 2
         assert out == ""
         assert err.startswith("usage: ")
         assert "not shown since it may be your token" in err
