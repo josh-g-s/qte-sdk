@@ -355,10 +355,13 @@ B_FILL = ("execution", execution("x-4", PRICE, 30, 40), M + 1)  # B fills the re
         pytest.param(
             [("resume_ack", payload_of(resume_ack(True, M + 1)), None), B_FILL], id="replay"
         ),
-        # Replay or snapshot is B's choice under contract 01's resume rules ("When replay is
-        # possible"): a snapshot if B's replay window does not hold A's reports to M.
-        # TODO(h2b): which one B gives rests on whether the client server B adopts at its
-        # promotion (#2859 item 2) holds the window from its fold; both are tested.
+        # With the cursor at M, B replays: what it logs past M is folded live, so it is in
+        # B's resume window (#2923 handover.go:741-750; contract 01 "When replay is
+        # possible"). A snapshot is still a valid answer there (a B whose window a restart
+        # emptied), so the SDK's handling of one is tested too.
+        # TODO(h2b): whether B's window also holds A's reports up to M, which decides
+        # replay or snapshot for a client whose cursor is behind M, rests on the client
+        # server B adopts at its promotion (#2859 item 2).
         pytest.param(
             [
                 ("resume_ack", payload_of(resume_ack(False, M + 1, 1)), None),
