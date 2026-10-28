@@ -1048,8 +1048,9 @@ async def open_session(
     logs a WARNING when a newer release is out and never delays or fails the session; set
     `QTE_UPDATE_CHECK=0` to turn it off (see `qte_sdk.update`).
 
-    The session does not reconnect. Iterating it ends quietly on 1001 and raises a
-    `ConnectionClosedError` on any other close. The closes to expect:
+    The session does not reconnect. Iterating it ends quietly on a normal close (1000, 1001,
+    or a close frame with no code) and raises a `ConnectionClosedError` on any other close.
+    The closes to expect:
 
     - 1001 `exchange stopping`: the exchange is stopping.
     - 1002: a protocol error.
