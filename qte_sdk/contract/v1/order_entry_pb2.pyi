@@ -144,3 +144,29 @@ class CancelHouseTicket(_message.Message):
     request_ref: str
     ticket_id: str
     def __init__(self, request_ref: _Optional[str] = ..., ticket_id: _Optional[str] = ...) -> None: ...
+
+class SubmitBreakRequest(_message.Message):
+    __slots__ = ("request_ref", "instrument", "side", "shares", "thesis_id", "thesis_version", "risk_statement")
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    SIDE_FIELD_NUMBER: _ClassVar[int]
+    SHARES_FIELD_NUMBER: _ClassVar[int]
+    THESIS_ID_FIELD_NUMBER: _ClassVar[int]
+    THESIS_VERSION_FIELD_NUMBER: _ClassVar[int]
+    RISK_STATEMENT_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    instrument: str
+    side: _common_pb2.Side
+    shares: int
+    thesis_id: str
+    thesis_version: int
+    risk_statement: str
+    def __init__(self, request_ref: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., risk_statement: _Optional[str] = ...) -> None: ...
+
+class WithdrawBreakRequest(_message.Message):
+    __slots__ = ("request_ref", "break_request_id")
+    REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
+    BREAK_REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    request_ref: str
+    break_request_id: str
+    def __init__(self, request_ref: _Optional[str] = ..., break_request_id: _Optional[str] = ...) -> None: ...

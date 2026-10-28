@@ -40,7 +40,9 @@ reason, then a summary:
                      query yet. Any other refusal is a FAIL. No figures are printed.
     test-order       only with --place-test-order (see below).
     feed             whether any message was missed or could not be decoded, and how many
-                     ticket states arrived, for a Fundamentals pod or Execution desk.
+                     ticket states arrived, for a Fundamentals pod or Execution desk, and
+                     how many term-close fills and break request answers, after a term's
+                     final close.
     heartbeat        whether the exchange's heartbeats arrived, and about how far apart;
                      a SKIP if none came, since the interval may be longer than the run.
     history:<name>   the start of the last closed session's books from the history service, when
@@ -144,6 +146,7 @@ try:
         ReportGap,
         SessionRejected,
         Unknown,
+        describe_close,
     )
     from qte_sdk.contract.v1.common_pb2 import (
         BUY,
@@ -561,6 +564,11 @@ def missed_reports(event: object) -> bool:
     return isinstance(event, DecodeFailed) and (
         event.type is None or event.type in ORDER_EVENT_TYPES
     )
+
+
+# The answers to a Fundamentals pod's break requests, from the term's final close until
+# the next term (qte_sdk.tickets).
+BREAK_REQUEST_ANSWERS = frozenset({"break_request_state", "break_request_reject"})
 
 
 def refuses_unknown_type(event: Received) -> bool:
@@ -1005,6 +1013,10 @@ class Watcher:
         self.unknown_types: set[str] = set()
         # Ticket states, which a Fundamentals pod or an Execution desk is sent on connecting.
         self.ticket_states = 0
+        # The term-end close's fills and the break request answers, which this SDK names
+        # (#301): counted, not reported as message types the SDK does not know.
+        self.term_close_fills = 0
+        self.break_request_answers = 0
         self.account_ref: str | None = None
         self.account_reply: AccountState | Reject | None = None
         # Whether the reply refuses the query as a message type the exchange does not know.
@@ -1095,6 +1107,10 @@ class Watcher:
             self.unknown_types.add(event.type)
         elif is_ticket_event(event) and event.type == "ticket_state":
             self.ticket_states += 1
+        elif isinstance(event, Received) and event.type == "term_close_fill":
+            self.term_close_fills += 1
+        elif isinstance(event, Received) and event.type in BREAK_REQUEST_ANSWERS:
+            self.break_request_answers += 1
         if self.order is not None and self.order.sent and missed_reports(event):
             self.order.reports_missed = True
         item = as_market_data(event)
@@ -1225,8 +1241,12 @@ def check_feed(report: Report, watcher: Watcher) -> None:
     if watcher.undecodable:
         problems.append(f"{watcher.undecodable} message(s) could not be decoded")
     if watcher.failure is not None:
+        if isinstance(watcher.failure, ConnectionClosed):
+            how = f"with {describe_close(watcher.failure)}"
+        else:
+            how = f"({type(watcher.failure).__name__})"
         problems.append(
-            f"the connection dropped ({type(watcher.failure).__name__}); this one-shot check "
+            f"the connection dropped {how}; this one-shot check "
             "does not reconnect (a long-running program reconnects with ReconnectingSession: "
             "docs/quickstart.md step 9)"
         )
@@ -1238,6 +1258,10 @@ def check_feed(report: Report, watcher: Watcher) -> None:
     note = ""
     if watcher.ticket_states:
         note = f"; {watcher.ticket_states} ticket state(s)"
+    if watcher.term_close_fills:
+        note += f"; {watcher.term_close_fills} term-close fill(s): query the account again"
+    if watcher.break_request_answers:
+        note += f"; {watcher.break_request_answers} break request answer(s)"
     if watcher.unknown_types:
         names = ", ".join(sorted(watcher.unknown_types))
         note += f"; message types this SDK does not know: {names} (a newer SDK may read them)"

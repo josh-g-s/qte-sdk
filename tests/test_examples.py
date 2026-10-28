@@ -187,6 +187,7 @@ class FakeExchange:
         instruments: dict[str, Any] | None = None,
         newer: dict[str, Any] | None = None,
         tickets: list[dict[str, Any]] | None = None,
+        frames: list[tuple[str, dict[str, Any]]] | None = None,
         options: dict[str, Any] | None = None,
         replay: bool = False,
         drop_on_new: int | None = None,
@@ -225,6 +226,8 @@ class FakeExchange:
         # With `tickets`, one `ticket_state` each follows them, as a Fundamentals pod or an
         # Execution desk is sent on connecting.
         self.tickets = tickets
+        # With `frames`, each (type, payload) follows them, as sent.
+        self.frames = frames
         # With `heartbeat_every`, a heartbeat is sent that often, in seconds, from the ack
         # on, each carrying a send time that many seconds after the ack's server_time.
         self.heartbeat_every = heartbeat_every
@@ -412,6 +415,8 @@ class FakeExchange:
             await self.send(ws, "newer_kind", self.newer)
         for ticket in self.tickets or []:
             await self.send(ws, "ticket_state", ticket)
+        for type_, payload in self.frames or []:
+            await self.send(ws, type_, payload)
         ticker: asyncio.Task | None = None
         beats = None if self.heartbeat_every is None else asyncio.create_task(self.beat(ws))
         try:
@@ -3062,6 +3067,54 @@ async def test_the_smoke_test_reads_ticket_states_and_counts_them():
     assert "does not know" not in reason
 
 
+async def test_the_smoke_test_counts_term_close_fills_and_break_request_answers():
+    fill = {
+        "instrument": INSTRUMENT,
+        "side": "SELL",
+        "size": "40",
+        "price": "200000000",
+        "proceeds": "8000000000",
+        "session_date": "2026-12-04",
+    }
+    state = {
+        "break_request_id": "73104",
+        "request_ref": "b-1",
+        "instrument": INSTRUMENT,
+        "side": "SELL",
+        "shares": "40",
+        "thesis_id": "TH-1",
+        "thesis_version": 1,
+        "risk_statement": "gap risk",
+        "status": "BREAK_REQUEST_PENDING",
+        "accepted_time": "1",
+        "update_time": "1",
+    }
+    reject = {
+        "request_ref": "b-2",
+        "request_kind": "BREAK_REQUEST_SUBMIT",
+        "reason_code": "BREAK_REQUEST_NOT_IN_BREAK",
+        "receipt_time": "1",
+    }
+    exchange = FakeExchange(
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+        frames=[
+            ("term_close_fill", fill),
+            ("break_request_state", state),
+            ("break_request_reject", reject),
+        ],
+    )
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    status, reason = found["feed"]
+    assert status == "PASS"
+    # Types this SDK knows: counted, and never named as ones it does not know.
+    assert reason.endswith(
+        "; 1 term-close fill(s): query the account again; 2 break request answer(s)"
+    )
+    assert "does not know" not in reason
+
+
 def listed(instrument: str, status: str = "INSTRUMENT_TRADING", tradable: bool = True) -> dict:
     return {
         "instrument": instrument,
@@ -5079,3 +5132,64 @@ def test_the_reconnecting_examples_bound_each_close_of_the_connection():
         source = (EXAMPLES_DIR / name).read_text()
         assert source.count("ReconnectingSession(") == 1, name
         assert source.count("close_timeout=CLOSE_SECONDS") == 1, name
+
+
+# The arguments each example that does not reconnect needs to run, and the line of its
+# output that reports a dropped connection.
+NO_RECONNECT_ARGS = {
+    "take_liquidity.py": (
+        "--instrument", INSTRUMENT, "--strat-id", "close-test", "--side", "buy", "--seconds", "5"
+    ),
+    "fundamentals_pod.py": (
+        "--instrument", "AAPL", "--side", "buy", "--shares", "500", "--limit", "201.50",
+        "--thesis-id", "t-aapl", "--thesis-version", "1",
+    ),
+    "out_of_hours.py": ("--instrument", INSTRUMENT, "--seconds", "5"),
+    "smoke_test.py": ("--instruments", INSTRUMENT, "--seconds", "1"),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", sorted(NO_RECONNECT_ARGS))
+@pytest.mark.parametrize(
+    ("code", "reason", "expected"),
+    [
+        (1008, "too many messages during a switch", "close code 1008: the gateway closed you"),
+        (1008, "credential revoked", 'close code 1008, reason "credential revoked": your token'),
+        (1011, "sequencer stopped", 'close code 1011, reason "sequencer stopped": the exchange'),
+    ],
+    ids=["1008-switch", "1008-revoked", "1011"],
+)
+async def test_each_example_that_does_not_reconnect_names_the_close_code(
+    name: str, code: int, reason: str, expected: str
+):
+    # The exchange acknowledges the session, waits briefly for the client's first message,
+    # then closes the connection with `code`.
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()
+        ack = {
+            "session_id": "s-1",
+            "team": "team-a",
+            "server_time": "1",
+            "contract_version": CONTRACT_VERSION,
+            "unscored": True,
+        }
+        await ws.send(
+            json.dumps(
+                {"version": CONTRACT_VERSION, "type": "session_ack", "payload": ack, "seq": 1}
+            )
+        )
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(0.5):
+                await ws.recv()
+        await ws.close(code, reason)
+
+    token = synthetic_token()
+    async with serve_local(handler) as url:
+        status, out, err = await run_example(
+            name, url, token, *NO_RECONNECT_ARGS[name], QTE_STRAT_ID="close-test"
+        )
+    assert status != 0, out + err
+    assert expected in out + err
+    assert token not in out + err
+    if code == 1008 and reason != "credential revoked":
+        assert reason not in out + err  # a reason the SDK does not show yet is withheld

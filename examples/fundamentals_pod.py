@@ -99,6 +99,7 @@ from qte_sdk.connection import (
     Received,
     SeqGap,
     SessionRejected,
+    describe_close,
 )
 from qte_sdk.contract.v1.common_pb2 import (
     AUTO_EXECUTION,
@@ -550,10 +551,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
-    except ConnectionClosedError:
+    except ConnectionClosedError as error:
         return fail(
-            "the connection dropped, and this example does not reconnect. A ticket sent "
-            "may still be working: reconnect and read its ticket_state"
+            f"the connection dropped with {describe_close(error)}. This example does not "
+            "reconnect. A ticket sent may still be working: reconnect and read its ticket_state"
         )
     except KeyboardInterrupt:
         # The ticket, if one was accepted, keeps working on the exchange.
