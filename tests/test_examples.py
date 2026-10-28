@@ -187,6 +187,7 @@ class FakeExchange:
         instruments: dict[str, Any] | None = None,
         newer: dict[str, Any] | None = None,
         tickets: list[dict[str, Any]] | None = None,
+        frames: list[tuple[str, dict[str, Any]]] | None = None,
         options: dict[str, Any] | None = None,
         replay: bool = False,
         drop_on_new: int | None = None,
@@ -225,6 +226,8 @@ class FakeExchange:
         # With `tickets`, one `ticket_state` each follows them, as a Fundamentals pod or an
         # Execution desk is sent on connecting.
         self.tickets = tickets
+        # With `frames`, each (type, payload) follows them, as sent.
+        self.frames = frames
         # With `heartbeat_every`, a heartbeat is sent that often, in seconds, from the ack
         # on, each carrying a send time that many seconds after the ack's server_time.
         self.heartbeat_every = heartbeat_every
@@ -412,6 +415,8 @@ class FakeExchange:
             await self.send(ws, "newer_kind", self.newer)
         for ticket in self.tickets or []:
             await self.send(ws, "ticket_state", ticket)
+        for type_, payload in self.frames or []:
+            await self.send(ws, type_, payload)
         ticker: asyncio.Task | None = None
         beats = None if self.heartbeat_every is None else asyncio.create_task(self.beat(ws))
         try:
@@ -3059,6 +3064,54 @@ async def test_the_smoke_test_reads_ticket_states_and_counts_them():
     assert status == "PASS"
     # A type this SDK knows: counted, and never named as one it does not know.
     assert reason.endswith("; 2 ticket state(s)")
+    assert "does not know" not in reason
+
+
+async def test_the_smoke_test_counts_term_close_fills_and_break_request_answers():
+    fill = {
+        "instrument": INSTRUMENT,
+        "side": "SELL",
+        "size": "40",
+        "price": "200000000",
+        "proceeds": "8000000000",
+        "session_date": "2026-12-04",
+    }
+    state = {
+        "break_request_id": "73104",
+        "request_ref": "b-1",
+        "instrument": INSTRUMENT,
+        "side": "SELL",
+        "shares": "40",
+        "thesis_id": "TH-1",
+        "thesis_version": 1,
+        "risk_statement": "gap risk",
+        "status": "BREAK_REQUEST_PENDING",
+        "accepted_time": "1",
+        "update_time": "1",
+    }
+    reject = {
+        "request_ref": "b-2",
+        "request_kind": "BREAK_REQUEST_SUBMIT",
+        "reason_code": "BREAK_REQUEST_NOT_IN_BREAK",
+        "receipt_time": "1",
+    }
+    exchange = FakeExchange(
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+        frames=[
+            ("term_close_fill", fill),
+            ("break_request_state", state),
+            ("break_request_reject", reject),
+        ],
+    )
+    code, out, err, found = await run_smoke_test(exchange, "--instruments", INSTRUMENT)
+    assert code == 0, out + err
+    status, reason = found["feed"]
+    assert status == "PASS"
+    # Types this SDK knows: counted, and never named as ones it does not know.
+    assert reason.endswith(
+        "; 1 term-close fill(s): query the account again; 2 break request answer(s)"
+    )
     assert "does not know" not in reason
 
 

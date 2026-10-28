@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.17
+**Version:** 0.18
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -19,6 +19,7 @@ The last line of a traceback is the class name and then this message. The code i
 - Catch `qte_sdk.errors.QteError` for any SDK exception that has a code, or filter on `qte_sdk.errors.QteWarning` for any such warning. Each exception keeps the base class it had before codes were added (`MissingToken` is still a `ValueError`, `LivenessTimeout` a `TimeoutError`), so an existing `except` clause still catches it.
 - To filter warnings by text, match the code, which is at the start: `warnings.filterwarnings("ignore", message="QTE-DOTENV")`. Filtering by class, such as `DotenvNotIgnored`, works as before.
 - No message ever holds your token. Text from the exchange or the history service, such as a rejection's detail, is flattened to one line in the message and kept as sent in the exception's attribute (`detail`, or `message` for a history error), and is withheld if it repeats any part of the token. Text you gave, such as an instrument, a message type, a replay's date or channel, or the path of a `.env` or token file, is withheld from the message if it holds the token, as written, percent-encoded or escaped. Where the SDK has no token to look for, as in the git warning before the `.env` is read or a `Session`'s `repr`, text holding a run of 32 hex digits, the shape of the exchange's tokens, is withheld instead.
+- The exchange's refusal of an order, a ticket, a break request or an account query is an event your loop reads, not an SDK error, and has no `QTE-` code. Only a refusal of the session itself (its `auth` or a resume) or one with `VERSION_MISMATCH` raises, with a `QTE-SESSION-` code below: a `reject` names its reason with `reason_code_name`, and a `ticket_reject` or `break_request_reject` with `qte_sdk.tickets.ticket_reason_code_name`. Two reasons refuse only a pod's `break_request`: `BREAK_REQUEST_NOT_IN_BREAK` (1721), sent outside an inter-term break (before the close of a term's final session, or from the next term's first session on; in Winter the break runs from the close on Friday 4 December 2026), so send it again only once the break has begun; and `BREAK_REQUEST_EXISTS` (1722), when the pod already holds a pending or approved request in that instrument, so withdraw that one with `send_break_request_withdraw` first if you mean to replace it. The `qte_sdk.tickets` docstring lists the others.
 - A code never changes once released. A code no longer used is listed under [Retired codes](#retired-codes) and never reused.
 
 ## Exit codes
@@ -181,7 +182,7 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 
 ### QTE-SESSION-VERSION-MISMATCH
 
-- Raised as: `qte_sdk.connection.ContractVersionMismatch`, a `SessionRejected`, on a `session_reject`, a `reject` or a `ticket_reject` with `VERSION_MISMATCH`, during a session too.
+- Raised as: `qte_sdk.connection.ContractVersionMismatch`, a `SessionRejected`, on a `session_reject`, a `reject`, a `ticket_reject` or a `break_request_reject` with `VERSION_MISMATCH`, during a session too.
 - Cause: The exchange does not serve the contract version this SDK sends, so nothing sent can work.
 - Fix: Run `python -m qte_sdk.update` and the command it prints.
 
