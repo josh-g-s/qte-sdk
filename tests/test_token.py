@@ -2133,6 +2133,7 @@ def test_a_value_after_the_command_is_refused_and_never_printed(
 TOKEN_ON_THE_COMMAND_LINE = {
     "as the command": ["{}"],
     "as an unknown option": ["set", "--token={}"],
+    "starting with a dash": ["set", "-{}"],
     "as --json's value": ["check", "--json={}"],
     "as an abbreviated --json's value": ["check", "--j={}"],
     "as --help's value": ["set", "--help={}"],
