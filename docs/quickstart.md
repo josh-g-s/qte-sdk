@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.85
+**Version:** 0.86
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -286,6 +286,7 @@ else:
 - `sector_limit` is the sector the Fundamentals sector limit counts the instrument against, the same for every team: a GICS sector name, or `Unsectored` for one the limit leaves out. It is empty when the exchange has none to give, as for every option contract; `qte_sdk.instruments.sector_of(info)` returns `None` then. Treat a sector name you do not know as unknown, never as an error.
 - `display_name` is a name to show, and may be absent: the exchange can leave it unset for every instrument. Show `instrument` when it is (`info.display_name if info.HasField("display_name") else info.instrument`), and never parse it.
 - A `ReconnectingSession` keeps the latest table of its current session in `instrument_table`, `None` again after each reconnect until the new session's table arrives.
+- From Wednesday 28 October 2026, a Market Making desk must display at least one round lot of its instrument at its best bid and at its best offer, each side on its own, for a second to count towards its presence, and an Options Market Making desk at least 1 contract on each obligated side. Each name's round lot is shown in the console's obligations panel; this SDK cannot read it yet. The minimum is not scaled, and there is no exemption where one round lot is more than the desk's name cap allows; size at other prices does not make up for an undersized best bid or offer, a fill that takes a side below it fails the next second unless the desk restores it, and orders need not be multiples of the round lot. The round lot is not `lot_size`: `lot_size` in the instruments table is the smallest order size and the step order sizes go in, set by the exchange (currently 1 share or 1 contract), and every order must still respect it. `examples/quote_both_sides.py` quotes 1 share per side unless told otherwise, below the minimum wherever the round lot is more than 1 share: a Market Making desk passes `--size` equal to its name's round lot.
 
 ## 4. Subscribe to market data
 
