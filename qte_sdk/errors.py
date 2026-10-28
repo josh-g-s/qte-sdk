@@ -630,8 +630,10 @@ SESSION_REJECTED_DEFAULT_STEP = (
 ORDER_REJECT_STEPS: dict[str, str] = {
     "STRATEGY_NOT_REGISTERED": (
         "This strategy ID has no live registration on this term. Each new term starts with "
-        "none, so your Team Lead must register it again on the console: Strategy "
-        "registration, Register a new strategy, Submit. Orders sent after it is admitted no "
+        "none, and retiring a registration ends it, so your Team Lead must register it again "
+        "on the console: Strategy registration, Register a new strategy, Submit. After a "
+        "retirement the new version must be above every version your team has held under this "
+        "strategy ID, or it is refused VERSION_NOT_NEW. Orders sent after it is accepted no "
         "longer get this reject"
     ),
 }
