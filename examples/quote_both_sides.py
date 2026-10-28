@@ -84,6 +84,13 @@ counts the time down too; if the connection is down when it ends, the example wa
 most --drain-seconds for it to come back to cancel its orders, and otherwise names them
 for you to check. Only the first connection is not retried: if it
 fails, the example says why and stops, before sending anything.
+
+What the resume cannot show. The replay or the snapshot covers only what the exchange had
+applied when it answered. A new still waiting out its order delay at the drop can be
+applied just after that, so the resume does not show it and the example takes that side's
+order as gone: it may send a second new for the side, and if the book has moved, the first
+is left resting, not cancelled by this example. The drop message names each order by the
+request_ref of its new, so you can find such an order in your reports and cancel it.
 """
 
 import argparse
@@ -226,6 +233,8 @@ class Quote:
     # as from an earlier run: the new is then refused as a duplicate, but if that reply is
     # lost with the connection, the view cannot tell the two apart.
     taken_before: bool = False
+    # The request_ref of the new that placed its order, so a message can name the order.
+    order_ref: str | None = None
 
 
 class Quoter:
@@ -289,7 +298,7 @@ class Quoter:
         why = disconnected.error or "the exchange closed it"
         print(
             f"the connection dropped ({why}); sending nothing until it is back. Orders this "
-            f"example believes it has: {self.believed_resting()}"
+            f"example believes it has: {self.believed_resting(refs=True)}"
         )
 
     def resumed(self) -> bool:
@@ -404,6 +413,7 @@ class Quoter:
             quote.taken_before = self.resting(quote) is not None
             if not quote.taken_before:
                 self.levels.add((quote.side, best))
+            quote.order_ref = self.record(quote, "new")
             await send_new(
                 self.session,
                 strat_id=self.strat_id,
@@ -412,7 +422,7 @@ class Quoter:
                 order_type=LIMIT,
                 price=best,
                 size=self.size,
-                request_ref=self.record(quote, "new"),
+                request_ref=quote.order_ref,
             )
             self.sent(quote)
             return
@@ -531,14 +541,20 @@ class Quoter:
         """This side's order is no longer on the book."""
         quote.price = None
         quote.cancelling = False
+        quote.order_ref = None
 
-    def believed_resting(self) -> str:
-        """The orders this example believes it may have, for a message to the user."""
-        levels = [
-            f"{SIDE_NAMES[q.side]} {self.instrument} @ {price_text(q.price)}"
-            for q in self.quotes.values()
-            if q.price is not None
-        ]
+    def believed_resting(self, refs: bool = False) -> str:
+        """The orders this example believes it may have, for a message to the user. With
+        `refs`, each names the request_ref of its new, and the kind of a message in flight."""
+        levels = []
+        for q in self.quotes.values():
+            if q.price is None:
+                continue
+            level = f"{SIDE_NAMES[q.side]} {self.instrument} @ {price_text(q.price)}"
+            if refs:
+                flight = f", {q.pending_kind} in flight" if q.pending_ref is not None else ""
+                level += f" (request_ref {q.order_ref}{flight})"
+            levels.append(level)
         return ", ".join(levels) or "none"
 
     def on_order_event(self, message: Message) -> None:

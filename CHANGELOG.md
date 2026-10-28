@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.89
+**Version:** 0.90
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -23,6 +23,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 - `python -m qte_sdk.token set` explains a `QTE-TOKEN-MALFORMED` refusal: the message gives the token's length and the kinds of character no token has that it found (a space, a quote, a #, an invisible or control character), never the token, a position or a codepoint, and says a trading token is 64 characters, 0-9 and a-f, and to copy it again from plain text and paste it only at the hidden prompt. It no longer claims to refuse a letter outside ASCII. A token that passes but is not 64 characters of 0-9 and a-f, such as one cut short or in capitals, is still saved, with a new `QTE-TOKEN-UNUSUAL` warning on stderr giving its length and whether it has characters outside 0-9 and a-f. `HistoryClient`'s refusal gives the same length and kinds (#317).
 - The quickstart, both copies of AGENTS.md, docs/errors.md and the `qte_sdk.history` and `qte_sdk.replay` docstrings say that all five sessions with options cached before the history service's options build, 15 to 21 October 2026, have been upgraded and serve option chains and Greeks, so an unavailable answer is final for every session; the QTE-HISTORY-UNAVAILABLE message drops its upgrade exception (#319).
 - `python -m qte_sdk.token` no longer repeats a token pasted onto its command line: argparse's "unrecognized arguments" and "invalid choice" errors are replaced by one that names no word it did not expect, says to paste the token at the hidden prompt of `token set`, and to remove it from the shell history (#321).
+- The quickstart and both copies of AGENTS.md say that a resume covers only what the exchange had applied when it answered, replays as well as snapshots, and what the trading examples do when an order still in its order delay is missing from it; `examples/quote_both_sides.py` names each order by its request_ref when the connection drops, `examples/options_bot.py` no longer subscribes twice after a subscribe cut off by a drop, and the quickstart lists `examples/out_of_hours.py` among the examples that do not reconnect (#308).
 
 ## 1.5.1
 
