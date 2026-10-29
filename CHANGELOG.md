@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.102
+**Version:** 0.103
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- The vendored conformance steps are now at v1.8, from qte-platform 8deb128e. Step 15 names `term_close_fill` as a seventh private message that carries a `report_seq`, and the conformance session accepts it there. The SDK already handled `term_close_fill`, so no SDK code changes (#363).
 - The README, the quickstart, both copies of AGENTS.md and docs/automatic-execution.md name 1.6.2 as the latest release, and its zip as the one to install without git.
 
 ## 1.6.2
