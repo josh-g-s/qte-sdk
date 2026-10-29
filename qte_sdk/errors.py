@@ -474,10 +474,16 @@ CODES: dict[str, Entry] = {
     ),
     HISTORY_FORBIDDEN: Entry(
         "{what}",
-        "The service serves only what your team may see",
-        "Ask the course team whether this data is open to your team",
-        "The token may not read this data (HTTP 403)",
-        "Ask the course team",
+        "The service serves only what your team may see: private reports only to their own "
+        "team, and only for sessions of the term the token belongs to",
+        "For reports, pass the team name your session reports (session.info.team) exactly, "
+        "and session dates of the current term only, since an earlier term's reports are "
+        "not served; if both are right and it is still refused, or for anything else, ask the "
+        "course team",
+        "The token may not read this data (HTTP 403): another team's reports, a session of "
+        "a term other than the token's own, or data not open to your team",
+        "Pass your own team name and dates of the current term; if both are right, tell the "
+        "course team",
     ),
     HISTORY_INTERRUPTED: Entry(
         "{what}",

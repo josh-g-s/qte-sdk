@@ -655,6 +655,7 @@ async def test_a_session_rejected_while_open_is_flagged_then_raised():
         (ConnectionClosedError(Close(4001, "term change"), None), True),
         (ConnectionClosedError(Close(1008, "credential revoked"), None), False),
         (ConnectionClosedError(Close(1008, "too many messages during a switch"), None), True),
+        (ConnectionClosedError(Close(1008, "too many link_drain messages"), None), True),
         (ConnectionClosedError(Close(1008, "<withheld>"), None), True),
         (ConnectionClosedError(Close(1011, "credential revoked"), None), True),
         (ConnectionClosedError(None, Close(1008, "credential revoked")), True),
