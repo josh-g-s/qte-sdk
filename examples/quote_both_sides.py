@@ -3,7 +3,12 @@
 Set QTE_URL and QTE_TOKEN first, in ./.env or the environment (see docs/quickstart.md),
 then:
 
-    python examples/quote_both_sides.py --instrument AAPL --strat-id <your strategy> --seconds 30
+    python examples/quote_both_sides.py --instrument AAPL --strat-id <your strategy> \\
+        --size 100 --seconds 30
+
+--size is required: the shares to quote on each side. A Market Making desk must display at
+least its term's minimum at its best bid and best offer; read it, the name's round lot,
+from the console's obligations panel and pass at least that (100 above is an example).
 
 The example quotes one limit order of --size shares on each side, --inside dollars inside
 the best price the wall shows on that side, and manages the two orders until --seconds
@@ -172,7 +177,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("QTE_STRAT_ID"),
         help="a strategy ID registered for your team (default: $QTE_STRAT_ID)",
     )
-    parser.add_argument("--size", type=int, default=1, help="shares per side (default 1)")
+    parser.add_argument(
+        "--size",
+        type=int,
+        required=True,
+        help=(
+            "shares per side; a Market Making desk passes at least its name's round lot, "
+            "shown in the console's obligations panel"
+        ),
+    )
     parser.add_argument(
         "--inside",
         type=to_micros,  # dollars as text, converted exactly to micro-dollars

@@ -20,7 +20,9 @@ leaves no room for a resting buy, and tries the next nearest strike.
 
 On that contract it sends one LIMIT buy of one lot (one contract, never 100 shares), naming
 the contract by its OCC symbol. It waits for the exchange to report the order resting,
-cancels that price level, waits for the cancel to be confirmed and stops. It never
+cancels that price level, waits for the cancel to be confirmed and stops. One contract is
+also the Options Market Making minimum per obligated side, but this example rests one side
+for a moment and does not meet an obligation: a desk quotes both sides and keeps them. It never
 retries an order: a reject is printed with its reason's name and the example stops. A
 DUPLICATE_ORDER_AT_LEVEL reject means your team already has an order at that level, often
 one an earlier run left: the example names the level, so you can cancel that order
