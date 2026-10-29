@@ -196,6 +196,17 @@ CREDENTIAL_REVOKED_CLOSE_REASON = "credential revoked"
 with a token that has just been revoked or rotated. Reconnecting with the same token is
 refused, so get a new token instead: `ReconnectingSession` does not retry this close."""
 
+SWITCH_OVERFLOW_CLOSE_REASON = "too many messages during a switch"
+"""The reason, with code 1008, of the gateway's close when this client sent more than 1024
+messages or more than 4 MiB in all while a switch held its messages. Reconnect and resume,
+and send less while messages are held."""
+
+LINK_DRAIN_OVERFLOW_CLOSE_REASON = "too many link_drain messages"
+"""The reason, with code 1008, of the gateway's close when this client sent more than 16
+`link_drain` messages, a type reserved for the gateway's link to the exchange, while their
+rejects were held (before the contract version is known, or during an atomic group). A
+client never sends one; stop sending them, then reconnect and resume."""
+
 # Close reasons whose exact text is fixed by the contract or by `websockets` itself, so
 # they cannot carry the token and are kept. Any other reason is withheld.
 _KNOWN_CLOSE_REASONS = frozenset(
@@ -206,6 +217,8 @@ _KNOWN_CLOSE_REASONS = frozenset(
         "exchange stopping",
         "sequencer stopped",
         CREDENTIAL_REVOKED_CLOSE_REASON,
+        SWITCH_OVERFLOW_CLOSE_REASON,
+        LINK_DRAIN_OVERFLOW_CLOSE_REASON,
     }
 )
 
@@ -265,18 +278,34 @@ _CLOSE_CAUSES: dict[int, dict[str | None, str]] = {
             "and after a switch that normally succeeds within seconds"
         )
     },
-    1002: {None: "a protocol error: the exchange could not read a message this client sent"},
+    1002: {
+        None: (
+            "a protocol error: the exchange or the gateway could not read a WebSocket frame "
+            "this client sent"
+        )
+    },
     CREDENTIAL_REVOKED_CLOSE_CODE: {
         CREDENTIAL_REVOKED_CLOSE_REASON: (
             "your token was revoked or rotated; get a new token, and do not connect again "
             "with this one"
         ),
-        None: (
-            "the gateway closed you for a policy reason, most often too many messages "
-            "queued during a switch"
+        SWITCH_OVERFLOW_CLOSE_REASON: (
+            "this client sent more than 1024 messages or 4 MiB while a switch held them; "
+            "reconnect and resume, and send less while messages are held"
         ),
+        LINK_DRAIN_OVERFLOW_CLOSE_REASON: (
+            "this client sent more than 16 link_drain messages, a type only the gateway's "
+            "link to the exchange sends, while their rejects were held; stop sending it, "
+            "then reconnect and resume"
+        ),
+        None: "a policy close by the exchange or the gateway",
     },
-    1009: {None: "a message was too large"},
+    1009: {
+        None: (
+            "a message was too large: over the exchange's read limit (64 KiB unless "
+            "configured), or over 1 MiB through the gateway; do not resend it unchanged"
+        )
+    },
     1011: {
         "sequencer stopped": "the exchange's sequencer stopped; reconnect and resume",
         "keepalive ping timeout": "a keepalive ping went unanswered; keep your loop reading",
