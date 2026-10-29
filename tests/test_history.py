@@ -190,6 +190,9 @@ class FakeHistory:
     # The body of GET /v1/history/sessions, and its Content-Type.
     listing: bytes = b'{"sessions":[]}'
     listing_type: str = "application/json"
+    # Send the listing chunked, without a Content-Length, as the service does for one
+    # over about 2 KiB; a drop then cuts a chunk short.
+    listing_chunked: bool = False
     # Paths answered 501, as an endpoint not built yet is.
     unbuilt: set[str] = field(default_factory=set)
     credential_term: bool = True  # False: the service's own credential term is missing
@@ -300,9 +303,20 @@ class FakeHistory:
     def sessions(self, handler: BaseHTTPRequestHandler) -> None:
         handler.send_response(200)
         handler.send_header("Content-Type", self.listing_type)
+        drop = self.drop_after.pop(handler.path, None)
+        if self.listing_chunked:
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.end_headers()
+            # One chunk, cut after `drop` bytes of its data, or whole with the last chunk.
+            data = self.listing if drop is None else self.listing[:drop]
+            handler.wfile.write(f"{len(self.listing):x}\r\n".encode() + data)
+            if drop is None:
+                handler.wfile.write(b"\r\n0\r\n\r\n")
+            handler.wfile.flush()
+            handler.close_connection = drop is not None
+            return
         handler.send_header("Content-Length", str(len(self.listing)))
         handler.end_headers()
-        drop = self.drop_after.pop(handler.path, None)
         handler.wfile.write(self.listing if drop is None else self.listing[:drop])
         if drop is not None:
             handler.close_connection = True
@@ -378,6 +392,8 @@ class FakeHistory:
                 offset += len(blob)
             entries.append(entry)
         manifest = json.dumps({"manifest": entries}, separators=(",", ":")).encode() + b"\n"
+        if self.raw_manifest is not None:
+            manifest = self.raw_manifest
         digest_input = [{k: e[k] for k in ("session_date", "status", "sha256")} for e in entries]
         etag = etag_of(json.dumps(digest_input, separators=(",", ":")).encode())
         extra = {"Retry-After": "30"} if any(e["status"] == "pending" for e in entries) else {}
@@ -2595,7 +2611,8 @@ async def test_a_listing_without_the_contract_fields_is_a_bad_response(body):
 
 async def test_a_listing_that_is_not_json_is_refused():
     token = synthetic_token()
-    fake = FakeHistory(token, listing=b"<html></html>", listing_type="text/html")
+    # Valid JSON, so only the Content-Type can refuse it.
+    fake = FakeHistory(token, listing=listing(session(DAY, "t")), listing_type="text/html")
     with serve_history(fake) as url:
         with pytest.raises(HistoryError) as caught:
             await HistoryClient(url, token).list_sessions()
@@ -2717,15 +2734,17 @@ async def test_reports_need_a_recognised_token():
 
 async def test_the_team_segment_is_sent_exactly_as_given():
     token = synthetic_token()
-    fake = FakeHistory(token, team="Team A/1", reports={DAY: accepted(1)})
+    fake = FakeHistory(token, team="Team A 1", reports={DAY: accepted(1)})
     with serve_history(fake) as url:
         client = HistoryClient(url, token)
-        assert len(await collect(client.fetch_reports(DAY, "Team A/1"))) == 1
+        assert len(await collect(client.fetch_reports(DAY, "Team A 1"))) == 1
+        assert len(await collect(client.fetch_reports_range(DAY, DAY, "Team A 1"))) == 2
         # No case folding or trimming: a near miss is another team's name.
-        for near in ("team a/1", " Team A/1"):
+        for near in ("team a 1", " Team A 1"):
             with pytest.raises(HistoryForbidden):
                 await collect(client.fetch_reports(DAY, near))
-    assert fake.requests[0][0] == f"/v1/history/{DAY}/Team%20A%2F1/reports"
+    assert fake.requests[0][0] == f"/v1/history/{DAY}/Team%20A%201/reports"
+    assert urlsplit(fake.requests[1][0]).path == "/v1/history/range/Team%20A%201/reports"
 
 
 @pytest.mark.parametrize(("team", "error"), [("", ValueError), (None, TypeError), (7, TypeError)])
@@ -2879,3 +2898,98 @@ async def test_a_dropped_session_listing_is_interrupted_not_partly_parsed():
         with pytest.raises(HistoryInterrupted) as caught:
             await HistoryClient(url, token).list_sessions()
     assert "session listing was cut short" in str(caught.value)
+
+
+async def test_a_dropped_chunked_session_listing_is_interrupted_not_partly_parsed():
+    # A listing over about 2 KiB comes chunked, so a drop cuts a chunk: IncompleteRead.
+    token = synthetic_token()
+    body = listing(*(session(f"2026-01-{day:02d}", "2026-spring") for day in range(5, 30)))
+    fake = FakeHistory(token, listing=body, listing_chunked=True)
+    fake.drop_after["/v1/history/sessions"] = 200
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        with pytest.raises(HistoryInterrupted) as caught:
+            await client.list_sessions()
+        assert "session listing was cut short (IncompleteRead)" in str(caught.value)
+        assert caught.value.bytes_received == 200
+        # Whole, the same chunked listing is read.
+        assert len(await client.list_sessions()) == 25
+
+
+async def test_a_session_listing_longer_than_the_cap_is_refused(monkeypatch):
+    assert history._LISTING_LIMIT == 16 * 1024 * 1024
+    monkeypatch.setattr(history, "_LISTING_LIMIT", 1000)
+    token = synthetic_token()
+    body = listing(*(session(f"2026-01-{day:02d}", "2026-spring") for day in range(5, 30)))
+    assert len(body) > 1000
+    for chunked in (False, True):
+        with serve_history(FakeHistory(token, listing=body, listing_chunked=chunked)) as url:
+            with pytest.raises(HistoryError) as caught:
+                await HistoryClient(url, token).list_sessions()
+        assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+        assert "longer than the client accepts" in str(caught.value)
+
+
+async def test_a_session_is_ready_only_when_every_channel_is():
+    token = synthetic_token()
+    mixed = session(DAY, "t")
+    mixed["channels"][1]["status"] = "pending"
+    with serve_history(FakeHistory(token, listing=listing(mixed))) as url:
+        [summary] = await HistoryClient(url, token).list_sessions()
+    assert not summary.ready
+
+
+async def test_the_session_listing_reply_is_closed(closes):
+    token = synthetic_token()
+    with serve_history(FakeHistory(token, listing=listing(session(DAY, "t")))) as url:
+        assert len(await HistoryClient(url, token).list_sessions()) == 1
+    assert closes == [200]
+
+
+async def test_a_network_error_reading_the_listing_that_shows_the_token_is_withheld(
+    monkeypatch,
+):
+    token = synthetic_token()
+
+    def reset(self: Any, *args: Any) -> bytes:
+        raise ConnectionResetError(104, f"reset while sending {token}")
+
+    with serve_history(FakeHistory(token, listing=listing(session(DAY, "t")))) as url:
+        monkeypatch.setattr(history.http.client.HTTPResponse, "read1", reset)
+        with pytest.raises(HistoryError) as caught:
+            await HistoryClient(url, token).list_sessions()
+    assert "ConnectionResetError; details withheld" in str(caught.value)
+    assert_token_absent(token, shown(caught.value))
+
+
+@pytest.mark.parametrize("ranged", [False, True])
+async def test_breaking_out_of_reports_closes_the_response_at_once(closes, ranged):
+    token = synthetic_token()
+    body = b"".join(accepted(n, f"r-{n}") for n in range(1, 6))
+    with serve_history(FakeHistory(token, reports={DAY: body})) as url:
+        client = HistoryClient(url, token)
+        items = (
+            client.fetch_reports_range(DAY, DAY, "team-a")
+            if ranged
+            else (client.fetch_reports(DAY, "team-a"))
+        )
+        async for item in items:
+            if isinstance(item, Accepted):
+                break
+        assert closes == []
+        await items.aclose()
+        # Closed by the close itself, not later by the event loop's finaliser.
+        assert closes == [200]
+
+
+async def test_a_ready_reports_range_entry_without_a_length_is_a_bad_response():
+    token = synthetic_token()
+    entry = {"session_date": DAY, "status": "ready", "byte_offset": 0, "length": None}
+    entry["sha256"] = hashlib.sha256(accepted(1)).hexdigest()
+    manifest = json.dumps({"manifest": [entry]}).encode() + b"\n"
+    fake = FakeHistory(token, reports={DAY: accepted(1)}, raw_manifest=manifest)
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError) as caught:
+            await collect(HistoryClient(url, token).fetch_reports_range(DAY, DAY, "team-a"))
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+    assert "manifest could not be read (ValueError)" in str(caught.value)

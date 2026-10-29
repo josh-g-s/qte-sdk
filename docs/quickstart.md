@@ -720,13 +720,13 @@ except HistoryPending as error:
 `fetch_reports(date, team)` yields your team's own private reports for one session, as the same `Accepted`, `Reject`, `Execution`, `OrderCancelled`, `OrderState`, `RiskNotice` and `TermCloseFill` classes your session received live, and `fetch_reports_range(from_date, to_date, team)` yields a `ReportsManifest` first (one entry per date, `ready`, `pending`, `not_closed` or `unavailable`), then each ready session's reports in date order. `team` is your team's name exactly as `session.info.team` gives it (step 3); the history service has no call that tells you it.
 
 ```python
-from qte_sdk.history import HistoryClient, HistoryForbidden, ReportsManifest
+from qte_sdk.history import HistoryClient, HistoryForbidden, HistoryPending, ReportsManifest
 from qte_sdk.session import open_session
 
 session = await open_session()
 async with session:
     team = session.info.team  # the name the history service checks your token against
-    calendar = await session.wait_for_calendar(timeout=5)  # the current term's dates
+    calendar = await session.wait_for_calendar(timeout=5)  # the current term's sessions
 
 client = HistoryClient()
 sessions = await client.list_sessions()
@@ -734,10 +734,11 @@ for s in sessions:
     print(s.session_date, s.term_id, s.scored, s.ready, len(s.feed_gaps), "feed gaps")
 by_term = [s for s in sessions if s.term_id == sessions[-1].term_id] if sessions else []
 
-if calendar is None or not calendar.term_start:
-    this_term = []  # without the calendar's term dates, the current term is unknown
+if calendar is None or not calendar.term_first_session:
+    this_term = []  # without the calendar's term sessions, the current term is unknown
 else:
-    this_term = [s for s in sessions if calendar.term_start <= s.session_date <= calendar.term_end]
+    first_session, last_session = calendar.term_first_session, calendar.term_last_session
+    this_term = [s for s in sessions if first_session <= s.session_date <= last_session]
 if not this_term:
     print("no closed session of the current term yet")
 else:
@@ -752,9 +753,11 @@ else:
                 print(type(item).__name__, item)
     except HistoryForbidden as error:
         print(error)  # another team's name, or a session of a term other than your token's
+    except HistoryPending as error:
+        print(error)  # the session's reports are not ready yet; try again later
 ```
 
-`by_term` shows filtering by `term_id`: every session held of the newest term in the listing. Take the dates for your reports from the calendar's `term_start` and `term_end` (step 3), not from the listing: in the days before a new term's first session closes, the newest term in the listing is the previous one, whose reports are not served.
+`by_term` shows filtering by `term_id`: every session held of the newest term in the listing. Take the dates for your reports from the calendar's `term_first_session` and `term_last_session` (step 3), not from `term_start` and `term_end` (the service refuses a date before the term's first session) and not from the listing: in the days before a new term's first session closes, the newest term in the listing is the previous one, whose reports are not served.
 
 - The service serves a team only its own reports, and only for sessions of the term your token belongs to. Another team's name, or a session of an earlier term, raises `HistoryForbidden`; a range is refused whole if any date in it is of another term. So keep the dates within the current term, as above. If your team name and dates are right and it is still refused, the service's own term setting is wrong: tell the course team.
 - A session in which your team sent no order yields nothing. Pending, not-closed and unavailable sessions behave as for `fetch`: `fetch_reports` waits on a pending one, and `fetch_reports_range` never waits (`ReportsManifest.pending`).
