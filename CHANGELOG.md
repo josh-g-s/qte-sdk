@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.103
+**Version:** 0.105
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -9,6 +9,8 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 ## Unreleased
 
 - The gateway's two 1008 close reasons, `too many messages during a switch` and `too many link_drain messages`, are now shown instead of `<withheld>`, and `describe_close` says which limit was hit (`qte_sdk.connection.SWITCH_OVERFLOW_CLOSE_REASON` and `LINK_DRAIN_OVERFLOW_CLOSE_REASON`). Its 1002 and 1009 causes now say that the exchange or the gateway may send them, and that the gateway closes any message over 1 MiB with 1009, as contract 01 v2.36's close-code table does (#365).
+- `HistoryClient.list_sessions()` lists the closed sessions the history service holds (`SessionSummary`: date, term, scored, channel status and feed gaps), and `fetch_reports(date, team)` and `fetch_reports_range(from_date, to_date, team)` fetch your team's own past private reports, with `team` taken from `session.info.team`. Another team's name, or a session of another term, raises `HistoryForbidden` with the next step. Quickstart step 10, docs/errors.md and both copies of AGENTS.md describe them (#359).
+- The vendored conformance steps are now at v1.8, from qte-platform 8deb128e. Step 15 names `term_close_fill` as a seventh private message that carries a `report_seq`, and the conformance session accepts it there. The SDK already handled `term_close_fill`, so no SDK code changes (#363).
 - The README, the quickstart, both copies of AGENTS.md and docs/automatic-execution.md name 1.6.2 as the latest release, and its zip as the one to install without git.
 
 ## 1.6.2

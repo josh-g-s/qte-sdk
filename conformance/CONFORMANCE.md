@@ -1,6 +1,6 @@
 # Conformance steps
 
-**Version:** 1.7
+**Version:** 1.8
 
 The scripted checks a client and an exchange are run against, end to end. Each step names
 the messages it exercises and the rule it proves, citing `SPEC.md` sections and naming
@@ -164,9 +164,10 @@ price and side; step 8 checks that the exchange refuses to.
     on a day with no session, see step 16.
 15. **Heartbeat and resume.** Precondition: the exchange under test can be restarted
     between two of the sub-steps, and the close of step 14 has happened before the
-    empty-marker sub-step. A "report" below is one of the six private messages that carry a `report_seq`
+    empty-marker sub-step. A "report" below is one of the seven private messages that carry a `report_seq`
     on the envelope: `accepted`, `reject` (when it is a reply to an order the exchange
-    released), `execution`, `order_cancelled`, `order_state` and `risk_notice`. The
+    released), `execution`, `order_cancelled`, `order_state`, `risk_notice` and
+    `term_close_fill` (sent only at the close of a term's final session). The
     sub-steps, in order, each on a connection the script opens itself:
 
     - **Heartbeat, nothing sent by the client.** From the opening of a connection, with
