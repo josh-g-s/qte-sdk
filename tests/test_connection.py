@@ -21,6 +21,8 @@ from websockets.exceptions import (
 from websockets.frames import Close
 
 from qte_sdk.connection import (
+    LINK_DRAIN_OVERFLOW_CLOSE_REASON,
+    SWITCH_OVERFLOW_CLOSE_REASON,
     TERM_CHANGE_CLOSE_CODE,
     Connection,
     ContractVersionMismatch,
@@ -981,6 +983,8 @@ async def test_the_contracts_fixed_close_reasons_are_kept(code: int, reason: str
         "Credential revoked",
         "exchange stopping ",
         "sequencer stopped.",
+        "too many messages during a switch {token}",
+        "Too many link_drain messages",
     ],
 )
 async def test_a_fixed_close_reason_with_anything_added_is_withheld(reason: str):
@@ -1012,13 +1016,13 @@ def closed(code: int | None, reason: str = "", sent: Close | None = None) -> Con
     ("code", "reason", "expected"),
     [
         (1001, "exchange stopping", 'close code 1001, reason "exchange stopping": the exchange is'),
-        (1002, "", "close code 1002: a protocol error"),
+        (1002, "", "close code 1002: a protocol error: the exchange or the gateway"),
         (
             1008,
             "credential revoked",
             'close code 1008, reason "credential revoked": your token was',
         ),
-        (1009, "", "close code 1009: a message was too large"),
+        (1009, "", "close code 1009: a message was too large: over the exchange's read limit"),
         (1011, "sequencer stopped", 'close code 1011, reason "sequencer stopped": the exchange\'s'),
         (
             4000,
@@ -1035,14 +1039,37 @@ def test_describe_close_names_each_close_to_expect(code: int, reason: str, expec
 def test_describe_close_tells_a_revoked_token_from_a_switch_close():
     revoked = describe_close(closed(1008, "credential revoked"))
     assert "get a new token, and do not connect again with this one" in revoked
-    switch = (
-        "close code 1008: the gateway closed you for a policy reason, most often too many "
-        "messages queued during a switch"
+    assert describe_close(closed(1008, "too many messages during a switch")) == (
+        'close code 1008, reason "too many messages during a switch": this client sent more '
+        "than 1024 messages or 4 MiB while a switch held them; reconnect and resume, and send "
+        "less while messages are held"
     )
-    # Neither switch reason is one the SDK shows yet, so it is withheld, as is any other.
-    for reason in ("too many messages during a switch", "too many link_drain messages", ""):
-        assert describe_close(closed(1008, reason)) == switch
-    assert describe_close(_without_close_reasons(closed(1008, "anything"))) == switch
+    assert describe_close(closed(1008, "too many link_drain messages")) == (
+        'close code 1008, reason "too many link_drain messages": this client sent more than '
+        "16 link_drain messages, a type only the gateway's link to the exchange sends; stop "
+        "sending it, then reconnect and resume"
+    )
+    # Any other 1008 reason is withheld, and the cause names neither limit.
+    other = "close code 1008: a policy close by the exchange or the gateway"
+    for reason in ("too many messages", "Too many link_drain messages", ""):
+        assert describe_close(closed(1008, reason)) == other
+    assert describe_close(_without_close_reasons(closed(1008, "anything"))) == other
+
+
+@pytest.mark.parametrize("reason", [SWITCH_OVERFLOW_CLOSE_REASON, LINK_DRAIN_OVERFLOW_CLOSE_REASON])
+async def test_the_gateways_two_fixed_1008_reasons_are_shown(reason: str):
+    async def close_with(ws: ServerConnection) -> None:
+        await ws.recv()
+        await ws.close(1008, reason)
+
+    async with serve_local(close_with) as url:
+        async with Connection(url) as conn:
+            await conn.send("auth", Auth(token=secrets.token_hex(16)))
+            with pytest.raises(ConnectionClosedError) as caught:
+                [event async for event in conn]
+    assert caught.value.rcvd is not None
+    assert (caught.value.rcvd.code, caught.value.rcvd.reason) == (1008, reason)
+    assert f'reason "{reason}"' in describe_close(caught.value)
 
 
 def test_describe_close_reports_no_close_frame_as_1006():

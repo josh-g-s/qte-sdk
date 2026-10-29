@@ -5178,11 +5178,16 @@ NO_RECONNECT_ARGS = {
 @pytest.mark.parametrize(
     ("code", "reason", "expected"),
     [
-        (1008, "too many messages during a switch", "close code 1008: the gateway closed you"),
+        (
+            1008,
+            "too many messages during a switch",
+            'close code 1008, reason "too many messages during a switch": this client sent',
+        ),
+        (1008, "too many messages", "close code 1008: a policy close by the exchange"),
         (1008, "credential revoked", 'close code 1008, reason "credential revoked": your token'),
         (1011, "sequencer stopped", 'close code 1011, reason "sequencer stopped": the exchange'),
     ],
-    ids=["1008-switch", "1008-revoked", "1011"],
+    ids=["1008-switch", "1008-other", "1008-revoked", "1011"],
 )
 async def test_each_example_that_does_not_reconnect_names_the_close_code(
     name: str, code: int, reason: str, expected: str
@@ -5216,5 +5221,5 @@ async def test_each_example_that_does_not_reconnect_names_the_close_code(
     assert status != 0, out + err
     assert expected in out + err
     assert token not in out + err
-    if code == 1008 and reason != "credential revoked":
-        assert reason not in out + err  # a reason the SDK does not show yet is withheld
+    if f'reason "{reason}"' not in expected:
+        assert reason not in out + err  # a reason the SDK does not show is withheld

@@ -1055,12 +1055,12 @@ async def open_session(
     - 1001 `exchange stopping`: the exchange is stopping or switching; a
       `ReconnectingSession` connects again, and after a switch that normally succeeds within
       seconds.
-    - 1002: a protocol error.
+    - 1002: a protocol error, from the exchange or the gateway.
     - 1008 `credential revoked`: do not reconnect with that credential. Also 1008 `too many
-      messages during a switch` or `too many link_drain messages`: the SDK does not show
-      these two reasons yet (they arrive with the gateway's contract), so they appear as
-      `<withheld>`.
-    - 1009: a message too large.
+      messages during a switch` (more than 1024 messages or 4 MiB sent while a switch held
+      them) or `too many link_drain messages`: reconnect and resume.
+    - 1009: a message too large (over the exchange's read limit, 64 KiB unless configured,
+      or over 1 MiB through the gateway).
     - 1011 `sequencer stopped`.
     - 4000 `heartbeat timeout` and 4001 `term change`.
     - 1006: a drop with no close frame.
