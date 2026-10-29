@@ -911,7 +911,8 @@ async def history_not_closed(token: str, ctx: Context) -> str:
 
 
 async def history_not_implemented(token: str, ctx: Context) -> str:
-    return await fetched(FakeHistory(token, error_message=ECHO), token, DAY, "TEST", "reports")
+    fake = FakeHistory(token, error_message=ECHO, unbuilt={f"/v1/history/{DAY}/TEST/book"})
+    return await fetched(fake, token)
 
 
 async def history_request_rejected(token: str, ctx: Context) -> str:

@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.26
+**Version:** 0.27
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -343,8 +343,8 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 ### QTE-HISTORY-FORBIDDEN
 
 - Raised as: `qte_sdk.history.HistoryForbidden`, a `HistoryError`.
-- Cause: The token may not read this data (HTTP 403). The service serves only what your team may see.
-- Fix: Ask the course team whether this data is open to your team.
+- Cause: The token may not read this data (HTTP 403): `fetch_reports` or `fetch_reports_range` named another team, or a session of a term other than the one the token belongs to, or the data is not open to your team. The service serves a team's private reports only to that team, and only for sessions of the token's current term.
+- Fix: For reports, pass the team name your session reports (`session.info.team`) exactly, and session dates of the current term only: an earlier term's reports are not served. If both are right and it is still refused, the service's own term setting is wrong: tell the course team. For anything else, ask the course team whether this data is open to your team.
 
 ### QTE-HISTORY-INTERRUPTED
 

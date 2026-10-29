@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.93
+**Version:** 0.94
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -661,7 +661,7 @@ An exchange that does not offer resume yet answers `resume` with a `reject`. `se
 
 ## 10. Past market data (history)
 
-The exchange's history service serves the market data of sessions that have closed, going back to the first session held, at any hour. It serves exactly what the live feed published to everyone, message for message, so you get the same `Book`, `Trades`, `Mark` and `SessionState` classes as from `market_data` and the same handling code works on both. It holds nothing else: no raw feed, and nothing about other teams.
+The exchange's history service serves the market data of sessions that have closed, going back to the first session held, at any hour. It serves exactly what the live feed published to everyone, message for message, so you get the same `Book`, `Trades`, `Mark` and `SessionState` classes as from `market_data` and the same handling code works on both. Besides that, it lists the sessions it holds and serves your own team's past private reports (below). It holds nothing else: no raw feed, and nothing private about other teams.
 
 It is a separate service with its own address, `https://history.trading.queenstowerexchange.com`. Set it as `QTE_HISTORY_URL`; the SDK has no default. Your token comes from `QTE_TOKEN` as before. No session is needed: this runs in any `async` function.
 
@@ -712,6 +712,56 @@ except HistoryPending as error:
   ```
 
 - History tells you what the market published, not how your own orders would have filled against it.
+
+### Sessions held, and your own past reports
+
+`list_sessions()` returns every closed session the service holds, oldest first, as `SessionSummary` values: `session_date`, `term_id` (the term whose configuration governed it), `scored` (False for an unscored recorded session), `channels` (each of `book`, `trades`, `mark` and `session_state` with its `status`, `ready` or `pending`; `ready` is True when all are) and `feed_gaps` (the feed gaps that touched a ready session, as `FeedGap` values; empty when there were none). Fields the service adds later are ignored.
+
+`fetch_reports(date, team)` yields your team's own private reports for one session, as the same `Accepted`, `Reject`, `Execution`, `OrderCancelled`, `OrderState`, `RiskNotice` and `TermCloseFill` classes your session received live, and `fetch_reports_range(from_date, to_date, team)` yields a `ReportsManifest` first (one entry per date, `ready`, `pending`, `not_closed` or `unavailable`), then each ready session's reports in date order. `team` is your team's name exactly as `session.info.team` gives it (step 3); the history service has no call that tells you it.
+
+```python
+from qte_sdk.history import HistoryClient, HistoryForbidden, HistoryPending, ReportsManifest
+from qte_sdk.session import open_session
+
+session = await open_session()
+async with session:
+    team = session.info.team  # the name the history service checks your token against
+    calendar = await session.wait_for_calendar(timeout=5)  # the current term's sessions
+
+client = HistoryClient()
+sessions = await client.list_sessions()
+for s in sessions:
+    print(s.session_date, s.term_id, s.scored, s.ready, len(s.feed_gaps), "feed gaps")
+by_term = [s for s in sessions if s.term_id == sessions[-1].term_id] if sessions else []
+
+if calendar is None or not calendar.term_first_session:
+    this_term = []  # without the calendar's term sessions, the current term is unknown
+else:
+    first_session, last_session = calendar.term_first_session, calendar.term_last_session
+    this_term = [s for s in sessions if first_session <= s.session_date <= last_session]
+if not this_term:
+    print("no closed session of the current term yet")
+else:
+    try:
+        async for report in client.fetch_reports(this_term[-1].session_date, team):
+            print(type(report).__name__, report)
+        first, last = this_term[0].session_date, this_term[-1].session_date
+        async for item in client.fetch_reports_range(first, last, team):
+            if isinstance(item, ReportsManifest):
+                print("still pending:", [e.session_date for e in item.pending])
+            else:
+                print(type(item).__name__, item)
+    except HistoryForbidden as error:
+        print(error)  # another team's name, or a session of a term other than your token's
+    except HistoryPending as error:
+        print(error)  # the session's reports are not ready yet; try again later
+```
+
+`by_term` shows filtering by `term_id`: every session held of the newest term in the listing. Take the dates for your reports from the calendar's `term_first_session` and `term_last_session` (step 3), not from `term_start` and `term_end` (the service refuses a date before the term's first session) and not from the listing: in the days before a new term's first session closes, the newest term in the listing is the previous one, whose reports are not served.
+
+- The service serves a team only its own reports, and only for sessions of the term your token belongs to. Another team's name, or a session of an earlier term, raises `HistoryForbidden`; a range is refused whole if any date in it is of another term. So keep the dates within the current term, as above. If your team name and dates are right and it is still refused, the service's own term setting is wrong: tell the course team.
+- A session in which your team sent no order yields nothing. Pending, not-closed and unavailable sessions behave as for `fetch`: `fetch_reports` waits on a pending one, and `fetch_reports_range` never waits (`ReportsManifest.pending`).
+- The reports come in the order the exchange decided them. That can differ from the order your connection received them live: a `reject` sent at receipt can arrive live before an earlier order's `accepted`. The reports come as the message classes alone, without the position numbers they had in the log, so count them yourself if you need an order within a session.
 
 To run your strategy's loop over a whole past session, `replay(client, date, instruments)` from `qte_sdk.replay` merges that session's books, trades, marks and market session state into one stream, as the same classes `market_data` yields, so the code that handles live market data runs on it unchanged. Grid points come in order, as on a live connection; the messages of one grid point come in no promised order, live or replayed, so treat them as a set. It is market data only: it sends no orders and fills nothing. If a stream's times go back, it raises `qte_sdk.replay.ReplayOutOfOrder` rather than deliver anything out of order. [Developing your algo](developing-your-algo.md) shows how to use it, and the path from there to the exchange.
 

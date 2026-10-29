@@ -11,7 +11,8 @@
 The history service serves each closed session's published market data again, message for
 message as the live feed carried it, so the items are the same generated classes that
 `qte_sdk.market_data.market_data` yields and your handling code works on both. It serves
-only what was published to everyone: there is no raw feed and no other team's data here.
+only what was published to everyone, and your own team's past private reports: there is
+no raw feed and no other team's reports here.
 
 Splits. Prices and quantities are as published, not adjusted for a later split. For a
 split of `a` new shares for `b` old (MTUM's 4-for-1 at the 5 November 2026 open is 4 for
@@ -33,6 +34,24 @@ the `url` argument or the `QTE_HISTORY_URL` environment variable; there is no de
   channels over a span of session dates in one response. It yields a `Manifest` first,
   which says which (session date, instrument, channel) entries are included, and then
   the messages of each included entry in the manifest's order.
+- `list_sessions()`: every closed session the service holds, oldest first, as
+  `SessionSummary` values: its `term_id`, whether it was `scored`, each channel's
+  readiness and the feed gaps that touched it.
+- `fetch_reports(session_date, team)` and `fetch_reports_range(from_date, to_date, team)`:
+  your team's own private reports (`accepted`, `reject`, `execution`, `order_cancelled`,
+  `order_state`, `risk_notice`, `term_close_fill`) for one session, or for a span of
+  session dates after a `ReportsManifest`, as the same classes your session received live.
+
+Your own reports. `team` is your team's name exactly as the exchange states it, which
+a session reports in `session.info.team` (the `team` of `session_ack`); the history
+service has no call that names it. The service checks it against the team your token
+belongs to, and serves a team only its own reports, and only for sessions of the term
+the token belongs to: another team's name, or a session of an earlier term, raises
+`HistoryForbidden` (a range with any date outside the current term is refused whole).
+A session in which your team sent no order has an empty object and yields nothing. The
+reports are in the order the exchange decided them, which can differ from the order your
+connection received them live (a receipt-stage `reject` can arrive before an earlier
+release's `accepted`), and `sent_at` is not in that order either.
 
 Options. An option contract is an instrument, named by its unpadded OCC symbol (such as
 `SPY261120C00650000`, see `qte_sdk.options`), in `fetch` and in `fetch_range`'s
@@ -144,8 +163,10 @@ from qte_sdk import errors as _errors
 from qte_sdk.connection import DecodeFailed, Unknown, _decode_error
 from qte_sdk.contract import codec
 from qte_sdk.contract.registry import INBOUND
+from qte_sdk.contract.v1.order_events_pb2 import TermCloseFill
 from qte_sdk.errors import QteError, flatten, plain
 from qte_sdk.market_data import MarketData
+from qte_sdk.orders import OrderEvent
 from qte_sdk.session import (
     _detached,
     _holds_token,
@@ -156,10 +177,12 @@ from qte_sdk.session import (
 )
 
 __all__ = [
+    "ChannelStatus",
     "DEFAULT_MAX_RESUMES",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_MAX_WAIT",
     "DEFAULT_TIMEOUT",
+    "FeedGap",
     "HISTORY_URL_ENV_VAR",
     "HistoryAddressInvalid",
     "HistoryChanged",
@@ -179,6 +202,10 @@ __all__ = [
     "Manifest",
     "ManifestEntry",
     "MissingHistoryURL",
+    "ReportItem",
+    "ReportsManifest",
+    "ReportsManifestEntry",
+    "SessionSummary",
     "TokenMalformed",
 ]
 
@@ -190,6 +217,7 @@ DEFAULT_MAX_RESUMES = 3
 
 _CHUNK = 64 * 1024
 _ERROR_BODY_LIMIT = 64 * 1024
+_LISTING_LIMIT = 16 * 1024 * 1024  # far above a listing of many terms' sessions
 _NDJSON = "application/x-ndjson"
 _HEX_DIGEST = re.compile(r"[0-9a-fA-F]{64}")  # the shape; compared exactly, as sent
 # An ETag: the lowercase hex SHA-256 digest, quoted, with "-gzip" inside the quotes on the
@@ -206,6 +234,12 @@ _sleep = asyncio.sleep  # a module attribute, so tests can observe the waits
 HistoryItem = MarketData | Unknown | DecodeFailed
 """What `fetch` and `fetch_session_state` yield: a message of a type this SDK knows, one
 of a type it does not (`Unknown`), or a line that could not be decoded (`DecodeFailed`)."""
+
+ReportItem = OrderEvent | TermCloseFill | Unknown | DecodeFailed
+"""What `fetch_reports` yields: one of your team's own reports, of a type this SDK knows
+(`Accepted`, `Reject`, `Execution`, `OrderCancelled`, `OrderState`, `RiskNotice` or
+`TermCloseFill`), one of a type it does not (`Unknown`), or a line that could not be
+decoded (`DecodeFailed`)."""
 
 
 class MissingHistoryURL(QteError, ValueError):
@@ -414,6 +448,111 @@ class Manifest:
         return tuple(entry for entry in self.entries if entry.status == "not_closed")
 
 
+@dataclass(frozen=True)
+class ReportsManifestEntry:
+    """One session date of a `fetch_reports_range` response: a `ManifestEntry` without
+    `instrument` or `channel`, since a team's reports have no such split.
+
+    `status` is `ready`, `pending`, `not_closed` or `unavailable` (a date in the term that
+    is not a session day), as for a `ManifestEntry`, and `byte_offset`, `length` and
+    `sha256` are set for a `ready` entry only. A ready entry of a session in which your
+    team sent no order has `length` 0.
+    """
+
+    session_date: str
+    status: str
+    byte_offset: int | None
+    length: int | None
+    sha256: str | None
+
+
+@dataclass(frozen=True)
+class ReportsManifest:
+    """The first item `fetch_reports_range` yields: every session date of the span, in
+    the order their reports follow, whether or not it is included. `retry_after` is as
+    for `Manifest`."""
+
+    entries: tuple[ReportsManifestEntry, ...]
+    retry_after: float | None
+
+    @property
+    def pending(self) -> tuple[ReportsManifestEntry, ...]:
+        """The entries that are not ready yet but will be."""
+        return tuple(entry for entry in self.entries if entry.status == "pending")
+
+    @property
+    def not_closed(self) -> tuple[ReportsManifestEntry, ...]:
+        """The entries whose session has not closed yet."""
+        return tuple(entry for entry in self.entries if entry.status == "not_closed")
+
+
+@dataclass(frozen=True)
+class ChannelStatus:
+    """One channel's readiness in a `SessionSummary`: `channel` is `book`, `trades`,
+    `mark` or `session_state`, and `status` is `ready` or `pending` (a listed session is
+    held, so never `unavailable`). The service may add words; an unknown one is kept as
+    sent."""
+
+    channel: str
+    status: str
+
+
+@dataclass(frozen=True)
+class FeedGap:
+    """One feed gap that touched a session: one that started in it, or was still in force
+    when it opened. While a gap is in force, its seconds are not eligible for Market
+    Making obligations or Tier M.
+
+    `link` is `stock` (the equities' feed) or `options` (the options stream), and
+    `instrument` the one instrument it concerned, or None for a whole-feed gap.
+    `start_seq` and `start_ts` are the event log's sequence number and timestamp
+    (milliseconds since the Unix epoch) of the record that started it, and `start_cause`
+    why, such as `alpaca_disconnect`, `link_down`, `silence`, `exchange_stop` or
+    `exchange_crash`; treat a cause you do not know as a gap of unknown cause.
+    `exchange_restart` is `clean_stop` or `crash` for a gap that was the exchange's own
+    stop, else None. `end_seq`, `end_ts` and `end_cause` (`feed_resumed` or
+    `ticker_listed`) are set if it ended by the session's close, and `ongoing` is True if
+    it was still in force then; the next session lists it again with its end.
+    """
+
+    link: str
+    start_seq: int
+    start_ts: int
+    start_cause: str
+    instrument: str | None = None
+    exchange_restart: str | None = None
+    end_seq: int | None = None
+    end_ts: int | None = None
+    end_cause: str | None = None
+    ongoing: bool = False
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    """One closed session the history service holds, as `list_sessions` returns it.
+
+    `session_date` is `YYYY-MM-DD`. `term_id` names the term whose configuration and
+    roster governed the session (the term configuration's effective date): your team's
+    reports are served only for sessions of your token's current term. `scored` is
+    False for an unscored recorded session. `channels` gives the readiness of `book`,
+    `trades`, `mark` and `session_state`, in that order; an option object is ready
+    exactly when `book` is. `feed_gaps` lists the feed gaps that touched a ready session,
+    in start order, and is empty if there were none, or while the session is pending.
+    Fields the service adds later are ignored.
+    """
+
+    session_date: str
+    term_id: str
+    scored: bool
+    channels: tuple[ChannelStatus, ...]
+    feed_gaps: tuple[FeedGap, ...]
+
+    @property
+    def ready(self) -> bool:
+        """True if every listed channel is `ready`."""
+        return all(channel.status == "ready" for channel in self.channels)
+
+
 class HistoryClient:
     """A client for the exchange's history service.
 
@@ -594,6 +733,106 @@ class HistoryClient:
             async for item in items:
                 yield item if isinstance(item, Manifest) else _decode_line(item)
 
+    async def list_sessions(self) -> tuple[SessionSummary, ...]:
+        """Every closed session the service holds, oldest first, ready or still pending.
+
+        A session that has not closed is not listed. The listing says nothing about your
+        team's reports: ask for them with `fetch_reports`. To keep one term's sessions,
+        filter on `term_id`, such as
+        `[s for s in await client.list_sessions() if s.term_id == "2026-10-26"]`.
+        Waits on a rate-limited answer as the fetch methods do.
+        """
+        failure: BaseException
+        try:
+            return await self._list_sessions()
+        except OSError as error:
+            # A network error keeps its type, unless it could show the token.
+            failure = _sanitised(error, self._secret)
+        except BaseException as error:
+            # Detached from the frames that held the response's bytes.
+            failure = _stripped(error)
+        raise failure
+
+    async def _list_sessions(self) -> tuple[SessionSummary, ...]:
+        reply = await self._first_reply(self._target("sessions"), listing=True)
+        try:
+            body = bytearray()
+            while True:
+                try:
+                    chunk = await asyncio.to_thread(reply.response.read1, _CHUNK)
+                except http.client.HTTPException as error:
+                    raise HistoryInterrupted(
+                        f"the session listing was cut short ({type(error).__name__})",
+                        bytes_received=len(body),
+                    ) from None
+                if not chunk:
+                    break
+                body += chunk
+                if len(body) > _LISTING_LIMIT:
+                    raise HistoryError(
+                        "the session listing is longer than the client accepts",
+                        http_status=200,
+                        code=_errors.HISTORY_BAD_RESPONSE,
+                    )
+            if reply.length is not None and len(body) != reply.length:
+                raise HistoryInterrupted(
+                    "the session listing was cut short of the length the service stated",
+                    bytes_received=len(body),
+                )
+        finally:
+            reply.close()
+        return _parse_sessions(bytes(body))
+
+    def fetch_reports(
+        self, session_date: date | str, team: str
+    ) -> AsyncGenerator[ReportItem, None]:
+        """Yield your team's own private reports for one session, in the order the
+        exchange decided them.
+
+        `team` is your team's name exactly as `session.info.team` gives it. Another
+        team's name, or a session of a term other than your token's, raises
+        `HistoryForbidden`. A session in which your team sent no order yields nothing.
+        Pending, not-closed and unavailable sessions are handled as by `fetch`.
+        """
+        return _Guarded(self._fetch_reports(session_date, team))
+
+    async def _fetch_reports(
+        self, session_date: date | str, team: str
+    ) -> AsyncGenerator[ReportItem, None]:
+        target = self._target(_date_text(session_date), _team_text(team), "reports")
+        async with aclosing(self._download(target, framed=False)) as lines:
+            async for line in lines:
+                assert isinstance(line, bytes)
+                yield cast(ReportItem, _decode_line(line))
+
+    def fetch_reports_range(
+        self, from_date: date | str, to_date: date | str, team: str
+    ) -> AsyncGenerator[ReportsManifest | ReportItem, None]:
+        """Yield a `ReportsManifest`, then your team's reports of each included session,
+        in session-date order.
+
+        `from_date` and `to_date` are session dates of the current term, both included;
+        if any date between them is of another term, the whole request raises
+        `HistoryForbidden`. `team` is as for `fetch_reports`. This does not wait for
+        pending entries: check `ReportsManifest.pending` and ask again later for those.
+        """
+        return _Guarded(self._fetch_reports_range(from_date, to_date, team))
+
+    async def _fetch_reports_range(
+        self, from_date: date | str, to_date: date | str, team: str
+    ) -> AsyncGenerator[ReportsManifest | ReportItem, None]:
+        query = (
+            f"from={quote(_date_text(from_date), safe='')}&to={quote(_date_text(to_date), safe='')}"
+        )
+        target = f"{self._target('range', _team_text(team), 'reports')}?{query}"
+        async with aclosing(self._download(target, framed=True, reports=True)) as items:
+            async for item in items:
+                if isinstance(item, ReportsManifest):
+                    yield item
+                else:
+                    assert isinstance(item, bytes)
+                    yield cast(ReportItem, _decode_line(item))
+
     def _logged(self, target: str) -> str:
         """`target` as a log line shows it: withheld if it holds the token, in any form, or
         the shape of one (an instrument pasted by mistake, say)."""
@@ -603,17 +842,17 @@ class HistoryClient:
         return self._prefix + "/v1/history/" + "/".join(quote(s, safe="") for s in segments)
 
     async def _download(
-        self, target: str, *, framed: bool
-    ) -> AsyncGenerator[bytes | Manifest, None]:
+        self, target: str, *, framed: bool, reports: bool = False
+    ) -> AsyncGenerator[bytes | Manifest | ReportsManifest, None]:
         """The response's lines, fetched incrementally, resumed after a drop and checked
         against the stated digests once complete. A range response's manifest line comes
-        first, as a `Manifest`."""
+        first, as a `Manifest`, or a `ReportsManifest` with `reports`."""
         reply = await self._first_reply(target)
         try:
             etag = cast(_Validator, reply.etag)
             total = reply.length
             if framed:
-                progress: _Progress = _FramedProgress(reply.retry_after)
+                progress: _Progress = _FramedProgress(reply.retry_after, reports)
             else:
                 # A single stream's identity ETag is the SHA-256 digest of its bytes.
                 progress = _StreamProgress(etag.value.strip('"'))
@@ -664,11 +903,22 @@ class HistoryClient:
         finally:
             reply.close()
 
-    async def _first_reply(self, target: str) -> "_Reply":
+    async def _first_reply(self, target: str, *, listing: bool = False) -> "_Reply":
+        """The first answer that is not one to wait on, checked to be a download (or, with
+        `listing`, a JSON listing) the service sends; an error answer is raised."""
         waited = 0.0
         retries = 0
         while True:
             reply = await self._call(target, None)
+            if reply.status == 200 and listing:
+                if not reply.json_identity:
+                    reply.close()
+                    raise HistoryError(
+                        "the response is not uncompressed JSON as the history service sends",
+                        http_status=200,
+                        code=_errors.HISTORY_BAD_RESPONSE,
+                    )
+                return reply
             if reply.status == 200:
                 if not reply.ndjson_identity:
                     reply.close()
@@ -1111,10 +1361,11 @@ class _Reply:
         del etag
         self.length = _count(_header(response, "Content-Length", secret))
         self.retry_after = _seconds(_header(response, "Retry-After", secret))
-        self.ndjson_identity = _is_ndjson_identity(
-            _header(response, "Content-Encoding", secret),
-            _header(response, "Content-Type", secret),
-        )
+        encoding = _header(response, "Content-Encoding", secret)
+        content_type = _header(response, "Content-Type", secret)
+        self.ndjson_identity = _is_identity(encoding, content_type, _NDJSON)
+        self.json_identity = _is_identity(encoding, content_type, "application/json")
+        del encoding, content_type
         # For a 206: where the slice starts, and the length of the whole data. Both are
         # None unless the Content-Range is a well-formed slice running to the end, whose
         # own length matches Content-Length where that is given.
@@ -1179,9 +1430,9 @@ def _seconds(value: str | None) -> float | None:
     return float(value) if value.isascii() and value.isdigit() else None
 
 
-def _is_ndjson_identity(encoding: str | None, content_type: str | None) -> bool:
+def _is_identity(encoding: str | None, content_type: str | None, media: str) -> bool:
     media_type = (content_type or "").split(";", 1)[0].strip().lower()
-    return (encoding or "identity").strip().lower() == "identity" and media_type == _NDJSON
+    return (encoding or "identity").strip().lower() == "identity" and media_type == media
 
 
 def _slice_to_end(value: str | None, length: int | None) -> tuple[int | None, int | None]:
@@ -1252,10 +1503,11 @@ class _StreamProgress(_Progress):
 class _FramedProgress(_Progress):
     """A range response: a manifest line, then each ready entry's bytes back to back."""
 
-    def __init__(self, retry_after: float | None) -> None:
+    def __init__(self, retry_after: float | None, reports: bool = False) -> None:
         super().__init__()
         self._retry_after = retry_after
-        self._manifest: Manifest | None = None
+        self._reports = reports
+        self._manifest: Manifest | ReportsManifest | None = None
         self._start = 0  # where the entries' bytes begin: just after the manifest line
         self._slices: list[tuple[int, int, str, Any]] = []
         self._next = 0
@@ -1263,7 +1515,7 @@ class _FramedProgress(_Progress):
     def _line(self, line: bytes) -> list[Any]:
         if self._manifest is not None:
             return [line]
-        self._manifest = _parse_manifest(line, self._retry_after)
+        self._manifest = _parse_manifest(line, self._retry_after, self._reports)
         self._start = len(line) + 1
         # Ready entries follow the manifest back to back, in its order, with no gaps.
         position = self._start
@@ -1311,9 +1563,14 @@ class _FramedProgress(_Progress):
                 raise HistoryCorrupt("an entry does not match the digest its manifest states")
 
 
-def _parse_manifest(line: bytes, retry_after: float | None) -> Manifest:
+def _parse_manifest(
+    line: bytes, retry_after: float | None, reports: bool = False
+) -> Manifest | ReportsManifest:
     try:
         data = json.loads(line)
+        if reports:
+            found = tuple(_reports_manifest_entry(raw) for raw in data["manifest"])
+            return ReportsManifest(found, retry_after)
         entries = tuple(_manifest_entry(raw) for raw in data["manifest"])
     except (ValueError, TypeError, KeyError, RecursionError) as error:
         failure = HistoryError(
@@ -1326,15 +1583,35 @@ def _parse_manifest(line: bytes, retry_after: float | None) -> Manifest:
 
 
 def _manifest_entry(raw: dict[str, Any]) -> ManifestEntry:
-    entry = ManifestEntry(
-        session_date=raw["session_date"],
-        instrument=raw["instrument"],
-        channel=raw["channel"],
-        status=raw["status"],
-        byte_offset=raw["byte_offset"],
-        length=raw["length"],
-        sha256=raw["sha256"],
+    return _checked(
+        ManifestEntry(
+            session_date=raw["session_date"],
+            instrument=raw["instrument"],
+            channel=raw["channel"],
+            status=raw["status"],
+            byte_offset=raw["byte_offset"],
+            length=raw["length"],
+            sha256=raw["sha256"],
+        )
     )
+
+
+def _reports_manifest_entry(raw: dict[str, Any]) -> ReportsManifestEntry:
+    return _checked(
+        ReportsManifestEntry(
+            session_date=raw["session_date"],
+            status=raw["status"],
+            byte_offset=raw["byte_offset"],
+            length=raw["length"],
+            sha256=raw["sha256"],
+        )
+    )
+
+
+_Entry = TypeVar("_Entry", ManifestEntry, ReportsManifestEntry)
+
+
+def _checked(entry: _Entry) -> _Entry:
     if entry.status == "ready":
         if not all(isinstance(v, int) and v >= 0 for v in (entry.byte_offset, entry.length)):
             raise ValueError("a ready entry needs a byte_offset and a length")
@@ -1545,6 +1822,71 @@ def _date_text(value: date | str) -> str:
     if isinstance(value, datetime):
         raise TypeError("pass a session date (a datetime.date or 'YYYY-MM-DD'), not a datetime")
     return value.isoformat() if isinstance(value, date) else value
+
+
+def _team_text(team: str) -> str:
+    # Sent exactly as given: the service compares it with the token's team byte for byte.
+    if not isinstance(team, str):
+        raise TypeError("pass team as your team's name, the str session.info.team gives")
+    if not team:
+        raise ValueError("team must be your team's name, as session.info.team gives it")
+    return team
+
+
+def _parse_sessions(body: bytes) -> tuple[SessionSummary, ...]:
+    """The listing's sessions. Fields the SDK does not know are ignored; a listing
+    without a field the contract requires is refused, naming only the error's type."""
+    try:
+        data = json.loads(body)
+        sessions = tuple(_session_summary(raw) for raw in data["sessions"])
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as error:
+        failure = HistoryError(
+            f"the session listing could not be read ({type(error).__name__})",
+            http_status=200,
+            code=_errors.HISTORY_BAD_RESPONSE,
+        )
+    else:
+        return sessions
+    raise failure
+
+
+def _session_summary(raw: dict[str, Any]) -> SessionSummary:
+    return SessionSummary(
+        session_date=_typed(raw["session_date"], str),
+        term_id=_typed(raw["term_id"], str),
+        scored=_typed(raw["scored"], bool),
+        channels=tuple(
+            ChannelStatus(_typed(item["channel"], str), _typed(item["status"], str))
+            for item in _typed(raw["channels"], list)
+        ),
+        feed_gaps=tuple(_feed_gap(item) for item in _typed(raw.get("feed_gaps", []), list)),
+    )
+
+
+def _feed_gap(raw: dict[str, Any]) -> FeedGap:
+    return FeedGap(
+        link=_typed(raw["link"], str),
+        start_seq=_typed(raw["start_seq"], int),
+        start_ts=_typed(raw["start_ts"], int),
+        start_cause=_typed(raw["start_cause"], str),
+        instrument=_optional(raw.get("instrument"), str),
+        exchange_restart=_optional(raw.get("exchange_restart"), str),
+        end_seq=_optional(raw.get("end_seq"), int),
+        end_ts=_optional(raw.get("end_ts"), int),
+        end_cause=_optional(raw.get("end_cause"), str),
+        ongoing=_typed(raw.get("ongoing", False), bool),
+    )
+
+
+def _typed(value: Any, kind: type[_T]) -> _T:
+    # bool is an int in Python, and never a number here.
+    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        raise TypeError(f"expected {kind.__name__}")
+    return value
+
+
+def _optional(value: Any, kind: type[_T]) -> _T | None:
+    return None if value is None else _typed(value, kind)
 
 
 def _list_param(values: Iterable[str], name: str) -> str:
