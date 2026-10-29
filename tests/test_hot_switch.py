@@ -11,9 +11,10 @@ through `ReconnectingSession` and resumes from `last_report_seq` in the same eve
 
 The gateway's behaviour is read from qte-platform's G3 switch, PR #2912 at f05138fa (issue
 #2823): `gateway/README.md` "Stage 2: the switch", `cmd/qte-gateway/session.go` and
-`switch.go`, and contract 01's close code table there. The exchange side is H2, PR #2923 at
-450f1ba9 (issue #2821). G2 (#2828) is merged; G3, H2, H2b (#2859, carrying the follower's
-client connections over the promotion) and H4 (#2862, the rollback follower) are not. Every
+`switch.go`, and contract 01's close code table there (unchanged in H4, PR #2988 at
+c1630c00). The exchange side is H2, PR #2923, merged at 9a25e194 (issue #2821). G2 (#2828)
+and H2 are merged; G3, H2b (#2859, carrying the follower's client connections over the
+promotion) and H4 (#2862, the rollback follower) are not. Every
 case runs against the stand-in gateway here; the points that H2b or H4 may still settle
 otherwise are named where they are assumed.
 """
@@ -356,7 +357,7 @@ B_FILL = ("execution", execution("x-4", PRICE, 30, 40), M + 1)  # B fills the re
             [("resume_ack", payload_of(resume_ack(True, M + 1)), None), B_FILL], id="replay"
         ),
         # With the cursor at M, B replays: what it logs past M is folded live, so it is in
-        # B's resume window (#2923 handover.go:741-750; contract 01 "When replay is
+        # B's resume window (#2923 at 9a25e194 handover.go:743-752; contract 01 "When replay is
         # possible"). A snapshot is still a valid answer there (a B whose window a restart
         # emptied), so the SDK's handling of one is tested too.
         # TODO(h2b): whether B's window also holds A's reports up to M, which decides
@@ -495,7 +496,10 @@ class Rollback:
     and 1018-1020), so nothing reaches the client twice; the SDK's own drop of a repeat is
     test_handover.py's `test_a_repeated_report_m_is_dropped_and_no_view_applies_a_duplicate_fill`.
     The client's order, sent on report M1, is held and taken by B; B's fill on it is report
-    M2. A then fills the first order once more."""
+    M2. A then fills the first order once more. The demoted A keeps its report_seq heads
+    but not its resume window (#2988 at c1630c00, demote.go:86-101), so a client closed at
+    the rollback release with its cursor behind M is answered with a snapshot, not a replay;
+    the SDK's handling of a snapshot on resume is the snapshot case in the resume tests above."""
 
     def __init__(self, resume: bool) -> None:
         self.resume = resume
