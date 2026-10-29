@@ -7,6 +7,8 @@
 
 repo = "qte-platform"
 commit = "8deb128ee221e1765fa71f2bd54dfadf26db1221"
+approved = "Head, 29 Oct 2026"
+approved_commit = "8deb128ee221e1765fa71f2bd54dfadf26db1221"
 path = "schemas/proto/qte/contract/v1"
 
 [blobs]

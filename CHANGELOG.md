@@ -8,7 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-- The contract is vendored at qte-platform 8deb128e: `BreakRequestState` carries `pod`, the pod that sent the request, and the docs now say a pod's session is sent each of its break requests' `break_request_state` once on each connection, after its `ticket_state` messages, and not again after a resume.
+- The contract is vendored at qte-platform 8deb128e (approved by the Head, 29 Oct 2026): `BreakRequestState` carries `pod`, the pod that sent the request, and the docs now say a pod's session is sent each of its break requests' `break_request_state` once on each connection, after its `ticket_state` messages, and not again after a resume (#362).
 - The README, the quickstart, both copies of AGENTS.md and docs/automatic-execution.md name 1.6.2 as the latest release, and its zip as the one to install without git.
 
 ## 1.6.2
