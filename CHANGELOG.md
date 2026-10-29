@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.102
+**Version:** 0.103
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -9,6 +9,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 ## Unreleased
 
 - `HistoryClient.list_sessions()` lists the closed sessions the history service holds (`SessionSummary`: date, term, scored, channel status and feed gaps), and `fetch_reports(date, team)` and `fetch_reports_range(from_date, to_date, team)` fetch your team's own past private reports, with `team` taken from `session.info.team`. Another team's name, or a session of another term, raises `HistoryForbidden` with the next step. Quickstart step 10, docs/errors.md and both copies of AGENTS.md describe them (#359).
+- The README, the quickstart, both copies of AGENTS.md and docs/automatic-execution.md name 1.6.2 as the latest release, and its zip as the one to install without git.
 
 ## 1.6.2
 
