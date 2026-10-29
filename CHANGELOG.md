@@ -8,7 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
-- The vendored conformance steps are now at v1.8, from qte-platform 8deb128e. Step 15 names `term_close_fill` as a seventh private message that carries a `report_seq`, and the conformance session accepts it there. The SDK already handled `term_close_fill`, so no SDK code changes.
+- The vendored conformance steps are now at v1.8, from qte-platform 8deb128e. Step 15 names `term_close_fill` as a seventh private message that carries a `report_seq`, and the conformance session accepts it there. The SDK already handled `term_close_fill`, so no SDK code changes (#363).
 - The README, the quickstart, both copies of AGENTS.md and docs/automatic-execution.md name 1.6.2 as the latest release, and its zip as the one to install without git.
 
 ## 1.6.2
