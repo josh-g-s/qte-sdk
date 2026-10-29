@@ -12,11 +12,13 @@ through `ReconnectingSession` and resumes from `last_report_seq` in the same eve
 The gateway's behaviour is read from qte-platform's G3 switch, PR #2912 at f05138fa (issue
 #2823): `gateway/README.md` "Stage 2: the switch", `cmd/qte-gateway/session.go` and
 `switch.go`, and contract 01's close code table there (unchanged in H4, PR #2988 at
-c1630c00). The exchange side is H2, PR #2923, merged at 9a25e194 (issue #2821). G2 (#2828)
-and H2 are merged; G3, H2b (#2859, carrying the follower's client connections over the
-promotion) and H4 (#2862, the rollback follower) are not. Every
-case runs against the stand-in gateway here; the points that H2b or H4 may still settle
-otherwise are named where they are assumed.
+c1630c00). G3 merged as 626b6e8b; on main the cited lines sit about 13 lower, and the
+behaviour they show is unchanged (main adds a write lock for control frames and bounds the
+release's close by its queue deadline). The exchange side is H2, PR #2923, merged at
+9a25e194 (issue #2821), and H2b, PR #2950, merged at 8e5f8c4a (issue #2859, carrying the
+follower's client connections over the promotion). H4 (#2862, the rollback follower) is not
+merged. Every case runs against the stand-in gateway here; the points that H4 may still
+settle otherwise are named where they are assumed.
 """
 
 import asyncio
@@ -55,7 +57,14 @@ from test_session import synthetic_token
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
-from qte_sdk.connection import HandshakeFailed, Received, ReportGap, ResumeComplete, SeqGap
+from qte_sdk.connection import (
+    SWITCH_OVERFLOW_CLOSE_REASON,
+    HandshakeFailed,
+    Received,
+    ReportGap,
+    ResumeComplete,
+    SeqGap,
+)
 from qte_sdk.contract.v1.common_pb2 import BUY, LIMIT
 from qte_sdk.orders import send_new
 from qte_sdk.reconnect import (
@@ -255,9 +264,9 @@ def resumed_once_from(gateway: Closing, rs: ReconnectingSession, cursor: int) ->
 
 async def test_a_1008_close_in_the_hold_is_a_disconnect_that_is_retried_and_resumed():
     # The SDK has no special case for 1008: like any close but 1000 and 1001, websockets
-    # raises it as ConnectionClosedError, which is retryable. The reason text is withheld,
-    # as every close reason the SDK does not know. The gateway closes at once, in the hold,
-    # when the queue passes its bound (#2912 session.go:631-640); one order stands in for
+    # raises it as ConnectionClosedError, which is retryable. The reason text is shown: it
+    # is one of the gateway's two fixed 1008 reasons (#366). The gateway closes at once, in
+    # the hold, when the queue passes its bound (#2912 session.go:631-640); one order stands in for
     # the bound here (it is tested below). The queue goes nowhere (session.go:51-52): the
     # held order reaches no exchange, so B replays nothing after M.
     gateway = Closing(1008, OVERFLOW, orders=1)
@@ -271,7 +280,7 @@ async def test_a_1008_close_in_the_hold_is_a_disconnect_that_is_retried_and_resu
     assert isinstance(disconnected.error, ConnectionClosedError)
     assert disconnected.error.rcvd is not None
     assert disconnected.error.rcvd.code == 1008
-    assert disconnected.error.rcvd.reason == "<withheld>"
+    assert disconnected.error.rcvd.reason == OVERFLOW == SWITCH_OVERFLOW_CLOSE_REASON
     retries = [e for e in events if isinstance(e, Retrying)]
     assert [(r.attempt, r.delay, r.error) for r in retries] == [(1, 0.5, None)]
     assert clock.waits == [0.5]
@@ -360,9 +369,12 @@ B_FILL = ("execution", execution("x-4", PRICE, 30, 40), M + 1)  # B fills the re
         # B's resume window (#2923 at 9a25e194 handover.go:743-752; contract 01 "When replay is
         # possible"). A snapshot is still a valid answer there (a B whose window a restart
         # emptied), so the SDK's handling of one is tested too.
-        # TODO(h2b): whether B's window also holds A's reports up to M, which decides
-        # replay or snapshot for a client whose cursor is behind M, rests on the client
-        # server B adopts at its promotion (#2859 item 2).
+        # For a cursor behind M, H2b (#2950 at 8e5f8c4a) settles it: B's window holds the
+        # reports its follower fold delivered from the point it first reached the log's end
+        # up to M (follow.go caughtUp; gateway/fanout/doc.go "Report numbers and resume").
+        # Reports before that point are numbered but not buffered. A replay needs every report
+        # past the cursor still in the window (gateway/fanout/reportseq.go), which also drops
+        # its oldest past its bound and empties at a session open; otherwise B snapshots.
         pytest.param(
             [
                 ("resume_ack", payload_of(resume_ack(False, M + 1, 1)), None),
