@@ -12,15 +12,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Runner pool: the Linux jobs run on vars.CI_RUNNER (the self-hosted `beast` label, as in
-# qte-platform) or, unset, on ubuntu-latest. A pull request from a fork always runs on
-# ubuntu-latest: this repository is public, and a fork's code must never run on the beast.
-# The Windows jobs stay on windows-latest. Undo: delete the CI_RUNNER repository variable.
-# A self-hosted runner shares /tmp with the other runners on its host, so jobs write only
-# under $RUNNER_TEMP.
 jobs:
   lint:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,7 +25,7 @@ jobs:
       - run: ruff format --check .
 
   test:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -176,7 +170,7 @@ jobs:
           python "%GITHUB_WORKSPACE%\scripts\check_student_install.py" update update-cmd.txt %errorlevel%
 
   test-websockets-floor:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -189,7 +183,7 @@ jobs:
       - run: pytest
 
   wheel:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -215,7 +209,7 @@ jobs:
           "$RUNNER_TEMP/sdist-venv/bin/pytest"
 
   contract-drift:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
