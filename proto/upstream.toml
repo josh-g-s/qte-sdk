@@ -6,9 +6,7 @@
 # bytes against it.
 
 repo = "qte-platform"
-commit = "7e47b07b77200b03513a37dfdae235ed7d12ed21"
-approved = "Head, 27 Oct 2026"
-approved_commit = "7e47b07b77200b03513a37dfdae235ed7d12ed21"
+commit = "8deb128ee221e1765fa71f2bd54dfadf26db1221"
 path = "schemas/proto/qte/contract/v1"
 
 [blobs]
@@ -16,5 +14,5 @@ path = "schemas/proto/qte/contract/v1"
 "envelope.proto" = "47c847d9b066383f4a08791186df86b521572b79"
 "session.proto" = "d4b82c943c588a04b8ae1fbca7d07c015ccf32fe"
 "order_entry.proto" = "9dd6b35c21a12e1769e58e78447703a464c748b0"
-"order_events.proto" = "1256ff4dca5ecc016911bf427c1937578fedb2df"
+"order_events.proto" = "383a10e5a0dac34a60a012c7208ae047233e113a"
 "market_data.proto" = "2735d9a81a18aa4c6d27b501c45c78789e771220"

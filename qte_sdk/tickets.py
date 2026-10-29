@@ -268,19 +268,21 @@ no urgency, and no `ticket_accepted` or `ticket_state` is sent for it.
 The exchange answers with a `break_request_state` (`BreakRequestState`) or a
 `break_request_reject` (`BreakRequestReject`); pick them out with `is_break_request_event`
 and match them with `break_request_ref_of`. A `break_request_state` is the whole state of
-one request, sent to the pod's sessions only at each change: its acceptance
+one request, sent to the pod's sessions at each change: its acceptance
 (`BREAK_REQUEST_PENDING`, echoing the `request_ref`), the Directors' approval
 (`BREAK_REQUEST_APPROVED`) or refusal (`BREAK_REQUEST_REFUSED`, with `decided_time` and
 `decision_reason`, and no `request_ref`), and its withdrawal (`BREAK_REQUEST_WITHDRAWN`,
 echoing the withdrawal's `request_ref`). A refused or withdrawn request never changes
 again. `BREAK_REQUEST_FILLED` and `BREAK_REQUEST_EXPIRED` are defined but not sent yet,
 and an approved request is not filled yet: that is qte-platform #2059's second part.
-Neither answer carries a `report_seq` or is replayed by a resume, and a session that
-connects after a change is not sent the request's state, so keep each state as it
-arrives. A `break_request_reject` refuses one message and logs nothing; its
-`request_kind` says which (`BREAK_REQUEST_SUBMIT` or `BREAK_REQUEST_WITHDRAW`), and its
-`reason_code` is a `TicketReasonCodes.TicketReasonCode`, named by
-`ticket_reason_code_name`. Two codes are its own: `BREAK_REQUEST_NOT_IN_BREAK` (1721), a
+Its `pod` names the pod that sent the request. Neither answer carries a `report_seq` or
+is replayed by a resume. Instead, once on each connection, after that connection's
+`ticket_state` messages, the pod's session is sent one `break_request_state` for each of
+the pod's requests, in ascending `break_request_id`, and not again after a resume, so
+let each replace the state you held. A `break_request_reject` refuses one message and
+logs nothing; its `request_kind` says which (`BREAK_REQUEST_SUBMIT` or
+`BREAK_REQUEST_WITHDRAW`), and its `reason_code` is a `TicketReasonCodes.TicketReasonCode`,
+named by `ticket_reason_code_name`. Two codes are its own: `BREAK_REQUEST_NOT_IN_BREAK` (1721), a
 request sent outside a break (before the final close, or from the next term's first
 session on), and `BREAK_REQUEST_EXISTS` (1722), a request in an instrument where the pod
 already holds a pending or approved one. A side that does not reduce the position, a

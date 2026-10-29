@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.29
+// **Version:** 1.30
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -551,15 +551,17 @@ message BreakRequestReject {
   int64 receipt_time = 5; // timestamp. Gateway receipt
 }
 
-// The state of one break request, sent to the pod that sent it whenever the
-// request changes: its acceptance, the Directors' approval or refusal, and
-// its withdrawal (SPEC 23.7). A pod is sent its own requests only. The
-// Director who decided is not named.
+// The state of one break request, sent whenever the request changes: its
+// acceptance, the Directors' approval or refusal, and its withdrawal (SPEC
+// 23.7). It is sent to the pod that sent it, which is sent its own requests
+// only, and, read-only, to every Director session, which is sent every pod's.
+// Each is also sent the current state of each such request on connect, in
+// ascending break_request_id. The Director who decided is not named.
 message BreakRequestState {
   string break_request_id = 1; // id, decimal digits. Immutable; the exchange assigns it at acceptance
-  // Present iff the change answers a message of the pod's: the request_ref
-  // of the break_request on acceptance, or of the break_request_withdraw on
-  // withdrawal.
+  // Present iff the change reported answers a message of the pod's: the
+  // request_ref of the break_request on acceptance, or of the
+  // break_request_withdraw on withdrawal.
   optional string request_ref = 2; // id
   string instrument = 3;  // id. SPEC 23.7
   Side side = 4;          // SPEC 23.7
@@ -573,8 +575,10 @@ message BreakRequestState {
   // or refused it, and their reason. SPEC 23.7
   optional int64 decided_time = 11; // timestamp
   optional string decision_reason = 12;
-  // timestamp. The time of the change this message reports.
+  // timestamp. The time of the change this message reports. On connect, the
+  // request's latest change, so the time it was made.
   int64 update_time = 13;
+  string pod = 14; // id. The pod that sent the request. SPEC 23.7
 }
 
 // One position closed by the automatic term-end close at the final session's

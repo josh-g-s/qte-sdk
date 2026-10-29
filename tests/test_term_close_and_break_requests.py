@@ -3,6 +3,8 @@
 decode as named types, and a Fundamentals pod sends `break_request` and
 `break_request_withdraw` with checks made before anything is sent."""
 
+from pathlib import Path
+
 import pytest
 from fake_exchange import frame
 from test_orders import Recorder, received
@@ -172,6 +174,17 @@ async def test_a_break_request_state_decodes():
     assert break_request_ref_of(state) is None
 
 
+async def test_a_break_request_state_names_its_pod():
+    # BreakRequestState.pod (field 14) from qte-platform 8deb128e: the pod that sent the
+    # request, on every copy, the pod's own included.
+    [event] = await received(frame("break_request_state", {**APPROVED, "pod": "pod-3"}))
+    state = event.message
+    assert isinstance(state, BreakRequestState)
+    assert state.pod == "pod-3"
+    assert BreakRequestState.DESCRIPTOR.fields_by_name["pod"].number == 14
+    assert BreakRequestState.FromString(state.SerializeToString()).pod == "pod-3"
+
+
 async def test_a_pending_state_echoes_the_request_ref_and_has_no_decision():
     pending = {**APPROVED, "status": "BREAK_REQUEST_PENDING", "request_ref": "b-1"}
     del pending["decided_time"], pending["decision_reason"]
@@ -267,7 +280,8 @@ def test_the_vendored_field_numbers_are_the_contracts():
         "receipt_time": 5,
     }
     assert numbers(BreakRequestState)["update_time"] == 13
-    assert len(BreakRequestState.DESCRIPTOR.fields) == 13
+    assert numbers(BreakRequestState)["pod"] == 14
+    assert len(BreakRequestState.DESCRIPTOR.fields) == 14
     # The modules the generator wrote are the ones the registry imports.
     assert order_entry_pb2.SubmitBreakRequest is SubmitBreakRequest
     assert common_pb2.BreakRequestStatus.Name(4) == "BREAK_REQUEST_WITHDRAWN"
@@ -414,3 +428,33 @@ def test_the_send_helpers_are_exported_and_documented():
     assert "BREAK_REQUEST_NOT_IN_BREAK" in doc and "(1721)" in doc
     assert "BREAK_REQUEST_EXISTS" in doc and "(1722)" in doc
     assert "after the close of" in doc and "before the next term's first" in doc
+
+
+ROOT = Path(__file__).resolve().parent.parent
+RESENT_ON_CONNECT = (
+    "once on each connection, after its `ticket_state` messages, the pod's session is sent"
+    " one `break_request_state` for each of the pod's requests, in ascending"
+    " `break_request_id`, and not again after a resume"
+)
+
+
+@pytest.mark.parametrize(
+    "path", ["AGENTS.md", "qte_sdk/AGENTS.md", "docs/automatic-execution.md", "docs/quickstart.md"]
+)
+def test_the_docs_say_break_requests_are_resent_on_connect(path):
+    text = (ROOT / path).read_text(encoding="utf-8")
+    assert RESENT_ON_CONNECT in text
+    assert "a later session is not sent them" not in text
+    assert "a session that connects later is not sent the state" not in text
+    assert "as it arrives: none is resent" not in text
+
+
+def test_the_tickets_docstring_says_break_requests_are_resent_on_connect():
+    doc = " ".join((tickets.__doc__ or "").split())
+    assert (
+        "once on each connection, after that connection's `ticket_state` messages, the pod's"
+        " session is sent one `break_request_state` for each of the pod's requests" in doc
+    )
+    assert "not again after a resume" in doc
+    assert "is not sent the request's state" not in doc
+    assert "Its `pod` names the pod that sent the request" in doc

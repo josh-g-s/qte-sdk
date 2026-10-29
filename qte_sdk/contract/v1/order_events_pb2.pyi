@@ -364,7 +364,7 @@ class BreakRequestReject(_message.Message):
     def __init__(self, request_ref: _Optional[str] = ..., request_kind: _Optional[_Union[_common_pb2.BreakRequestKind, str]] = ..., reason_code: _Optional[_Union[_common_pb2.TicketReasonCodes.TicketReasonCode, str]] = ..., reason_detail: _Optional[str] = ..., receipt_time: _Optional[int] = ...) -> None: ...
 
 class BreakRequestState(_message.Message):
-    __slots__ = ("break_request_id", "request_ref", "instrument", "side", "shares", "thesis_id", "thesis_version", "risk_statement", "status", "accepted_time", "decided_time", "decision_reason", "update_time")
+    __slots__ = ("break_request_id", "request_ref", "instrument", "side", "shares", "thesis_id", "thesis_version", "risk_statement", "status", "accepted_time", "decided_time", "decision_reason", "update_time", "pod")
     BREAK_REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     REQUEST_REF_FIELD_NUMBER: _ClassVar[int]
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
@@ -378,6 +378,7 @@ class BreakRequestState(_message.Message):
     DECIDED_TIME_FIELD_NUMBER: _ClassVar[int]
     DECISION_REASON_FIELD_NUMBER: _ClassVar[int]
     UPDATE_TIME_FIELD_NUMBER: _ClassVar[int]
+    POD_FIELD_NUMBER: _ClassVar[int]
     break_request_id: str
     request_ref: str
     instrument: str
@@ -391,7 +392,8 @@ class BreakRequestState(_message.Message):
     decided_time: int
     decision_reason: str
     update_time: int
-    def __init__(self, break_request_id: _Optional[str] = ..., request_ref: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., risk_statement: _Optional[str] = ..., status: _Optional[_Union[_common_pb2.BreakRequestStatus, str]] = ..., accepted_time: _Optional[int] = ..., decided_time: _Optional[int] = ..., decision_reason: _Optional[str] = ..., update_time: _Optional[int] = ...) -> None: ...
+    pod: str
+    def __init__(self, break_request_id: _Optional[str] = ..., request_ref: _Optional[str] = ..., instrument: _Optional[str] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., shares: _Optional[int] = ..., thesis_id: _Optional[str] = ..., thesis_version: _Optional[int] = ..., risk_statement: _Optional[str] = ..., status: _Optional[_Union[_common_pb2.BreakRequestStatus, str]] = ..., accepted_time: _Optional[int] = ..., decided_time: _Optional[int] = ..., decision_reason: _Optional[str] = ..., update_time: _Optional[int] = ..., pod: _Optional[str] = ...) -> None: ...
 
 class TermCloseFill(_message.Message):
     __slots__ = ("instrument", "side", "size", "price", "proceeds", "session_date", "frozen", "prior_close", "house")

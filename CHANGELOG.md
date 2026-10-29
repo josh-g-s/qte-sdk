@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.102
+**Version:** 0.103
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- The contract is vendored at qte-platform 8deb128e: `BreakRequestState` carries `pod`, the pod that sent the request, and the docs now say a pod's session is sent each of its break requests' `break_request_state` once on each connection, after its `ticket_state` messages, and not again after a resume.
 - The README, the quickstart, both copies of AGENTS.md and docs/automatic-execution.md name 1.6.2 as the latest release, and its zip as the one to install without git.
 
 ## 1.6.2
