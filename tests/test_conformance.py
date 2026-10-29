@@ -1987,9 +1987,17 @@ STEP_15_FRAME_EVERY = 44.0  # seconds
 STEP_15_EARLY = 0.5
 STEP_15_LATE = 2.5
 
-# The six private messages that carry a `report_seq`, as step 15 names them.
+# The seven private messages that carry a `report_seq`, as step 15 names them.
 REPORT_TYPES = frozenset(
-    {"accepted", "reject", "execution", "order_cancelled", "order_state", "risk_notice"}
+    {
+        "accepted",
+        "reject",
+        "execution",
+        "order_cancelled",
+        "order_state",
+        "risk_notice",
+        "term_close_fill",
+    }
 )
 # The fields step 15 names on each `order_snapshot`.
 SNAPSHOT_FIELDS = ("strat_id", "instrument", "side", "price", "remaining_size", "timestamp")
