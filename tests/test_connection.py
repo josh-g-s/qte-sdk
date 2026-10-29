@@ -1046,8 +1046,8 @@ def test_describe_close_tells_a_revoked_token_from_a_switch_close():
     )
     assert describe_close(closed(1008, "too many link_drain messages")) == (
         'close code 1008, reason "too many link_drain messages": this client sent more than '
-        "16 link_drain messages, a type only the gateway's link to the exchange sends; stop "
-        "sending it, then reconnect and resume"
+        "16 link_drain messages, a type only the gateway's link to the exchange sends, while "
+        "their rejects were held; stop sending it, then reconnect and resume"
     )
     # Any other 1008 reason is withheld, and the cause names neither limit.
     other = "close code 1008: a policy close by the exchange or the gateway"

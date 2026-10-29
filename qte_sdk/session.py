@@ -1058,7 +1058,8 @@ async def open_session(
     - 1002: a protocol error, from the exchange or the gateway.
     - 1008 `credential revoked`: do not reconnect with that credential. Also 1008 `too many
       messages during a switch` (more than 1024 messages or 4 MiB sent while a switch held
-      them) or `too many link_drain messages`: reconnect and resume.
+      them) or `too many link_drain messages` (more than 16 `link_drain` messages sent while
+      their rejects were held): reconnect and resume.
     - 1009: a message too large (over the exchange's read limit, 64 KiB unless configured,
       or over 1 MiB through the gateway).
     - 1011 `sequencer stopped`.
