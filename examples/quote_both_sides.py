@@ -3,7 +3,13 @@
 Set QTE_URL and QTE_TOKEN first, in ./.env or the environment (see docs/quickstart.md),
 then:
 
-    python examples/quote_both_sides.py --instrument AAPL --strat-id <your strategy> --seconds 30
+    python examples/quote_both_sides.py --instrument AAPL --strat-id <your strategy> \\
+        --size 100 --seconds 30
+
+--size is the shares to quote on each side. A Market Making desk must display at least one
+round lot of its name at its best bid and best offer: read the round lot from the console's
+obligations panel and pass at least that (100 above is an example). Without --size the
+example quotes 1 share and warns at start; a later release will require --size.
 
 The example quotes one limit order of --size shares on each side, --inside dollars inside
 the best price the wall shows on that side, and manages the two orders until --seconds
@@ -159,6 +165,13 @@ from qte_sdk.units import to_decimal, to_micros
 SIDE_NAMES = {BUY: "BUY", SELL: "SELL"}
 
 
+SIZE_WARNING = (
+    "warning: --size not set, so this example quotes 1 share per side. The market maker "
+    "minimum is one round lot per side: set --size to your instrument's round lot, shown in "
+    "the console's obligations panel. A later release will require --size."
+)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rest a quote on both sides and manage it.")
     parser.color = False  # Python 3.14 colours argparse's output; it is read as plain text.
@@ -172,7 +185,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("QTE_STRAT_ID"),
         help="a strategy ID registered for your team (default: $QTE_STRAT_ID)",
     )
-    parser.add_argument("--size", type=int, default=1, help="shares per side (default 1)")
+    parser.add_argument(
+        "--size",
+        type=int,
+        default=None,
+        help=(
+            "shares per side; a Market Making desk passes at least its name's round lot, "
+            "shown in the console's obligations panel (default 1, with a warning; a later "
+            "release will require it)"
+        ),
+    )
     parser.add_argument(
         "--inside",
         type=to_micros,  # dollars as text, converted exactly to micro-dollars
@@ -210,6 +232,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(
             "pass --strat-id or set QTE_STRAT_ID to a strategy ID registered for your team"
         )
+    if args.size is None:
+        args.size = 1
+        print(SIZE_WARNING, file=sys.stderr)
     return args
 
 

@@ -1148,7 +1148,7 @@ async def test_out_of_hours_stops_at_once_during_a_session():
 @pytest.mark.parametrize(
     ("name", "args"),
     [
-        ("quote_both_sides.py", ("--strat-id", "closed-test", "--seconds", "0.5")),
+        ("quote_both_sides.py", ("--strat-id", "closed-test", "--size", "1", "--seconds", "0.5")),
         ("take_liquidity.py", ("--strat-id", "closed-test", "--side", "buy", "--seconds", "0.5")),
     ],
 )
@@ -1194,7 +1194,7 @@ async def test_quote_both_sides_cancels_and_re_enters_when_the_wall_moves():
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "1.5", "--requote-seconds", "0.1", "--drain-seconds", "5"),
         )
     assert code == 0, out + err
@@ -1217,7 +1217,7 @@ async def test_quote_both_sides_prints_rejects_and_still_exits_cleanly():
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "1", "--requote-seconds", "0.2", "--drain-seconds", "1"),
         )
     assert code == 0, out + err
@@ -1233,7 +1233,7 @@ async def test_quote_both_sides_prints_a_reject_s_next_step_once_however_often_i
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "1", "--requote-seconds", "0.2", "--drain-seconds", "1"),
         )
     assert code == 0, out + err
@@ -1255,7 +1255,7 @@ async def test_quote_both_sides_retries_a_reject_with_no_further_book():
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "1.5", "--requote-seconds", "0.2", "--drain-seconds", "1"),
         )
     assert code == 0, out + err
@@ -1276,7 +1276,7 @@ async def test_quote_both_sides_re_enters_after_a_full_fill_with_no_further_book
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "1.5", "--requote-seconds", "0.1", "--drain-seconds", "5"),
         )
     assert code == 0, out + err
@@ -1301,7 +1301,7 @@ async def test_quote_both_sides_ignores_a_teammates_fill_at_its_level():
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "1", "--requote-seconds", "0.1", "--drain-seconds", "5"),
         )
     assert code == 0, out + err
@@ -1321,7 +1321,7 @@ async def test_quote_both_sides_stops_sending_when_messages_are_missed():
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "5", "--requote-seconds", "0.1"),
         )
     assert code == 1, out + err
@@ -1340,7 +1340,7 @@ async def test_quote_both_sides_sends_no_retry_after_missing_messages_while_canc
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "1", "--requote-seconds", "0.5", "--drain-seconds", "5"),
         )
     assert code == 1, out + err
@@ -1358,7 +1358,7 @@ async def test_the_fake_rejects_a_duplicate_without_accepting_it():
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", "0.5", "--requote-seconds", "1", "--drain-seconds", "5"),
         )
     assert code == 0, out + err
@@ -1453,7 +1453,7 @@ async def start_quoter(url: str, *args: str) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(
         sys.executable,
         str(EXAMPLES_DIR / "quote_both_sides.py"),
-        *("--instrument", INSTRUMENT, "--strat-id", "quote-test", *args),
+        *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1", *args),
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -2471,10 +2471,54 @@ def test_replay_book_stops_cleanly_when_its_seconds_are_up(monkeypatch, capsys):
 @pytest.mark.parametrize("inside", ["0", "-0.01"])
 async def test_quote_both_sides_refuses_an_inside_of_less_than_a_tick(inside: str):
     code, out, err = await run_example(
-        "quote_both_sides.py", None, synthetic_token(), "--strat-id", "x", f"--inside={inside}"
+        "quote_both_sides.py",
+        None,
+        synthetic_token(),
+        "--strat-id",
+        "x",
+        "--size",
+        "1",
+        f"--inside={inside}",
     )
     assert code == 2
     assert "--inside must be at least one price tick" in err
+
+
+def test_quote_both_sides_warns_without_a_size_and_quotes_one_share(
+    capsys: pytest.CaptureFixture[str],
+):
+    # 1 share is below the market maker minimum wherever the round lot is more, so a run
+    # without --size says so at start; it still runs, and a later release requires --size.
+    example = load_example("quote_both_sides.py")
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    assert args.size == 1
+    err = capsys.readouterr().err
+    assert err.count(example.SIZE_WARNING) == 1
+    assert "round lot" in example.SIZE_WARNING and "obligations panel" in example.SIZE_WARNING
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "40"]
+    )
+    assert args.size == 40
+    assert capsys.readouterr().err == ""
+
+
+async def test_quote_both_sides_runs_without_a_size_after_its_warning():
+    exchange = FakeExchange()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--seconds", "0.5"),
+        )
+    assert code == 0, out + err
+    assert "--size not set, so this example quotes 1 share per side" in err
+    assert "round lot" in " ".join(err.split())
+    help_code, help_out, _ = await run_example(
+        "quote_both_sides.py", None, synthetic_token(), "--help"
+    )
+    assert help_code == 0
+    assert "round lot" in " ".join(help_out.split())
 
 
 def load_example(name: str) -> Any:
@@ -2516,7 +2560,9 @@ async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short()
     # Ctrl+C then must not make the example forget that message and send it again.
     example = load_example("quote_both_sides.py")
     sent: list[str] = []
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     quoter = example.Quoter(StalledConnection(sent), None, args)
     quoter.resting = lambda quote: quote.price is not None  # reported resting
     buy = quoter.quotes[example.BUY]
@@ -2545,7 +2591,9 @@ async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short()
 async def test_quote_both_sides_keeps_to_drain_seconds_when_a_cancel_send_stalls():
     example = load_example("quote_both_sides.py")
     sent: list[str] = []
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     view = RestingOrders()
     quoter = example.Quoter(StalledConnection(sent), view, args)
     quoter.resting = lambda quote: quote.price is not None  # reported resting
@@ -2562,7 +2610,9 @@ async def test_quote_both_sides_keeps_to_drain_seconds_when_a_cancel_send_stalls
 async def test_quote_both_sides_keeps_to_seconds_when_a_send_stalls_while_quoting():
     example = load_example("quote_both_sides.py")
     sent: list[str] = []
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     view = RestingOrders()
     quoter = example.Quoter(StalledConnection(sent), view, args)
     queue: asyncio.Queue = asyncio.Queue()
@@ -2591,7 +2641,9 @@ class RecordingSession:
 async def test_quote_both_sides_sends_nothing_from_a_book_that_may_be_stale():
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     quoter = example.Quoter(session, RestingOrders(), args)
     quoter.market_open = True
     quoter.books.update(book_event().message)
@@ -2622,7 +2674,9 @@ async def test_quote_both_sides_applies_queued_events_before_it_sends(missed: ob
     # a gap the example sends nothing more, so an order sent first would be left resting.
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
     quoter.market_open = True
@@ -2667,7 +2721,9 @@ async def test_quote_both_sides_applies_events_that_arrive_between_two_sends(
     example = load_example("quote_both_sides.py")
     queue: asyncio.Queue = asyncio.Queue()
     session = YieldingSession(queue, arrives)
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
     queue.put_nowait(session_state_event())
@@ -2681,7 +2737,9 @@ async def test_quote_both_sides_sends_no_second_cancel_after_a_gap_during_the_fi
     example = load_example("quote_both_sides.py")
     queue: asyncio.Queue = asyncio.Queue()
     session = YieldingSession(queue, SeqGap(expected=2, received=3))
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
     quoter.resting = lambda quote: quote.price is not None  # reported resting
@@ -2699,7 +2757,9 @@ async def test_quote_both_sides_takes_the_two_sides_in_turn():
     # whose replies come back quickly could keep the other from ever sending.
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     quoter = example.Quoter(session, RestingOrders(), args)
     quoter.resting = lambda quote: quote.price is not None  # reported resting
     buy = quoter.quotes[example.BUY]
@@ -2731,7 +2791,9 @@ async def test_quote_both_sides_takes_the_two_sides_in_turn():
 async def test_quote_both_sides_stops_quoting_after_an_unreadable_session_state():
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     quoter = example.Quoter(session, RestingOrders(), args)
     example.handle(quoter, quoter.view, session_state_event())
     example.handle(quoter, quoter.view, book_event())
@@ -2781,7 +2843,9 @@ SESSIONS = {
 async def test_quote_both_sides_quotes_only_a_book_of_the_session_in_progress(name: str):
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     quoter = example.Quoter(session, RestingOrders(), args)
     events, quotes = SESSIONS[name]
     for event in events:
@@ -2793,7 +2857,9 @@ async def test_quote_both_sides_quotes_only_a_book_of_the_session_in_progress(na
 async def test_quote_both_sides_sends_nothing_while_the_market_is_closed():
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
     queue: asyncio.Queue = asyncio.Queue()
@@ -2809,7 +2875,9 @@ async def test_quote_both_sides_applies_an_event_that_arrives_as_time_runs_out()
     # applied, or the cleanup would not know the order it answers.
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
     buy = quoter.quotes[example.BUY]
@@ -2832,7 +2900,9 @@ async def test_quote_both_sides_applies_an_event_that_arrives_as_time_runs_out()
 async def test_quote_both_sides_sends_nothing_once_time_is_up():
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
     quoter.market_open = True
@@ -2846,7 +2916,8 @@ async def test_quote_both_sides_sends_nothing_once_time_is_up():
 async def test_quote_both_sides_reads_events_with_a_very_short_requote_interval():
     example = load_example("quote_both_sides.py")
     session = RecordingSession()
-    argv = ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--requote-seconds", "1e-6"]
+    argv = ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    argv += ["--requote-seconds", "1e-6"]
     view = RestingOrders()
     quoter = example.Quoter(session, view, example.parse_args(argv))
     queue: asyncio.Queue = asyncio.Queue()
@@ -2923,6 +2994,8 @@ async def test_each_example_stops_in_time_on_a_connection_that_stalls(
     argv = ["--instrument", INSTRUMENT, "--seconds", "0.3"]
     if name != "print_book.py":
         argv += ["--strat-id", "x"]
+    if name == "quote_both_sides.py":
+        argv += ["--size", "1"]
     args = example.parse_args(argv)
     loop = asyncio.get_running_loop()
     started = loop.time()
@@ -4692,7 +4765,7 @@ async def run_quoter(exchange: FakeExchange, seconds: str = "2") -> tuple[int, s
             "quote_both_sides.py",
             url,
             synthetic_token(),
-            *("--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"),
             *("--seconds", seconds, "--requote-seconds", "0.1", "--drain-seconds", "3"),
         )
 
@@ -4959,7 +5032,15 @@ async def test_options_bot_acts_only_once_the_events_already_read_are_applied():
 @pytest.mark.parametrize(
     "args",
     [
-        ("quote_both_sides.py", "--instrument", INSTRUMENT, "--strat-id", "quote-test"),
+        (
+            "quote_both_sides.py",
+            "--instrument",
+            INSTRUMENT,
+            "--strat-id",
+            "quote-test",
+            "--size",
+            "1",
+        ),
         ("options_bot.py", "--strat-id", "opt-test"),
         ("print_book.py", "--instrument", INSTRUMENT),
     ],
