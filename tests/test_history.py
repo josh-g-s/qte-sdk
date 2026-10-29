@@ -2732,19 +2732,22 @@ async def test_reports_need_a_recognised_token():
             await collect(HistoryClient(url, synthetic_token()).fetch_reports(DAY, "team-a"))
 
 
-async def test_the_team_segment_is_sent_exactly_as_given():
+@pytest.mark.parametrize(
+    ("team", "quoted"), [("Team A 1", "Team%20A%201"), ("Team A/1", "Team%20A%2F1")]
+)
+async def test_the_team_segment_is_sent_exactly_as_given(team, quoted):
     token = synthetic_token()
-    fake = FakeHistory(token, team="Team A 1", reports={DAY: accepted(1)})
+    fake = FakeHistory(token, team=team, reports={DAY: accepted(1)})
     with serve_history(fake) as url:
         client = HistoryClient(url, token)
-        assert len(await collect(client.fetch_reports(DAY, "Team A 1"))) == 1
-        assert len(await collect(client.fetch_reports_range(DAY, DAY, "Team A 1"))) == 2
+        assert len(await collect(client.fetch_reports(DAY, team))) == 1
+        assert len(await collect(client.fetch_reports_range(DAY, DAY, team))) == 2
         # No case folding or trimming: a near miss is another team's name.
-        for near in ("team a 1", " Team A 1"):
+        for near in (team.lower(), " " + team):
             with pytest.raises(HistoryForbidden):
                 await collect(client.fetch_reports(DAY, near))
-    assert fake.requests[0][0] == f"/v1/history/{DAY}/Team%20A%201/reports"
-    assert urlsplit(fake.requests[1][0]).path == "/v1/history/range/Team%20A%201/reports"
+    assert fake.requests[0][0] == f"/v1/history/{DAY}/{quoted}/reports"
+    assert urlsplit(fake.requests[1][0]).path == f"/v1/history/range/{quoted}/reports"
 
 
 @pytest.mark.parametrize(("team", "error"), [("", ValueError), (None, TypeError), (7, TypeError)])
