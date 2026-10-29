@@ -1052,7 +1052,9 @@ async def open_session(
     or a close frame with no code) and raises a `ConnectionClosedError` on any other close.
     The closes to expect:
 
-    - 1001 `exchange stopping`: the exchange is stopping.
+    - 1001 `exchange stopping`: the exchange is stopping or switching; a
+      `ReconnectingSession` connects again, and after a switch that normally succeeds within
+      seconds.
     - 1002: a protocol error.
     - 1008 `credential revoked`: do not reconnect with that credential. Also 1008 `too many
       messages during a switch` or `too many link_drain messages`: the SDK does not show

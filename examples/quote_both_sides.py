@@ -135,6 +135,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     Reject,
     RiskNotice,
 )
+from qte_sdk.errors import order_reject_step
 from qte_sdk.market_data import DecodeFailed, SeqGap, SessionState, as_market_data
 from qte_sdk.orders import (
     is_order_event,
@@ -263,6 +264,8 @@ class Quoter:
         # Whether a session is up and its resume complete; nothing is sent until it is.
         self.up = True
         self.sessions = 0  # how many sessions have been connected
+        # The reject reasons whose next step this run has printed: once each, not every retry.
+        self.steps_shown: set[str] = set()
         # The levels this run sent a new to with none of its strategy resting there: an
         # order of its strategy left at any other level (an earlier run's) is not its own.
         self.levels: set[tuple[int, int]] = set()
@@ -572,6 +575,10 @@ class Quoter:
                 reason = reason_code_name(message.reason_code)
                 kind = quote.pending_kind if quote is not None else "message"
                 print(f"REJECTED {kind}: {reason}{detail}")
+                step = order_reject_step(reason)
+                if step is not None and reason not in self.steps_shown:
+                    self.steps_shown.add(reason)
+                    print(f"next step for {reason}: {step}")
                 if quote is not None:
                     if quote.pending_kind == "new" or (
                         quote.pending_kind == "cancel"

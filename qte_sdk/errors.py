@@ -14,8 +14,8 @@ Catch `QteError` for any SDK exception that has a code, or `QteWarning` for any 
 warning. Each exception also keeps the base class it had before codes were added, such as
 `ValueError` or `TimeoutError`, so existing `except` clauses keep working.
 
-No message ever holds the token. This module imports nothing from the rest of the SDK, so
-every module can import it.
+No message ever holds the token. This module imports nothing from the rest of the SDK when
+it loads, so every module can import it.
 """
 
 import os
@@ -28,10 +28,12 @@ from urllib.parse import unquote
 
 __all__ = [
     "CODES",
+    "ORDER_REJECT_STEPS",
     "RETIRED",
     "Entry",
     "QteError",
     "QteWarning",
+    "order_reject_step",
     "render",
 ]
 
@@ -68,6 +70,7 @@ SESSION_RESUME_REJECTED = "QTE-SESSION-RESUME-REJECTED"
 SESSION_RESUME_NOT_ACKNOWLEDGED = "QTE-SESSION-RESUME-NOT-ACKNOWLEDGED"
 SESSION_RESUME_TIMEOUT = "QTE-SESSION-RESUME-TIMEOUT"
 SESSION_LOG_CHANGED = "QTE-SESSION-LOG-CHANGED"
+SESSION_UNANSWERED = "QTE-SESSION-UNANSWERED"
 # CONNECT
 CONNECT_HANDSHAKE_FAILED = "QTE-CONNECT-HANDSHAKE-FAILED"
 CONNECT_LIVENESS_TIMEOUT = "QTE-CONNECT-LIVENESS-TIMEOUT"
@@ -364,6 +367,17 @@ CODES: dict[str, Entry] = {
         "the one its report cursor was counted under",
         "Wait for the snapshot, then check positions",
     ),
+    SESSION_UNANSWERED: Entry(
+        "the connection dropped; unconfirmed requests ({count}): {refs}",
+        "Each may or may not have reached the exchange, and a resume that omits one does "
+        "not prove it is gone",
+        "After ResumeComplete, settle each against RestingOrders, your fills and (after a "
+        "snapshot) send_account_query, then again after one order delay; never resend an "
+        "order only because it is not resting",
+        "A ReconnectingSession's session dropped before the exchange answered these requests "
+        "(listed in Disconnected.unanswered as message type and request_ref)",
+        "Settle each after ResumeComplete, again after one order delay; never resend blind",
+    ),
     CONNECT_HANDSHAKE_FAILED: Entry(
         "the opening handshake failed ({kind}{status}); details withheld",
         "{why}",
@@ -607,9 +621,30 @@ SESSION_REJECTED_STEPS: dict[str, str] = {
     "NO_MARKET_ACCESS": "Ask the Head of Technology about your team's access",
     "EXCHANGE_OUTAGE": "Wait for the exchange's outage to end, then connect again",
 }
+# A NO_MARKET_ACCESS session_reject whose detail is the contract's fixed closed-arm text
+# (contract 01, "the AGENTIC_AI arm is not open for trading this term (term configuration
+# open_arms)"): the team's arm does not trade this term, so the step is not the Head's.
+CLOSED_ARM_DETAIL = re.compile(r"the [A-Z_]+ arm is not open for trading this term\b")
+CLOSED_ARM_STEP = (
+    "Your team's arm does not trade this term (the term configuration's open_arms). Do not "
+    "retry or ask for a new token: the arms open for trading change only at a later term"
+)
 SESSION_REJECTED_DEFAULT_STEP = (
     f"Look up {{reason_name}} under {SESSION_REJECTED} in docs/errors.md"
 )
+
+# The next step for each `reason_code` name of an order `reject` that has one. A reject is an
+# event, not an SDK error, so it has no code; docs/errors.md lists these under Order rejects.
+ORDER_REJECT_STEPS: dict[str, str] = {
+    "STRATEGY_NOT_REGISTERED": (
+        "This strategy ID has no live registration on this term. Each new term starts with "
+        "none, and retiring a registration ends it, so your Team Lead must register it again "
+        "on the console: Strategy registration, Register a new strategy, Submit. After a "
+        "retirement the new version must be above every version your team has held under this "
+        "strategy ID, or it is refused VERSION_NOT_NEW. Orders sent after it is accepted no "
+        "longer get this reject"
+    ),
+}
 
 # Why and the next step for a QTE-CONNECT-HANDSHAKE-FAILED, by kind of HTTP status.
 HANDSHAKE_STEPS: dict[str, tuple[str, str]] = {
@@ -638,6 +673,7 @@ FIELDS = frozenset(
         "action",
         "characters",
         "command",
+        "count",
         "cursor",
         "fix",
         "found",
@@ -653,6 +689,7 @@ FIELDS = frozenset(
         "problem",
         "reason",
         "reason_name",
+        "refs",
         "seconds",
         "source",
         "status",
@@ -744,6 +781,21 @@ def next_step(code: str, /, *, withhold: Callable[[str], bool] | None = None, **
         if entry is not None:
             return entry.fix.strip().rstrip(".")
         return f"See {code} in docs/errors.md"
+
+
+def order_reject_step(reason: str | int, /) -> str | None:
+    """The next step for an order `reject` whose reason is `reason`, a name such as
+    "STRATEGY_NOT_REGISTERED" or its number, without a full stop; None when the SDK has no
+    step for it. Never raises."""
+    if isinstance(reason, int) and not isinstance(reason, bool):
+        try:
+            # Imported here, so that this module still imports nothing at load time.
+            from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+
+            reason = ReasonCodes.ReasonCode.Name(reason)
+        except Exception:
+            return None
+    return ORDER_REJECT_STEPS.get(reason) if isinstance(reason, str) else None
 
 
 def what(code: str, /, *, withhold: Callable[[str], bool] | None = None, **fields: Any) -> str:

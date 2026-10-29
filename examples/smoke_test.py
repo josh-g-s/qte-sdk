@@ -165,7 +165,7 @@ try:
         dotenv_path,
         withholding,
     )
-    from qte_sdk.errors import CODES, WITHHELD
+    from qte_sdk.errors import CODES, WITHHELD, order_reject_step
     from qte_sdk.history import (
         HISTORY_URL_ENV_VAR,
         HistoryClient,
@@ -1351,7 +1351,7 @@ def rejected_new(order: ProbeOrder) -> tuple[str, str]:
         return SKIP, f"{order.where} not placed: your team already has an order there ({text})"
     hint = {
         ReasonCodes.STRATEGY_NOT_REGISTERED: (
-            "; ask your Team Lead to register it in the Team Lead console"
+            f". {order_reject_step(ReasonCodes.STRATEGY_NOT_REGISTERED)}"
         ),
         ReasonCodes.NO_MARKET_ACCESS: "; this team's account does not send orders",
         ReasonCodes.TICK_VIOLATION: "; give the instrument's tick with --tick",

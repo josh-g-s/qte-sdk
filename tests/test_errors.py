@@ -97,6 +97,7 @@ FIELD_VALUES: dict[str, object] = {
     "action": "write",
     "characters": "characters",
     "command": "`git rm --cached .env` in /home/student/algo",
+    "count": 2,
     "cursor": 3,
     "fix": "Choose another path with --file PATH",
     "found": "a space and a quote",
@@ -112,6 +113,7 @@ FIELD_VALUES: dict[str, object] = {
     "problem": "is not UTF-8 text",
     "reason": "NOT_AUTHENTICATED: unknown credentials",
     "reason_name": "NOT_AUTHENTICATED",
+    "refs": "new r1, cancel r3",
     "seconds": 10.0,
     "source": "the QTE_URL environment variable",
     "status": ", HTTP 401",
@@ -176,6 +178,30 @@ def test_every_docs_entry_says_its_cause_and_fix():
         cause = re.search(r"^- Cause: (\S.*)$", text, flags=re.MULTILINE)
         fix = re.search(r"^- Fix: (\S.*)$", text, flags=re.MULTILINE)
         assert cause and fix, code
+
+
+def test_the_order_rejects_table_in_docs_errors_md_matches_the_registry():
+    text = DOCS.read_text(encoding="utf-8")
+    section = text.split("\n## Order rejects\n", 1)[1].split("\n## ", 1)[0]
+    rows = re.findall(r"^\| `([A-Z_]+)` \| (.+) \|$", section, flags=re.MULTILINE)
+    assert dict(rows) == errors.ORDER_REJECT_STEPS
+
+
+def test_an_order_reject_s_step_is_found_by_its_name_or_number_and_none_otherwise():
+    from qte_sdk.contract.v1.common_pb2 import ReasonCodes
+
+    step = errors.order_reject_step("STRATEGY_NOT_REGISTERED")
+    assert step is not None
+    for words in ("Each new term starts with none", "your Team Lead must register it again"):
+        assert words in step
+    assert "Strategy registration, Register a new strategy, Submit" in step
+    assert not step.endswith(".")
+    assert errors.order_reject_step(ReasonCodes.STRATEGY_NOT_REGISTERED) == step
+    assert errors.order_reject_step(1100) == step
+    for unknown in ("MARKET_CLOSED", "OUTSIDE_DECLARED_SCOPE", "NO_SUCH_REASON", ""):
+        assert errors.order_reject_step(unknown) is None
+    for unknown in (ReasonCodes.MARKET_CLOSED, 0, -1, 999_999, True, None, 1.5):
+        assert errors.order_reject_step(unknown) is None  # type: ignore[arg-type]
 
 
 def source_files() -> list[Path]:
@@ -246,6 +272,34 @@ def test_a_missing_field_gives_the_cause_rather_than_failing():
         "QTE-DOTENV-INVALID: A QTE_TOKEN or QTE_URL line in the .env cannot be parsed. "
         "See QTE-DOTENV-INVALID in docs/errors.md."
     )
+
+
+CLOSED_ARM = "the AGENTIC_AI arm is not open for trading this term (term configuration open_arms)"
+
+
+@pytest.mark.parametrize(
+    ("reason_name", "detail", "closed_arm"),
+    [
+        ("NO_MARKET_ACCESS", CLOSED_ARM, True),
+        ("NO_MARKET_ACCESS", "the FUNDAMENTALS arm is not open for trading this term", True),
+        ("NO_MARKET_ACCESS", "your team may not send orders", False),
+        ("NO_MARKET_ACCESS", None, False),
+        ("TEAM_DISABLED", CLOSED_ARM, False),
+    ],
+)
+def test_a_closed_arm_session_reject_gets_its_own_step(reason_name, detail, closed_arm):
+    error = SessionRejected(1004, detail, reason_name=reason_name)
+    step = error.fields["step"]
+    if closed_arm:
+        assert step == errors.CLOSED_ARM_STEP
+        assert "Head of Technology" not in step
+    else:
+        assert step == errors.SESSION_REJECTED_STEPS[reason_name]
+
+
+def test_the_closed_arm_step_is_in_docs_errors():
+    text = (ROOT / "docs" / "errors.md").read_text(encoding="utf-8")
+    assert f"| {errors.CLOSED_ARM_STEP} |" in text
 
 
 def test_server_text_is_flattened_to_one_line():
@@ -1090,6 +1144,19 @@ def session_log_changed(token: str, ctx: Context) -> str:
     return caught[0]
 
 
+def session_unanswered(token: str, ctx: Context) -> str:
+    from qte_sdk.reconnect import ReconnectingSession
+
+    caught = caught_warnings(ctx)
+    ctx.monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    session = ReconnectingSession(URL, token)
+    # A new and a cancel sent on the session that dropped, neither answered.
+    session._unanswered = {"r1": "new", "r3": "cancel"}
+    assert session._take_unanswered() == (("new", "r1"), ("cancel", "r3"))
+    assert len(caught) == 1
+    return caught[0]
+
+
 SPY_CALL = "SPY261120C00450000"
 
 
@@ -1123,6 +1190,7 @@ CASES: dict[str, Case] = {
     errors.SESSION_RESUME_NOT_ACKNOWLEDGED: session_resume_not_acknowledged,
     errors.SESSION_RESUME_TIMEOUT: session_resume_timeout,
     errors.SESSION_LOG_CHANGED: session_log_changed,
+    errors.SESSION_UNANSWERED: session_unanswered,
     errors.CONNECT_HANDSHAKE_FAILED: connect_handshake_failed,
     errors.CONNECT_LIVENESS_TIMEOUT: connect_liveness_timeout,
     errors.CONNECT_NO_SESSION: connect_no_session,

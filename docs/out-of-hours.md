@@ -1,6 +1,6 @@
 # Using the SDK outside session hours
 
-**Version:** 0.7
+**Version:** 0.8
 
 You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market, query your account and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 
@@ -176,7 +176,7 @@ An order message the exchange takes in is held for its order delay, currently 15
 
 | Reason | When |
 |---|---|
-| `NO_MARKET_ACCESS` | Your team may not send orders. This is checked first, so such a team sees it at any hour. Only teams on the trading arms and Execution teams send orders. |
+| `NO_MARKET_ACCESS` | Your team may not send orders. This is checked first, so such a team sees it at any hour. Only teams on the trading arms and Execution teams send orders. A team whose arm is not open for trading this term (the term configuration's open_arms) is refused earlier, at `auth`, with a `session_reject` of `NO_MARKET_ACCESS` (QTE-SESSION-REJECTED in docs/errors.md). |
 | `MARKET_CLOSED` | Before the open, or on a day with no session at all, such as a weekend or an exchange holiday. |
 | `RELEASE_AFTER_CLOSE` | After the close, on a day that had a session. |
 

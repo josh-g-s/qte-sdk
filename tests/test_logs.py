@@ -158,6 +158,22 @@ def test_the_handler_writes_to_stderr_as_it_is_at_each_write(capsys: pytest.Capt
     assert json.loads(replaced.getvalue())["message"] == "second"
 
 
+def test_a_stream_set_on_the_handler_is_written_until_it_is_set_back_to_stderr(
+    capsys: pytest.CaptureFixture[str],
+):
+    handler = logs.configure("json")
+    assert isinstance(handler, logging.StreamHandler)
+    given = io.StringIO()
+    handler.setStream(given)
+    logging.getLogger("qte_sdk.update").warning("given")
+    assert json.loads(given.getvalue())["message"] == "given"
+    assert capsys.readouterr().err == ""
+    handler.stream = None
+    logging.getLogger("qte_sdk.update").warning("stderr")
+    assert json.loads(capsys.readouterr().err)["message"] == "stderr"
+    assert given.getvalue().count("\n") == 1
+
+
 def test_the_handler_is_written_without_waiting_on_a_pipe(pipe: Any):
     # A plain stream handler on Python's own kind of stderr: the update check writes to it
     # in one os.write, never waiting (see qte_sdk.update).
@@ -252,6 +268,35 @@ def test_a_field_json_cannot_write_is_written_as_text_or_dropped():
     assert json.loads(log_line(fields={"cycle": cycle}))["fields"] == {}
 
 
+def test_fields_json_cannot_write_even_once_withheld_are_dropped_and_the_line_kept():
+    # An int too long for str() passes the withholding untouched; json then cannot write it.
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        parsed = json.loads(log_line(message="kept", fields={"huge": 10**5000, "path": "/x"}))
+    finally:
+        sys.set_int_max_str_digits(limit)
+    assert parsed["message"] == "kept"
+    assert parsed["fields"] == {}
+
+
+def test_a_field_whose_text_cannot_be_made_is_withheld():
+    class Unprintable:
+        def __str__(self) -> str:
+            raise RuntimeError("no text")
+
+    parsed = json.loads(log_line(fields={"odd": Unprintable(), "plain": "x"}))
+    assert parsed["fields"] == {"odd": errors.WITHHELD, "plain": "x"}
+
+
+def test_a_message_whose_arguments_do_not_fit_is_written_as_logged():
+    # Formatted directly: pytest's own log capture raises for such a record.
+    record = logging.LogRecord(
+        "qte_sdk.update", logging.WARNING, __file__, 1, "%d apples", ("many",), None
+    )
+    assert json.loads(logs.JsonFormatter().format(record))["message"] == "%d apples"
+
+
 def test_lines_read_the_same_through_a_cp1252_pipe():
     code = (
         "import logging, qte_sdk.logs\n"
@@ -317,6 +362,44 @@ def test_an_sdk_warning_the_logger_would_drop_is_shown_as_before():
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     assert "QteWarning: QTE-DOTENV-NOT-IGNORED: " in done.stderr
+
+
+@pytest.mark.parametrize(
+    "warning, next_step",
+    [
+        (
+            errors.QteWarning("a program's own text", code=errors.DOTENV_NOT_IGNORED),
+            CODES[errors.DOTENV_NOT_IGNORED].fix.strip().rstrip("."),
+        ),
+        (errors.QteWarning("no code at all"), None),
+    ],
+    ids=["code-without-fields", "no-code"],
+)
+def test_a_captured_sdk_warning_without_fields_takes_its_code_s_own_next_step(
+    warning: errors.QteWarning, next_step: str | None
+):
+    stream = io.StringIO()
+    # The record itself, for a handler of the program's own (a JSON line would fill in a
+    # missing next step from the code by itself).
+    records: list[logging.LogRecord] = []
+    own = logging.Handler()
+    own.emit = records.append  # type: ignore[method-assign]
+    warnings_logger = logging.getLogger(logs.WARNINGS_LOGGER)
+    warnings_logger.addHandler(own)
+    try:
+        with logs.configured("json", stream=stream, capture_warnings=True):
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(warning, stacklevel=1)
+    finally:
+        warnings_logger.removeHandler(own)
+    [record] = records
+    assert record.next_step == next_step  # type: ignore[attr-defined]
+    parsed = json.loads(stream.getvalue())
+    assert parsed["logger"] == logs.WARNINGS_LOGGER
+    assert parsed["code"] == warning.code
+    assert parsed["next_step"] == next_step
+    assert parsed["fields"] == {"category": "QteWarning"}
 
 
 def test_warnings_are_not_captured_unless_asked():

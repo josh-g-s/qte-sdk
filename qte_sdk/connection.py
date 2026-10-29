@@ -259,7 +259,12 @@ def _close_detail(error: ConnectionClosed) -> str:
 # for any other reason, or a withheld one). Only reasons in `_KNOWN_CLOSE_REASONS` are keys,
 # so no other reason is ever shown.
 _CLOSE_CAUSES: dict[int, dict[str | None, str]] = {
-    1001: {None: "the exchange is stopping; connect again once it is back"},
+    1001: {
+        None: (
+            "the exchange is stopping or switching; a ReconnectingSession connects again, "
+            "and after a switch that normally succeeds within seconds"
+        )
+    },
     1002: {None: "a protocol error: the exchange could not read a message this client sent"},
     CREDENTIAL_REVOKED_CLOSE_CODE: {
         CREDENTIAL_REVOKED_CLOSE_REASON: (
@@ -408,9 +413,17 @@ class Disconnected(DataUncertain):
     does by default; without a resume they are not recovered either. `error` is why the
     connection ended, or None when the exchange closed it normally. A `Connection` never
     yields this itself; `qte_sdk.reconnect.ReconnectingSession` does.
+
+    `unanswered` names the requests sent on that session that carry a `request_ref` and
+    got no answer echoing it, as (message type, request_ref) pairs in the order sent, for
+    example `(("new", "r1"), ("cancel", "r3"))`; empty when there are none. A ref sent
+    again while still unanswered is listed once, until the first answer echoing it. They are
+    unconfirmed: each may or may not have reached the exchange (see
+    `QTE-SESSION-UNANSWERED` in docs/errors.md for how to settle them).
     """
 
     error: Exception | None
+    unanswered: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -530,9 +543,12 @@ class SessionRejected(QteError, Exception):
             except ValueError:  # a code from a newer contract
                 reason_name = str(reason_code)
         name = plain(reason_name)
-        step = _errors.SESSION_REJECTED_STEPS.get(
-            reason_name, _errors.SESSION_REJECTED_DEFAULT_STEP.format(reason_name=name)
-        )
+        if reason_name == "NO_MARKET_ACCESS" and detail and _errors.CLOSED_ARM_DETAIL.match(detail):
+            step = _errors.CLOSED_ARM_STEP
+        else:
+            step = _errors.SESSION_REJECTED_STEPS.get(
+                reason_name, _errors.SESSION_REJECTED_DEFAULT_STEP.format(reason_name=name)
+            )
         reason = plain(f"{reason_name}: {detail}" if detail else reason_name)
         super().__init__(
             f"{reason_name}: {detail}" if detail else reason_name,

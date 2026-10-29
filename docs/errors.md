@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.23
+**Version:** 0.26
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -21,6 +21,14 @@ The last line of a traceback is the class name and then this message. The code i
 - No message ever holds your token. Text from the exchange or the history service, such as a rejection's detail, is flattened to one line in the message and kept as sent in the exception's attribute (`detail`, or `message` for a history error), and is withheld if it repeats any part of the token. Text you gave, such as an instrument, a message type, a replay's date or channel, or the path of a `.env` or token file, is withheld from the message if it holds the token, as written, percent-encoded or escaped. Where the SDK has no token to look for, as in the git warning before the `.env` is read or a `Session`'s `repr`, text holding a run of 32 hex digits, the shape of the exchange's tokens, is withheld instead.
 - The exchange's refusal of an order, a ticket, a break request or an account query is an event your loop reads, not an SDK error, and has no `QTE-` code. Only a refusal of the session itself (its `auth` or a resume) or one with `VERSION_MISMATCH` raises, with a `QTE-SESSION-` code below: a `reject` names its reason with `reason_code_name`, and a `ticket_reject` or `break_request_reject` with `qte_sdk.tickets.ticket_reason_code_name`. Two reasons refuse only a pod's `break_request`: `BREAK_REQUEST_NOT_IN_BREAK` (1721), sent outside an inter-term break (before the close of a term's final session, or from the next term's first session on; in Winter the break runs from the close on Friday 4 December 2026), so send it again only once the break has begun; and `BREAK_REQUEST_EXISTS` (1722), when the pod already holds a pending or approved request in that instrument, so withdraw that one with `send_break_request_withdraw` first if you mean to replace it. The `qte_sdk.tickets` docstring lists the others.
 - A code never changes once released. A code no longer used is listed under [Retired codes](#retired-codes) and never reused.
+
+## Order rejects
+
+The exchange's `reject` of an order is an event, with no `QTE-` code, whose `reason_code` says why. For the reasons below, `qte_sdk.errors.order_reject_step(reason)` returns the next step (from `qte_sdk.errors.ORDER_REJECT_STEPS`), given the reason's name or number; for any other it returns `None`.
+
+| `reason_code` | Next step |
+|---|---|
+| `STRATEGY_NOT_REGISTERED` | This strategy ID has no live registration on this term. Each new term starts with none, and retiring a registration ends it, so your Team Lead must register it again on the console: Strategy registration, Register a new strategy, Submit. After a retirement the new version must be above every version your team has held under this strategy ID, or it is refused VERSION_NOT_NEW. Orders sent after it is accepted no longer get this reject |
 
 ## Exit codes
 
@@ -188,7 +196,8 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 | `reason_name` | Fix |
 |---|---|
 | `NOT_AUTHENTICATED` | Run `python -m qte_sdk.token check`. If the token is found and still refused, ask the Head of Technology for a new one |
-| `TEAM_DISABLED`, `NO_MARKET_ACCESS` | Ask the Head of Technology about your team's access |
+| `NO_MARKET_ACCESS` with the detail "the ... arm is not open for trading this term (term configuration open_arms)" | Your team's arm does not trade this term (the term configuration's open_arms). Do not retry or ask for a new token: the arms open for trading change only at a later term |
+| `TEAM_DISABLED`, any other `NO_MARKET_ACCESS` | Ask the Head of Technology about your team's access |
 | `EXCHANGE_OUTAGE` | Wait for the exchange's outage to end, then connect again |
 | Any other | Ask the course team, quoting the whole message |
 
@@ -239,6 +248,12 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 - Raised as: a WARNING from the `qte_sdk.reconnect` logger, with `old_log_id`, `new_log_id` and `cursor`, logged by a `ReconnectingSession` when it forgets its report cursor for this reason.
 - Cause: A new session's `session_ack` named a different event log (`log_id`, 16 lowercase hex characters) from the one the report cursor was counted under: the exchange started a new log, for a new term or a fresh start. Report numbers belong to one log, so the old cursor would skip the new log's first reports. The cursor was reset, as at a term change: with a resume the session asks from 0 and gets a snapshot of your resting orders; with `resume=False` it counts the new log's reports from the first it reads. A `log_id` that is absent or malformed is unknown: it resets the cursor too, as the contract asks, but without this warning.
 - Fix: Nothing to retry. Treat the resting orders you track as unknown until a snapshot loads them: with a resume, until the next `ResumeComplete`; with `resume=False`, which never gets one, until you call `resume(0)` on a session of your own. Check your positions with `send_account_query` before you trade. With `Session.resume` on your own, pass your saved `last_report_seq` only when `info.log_id` is known and equal to the one it was counted under, and 0 otherwise.
+
+### QTE-SESSION-UNANSWERED
+
+- Raised as: a WARNING from the `qte_sdk.reconnect` logger, with `count` and `refs` (each request's message type and `request_ref`, never its contents), logged by a `ReconnectingSession` when a session drops; the same requests are in that `Disconnected`'s `unanswered`, as (message type, request_ref) pairs. The log shortens a ref of 32 hex digits, such as one `new_request_ref` made, to its first 12 and `...`, since a log withholds anything shaped like a token; `unanswered` has it whole.
+- Cause: These requests were sent on the session that dropped and got no answer echoing their `request_ref` (`accepted`, `reject`, `order_cancelled`, `account_state`, `ticket_accepted`, `ticket_reject`, `break_request_state` or `break_request_reject`). They are unconfirmed, not lost: each may or may not have reached the exchange, and a resume that omits one does not prove it is gone, since one still waiting out its order delay can be applied after `ResumeComplete`. A `reject` with no `request_ref` cannot be matched, so its request stays listed. A ref sent again while still listed is listed once, under its first message type, until the first answer echoing it; give each request its own ref.
+- Fix: After `ResumeComplete`, settle each against `RestingOrders`, your fills and (after a snapshot) your position from `send_account_query`, then check again after one order delay. Never resend an order only because it is not resting. Send a `cancel` again if its target still rests. Never repeat an `amend` as sent: it sets the remaining size, so work out the size you want from what now rests.
 
 ## CONNECT
 
