@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.30
+// **Version:** 1.31
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -532,10 +532,12 @@ message ReasonCodes {
     // A Market Making, Market Taking, Options MM or Options Taking order
     // message received at or after the term-end trading cutoff, five minutes
     // before the actual close of the term's final session (SPEC 13.5,
-    // SPEC 9.4.3). A new or amend of the team's still waiting out its delay at
-    // the cutoff is dropped with no answer, not rejected with this code: the
-    // Technology Arm's reading of SPEC 13.5, which does not say "without a
-    // response" (see TERM_CUTOFF).
+    // SPEC 9.4.3). In a term whose configuration's `term_end.agentic_ai` is on
+    // (from the Winter term, SPEC 13.5), an Agentic AI team's order message is
+    // rejected the same way. A new or amend of the team's still waiting out
+    // its delay at the cutoff is dropped with no answer, not rejected with
+    // this code: the Technology Arm's reading of SPEC 13.5, which does not say
+    // "without a response" (see TERM_CUTOFF).
     TRADING_CUTOFF = 1007;
     // A research repository session's `thesis_filed` or `thesis_superseded`
     // while the term's `thesis_gating` is off: the term serves no thesis
@@ -656,12 +658,14 @@ message ReasonCodes {
     POSITION_REDUCING_RECHECK_FAILED = 1814;
     // A Market Making, Market Taking, Options MM or Options Taking order
     // cancelled at the term-end trading cutoff, five minutes before the
-    // actual close of the term's final session (SPEC 13.5). A new or amend
-    // of the team's still waiting out its delay at the cutoff is not
-    // cancelled with this code but dropped with no answer, the way the close
-    // drops one. That "no answer" is the Technology Arm's reading of SPEC
-    // 13.5, which cancels pending submissions and amendments but does not say
-    // "without a response".
+    // actual close of the term's final session (SPEC 13.5). In a term whose
+    // configuration's `term_end.agentic_ai` is on (from the Winter term,
+    // SPEC 13.5), an Agentic AI team's outstanding order is cancelled the same
+    // way. A new or amend of the team's still waiting out its delay at the
+    // cutoff is not cancelled with this code but dropped with no answer, the
+    // way the close drops one. That "no answer" is the Technology Arm's
+    // reading of SPEC 13.5, which cancels pending submissions and amendments
+    // but does not say "without a response".
     TERM_CUTOFF = 1815;
     // A resting order in a reducing-only option contract cancelled because it
     // would increase the desk's absolute position or cross zero: whole when
