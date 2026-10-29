@@ -58,5 +58,17 @@
     "recommended": false,
     "why": "the history-unavailable message and the packaged guidance say the options history build is live, and messages give the production addresses",
     "platforms": []
+  },
+  {
+    "version": "1.6.0",
+    "recommended": true,
+    "why": "the guidance says what MTUM's 4-for-1 split on 5 November does to positions, tickets and history; term-close fills decode; no reconnect after a revoked token; the main examples reconnect",
+    "platforms": []
+  },
+  {
+    "version": "1.6.2",
+    "recommended": true,
+    "why": "a team whose arm does not trade this term is told so at sign-in; order rejects give a next step; Disconnected names the requests a dropped session left unanswered",
+    "platforms": []
   }
 ]

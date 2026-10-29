@@ -1466,7 +1466,12 @@ async def test_a_halt_reject_read_before_a_new_terms_calendar_is_counted_once(mo
     from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 
     caught: list[str] = []
-    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    # The drop's QTE-SESSION-UNANSWERED for "r" is not the warning this test counts.
+    monkeypatch.setattr(
+        pacing,
+        "_emit",
+        lambda message, code, **_: code == errors.SESSION_UNANSWERED or caught.append(message),
+    )
     monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
     received: list[dict] = []
 
