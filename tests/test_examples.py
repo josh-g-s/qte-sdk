@@ -2276,10 +2276,7 @@ async def test_options_bot_names_the_level_on_a_second_ctrl_c_while_cancelling()
 
 
 # The arguments an example needs to get as far as connecting, beyond QTE_STRAT_ID.
-REQUIRED_ARGS = {
-    "fundamentals_pod.py": ("--shares", "100", "--limit", "200"),
-    "quote_both_sides.py": ("--size", "1"),
-}
+REQUIRED_ARGS = {"fundamentals_pod.py": ("--shares", "100", "--limit", "200")}
 
 
 @pytest.mark.parametrize("path", SESSION_EXAMPLES, ids=lambda p: p.name)
@@ -2487,13 +2484,36 @@ async def test_quote_both_sides_refuses_an_inside_of_less_than_a_tick(inside: st
     assert "--inside must be at least one price tick" in err
 
 
-async def test_quote_both_sides_requires_a_size_and_points_at_the_round_lot():
-    # No default: 1 share is below the market maker minimum wherever the round lot is more.
-    code, out, err = await run_example(
-        "quote_both_sides.py", None, synthetic_token(), "--strat-id", "x"
+def test_quote_both_sides_warns_without_a_size_and_quotes_one_share(
+    capsys: pytest.CaptureFixture[str],
+):
+    # 1 share is below the market maker minimum wherever the round lot is more, so a run
+    # without --size says so at start; it still runs, and a later release requires --size.
+    example = load_example("quote_both_sides.py")
+    args = example.parse_args(["--instrument", INSTRUMENT, "--strat-id", "quote-test"])
+    assert args.size == 1
+    err = capsys.readouterr().err
+    assert err.count(example.SIZE_WARNING) == 1
+    assert "round lot" in example.SIZE_WARNING and "obligations panel" in example.SIZE_WARNING
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "40"]
     )
-    assert code == 2
-    assert "--size" in err
+    assert args.size == 40
+    assert capsys.readouterr().err == ""
+
+
+async def test_quote_both_sides_runs_without_a_size_after_its_warning():
+    exchange = FakeExchange()
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "quote_both_sides.py",
+            url,
+            synthetic_token(),
+            *("--instrument", INSTRUMENT, "--strat-id", "quote-test", "--seconds", "0.5"),
+        )
+    assert code == 0, out + err
+    assert "--size not set, so this example quotes 1 share per side" in err
+    assert "round lot" in " ".join(err.split())
     help_code, help_out, _ = await run_example(
         "quote_both_sides.py", None, synthetic_token(), "--help"
     )
