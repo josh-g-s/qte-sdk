@@ -41,11 +41,23 @@ from qte_sdk.contract.v1.market_data_pb2 import (
     SessionState,
     Trades,
 )
+from qte_sdk.contract.v1.order_events_pb2 import (
+    Accepted,
+    Execution,
+    OrderCancelled,
+    OrderState,
+    Reject,
+    RiskNotice,
+    TermCloseFill,
+)
 from qte_sdk.history import (
+    ChannelStatus,
+    FeedGap,
     HistoryChanged,
     HistoryClient,
     HistoryCorrupt,
     HistoryError,
+    HistoryForbidden,
     HistoryInterrupted,
     HistoryNotClosed,
     HistoryNotImplemented,
@@ -56,6 +68,9 @@ from qte_sdk.history import (
     HistoryUnavailable,
     Manifest,
     MissingHistoryURL,
+    ReportsManifest,
+    ReportsManifestEntry,
+    SessionSummary,
     TokenMalformed,
 )
 from qte_sdk.options import is_option_symbol
@@ -165,6 +180,19 @@ class FakeHistory:
     answer_resume: threading.Event | None = None
     # Added to every ready entry's byte_offset in a range manifest, to break its layout.
     shift_offsets: int = 0
+    # The private reports: the team the token resolves to, its term's date range, and its
+    # reports object per session date. A date in `reports_pending` answers pending that
+    # many times first.
+    team: str = "team-a"
+    term: tuple[str, str] = ("2026-01-01", "2026-03-31")
+    reports: dict[str, bytes] = field(default_factory=dict)
+    reports_pending: dict[str, Pending] = field(default_factory=dict)
+    # The body of GET /v1/history/sessions, and its Content-Type.
+    listing: bytes = b'{"sessions":[]}'
+    listing_type: str = "application/json"
+    # Paths answered 501, as an endpoint not built yet is.
+    unbuilt: set[str] = field(default_factory=set)
+    credential_term: bool = True  # False: the service's own credential term is missing
     requests: list[tuple[str, dict[str, str]]] = field(default_factory=list)
 
     def respond(self, handler: BaseHTTPRequestHandler) -> None:
@@ -178,10 +206,14 @@ class FakeHistory:
             return self.json(handler, 401, "unauthenticated")
         parts = urlsplit(handler.path)
         segments = [unquote(s) for s in parts.path.split("/")[3:]]
+        if parts.path in self.unbuilt:
+            return self.json(handler, 501, "not_implemented")
+        if segments == ["sessions"]:
+            return self.sessions(handler)
+        if segments[-1] == "reports":
+            return self.private_reports(handler, segments, parse_qs(parts.query), headers)
         if segments == ["range"]:
             return self.range(handler, parse_qs(parts.query), headers)
-        if segments[-1] == "reports":
-            return self.json(handler, 501, "not_implemented")
         try:
             date.fromisoformat(segments[0])
         except ValueError:
@@ -265,6 +297,92 @@ class FakeHistory:
         extra = {"Retry-After": "30"} if any(e["status"] == "pending" for e in entries) else {}
         self.serve(handler, manifest + b"".join(blobs), etag, headers, extra)
 
+    def sessions(self, handler: BaseHTTPRequestHandler) -> None:
+        handler.send_response(200)
+        handler.send_header("Content-Type", self.listing_type)
+        handler.send_header("Content-Length", str(len(self.listing)))
+        handler.end_headers()
+        drop = self.drop_after.pop(handler.path, None)
+        handler.wfile.write(self.listing if drop is None else self.listing[:drop])
+        if drop is not None:
+            handler.close_connection = True
+
+    def report_status(self, day: str) -> str:
+        if day in self.open_dates:
+            return "not_closed"
+        pending = self.reports_pending.get(day)
+        if pending is not None and pending.times > 0:
+            return "pending"
+        return "ready" if day in self.reports else "unavailable"
+
+    def private_reports(
+        self,
+        handler: BaseHTTPRequestHandler,
+        segments: list[str],
+        query: dict[str, list[str]],
+        headers: dict,
+    ) -> None:
+        """Both reports endpoints, answering in the contract's order: 400, 403 for a team
+        not the token's, 403 for a date outside the token's term, then 409, then 200, 202
+        or 404 (per entry, for the range form)."""
+        ranged = len(segments) == 3 and segments[0] == "range"
+        try:
+            if ranged:
+                first = date.fromisoformat(query["from"][0])
+                last = date.fromisoformat(query["to"][0])
+            elif len(segments) == 3:
+                first = last = date.fromisoformat(segments[0])
+            else:
+                return self.json(handler, 400, "malformed_request")
+        except (KeyError, ValueError):
+            return self.json(handler, 400, "malformed_request")
+        if last < first:
+            return self.json(handler, 400, "malformed_request")
+        if segments[1] != self.team:
+            message = "private reports are served only to the token's own team"
+            return self.json(handler, 403, "forbidden", message=message)
+        if not self.credential_term:
+            message = "the credential's term is not set on the service"
+            return self.json(handler, 403, "forbidden", message=message)
+        days = [
+            date.fromordinal(n).isoformat() for n in range(first.toordinal(), last.toordinal() + 1)
+        ]
+        if not all(self.term[0] <= day <= self.term[1] for day in days):
+            message = (
+                "private reports are served only for a session of the term this token's "
+                "credentials belong to"
+            )
+            return self.json(handler, 403, "forbidden", message=message)
+        if not ranged:
+            status = self.report_status(days[0])
+            if status == "not_closed":
+                return self.json(handler, 409, "not_closed")
+            if status == "pending":
+                pending = self.reports_pending[days[0]]
+                pending.times -= 1
+                return self.json(handler, 202, "pending", pending.retry_after)
+            if status == "unavailable":
+                return self.json(handler, 404, "unavailable")
+            body = self.reports[days[0]]
+            return self.serve(handler, body, etag_of(body), headers)
+        entries, blobs, offset = [], [], 0
+        for day in days:
+            status = self.report_status(day)
+            entry: dict[str, Any] = {"session_date": day, "status": status}
+            entry |= {"byte_offset": None, "length": None, "sha256": None}
+            if status == "ready":
+                blob = self.reports[day]
+                entry |= {"byte_offset": offset, "length": len(blob)}
+                entry["sha256"] = hashlib.sha256(blob).hexdigest()
+                blobs.append(blob)
+                offset += len(blob)
+            entries.append(entry)
+        manifest = json.dumps({"manifest": entries}, separators=(",", ":")).encode() + b"\n"
+        digest_input = [{k: e[k] for k in ("session_date", "status", "sha256")} for e in entries]
+        etag = etag_of(json.dumps(digest_input, separators=(",", ":")).encode())
+        extra = {"Retry-After": "30"} if any(e["status"] == "pending" for e in entries) else {}
+        self.serve(handler, manifest + b"".join(blobs), etag, headers, extra)
+
     def serve(
         self,
         handler: BaseHTTPRequestHandler,
@@ -315,11 +433,12 @@ class FakeHistory:
         code: int,
         status: str,
         retry_after: str | None = None,
+        message: str | None = None,
     ) -> None:
         # "{auth}" in the message echoes whatever token the request presented, and
         # "{auth_part}" its first twelve characters.
         presented = handler.headers.get("Authorization", "").removeprefix("Bearer ")
-        message = self.error_message.replace("{auth}", presented)
+        message = (self.error_message if message is None else message).replace("{auth}", presented)
         message = message.replace("{auth_part}", presented[:12])
         body = json.dumps({"status": status, "message": message}).encode()
         if self.raw_error_body is not None:
@@ -2202,10 +2321,10 @@ async def test_a_manifest_digest_is_compared_exactly_with_the_lowercase_computed
 
 async def test_an_endpoint_not_built_yet_is_not_implemented_not_unavailable(waits):
     token = synthetic_token()
-    fake = FakeHistory(token)
+    fake = FakeHistory(token, unbuilt={f"/v1/history/{DAY}/team-a/reports"})
     with serve_history(fake) as url:
         with pytest.raises(HistoryNotImplemented) as caught:
-            await collect(HistoryClient(url, token).fetch(DAY, "team-a", "reports"))
+            await collect(HistoryClient(url, token).fetch_reports(DAY, "team-a"))
     assert not isinstance(caught.value, HistoryUnavailable)
     assert (caught.value.http_status, caught.value.status) == (501, "not_implemented")
     assert len(fake.requests) == 1 and waits == []
@@ -2342,3 +2461,421 @@ async def test_https_works_on_an_ipv6_address(tmp_path):
         client = HistoryClient(url, token, ssl_context=trusting(certificate))
         items = await collect(client.fetch(DAY, "TEST", "book"))
     assert [item.grid_time for item in items] == [1000, 2000, 3000]
+
+
+# GET /v1/history/sessions, and the team's own reports (#359)
+
+
+def session(day: str, term_id: str, status: str = "ready", **extra: Any) -> dict[str, Any]:
+    channels = [{"channel": c, "status": status} for c in (*CHANNELS, "session_state")]
+    return {"session_date": day, "term_id": term_id, "scored": True, "channels": channels, **extra}
+
+
+def listing(*sessions: dict[str, Any]) -> bytes:
+    return json.dumps({"sessions": list(sessions)}).encode()
+
+
+GAP_ENDED = {
+    "link": "stock",
+    "start_seq": 10,
+    "start_ts": 1000,
+    "start_cause": "exchange_stop",
+    "exchange_restart": "clean_stop",
+    "end_seq": 20,
+    "end_ts": 2000,
+    "end_cause": "feed_resumed",
+}
+GAP_ONGOING = {
+    "link": "options",
+    "instrument": CALL,
+    "start_seq": 30,
+    "start_ts": 3000,
+    "start_cause": "a_cause_added_later",
+    "ongoing": True,
+}
+
+
+async def test_sessions_are_listed_oldest_first_as_typed_summaries():
+    token = synthetic_token()
+    body = listing(
+        session("2026-10-23", "2026-10-07", feed_gaps=[GAP_ENDED, GAP_ONGOING]),
+        session("2026-10-26", "2026-10-26", status="pending"),
+    )
+    fake = FakeHistory(token, listing=body)
+    with serve_history(fake) as url:
+        sessions = await HistoryClient(url, token).list_sessions()
+    assert fake.requests[0][0] == "/v1/history/sessions"
+    assert fake.requests[0][1]["authorization"] == f"Bearer {token}"
+    first, second = sessions
+    assert isinstance(first, SessionSummary)
+    assert (first.session_date, first.term_id, first.scored, first.ready) == (
+        "2026-10-23",
+        "2026-10-07",
+        True,
+        True,
+    )
+    assert first.channels[0] == ChannelStatus("book", "ready")
+    assert [c.channel for c in first.channels] == ["book", "trades", "mark", "session_state"]
+    assert first.feed_gaps == (
+        FeedGap(
+            link="stock",
+            start_seq=10,
+            start_ts=1000,
+            start_cause="exchange_stop",
+            exchange_restart="clean_stop",
+            end_seq=20,
+            end_ts=2000,
+            end_cause="feed_resumed",
+        ),
+        FeedGap(
+            link="options",
+            start_seq=30,
+            start_ts=3000,
+            start_cause="a_cause_added_later",
+            instrument=CALL,
+            ongoing=True,
+        ),
+    )
+    # A session without feed_gaps (absent on the wire) has none; pending is not ready.
+    assert second.feed_gaps == () and not second.ready
+    assert second.channels[0].status == "pending"
+    with pytest.raises(AttributeError):
+        first.term_id = "x"  # type: ignore[misc]
+
+
+async def test_an_empty_listing_is_an_empty_tuple():
+    token = synthetic_token()
+    with serve_history(FakeHistory(token)) as url:
+        assert await HistoryClient(url, token).list_sessions() == ()
+
+
+async def test_fields_the_sdk_does_not_know_are_ignored_and_new_words_kept():
+    token = synthetic_token()
+    raw = session("2026-10-26", "2026-10-26", unscored_reason="later field", future={"a": 1})
+    raw["channels"][0] |= {"status": "rebuilding", "progress": 0.5}
+    raw["feed_gaps"] = [{**GAP_ENDED, "severity": "low"}]
+    fake = FakeHistory(token, listing=json.dumps({"sessions": [raw], "next": None}).encode())
+    with serve_history(fake) as url:
+        (only,) = await HistoryClient(url, token).list_sessions()
+    assert only.channels[0] == ChannelStatus("book", "rebuilding")
+    assert only.feed_gaps[0].end_cause == "feed_resumed"
+
+
+async def test_sessions_can_be_filtered_by_term_id():
+    token = synthetic_token()
+    body = listing(
+        session("2026-10-06", "2026-09-28"),
+        session("2026-10-07", "2026-10-07"),
+        session("2026-10-08", "2026-10-07", status="pending"),
+    )
+    with serve_history(FakeHistory(token, listing=body)) as url:
+        sessions = await HistoryClient(url, token).list_sessions()
+    this_term = [s.session_date for s in sessions if s.term_id == "2026-10-07"]
+    assert this_term == ["2026-10-07", "2026-10-08"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        b'{"listing": []}',
+        b'{"sessions": [{"session_date": "2026-10-07"}]}',
+        b'{"sessions": [{"session_date": "2026-10-07", "term_id": "x", "scored": "yes",'
+        b' "channels": []}]}',
+        b'{"sessions": [7]}',
+    ],
+)
+async def test_a_listing_without_the_contract_fields_is_a_bad_response(body):
+    token = synthetic_token()
+    with serve_history(FakeHistory(token, listing=body)) as url:
+        with pytest.raises(HistoryError) as caught:
+            await HistoryClient(url, token).list_sessions()
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+
+
+async def test_a_listing_that_is_not_json_is_refused():
+    token = synthetic_token()
+    fake = FakeHistory(token, listing=b"<html></html>", listing_type="text/html")
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError) as caught:
+            await HistoryClient(url, token).list_sessions()
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+
+
+async def test_the_listing_needs_a_recognised_token_and_waits_on_a_rate_limit(waits):
+    token = synthetic_token()
+    with serve_history(FakeHistory(token)) as url:
+        with pytest.raises(HistoryUnauthenticated):
+            await HistoryClient(url, synthetic_token()).list_sessions()
+    with serve_history(RateLimited(token)) as url:
+        with pytest.raises(HistoryRateLimited) as caught:
+            await HistoryClient(url, token, max_wait=10).list_sessions()
+    # Raised without the frames of the download, or a chain.
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+    frames = [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)]
+    assert "_list_sessions" not in frames and "_first_reply" not in frames
+    assert waits == [7.0]
+
+
+def accepted(seq: int, ref: str = "r-1") -> bytes:
+    payload = {"request_ref": ref, "request_type": "NEW", "receipt_time": "1", "release_time": "2"}
+    return line("accepted", seq, payload, "2")
+
+
+def rejected(seq: int) -> bytes:
+    payload = {
+        "request_ref": "r-2",
+        "request_type": "CANCEL",
+        "reason_code": "NO_ORDER_AT_LEVEL",
+        "reason_detail": "no order at that level",
+        "receipt_time": "3",
+    }
+    return line("reject", seq, payload, "3")
+
+
+async def test_your_reports_for_one_session_arrive_as_the_live_report_types():
+    token = synthetic_token()
+    body = accepted(1) + rejected(2) + line("a_report_added_later", 3, {})
+    fake = FakeHistory(token, reports={DAY: body})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch_reports(date(2026, 1, 5), "team-a"))
+    assert fake.requests[0][0] == f"/v1/history/{DAY}/team-a/reports"
+    assert isinstance(items[0], Accepted) and items[0].request_ref == "r-1"
+    assert isinstance(items[1], Reject) and items[1].request_ref == "r-2"
+    assert isinstance(items[2], Unknown) and items[2].type == "a_report_added_later"
+
+
+async def test_a_session_with_no_orders_yields_no_reports():
+    token = synthetic_token()
+    with serve_history(FakeHistory(token, reports={DAY: b""})) as url:
+        assert await collect(HistoryClient(url, token).fetch_reports(DAY, "team-a")) == []
+
+
+async def test_pending_reports_are_waited_on_then_served(waits):
+    token = synthetic_token()
+    fake = FakeHistory(token, reports={DAY: accepted(1)}, reports_pending={DAY: Pending(1)})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch_reports(DAY, "team-a"))
+    assert len(items) == 1 and waits == [2.0]
+
+
+async def test_reports_past_max_wait_raise_pending(waits):
+    token = synthetic_token()
+    fake = FakeHistory(token, reports_pending={DAY: Pending(5, "30")})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryPending) as caught:
+            await collect(HistoryClient(url, token, max_wait=10).fetch_reports(DAY, "team-a"))
+    assert caught.value.retry_after == 30.0 and waits == []
+
+
+async def test_reports_of_a_day_with_no_session_are_unavailable_and_not_closed_raises(waits):
+    token = synthetic_token()
+    fake = FakeHistory(token, open_dates={"2026-01-06"})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        with pytest.raises(HistoryUnavailable):
+            await collect(client.fetch_reports(DAY, "team-a"))
+        with pytest.raises(HistoryNotClosed):
+            await collect(client.fetch_reports("2026-01-06", "team-a"))
+    assert waits == []
+
+
+async def test_another_teams_reports_are_forbidden_with_a_next_step(waits):
+    token = synthetic_token()
+    # Refused 403 even for a session that is pending, or that never was: never 202 or 404.
+    fake = FakeHistory(token, reports_pending={DAY: Pending(5)})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        for day in (DAY, "2026-01-10"):
+            with pytest.raises(HistoryForbidden) as caught:
+                await collect(client.fetch_reports(day, "team-b"))
+            assert (caught.value.http_status, caught.value.status) == (403, "forbidden")
+    text = str(caught.value)
+    assert text.startswith("QTE-HISTORY-FORBIDDEN: ")
+    assert "own team" in text and "session.info.team" in text
+    assert waits == []
+
+
+async def test_a_session_of_another_term_is_forbidden_with_a_next_step(waits):
+    token = synthetic_token()
+    fake = FakeHistory(token, reports={"2025-12-15": accepted(1)})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryForbidden) as caught:
+            await collect(HistoryClient(url, token).fetch_reports("2025-12-15", "team-a"))
+    text = str(caught.value)
+    assert "term this token's credentials belong to" in text
+    assert "current term" in text and "earlier term" in text
+    assert waits == []
+
+
+async def test_reports_need_a_recognised_token():
+    token = synthetic_token()
+    with serve_history(FakeHistory(token, reports={DAY: accepted(1)})) as url:
+        with pytest.raises(HistoryUnauthenticated):
+            await collect(HistoryClient(url, synthetic_token()).fetch_reports(DAY, "team-a"))
+
+
+async def test_the_team_segment_is_sent_exactly_as_given():
+    token = synthetic_token()
+    fake = FakeHistory(token, team="Team A/1", reports={DAY: accepted(1)})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        assert len(await collect(client.fetch_reports(DAY, "Team A/1"))) == 1
+        # No case folding or trimming: a near miss is another team's name.
+        for near in ("team a/1", " Team A/1"):
+            with pytest.raises(HistoryForbidden):
+                await collect(client.fetch_reports(DAY, near))
+    assert fake.requests[0][0] == f"/v1/history/{DAY}/Team%20A%2F1/reports"
+
+
+@pytest.mark.parametrize(("team", "error"), [("", ValueError), (None, TypeError), (7, TypeError)])
+async def test_a_missing_team_is_refused_before_any_request(team, error):
+    token = synthetic_token()
+    fake = FakeHistory(token)
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        with pytest.raises(error, match="session.info.team"):
+            await collect(client.fetch_reports(DAY, team))
+        with pytest.raises(error, match="session.info.team"):
+            await collect(client.fetch_reports_range(DAY, DAY, team))
+    assert fake.requests == []
+
+
+async def test_a_reports_range_yields_its_manifest_then_each_ready_session():
+    token = synthetic_token()
+    fake = FakeHistory(
+        token,
+        reports={DAY: accepted(1) + rejected(2), "2026-01-07": b"", "2026-01-08": accepted(1)},
+        reports_pending={"2026-01-06": Pending(1)},
+        open_dates={"2026-01-09"},
+    )
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch_reports_range(DAY, date(2026, 1, 10), "team-a"))
+    path = urlsplit(fake.requests[0][0])
+    assert path.path == "/v1/history/range/team-a/reports"
+    assert parse_qs(path.query) == {"from": [DAY], "to": ["2026-01-10"]}
+    manifest = items[0]
+    assert isinstance(manifest, ReportsManifest)
+    assert [(e.session_date, e.status) for e in manifest.entries] == [
+        (DAY, "ready"),
+        ("2026-01-06", "pending"),
+        ("2026-01-07", "ready"),
+        ("2026-01-08", "ready"),
+        ("2026-01-09", "not_closed"),
+        ("2026-01-10", "unavailable"),
+    ]
+    assert manifest.entries[2] == ReportsManifestEntry(
+        "2026-01-07", "ready", len(accepted(1) + rejected(2)), 0, hashlib.sha256().hexdigest()
+    )
+    assert [e.session_date for e in manifest.pending] == ["2026-01-06"]
+    assert [e.session_date for e in manifest.not_closed] == ["2026-01-09"]
+    assert manifest.retry_after == 30.0
+    assert [type(item) for item in items[1:]] == [Accepted, Reject, Accepted]
+
+
+async def test_a_reports_range_with_only_a_not_closed_session_sets_no_retry_after():
+    token = synthetic_token()
+    fake = FakeHistory(token, reports={DAY: accepted(1)}, open_dates={"2026-01-06"})
+    with serve_history(fake) as url:
+        items = await collect(
+            HistoryClient(url, token).fetch_reports_range(DAY, "2026-01-06", "team-a")
+        )
+    assert items[0].retry_after is None and len(items) == 2
+
+
+async def test_a_reports_range_reaching_outside_the_term_is_refused_whole():
+    token = synthetic_token()
+    fake = FakeHistory(token, reports={DAY: accepted(1)})
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        with pytest.raises(HistoryForbidden) as caught:
+            await collect(client.fetch_reports_range("2025-12-30", DAY, "team-a"))
+        assert "earlier term" in str(caught.value)
+        with pytest.raises(HistoryForbidden):
+            await collect(client.fetch_reports_range(DAY, DAY, "team-b"))
+        with pytest.raises(HistoryUnauthenticated):
+            await collect(
+                HistoryClient(url, synthetic_token()).fetch_reports_range(DAY, DAY, "team-a")
+            )
+        with pytest.raises(HistoryRequestRejected):
+            await collect(client.fetch_reports_range("2026-01-06", DAY, "team-a"))
+
+
+async def test_a_reports_range_entry_that_does_not_match_its_digest_is_corrupt():
+    token = synthetic_token()
+
+    class Tampered(FakeHistory):
+        def serve(self, handler, body, etag, headers, extra=None):
+            super().serve(handler, body.replace(b'"r-1"', b'"r-9"'), etag, headers, extra)
+
+    with serve_history(Tampered(token, reports={DAY: accepted(1)})) as url:
+        with pytest.raises(HistoryCorrupt):
+            await collect(HistoryClient(url, token).fetch_reports_range(DAY, DAY, "team-a"))
+
+
+async def test_every_report_type_decodes_and_sent_at_need_not_be_in_order():
+    token = synthetic_token()
+    body = (
+        line("execution", 1, {"exec_id": "e-1", "instrument": "AAA", "fill_size": "5"}, "50")
+        + line("order_cancelled", 2, {"instrument": "AAA", "cancelled_size": "5"}, "40")
+        + line("order_state", 3, {"instrument": "AAA", "remaining_size": "3"}, "60")
+        + line("risk_notice", 4, {"timestamp": "7"}, "10")
+        + line("term_close_fill", 5, {"instrument": "AAA", "size": "2"}, "70")
+        + accepted(6)
+        + rejected(7)
+    )
+    fake = FakeHistory(token, reports={DAY: body})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch_reports(DAY, "team-a"))
+    kinds = [Execution, OrderCancelled, OrderState, RiskNotice, TermCloseFill, Accepted, Reject]
+    assert [type(item) for item in items] == kinds
+    assert items[0].exec_id == "e-1" and items[4].size == 2
+
+
+async def test_a_correct_request_refused_for_the_services_own_term_says_to_tell_the_course_team(
+    waits,
+):
+    token = synthetic_token()
+    fake = FakeHistory(token, reports={DAY: accepted(1)}, credential_term=False)
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryForbidden) as caught:
+            await collect(HistoryClient(url, token).fetch_reports(DAY, "team-a"))
+    text = str(caught.value)
+    assert "credential's term is not set" in text
+    assert "if both are right and it is still refused" in text and "course team" in text
+    assert waits == []
+
+
+async def test_a_dropped_reports_range_resumes_without_repeating_a_report():
+    token = synthetic_token()
+    body = b"".join(accepted(n, f"r-{n}") for n in range(1, 41))
+    fake = FakeHistory(token, reports={DAY: body, "2026-01-06": accepted(1, "s-1")})
+    path = f"/v1/history/range/team-a/reports?from={DAY}&to=2026-01-06"
+    fake.drop_after[path] = 1500
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token)
+        items = await collect(client.fetch_reports_range(DAY, "2026-01-06", "team-a"))
+    assert isinstance(items[0], ReportsManifest)
+    refs = [item.request_ref for item in items[1:]]
+    assert refs == [f"r-{n}" for n in range(1, 41)] + ["s-1"]
+    assert fake.requests[1][1]["range"] == "bytes=1500-"
+
+
+async def test_a_dropped_session_listing_is_interrupted_not_partly_parsed():
+    token = synthetic_token()
+    sessions = [
+        {
+            "session_date": f"2026-01-{day:02d}",
+            "term_id": "2026-spring",
+            "scored": True,
+            "channels": [{"channel": "book", "status": "ready"}],
+        }
+        for day in range(5, 30)
+    ]
+    fake = FakeHistory(token, listing=json.dumps({"sessions": sessions}).encode())
+    fake.drop_after["/v1/history/sessions"] = 200
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryInterrupted) as caught:
+            await HistoryClient(url, token).list_sessions()
+    assert "session listing was cut short" in str(caught.value)
