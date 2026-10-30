@@ -6838,6 +6838,7 @@ def test_options_bot_names_its_unanswered_cancel_when_a_reconnect_fails_for_good
         bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
         bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, 4_910_000, "o", True
         bot.cancel_ref, bot.cancel_price, bot.gone = "c", OPTION_PRICE, True
+        bot.unanswered_cancels.append("c")
         progress.bot = bot
         raise SessionRejected(1, None)
 
@@ -6847,6 +6848,69 @@ def test_options_bot_names_its_unanswered_cancel_when_a_reconnect_fails_for_good
     assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY @ 4.900000" in (
         err
     )
+
+
+def options_bot_filled(seq: int) -> Any:
+    fill = Execution(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        order_price=OPTION_PRICE,
+        fill_price=OPTION_PRICE,
+        fill_size=1,
+        remaining_size=0,
+    )
+    return Received("execution", fill, None, report_seq=seq)
+
+
+async def test_options_bot_reads_an_earlier_cancel_after_the_fresh_one_was_rejected():
+    # The resume shows the order resting with a cancel in flight at the drop, so the bot
+    # cancels afresh. The fresh cancel is refused on its budget and the order then fills:
+    # the first cancel may still be in its order delay, so its reply is still read.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, RestingOrders(), sender)
+    first = bot.cancel_ref
+    for event in [
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_complete(True),
+    ]:
+        await bot.on_event(event)
+    budget = ReasonCodes.MESSAGE_BUDGET_EXCEEDED
+    refused = Reject(request_ref=bot.cancel_ref, reason_code=budget)
+    await bot.on_event(Received("reject", refused, None, report_seq=6))
+    await bot.on_event(options_bot_filled(7))
+    assert bot.gone and not bot.finished
+    await bot.on_event(options_bot_cancelled(first, strat_id="other-strat", seq=8))
+    assert bot.finished and "another order of your team" in bot.warnings[0]
+
+
+async def test_options_bot_reads_its_cancel_after_a_resume_cut_short_once_its_order_went():
+    # The order fills with its cancel in flight, then the connection drops and the
+    # resume is cut short. That cancel may still be in its order delay, so the bot keeps
+    # reading for its reply rather than ending with it unread.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, RestingOrders(), sender)
+    first = bot.cancel_ref
+    await bot.on_event(options_bot_filled(3))
+    for event in [
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        SeqGap(6, 8),
+    ]:
+        await bot.on_event(event)
+    assert bot.gone and bot.up and not bot.finished
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    await bot.on_event(options_bot_cancelled(first, strat_id="other-strat", seq=9))
+    assert bot.finished and "another order of your team" in bot.warnings[0]
 
 
 async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():

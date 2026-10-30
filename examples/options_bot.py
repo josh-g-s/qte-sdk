@@ -130,7 +130,9 @@ and how to check, and exits with status 1. Once its order is gone it still reads
 reply to a cancel of its own in flight before it ends: applied late (a resume can show
 the order resting while a cancel sent before the drop is still in its order delay, so it
 cancels again), a cancel takes whatever of the team rests at the level by then. If it took
-another order, or no reply came by the end, it names it and exits with status 1. When one
+another order, or no reply came by the end, it names it and exits with status 1. A reply
+from the book to a later cancel settles the earlier ones, since the exchange applies
+messages in the order it took them in. When one
 warning already names the orders that may be this one, no generic warning of missed
 messages follows it.
 --seconds and --drain-seconds count the time down too.
@@ -367,6 +369,9 @@ class OptionsBot:
         # Cancels sent before a drop and forgotten at the resume: a late reply to one is
         # still this example's cancel, so it is matched by these.
         self.earlier_cancel_refs: set[str] = set()
+        # Every cancel sent whose reply (its order_cancelled or reject) has not been read,
+        # in the order sent: see `cancel_unread`.
+        self.unanswered_cancels: list[str] = []
         self.cancel_price = 0
         self.grid_points = 0
         self.retry_at: int | None = None
@@ -409,10 +414,11 @@ class OptionsBot:
 
     @property
     def cancel_unread(self) -> bool:
-        """Whether the order is gone with this example's cancel still in flight. Applied
-        after the order went, that cancel takes whatever of the team rests at the level
-        by then, so the example never ends before its reply (or the drain's end)."""
-        return self.gone and self.cancel_ref is not None
+        """Whether the order is gone with a cancel of this example, the one in flight or
+        one sent before a drop, not yet answered. Applied after the order went, such a
+        cancel takes whatever of the team rests at the level by then, so the example
+        never ends before its reply (or the drain's end), whatever the resume showed."""
+        return self.gone and bool(self.unanswered_cancels)
 
     @property
     def where(self) -> str:
@@ -555,6 +561,8 @@ class OptionsBot:
             if self.stopping and self.reply_lost:
                 self.gave_up = True
             return
+        if self.gone:
+            return  # nothing of it rests: only replies to its cancels are still read
         if (self.resting or self.stopping) and self.cancel_ref is None:
             if self.retry_at is not None and self.grid_points < self.retry_at:
                 return
@@ -607,6 +615,7 @@ class OptionsBot:
     async def cancel(self) -> None:
         assert self.contract is not None
         self.cancel_ref = new_request_ref()  # recorded first, so its reply is matched
+        self.unanswered_cancels.append(self.cancel_ref)
         self.cancel_price = self.price
         self.budget_reject = None
         print(f"cancelling {self.where}")
@@ -882,6 +891,28 @@ class OptionsBot:
     def on_order_event(self, message: Message) -> None:
         # A reject the exchange could not tie to a message carries no request_ref.
         ref = request_ref_of(message)
+        try:
+            self.on_order_report(message, ref)
+        finally:
+            if isinstance(message, OrderCancelled | Reject) and ref in self.unanswered_cancels:
+                self.answered(ref, message)
+
+    def answered(self, ref: str, reply: OrderCancelled | Reject) -> None:
+        """A cancel's reply is read. The exchange applies messages in the order it took
+        them in, so a reply from the book (an order_cancelled, or nothing at the level)
+        also settles every cancel sent before it: one that reached the exchange was
+        applied first, and one that did not (lost in a drop) never will be. A reject on
+        receipt, such as a budget's, comes before the order delay and settles only its own."""
+        position = self.unanswered_cancels.index(ref)
+        from_book = isinstance(reply, OrderCancelled) or (
+            reply.reason_code == ReasonCodes.NO_ORDER_AT_LEVEL
+        )
+        if from_book:
+            del self.unanswered_cancels[: position + 1]
+        else:
+            del self.unanswered_cancels[position]
+
+    def on_order_report(self, message: Message, ref: str | None) -> None:
         if (
             isinstance(message, OrderState | Execution | OrderCancelled)
             and message.strat_id == self.strat_id
