@@ -380,7 +380,7 @@ CODES: dict[str, Entry] = {
         "Settle each after ResumeComplete, again after one order delay; never resend blind",
     ),
     SESSION_DISCONNECTED: Entry(
-        "the session ended, {close}{unanswered}",
+        "the session ended, {close}{cause}{unanswered}",
         "Messages sent while disconnected may be missed: market data is not recovered, and "
         "your order reports only by a resume",
         "Wait for ResumeComplete, then check positions with send_account_query; after a "
@@ -689,6 +689,7 @@ HANDSHAKE_STEPS: dict[str, tuple[str, str]] = {
 FIELDS = frozenset(
     {
         "action",
+        "cause",
         "characters",
         "close",
         "command",

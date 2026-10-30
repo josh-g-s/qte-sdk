@@ -95,8 +95,9 @@ RELEASED: frozenset[str] = frozenset()
 # A realistic value for every field a template may take. None is the token.
 FIELD_VALUES: dict[str, object] = {
     "action": "write",
+    "cause": ": an error on the exchange",
     "characters": "characters",
-    "close": "close code 1012",
+    "close": "close code 1011",
     "command": "`git rm --cached .env` in /home/student/algo",
     "count": 2,
     "cursor": 3,
@@ -121,7 +122,7 @@ FIELD_VALUES: dict[str, object] = {
     "step": "Ask the Head of Technology about your team's access",
     "strerror": "Permission denied",
     "type": "new_order",
-    "unanswered": "; 2 requests were unanswered (QTE-SESSION-UNANSWERED)",
+    "unanswered": "; 2 unanswered requests (QTE-SESSION-UNANSWERED)",
     "underlying": "SPY",
     "version": "1.1.1",
     "what": "the connection closed before session_ack (close code 1011)",

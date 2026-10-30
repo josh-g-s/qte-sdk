@@ -1105,23 +1105,25 @@ class ReconnectingSession:
         ended another way, and the number of unanswered requests when there are any (their
         refs are in `QTE-SESSION-UNANSWERED`). Written from a thread of its own, as every
         SDK warning is (see `qte_sdk.pacing._warn`), never on the event loop."""
-        close = _ended_by(disconnected.error, session)
+        close, found, cause = _ended_by(disconnected.error, session).partition(": ")
         count = len(disconnected.unanswered)
         unanswered = (
-            f"; {count} request{' was' if count == 1 else 's were'} unanswered "
+            f"; {count} unanswered request{'' if count == 1 else 's'} "
             f"({_errors.SESSION_UNANSWERED})"
             if count
             else ""
         )
-        # A line over 512 bytes is written short on a full pipe (see `_pacing._warn`):
-        # the close's code and shown reason, without its cause, and the count.
-        head = close.split(": ", 1)[0]
+        # On a pipe, socket or terminal, a line over 512 bytes is written short (see
+        # `_pacing._warn`): without the cause, which `describe_close` and docs/errors.md
+        # give for the code, and with only the close as a field (the count stays in the
+        # message), so that it fits for every close.
         _pacing._warn(
             _errors.SESSION_DISCONNECTED,
-            short_what=f"the session ended, {head}",
-            short_fields={"close": head, "unanswered": unanswered},
+            short_what=f"the session ended, {close}{unanswered}",
+            short_fields=("close",),
             target=_log,
             close=close,
+            cause=f": {cause}" if found else "",
             unanswered=unanswered,
         )
 
@@ -1142,8 +1144,10 @@ class ReconnectingSession:
 
 def _ended_by(failure: Exception | None, session: Session | None) -> str:
     """How a session ended, in one line that cannot hold the token: `describe_close` of
-    its close, or for any other failure its type name and code (such as
-    `LivenessTimeout (QTE-CONNECT-LIVENESS-TIMEOUT)`), never its message."""
+    its close; for a failure while connecting or resuming that kept a close code, its
+    type name and that close (such as `ResumeNotAcknowledged, close code 1012`); for any
+    other failure its type name and code (such as
+    `LivenessTimeout (QTE-CONNECT-LIVENESS-TIMEOUT)`); never its message."""
     if isinstance(failure, ConnectionClosed):
         return describe_close(failure)
     if failure is None:
@@ -1152,16 +1156,15 @@ def _ended_by(failure: Exception | None, session: Session | None) -> str:
             return describe_close(closed)
         return "the exchange closed the connection"
     name = type(failure).__name__
-    code = getattr(failure, "code", None)
-    text = f"{name} ({code})" if isinstance(code, str) and code in _errors.CODES else name
     # A session that closed while connecting or resuming keeps the close's code, and
     # whether it said the token was revoked: the only reason that changes what to do.
     close_code = getattr(failure, "close_code", None)
     if isinstance(close_code, int) and not isinstance(close_code, bool):
         revoked = getattr(failure, "credential_revoked", False) is True
         reason = CREDENTIAL_REVOKED_CLOSE_REASON if revoked else ""
-        text += f", {describe_close(ConnectionClosedError(Close(close_code, reason), None))}"
-    return text
+        return f"{name}, {describe_close(ConnectionClosedError(Close(close_code, reason), None))}"
+    code = getattr(failure, "code", None)
+    return f"{name} ({code})" if isinstance(code, str) and code in _errors.CODES else name
 
 
 _CLOSED = object()
