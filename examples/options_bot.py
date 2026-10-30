@@ -79,9 +79,13 @@ fills made while it was down are not reported, and the summary says so. An order
 cancel in flight at the drop is never sent again: the replay or the snapshot says what
 became of it, and a cancel is sent afresh only while the order rests. Market data sent
 while it was down is not replayed, so before it chooses a contract again it waits for a
-session state, Greeks and a book received since it reconnected. If the order reports
-cannot be recovered (the exchange did not resume, or messages were missed meanwhile), it
-treats them as missed, as above, and sends no order from then on. If its order went to a
+session state, an option chain, Greeks and a book received since it reconnected. If the
+order reports cannot be recovered (the exchange did not resume, or messages were missed
+meanwhile) after its order was sent, it treats them as missed, as above, and sends no
+order from then on; a cancel in flight at the drop is then sent afresh. Before an order
+is sent, there is nothing of its own to miss, so it chooses and sends as usual. An
+`accepted` that comes through the resume is printed as answered after a reconnect, with
+no round trip. If its order went to a
 level where an order of its strategy already rested, as from an earlier run, and the reply
 was lost, it cannot tell whose order rests there: it cancels nothing and warns instead.
 --seconds and --drain-seconds count the time down too.
@@ -282,7 +286,6 @@ class OptionsBot:
         # The team's resting orders, from the session's order reports, applied as each event
         # is handled; read after a resume.
         self.view = view
-        self.reconnected = False  # a session after the first has come up
         # Whether an order of this strategy already rested at the level when the order was
         # sent, as from an earlier run: see `resumed`.
         self.taken_before = False
@@ -302,6 +305,7 @@ class OptionsBot:
         self.price = 0
         self.ref: str | None = None
         self.sent_at = 0.0
+        self.dropped_since_send = False  # the connection dropped after the order was sent
         self.accepted = False  # until then, no report at its level is taken as its own
         self.resting = False  # the exchange has reported it resting
         self.gone = False  # nothing of it rests: cancelled, filled or never left resting
@@ -525,7 +529,6 @@ class OptionsBot:
     async def on_connected(self, connected: Connected) -> None:
         self.up = False  # until its resume is complete
         if connected.reconnected:
-            self.reconnected = True
             print("reconnected: sending nothing until the resume is complete")
         if connected.resume is None:
             self.resumed(replayed=False)  # the exchange did not resume this session
@@ -548,14 +551,18 @@ class OptionsBot:
 
     def on_disconnected(self, disconnected: Disconnected) -> None:
         self.up = False
-        # Wait for a session state, Greeks and a book received after the reconnect.
+        # Wait for a session state, an option chain, Greeks and a book received after the
+        # reconnect: the chain held may be of another day or event log.
         self.market = None
+        self.chain = None
         self.books.update(disconnected)
         self.greeks.update(disconnected)
         why = disconnected.error or "the exchange closed it"
         print(f"the connection dropped ({why}); sending nothing until it is back")
         if self.ref is not None and not self.finished:
             print(f"the order sent may still rest at {self.where}")
+            # Its accepted, if it comes, comes through the resume: no round trip.
+            self.dropped_since_send = True
 
     def resumed(self, replayed: bool) -> None:
         """A session's resume is complete, or the exchange did not resume it: take this
@@ -564,12 +571,15 @@ class OptionsBot:
         if self.view is None:
             return
         if self.view.incomplete:
-            if self.ref is None and (not self.reconnected or self.watch_only):
-                return  # nothing was missed: the first session, or nothing is ever sent
+            if self.ref is None:
+                return  # no order was sent, so none of its reports can have been missed
             # The reports missed while down are not recovered: treat them as missed, so
-            # no order is sent from now on.
+            # no order is sent from now on. A cancel in flight at the drop may never have
+            # reached the exchange, and its answer is never sent again: forget it, so the
+            # order is cancelled afresh.
             print("warning: the order reports missed while disconnected were not recovered")
             self.missed = True
+            self.cancel_ref = None
             return
         if self.ref is None or self.finished:
             return  # no order was sent, so there is nothing to take from the view
@@ -679,8 +689,11 @@ class OptionsBot:
         ref = request_ref_of(message)
         match message:
             case Accepted() if ref is not None and ref == self.ref:
-                elapsed_ms = (time.monotonic() - self.sent_at) * 1000
-                print(f"accepted after a {elapsed_ms:.0f} ms round trip")
+                if self.dropped_since_send:
+                    print("accepted (answered after a reconnect)")
+                else:
+                    elapsed_ms = (time.monotonic() - self.sent_at) * 1000
+                    print(f"accepted after a {elapsed_ms:.0f} ms round trip")
                 self.accepted = True
             case Accepted() if ref is not None and ref == self.cancel_ref:
                 print("cancel accepted")

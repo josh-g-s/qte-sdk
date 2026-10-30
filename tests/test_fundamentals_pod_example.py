@@ -699,3 +699,197 @@ async def test_a_pod_ends_on_a_revoked_credential_and_names_the_close():
     assert 'close code 1008, reason "credential revoked": your token' in err
     assert "A ticket sent may still be working: read its ticket_state" in err
     assert "reconnecting in" not in out
+
+
+# Review of #375: the log a ticket was sent on, the account on each connection, and what
+# the pod forgets or keeps at a drop.
+
+LOG_A, LOG_B = "a" * 16, "b" * 16
+
+
+class LogsPerConnection(PodExchange):
+    """A PodExchange whose session_acks name `logs`, one per connection. The first
+    connection answers the account and drops before execution_route; the second accepts
+    the ticket and then closes; the third sends `on_third`. With `revoke_third`, the
+    third connection is closed 1008 "credential revoked" before its session_ack."""
+
+    def __init__(
+        self,
+        *,
+        logs: list[str | None],
+        on_third: list[tuple[str, dict[str, Any]]] | None = None,
+        revoke_third: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.logs = logs
+        self.on_third = on_third or []
+        self.revoke_third = revoke_third
+        self.connections = 0
+
+    async def __call__(self, ws: ServerConnection) -> None:
+        self.connections += 1
+        self._seq = 0
+        if self.connections == 3 and self.revoke_third:
+            self.received.append(json.loads(await ws.recv()))
+            await ws.close(1008, "credential revoked")
+            return
+        await super().__call__(ws)
+
+    async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+        if type_ == "session_ack":
+            payload = {**payload, "log_id": self.logs[self.connections - 1]}
+            if payload["log_id"] is None:
+                del payload["log_id"]
+        if type_ == "execution_route" and self.connections == 1:
+            return  # the first connection drops before its route
+        await super().send(ws, type_, payload)
+        if type_ == "account_state" and self.connections == 1:
+            await ws.close(1012, "service restart")
+        if type_ == "execution_route" and self.connections == 3:
+            for frame_type, frame_ in self.on_third:
+                await super().send(ws, frame_type, frame_)
+
+    async def answer_ticket(self, ws: ServerConnection, payload: dict[str, Any]) -> None:
+        await super().answer_ticket(ws, payload)
+        if self.connections == 2:
+            await ws.close(1012, "service restart")
+
+
+async def test_a_pod_compares_the_log_its_ticket_was_sent_on_not_its_first_connections():
+    # Logs A, then B, then B: the ticket is sent and accepted on B, so the third
+    # connection is on the ticket's own log and the pod keeps following it.
+    exchange = LogsPerConnection(
+        logs=[LOG_A, LOG_B, LOG_B],
+        route=route_payload(),
+        accounts=[account(100), account(0)],
+        after=WORKING,
+        on_third=WORKING,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert exchange.connections == 3
+    assert len(exchange.tickets()) == 1
+    assert "reconnected to a new event log" in out  # A to B, before the ticket
+    assert "what became of the ticket is not known here" not in out
+    assert "ticket 17 is still working on the exchange" in out
+
+
+async def test_a_pod_reads_its_position_again_on_a_reconnect_before_its_ticket():
+    # The account is answered on log A and the link drops before the route; the route
+    # comes on log B. The position the ticket is sent on is B's, not A's.
+    exchange = LogsPerConnection(
+        logs=[LOG_A, LOG_B, LOG_B],
+        route=route_payload(),
+        accounts=[account(100), account(0)],
+        after=WORKING,
+        on_third=WORKING,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert "asking for the account again: the ticket is sent on this connection" in out
+    assert f"position in {INSTRUMENT} at the start, from account_state: 0" in out
+    assert "from account_state: 100" not in out
+    sent = [m["type"] for m in exchange.received]
+    assert sent.index("ticket") > [i for i, t in enumerate(sent) if t == "account_query"][1]
+
+
+async def test_a_pod_takes_no_log_change_from_an_unknown_log_id():
+    # The ticket is sent on a connection that names no log; the next one names one. An
+    # unknown id says nothing either way, so this is not a new log.
+    exchange = LogsPerConnection(
+        logs=[None, None, LOG_B],
+        route=route_payload(),
+        accounts=[account(0), account(0)],
+        after=WORKING,
+        on_third=WORKING,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert "reconnected to a new event log" not in out
+    assert "what became of the ticket is not known here" not in out
+    assert "ticket 17 is still working on the exchange" in out
+
+
+async def test_a_pod_warns_its_ticket_may_be_working_when_a_reconnect_fails_for_good():
+    # The third connection is refused for a revoked credential, which is not retried.
+    exchange = LogsPerConnection(
+        logs=[LOG_A, LOG_A, LOG_A],
+        revoke_third=True,
+        route=route_payload(),
+        accounts=[account(0), account(0)],
+        after=WORKING,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "6")
+    assert code == 1, out + err
+    assert exchange.connections == 3
+    assert "a ticket sent may still be working on the exchange" in err
+
+
+class RecordingPodSession:
+    """A session that records each message type sent, raising `error` on each send."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.sent: list[str] = []
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append(type_)
+        if self.error is not None:
+            raise self.error
+
+
+def pod_connected(log_id: str | None, reconnected: bool) -> Any:
+    from qte_sdk.connection import Connected, SessionInfo
+
+    info = SessionInfo("s-1", "pod-a", 1, CONTRACT_VERSION, True, log_id)
+    return Connected(info, (), reconnected)
+
+
+def test_a_pod_takes_no_log_change_before_its_ticket_is_sent():
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(RecordingPodSession(), example.parse_args(list(ARGS)))
+    pod.on_connected(pod_connected(LOG_A, False))
+    pod.on_disconnected(Disconnected(error=None))
+    pod.on_connected(pod_connected(LOG_B, True))
+    assert not pod.log_changed
+
+
+def test_a_pod_forgets_the_ticket_states_it_kept_at_a_drop():
+    # LatestTickets forgets them at a drop; the events kept for their unknown enum names
+    # go with them, so a stale state is never taken for a replacement or a newest state.
+    from qte_sdk.connection import Disconnected, Received
+    from qte_sdk.contract.v1.order_events_pb2 import TicketState
+
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(RecordingPodSession(), example.parse_args(list(ARGS)))
+    pod.state_events["17"] = Received("ticket_state", TicketState(ticket_id="17"), 1)
+    pod.on_disconnected(Disconnected(error=None))
+    assert pod.state_events == {}
+
+
+async def test_a_pod_takes_a_ticket_not_sent_while_down_as_not_sent():
+    from qte_sdk.reconnect import NotConnected
+
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(RecordingPodSession(NotConnected("down")), example.parse_args(list(ARGS)))
+    await pod.send()
+    assert pod.unsent
+    assert pod.ticket_ref is None
+    assert not pod.ticket_out()
+
+
+@pytest.mark.parametrize(
+    "error", [ConnectionClosed(None, None), None], ids=["connection-closed", "not-connected"]
+)
+async def test_a_pod_asks_for_the_account_again_later_when_its_query_cannot_be_sent(error):
+    from qte_sdk.reconnect import NotConnected
+
+    example = load_example("fundamentals_pod.py")
+    session = RecordingPodSession(error or NotConnected("down"))
+    pod = example.Pod(session, example.parse_args(list(ARGS)))
+    await pod.query_account()  # does not raise
+    assert pod.account_ref is None
+    assert pod.account_wanted and not pod.account_answered

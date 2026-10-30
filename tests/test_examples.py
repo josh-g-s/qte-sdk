@@ -4901,16 +4901,18 @@ async def test_options_bot_claims_no_earlier_order_at_its_level_after_a_drop():
     assert exchange.resting[earlier] == ("opt-test", 7)
 
 
-async def test_options_bot_sends_no_order_when_the_resume_is_refused_before_it_sent_one():
-    # The first connection drops before the bot could choose; the next one is not resumed,
-    # so its view cannot be put right and it sends no order at all.
+async def test_options_bot_still_sends_its_order_when_the_resume_is_refused_before_it_sent_one():
+    # The first connection drops before the bot could choose; the next one is not resumed.
+    # No order of this run was out, so none of its reports can have been missed: the bot
+    # chooses and sends its one order as usual, and cancels it at the end.
     exchange = options_exchange(drop_after_books=1, refuse_resume_on_reconnect=True)
     code, out, err = await run_options_bot(exchange, "--seconds", "3")
     assert exchange.connections >= 2
-    assert payloads(exchange, "new") == []
-    assert "the order reports missed while disconnected were not recovered" in out
-    assert code == 0, out + err  # as after messages missed before an order: none sent
-    assert out.splitlines()[-1] == "no order was sent"
+    assert orders_on(exchange, 1, "new") == []
+    assert len(payloads(exchange, "new")) == 1
+    assert "the order reports missed while disconnected were not recovered" not in out
+    assert code == 0, out + err
+    assert exchange.resting == {}
 
 
 async def test_options_bot_applies_its_view_as_it_handles_each_event():
@@ -5494,3 +5496,372 @@ async def test_each_moved_example_ends_on_a_revoked_credential_and_names_the_clo
     assert 'close code 1008, reason "credential revoked": your token' in err
     assert "reconnecting in" not in out
     assert token not in out + err
+
+
+# Review of #375: the reconnect handling of take_liquidity, out_of_hours and options_bot.
+
+
+def session_info(log_id: str | None = None, server_time: int = 1) -> Any:
+    from qte_sdk.connection import SessionInfo
+
+    return SessionInfo("s-1", "team-a", server_time, CONTRACT_VERSION, True, log_id)
+
+
+def connected_event(*, reconnected: bool, resume: Any = None, log_id: str | None = None) -> Any:
+    from qte_sdk.connection import Connected
+
+    return Connected(session_info(log_id), (INSTRUMENT,), reconnected, resume)
+
+
+def replay_ack(replayed: bool = True) -> Any:
+    from qte_sdk.contract.v1.session_pb2 import ResumeAck
+
+    return ResumeAck(replayed=replayed, as_of_report_seq=5, snapshot_count=0)
+
+
+class ScriptedSession:
+    """Stands in for a `ReconnectingSession`: yields `script` in turn, then waits for good.
+    An entry that is callable is called with this session and yields what it returns, so a
+    reply can name the request_ref of a message sent; an exception is raised. Records each
+    message sent, and raises `fail_sends` on the sends, in turn, while any are left."""
+
+    def __init__(self, script: list[Any], fail_sends: list[Exception] | None = None) -> None:
+        self.script = script
+        self.fail_sends = list(fail_sends or [])
+        self.sent: list[tuple[str, Any]] = []
+        self.instrument_table = None
+        self.calendar = None
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append((type_, payload))
+        if self.fail_sends:
+            raise self.fail_sends.pop(0)
+
+    async def close(self) -> None:
+        pass
+
+    def __aiter__(self) -> Any:
+        return self.events()
+
+    async def events(self) -> Any:
+        for entry in self.script:
+            await asyncio.sleep(0)
+            item = entry(self) if callable(entry) else entry
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+        await asyncio.Event().wait()
+
+    def refs(self, type_: str) -> list[str]:
+        return [payload.request_ref for sent, payload in self.sent if sent == type_]
+
+
+def taken_order(session: ScriptedSession) -> str:
+    [ref] = session.refs("new")
+    return ref
+
+
+def our_accepted(session: ScriptedSession) -> Received:
+    return Received("accepted", Accepted(request_ref=taken_order(session)), None, report_seq=2)
+
+
+def our_fill(session: ScriptedSession) -> Received:
+    fill = Execution(
+        strat_id="take-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        fill_price=ASK,
+        fill_size=1,
+        remaining_size=0,
+    )
+    return Received("execution", fill, None, report_seq=3)
+
+
+async def run_taker(
+    script: list[Any], seconds: str = "0.5", fail_sends: list[Exception] | None = None
+) -> tuple[Any, ScriptedSession, Any]:
+    """Run take_liquidity's `run` against a ScriptedSession; its status (or the exception
+    it raised), the session, and the example module."""
+    example = load_example("take_liquidity.py")
+    session = ScriptedSession(script, fail_sends)
+    example.ReconnectingSession = lambda *args, **kwargs: session
+    args = example.parse_args([*TAKE_ARGS, "--seconds", seconds])
+    try:
+        async with asyncio.timeout(RUN_LIMIT):
+            outcome: Any = await example.run("ws://127.0.0.1:1/ws", args)
+    except Exception as error:
+        outcome = error
+    return outcome, session, example
+
+
+def first_session_then_order() -> list[Any]:
+    """A first session, resumed, whose book makes take_liquidity send its order."""
+    from qte_sdk.connection import ResumeComplete
+
+    return [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        ResumeComplete(False, 0, 0),
+        book_event(),
+    ]
+
+
+async def test_take_liquidity_never_resends_an_order_whose_send_a_drop_cut_short():
+    # ConnectionClosed on the send: the order may have reached the exchange, so it stays
+    # recorded as sent and is never sent again, not even from a fresh book once resumed.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("take_liquidity.py")
+    session = ScriptedSession([], fail_sends=[ConnectionClosed(None, None)])
+    taker = example.Taker(session, example.parse_args([*TAKE_ARGS]))
+    await taker.on_book(book_event().message)
+    assert taker.ref is not None
+    taker.on_disconnected(Disconnected(error=None))
+    taker.on_connected(connected_event(reconnected=True, resume=replay_ack()))
+    taker.resumed(replayed=True)
+    fresh = book_event().message
+    fresh.grid_time = 2
+    await taker.on_book(fresh)
+    assert [type_ for type_, _ in session.sent] == ["new"]
+
+
+async def test_take_liquidity_sends_nothing_from_a_session_until_its_resume_completes():
+    # Each Connected holds back the order until its resume completes, whatever came before.
+    example = load_example("take_liquidity.py")
+    session = ScriptedSession([])
+    taker = example.Taker(session, example.parse_args([*TAKE_ARGS]))
+    assert taker.up
+    taker.on_connected(connected_event(reconnected=False, resume=replay_ack(False)))
+    await taker.on_book(book_event().message)
+    assert session.sent == []
+    taker.resumed(replayed=False)
+    await taker.act()
+    assert [type_ for type_, _ in session.sent] == ["new"]
+
+
+async def test_take_liquidity_takes_a_reconnect_with_no_resume_as_its_reports_lost():
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("take_liquidity.py")
+    taker = example.Taker(ScriptedSession([]), example.parse_args([*TAKE_ARGS]))
+    await taker.on_book(book_event().message)
+    taker.on_disconnected(Disconnected(error=None))
+    taker.on_connected(connected_event(reconnected=True, resume=None))
+    assert taker.lost and taker.done and taker.missed
+
+
+async def test_take_liquidity_names_a_message_missed_while_its_order_was_out(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A gap may have lost one of its fills: the summary says it may be incomplete.
+    script = [*first_session_then_order(), SeqGap(4, 6), our_accepted, our_fill]
+    outcome, session, _ = await run_taker(script)
+    lines = capsys.readouterr().out.splitlines()
+    assert outcome == 0, lines
+    assert len(session.refs("new")) == 1
+    assert lines[-1] == (
+        "filled 1 of 1 at an average of about 100.050000 (messages were missed, so this "
+        "may be incomplete: check your fills)"
+    )
+
+
+@pytest.mark.parametrize(
+    "cut",
+    [
+        lambda: [SeqGap(7, 9)],
+        lambda: [DecodeFailed(None, ValueError("x"))],
+        # A report unreadable in the replay: ResumeComplete follows, but it lacks one.
+        lambda: [DecodeFailed("execution", ValueError("x"), 3), resume_complete(True)],
+    ],
+    ids=["seq-gap", "decode-failed-untyped", "decode-failed-report"],
+)
+async def test_take_liquidity_takes_a_resume_cut_short_as_its_outcome_unknown(
+    cut: Callable[[], list[Any]], capsys: pytest.CaptureFixture[str]
+):
+    # The order is out at the drop; the next resume ends on a message missed or
+    # unreadable. The outcome is not known: exit 1 at once, and never send it again.
+    from qte_sdk.connection import Disconnected
+
+    script = [
+        *first_session_then_order(),
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        *cut(),
+        book_event(),
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert len(session.refs("new")) == 1
+    assert "how it filled is not known: check your fills" in out
+
+
+def resume_complete(replayed: bool) -> Any:
+    from qte_sdk.connection import ResumeComplete
+
+    return ResumeComplete(replayed, 5, 0)
+
+
+async def test_take_liquidity_sends_once_a_first_resume_is_cut_short_by_a_gap(
+    capsys: pytest.CaptureFixture[str],
+):
+    # With nothing sent yet, a resume that ends on a gap with no ResumeComplete still
+    # lets the session act: it waits no longer for a ResumeComplete that never comes.
+    script = [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        SeqGap(1, 3),
+        book_event(),
+        our_accepted,
+        our_fill,
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 0, out
+    assert len(session.refs("new")) == 1
+    assert "the resume was cut short" in out
+
+
+@pytest.mark.parametrize("sent", [True, False], ids=["order-out", "nothing-sent"])
+async def test_take_liquidity_warns_its_order_may_be_out_when_a_reconnect_fails_for_good(
+    sent: bool, capsys: pytest.CaptureFixture[str]
+):
+    # A failure that is not retried on a reconnect (here a refused session) ends the run:
+    # with an order out, it says the order may have filled.
+    from qte_sdk.connection import Disconnected, SessionRejected
+
+    start = (
+        first_session_then_order() if sent else [connected_event(reconnected=False, resume=None)]
+    )
+    script = [*start, Disconnected(error=None), SessionRejected(1, None)]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    err = capsys.readouterr().err
+    assert isinstance(outcome, SessionRejected)
+    assert len(session.refs("new")) == (1 if sent else 0)
+    assert ("the order sent may have reached the exchange and filled" in err) == sent
+
+
+async def test_take_liquidity_names_no_round_trip_for_an_accepted_replayed_after_a_drop(
+    capsys: pytest.CaptureFixture[str],
+):
+    from qte_sdk.connection import Disconnected
+
+    script = [
+        *first_session_then_order(),
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        our_accepted,
+        our_fill,
+        resume_complete(True),
+    ]
+    outcome, _, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 0, out
+    assert "accepted (answered after a reconnect)" in out
+    assert "round trip" not in out
+
+
+async def test_take_liquidity_names_the_round_trip_of_an_accepted_with_no_drop(
+    capsys: pytest.CaptureFixture[str],
+):
+    outcome, _, _ = await run_taker([*first_session_then_order(), our_accepted, our_fill])
+    out = capsys.readouterr().out
+    assert outcome == 0, out
+    assert re.search(r"accepted after a \d+ ms round trip", out), out
+
+
+class ClockMovesOnReconnect(ClosingExchange):
+    """A ClosingExchange whose second connection's session_ack gives a later server_time."""
+
+    async def send(
+        self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
+    ) -> None:
+        if type_ == "session_ack" and self.connections > 1:
+            payload = {**payload, "server_time": str(SERVER_TIME + 3_600_000)}
+        await super().send(ws, type_, payload, **envelope)
+
+
+async def test_out_of_hours_takes_now_from_each_new_sessions_clock():
+    exchange = ClockMovesOnReconnect(
+        close_code=1012,
+        reason="service restart",
+        close_after_state=True,
+        closed=True,
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "3"
+        )
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    times = [line for line in out.splitlines() if line.startswith("exchange time:")]
+    assert len(times) == 2 and times[0] != times[1], out
+    # The wait to the next open is measured from the new clock: an hour less.
+    waits = [line for line in out.splitlines() if line.startswith("next session:")]
+    assert len(waits) == 2 and waits[0] != waits[1], out
+
+
+async def test_options_bot_cancels_again_after_a_drop_with_its_cancel_out_and_no_resume():
+    # The cancel in flight at the drop is lost and the next session is not resumed: the
+    # bot forgets the lost cancel and cancels afresh, once.
+    exchange = LostFirstCancel(refuse_resume_on_reconnect=True)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert exchange.connections == 2
+    assert "the order reports missed while disconnected were not recovered" in out
+    assert len(payloads(exchange, "new")) == 1
+    assert len(orders_on(exchange, 1, "cancel")) == 1
+    assert len(orders_on(exchange, 2, "cancel")) == 1
+    assert exchange.resting == {}, out + err
+
+
+async def test_options_bot_cancels_only_once_after_a_replay_shows_its_cancel_applied():
+    # The replay brings the cancel's order_cancelled: nothing rests, so no cancel again.
+    example = load_example("options_bot.py")
+    from qte_sdk.connection import Disconnected
+
+    view = RestingOrders()
+    session = RecordingSender()
+    bot = example.OptionsBot(session, None, "SPY", "opt-test", False, view)
+    contract, price = "SPY261120P00665000", 4_900_000
+    bot.contract, bot.price, bot.ref, bot.accepted, bot.resting = contract, price, "r1", True, True
+    level = {"strat_id": "opt-test", "instrument": contract, "side": BUY, "price": price}
+    view.apply(OrderState(**level, state=RESTING, remaining_size=1))
+    await bot.act()
+    assert [t for t, _ in session.sent] == ["cancel"]
+    await bot.on_event(Disconnected(error=None))
+    await bot.on_event(connected_event(reconnected=True, resume=replay_ack()))
+    cancelled = OrderCancelled(**level, cancelled_size=1, request_ref=bot.cancel_ref, reason_code=0)
+    await bot.on_event(Received("order_cancelled", cancelled, None, report_seq=5))
+    await bot.on_event(resume_complete(True))
+    assert [t for t, _ in session.sent] == ["cancel"]
+    assert bot.gone
+
+
+async def test_options_bot_forgets_its_option_chain_at_a_drop():
+    # The chain held may be of another day or event log: choose only from one sent since.
+    from qte_sdk.connection import Disconnected
+    from qte_sdk.contract.v1.market_data_pb2 import OptionChain
+
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test")
+    bot.chain = OptionChain()
+    bot.on_disconnected(Disconnected(error=None))
+    assert bot.chain is None
+    assert bot.choose() is None
+    assert bot.why_none == "no option chain was received"
+
+
+async def test_options_bot_names_no_round_trip_for_an_accepted_after_a_drop(
+    capsys: pytest.CaptureFixture[str],
+):
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test")
+    bot.contract, bot.price, bot.ref = "SPY261120P00665000", 4_900_000, "r1"
+    bot.on_disconnected(Disconnected(error=None))
+    bot.on_order_event(Accepted(request_ref="r1"))
+    out = capsys.readouterr().out
+    assert "accepted (answered after a reconnect)" in out
+    assert "round trip" not in out
+    assert bot.accepted

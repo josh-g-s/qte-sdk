@@ -37,8 +37,13 @@ drop is never sent again. If the exchange replays the reports missed, the order'
 `accepted`, fills and cancelled remainder arrive as if nothing had happened. If it sends a
 snapshot of the resting orders instead, or does not resume, the reports missed are not
 recovered, and a market order never rests, so nothing says how it filled: the example says
-so, tells you to check your fills, and exits with status 1. --seconds counts the time down
-too. Only the first connection is not retried: if it fails, the example says why and stops.
+so, tells you to check your fills, and exits with status 1. So it does, too, if a message is
+missed or unreadable during the resume (a `SeqGap` or `DecodeFailed`), since the report lost
+may be one of its fills; a gap can also end the resume with no `ResumeComplete`. An
+`accepted` that comes through the resume is printed as answered after a reconnect, with no
+round trip. --seconds counts the time down too. Only the first connection is not retried:
+if it fails, the example says why and stops; a later one that fails for good (a revoked
+credential, say) says why and, with the order out, that it may have filled.
 """
 
 import argparse
@@ -131,6 +136,13 @@ class Taker:
         # Whether the order was in flight at a drop, until a resume says what became of it.
         self.in_doubt = False
         self.lost = False  # its reports while disconnected were not recovered
+        # Whether a resume announced by a session is still to complete, and whether a
+        # message was missed or unreadable during it, so its replay may lack a report.
+        self.resuming = False
+        self.resume_damaged = False
+        # Whether the connection dropped after the order was sent: its `accepted` then
+        # comes through a resume, and the time to it is no round trip.
+        self.dropped_since_send = False
 
     async def on_book(self, book: Book) -> None:
         """Keep `book` if it is newer than the one held, and act on it if so."""
@@ -139,13 +151,14 @@ class Taker:
 
     async def act(self) -> None:
         """Send the order from the latest book held, unless one is already sent, no session
-        is up and resumed, the book predates a drop (no newer one has come since), or
-        that book shows no wall on the side to trade against."""
+        is up and resumed, the book may be out of date (held from before a drop, or a
+        gap, with no newer one since), or that book shows no wall on the side to trade
+        against."""
         book = self.books.get(self.instrument)
         if self.ref is not None or book is None or not self.up:
             return
         if self.instrument in self.books.stale:
-            return  # held from before a drop: wait for a book sent since
+            return  # held from before a drop or a gap: wait for a book sent since
         # A buy trades against the offer, a sell against the bid.
         levels = book.ask_levels if self.side == BUY else book.bid_levels
         if not levels:
@@ -184,10 +197,25 @@ class Taker:
 
     def on_connected(self, connected: Connected) -> None:
         self.up = False  # until its resume is complete
+        self.resuming = connected.resume is not None
+        self.resume_damaged = False
         if connected.reconnected:
             print("reconnected: sending nothing until the resume is complete")
         if connected.resume is None:
             self.resumed(replayed=False)  # the exchange did not resume this session
+
+    def on_missed(self, ends_resume: bool) -> None:
+        """A message was missed or unreadable. During a resume, a report the replay was to
+        bring may be the one lost. A `SeqGap`, or a `DecodeFailed` whose type is unknown,
+        also ends the resume with no `ResumeComplete` (the session stops waiting for it),
+        so it counts as a resume that did not recover the reports missed."""
+        self.missed = True
+        if not self.resuming:
+            return
+        self.resume_damaged = True
+        if ends_resume:
+            print("the resume was cut short by a message missed or unreadable")
+            self.resumed(replayed=False)
 
     def on_disconnected(self, disconnected: Disconnected) -> None:
         self.up = False
@@ -195,24 +223,32 @@ class Taker:
         self.books.update(disconnected)
         why = disconnected.error or "the exchange closed it"
         print(f"the connection dropped ({why}); sending nothing until it is back")
+        self.resuming = False
         if self.ref is not None and not self.done:
-            self.in_doubt = True
+            self.in_doubt = self.dropped_since_send = True
             print("the order sent may have filled meanwhile: the resume says what became of it")
 
     def resumed(self, replayed: bool) -> None:
         """A session's resume is complete, or the exchange did not resume it."""
         self.up = True
+        self.resuming = False
         if not self.in_doubt:
             return
         self.in_doubt = False
-        if not replayed:
+        if not replayed or self.resume_damaged:
             # A snapshot lists only resting orders, and a market order never rests: its
-            # fills while disconnected are not recovered. It is never sent again.
+            # fills while disconnected are not recovered. Nor are they after a replay a
+            # message was missed from. It is never sent again.
             print(
-                "the order's reports while disconnected were not recovered (no replay), so "
-                "how it filled is not known: check your fills before running this again"
+                "the order's reports while disconnected were not recovered (no complete "
+                "replay), so how it filled is not known: check your fills before running "
+                "this again"
             )
             self.missed = self.lost = self.done = True
+
+    def order_out(self) -> bool:
+        """Whether an order may have reached the exchange without its outcome known."""
+        return self.ref is not None and not self.done
 
     def ours(self, message: Execution | OrderCancelled) -> bool:
         """Whether a fill or cancellation belongs to this example's market order: same
@@ -232,8 +268,11 @@ class Taker:
         answers_ours = ref is not None and ref == self.ref
         match message:
             case Accepted() if answers_ours:
-                elapsed_ms = (time.monotonic() - self.sent_at) * 1000
-                print(f"accepted after a {elapsed_ms:.0f} ms round trip")
+                if self.dropped_since_send:
+                    print("accepted (answered after a reconnect)")
+                else:
+                    elapsed_ms = (time.monotonic() - self.sent_at) * 1000
+                    print(f"accepted after a {elapsed_ms:.0f} ms round trip")
             case Reject() if answers_ours:
                 detail = f" ({message.reason_detail})" if message.HasField("reason_detail") else ""
                 print(f"REJECTED: {reason_code_name(message.reason_code)}{detail}")
@@ -263,6 +302,12 @@ class Taker:
             text += " (messages were missed, so this may be incomplete: check your fills)"
         return text
 
+
+# Said when the session ends for good while the order sent may have reached the exchange.
+ORDER_OUT_WARNING = (
+    "WARNING: the order sent may have reached the exchange and filled, and its outcome is "
+    "not known. Check your fills before running this again"
+)
 
 # The longest wait for the connection to close at the end. A local choice, not a value
 # the exchange sets. If the close does not finish, the connection is dropped anyway when
@@ -323,9 +368,13 @@ async def run(url: str, args: argparse.Namespace) -> int:
                         return 1
                     elif isinstance(item, SeqGap | DecodeFailed) or isinstance(event, ReportGap):
                         print("warning: a message from the exchange was missed or unreadable")
-                        taker.missed = True
                         if item is not None:
                             taker.books.update(item)  # it may have been a book: now stale
+                        # As the session does: these end a resume with no ResumeComplete.
+                        taker.on_missed(
+                            isinstance(item, SeqGap)
+                            or (isinstance(item, DecodeFailed) and item.type is None)
+                        )
                     elif is_order_event(event):
                         taker.on_order_event(event.message)
                     if taker.done:
@@ -340,6 +389,12 @@ async def run(url: str, args: argparse.Namespace) -> int:
             sent = "the order's outcome is not known yet" if taker.ref else "no order was sent"
             print(f"stopped after {args.seconds:g} seconds: {sent}; {taker.summary()}")
             return 0
+        # After TimeoutError, an OSError too, so a deadline is not taken for one.
+        except (SessionRejected, OSError, InvalidHandshake, SessionNotAcknowledged):
+            if taker.order_out():
+                # Not retried, such as a credential revoked while reconnecting.
+                print(ORDER_OUT_WARNING, file=sys.stderr)
+            raise
     print("the exchange closed the connection")
     return 1
 

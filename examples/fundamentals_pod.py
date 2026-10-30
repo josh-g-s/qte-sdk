@@ -84,9 +84,13 @@ after the ticket is sent and before its `ticket_accepted` or `ticket_reject`, th
 cannot tell whether it is working: it says so, never sends it again, and exits with status
 1; read its `ticket_state` (from `LatestTickets`) before sending another. The session
 does not send an `account_query` again by itself, so a query still unanswered at the drop
-is sent again on the next connection. If the exchange comes back on a new event log (a
-new term, say), the ticket is not in its states: the example says what became of it is not
-known and exits with status 1. A fill of a child sent while the example was down is
+is sent again on the next connection, and on a reconnect before the ticket is sent the
+account is asked for again, so the ticket goes out on the position of the connection it is
+sent on. If the exchange comes back on another event log (a new term, say) than the one the
+ticket was sent on, the ticket is not in its states: the example says what became of it is
+not known and exits with status 1. Only two known `log_id`s that differ count as another
+log. If a reconnect fails for good (a revoked credential, say) while the ticket may be
+working, the example says so. A fill of a child sent while the example was down is
 not replayed; it is already in the ticket's `filled_shares`. --seconds counts the time
 down too. Only the first connection is not retried: if it fails, the example says why and
 stops.
@@ -224,6 +228,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def new_log(before: str | None, now: str | None) -> bool:
+    """Whether `now` names another event log than `before`. An unknown log_id (absent or
+    malformed) says nothing either way, so only two known ids that differ count."""
+    return before is not None and now is not None and before != now
+
+
 def enum_name(event: Received, field: str, enum: type, value: int) -> str:
     """The name of an enum field, or the name the exchange sent when this SDK does not
     know it (it then decodes as the zero value)."""
@@ -261,7 +271,9 @@ class Pod:
         # Whether the ticket was sent and its answer lost with a drop, or not sent at all.
         self.lost = False
         self.unsent = False
-        self.log_id: str | None = None  # the event log of the first connection
+        # The event log of the current connection, and of the one the ticket was sent on.
+        self.log_id: str | None = None
+        self.ticket_log_id: str | None = None
         self.log_changed = False
         # The event of each ticket's newest state, kept for the names this SDK does not
         # know (`unknown_enum_names()`), which the message alone does not carry.
@@ -291,6 +303,7 @@ class Pod:
         # The ref is recorded before the send: once it is, the ticket may have reached the
         # exchange, even if the send does not finish.
         self.ticket_ref = new_request_ref()
+        self.ticket_log_id = self.log_id
         try:
             await send_ticket(
                 self.session,
@@ -325,6 +338,11 @@ class Pod:
                 # The session does not send an account_query again by itself.
                 print("asking for the account again: the query sent was not answered")
                 await self.ask_account()
+            elif event.reconnected and self.ticket_ref is None and self.account_wanted:
+                # No ticket is sent yet: the position it is sent on comes from this
+                # connection, which may be on another event log than the last answer.
+                print("asking for the account again: the ticket is sent on this connection")
+                await self.query_account()
         elif isinstance(event, Disconnected):
             self.on_disconnected(event)
         elif isinstance(event, SeqGap | DecodeFailed):
@@ -400,15 +418,20 @@ class Pod:
         info = connected.info
         if not self.connected:
             print(f"connected: team {info.team}, unscored session: {info.unscored}")
-            self.log_id = info.log_id
-        elif info.log_id != self.log_id:
+        elif new_log(self.log_id, info.log_id):
             # A new log (a new term, say): a ticket sent on the old one is not in it.
             print("reconnected to a new event log: the tickets of the old one are not in it")
-            if self.ticket_ref is not None and not self.stopped and not self.rejected:
-                self.log_changed = True
         else:
             print("reconnected: the ticket states are sent again")
+        if self.ticket_out() and new_log(self.ticket_log_id, info.log_id):
+            # Not the log the ticket was sent on: what became of it is not in this one.
+            self.log_changed = True
+        self.log_id = info.log_id
         self.connected = self.up = True
+
+    def ticket_out(self) -> bool:
+        """Whether a ticket was sent that may still be working."""
+        return self.ticket_ref is not None and not self.stopped and not self.rejected
 
     def on_disconnected(self, disconnected: Disconnected) -> None:
         # LatestTickets has forgotten the route and every state it held: the next
@@ -571,6 +594,23 @@ async def follow(
     session: ReconnectingSession, queue: asyncio.Queue, args: argparse.Namespace
 ) -> int:
     pod = Pod(session, args)
+    try:
+        return await follow_pod(pod, queue, args)
+    except (SessionRejected, OSError, InvalidHandshake, SessionNotAcknowledged):
+        # Not retried, such as a credential revoked while reconnecting.
+        if pod.ticket_out():
+            print(TICKET_OUT_WARNING, file=sys.stderr)
+        raise
+
+
+# Said when the session ends for good while a ticket sent may still be working.
+TICKET_OUT_WARNING = (
+    "WARNING: a ticket sent may still be working on the exchange: read its ticket_state "
+    "before sending another"
+)
+
+
+async def follow_pod(pod: Pod, queue: asyncio.Queue, args: argparse.Namespace) -> int:
     # Wait for the first session; a first connection that fails raises here.
     if await drive(queue, pod, lambda: pod.connected, None) == "closed":
         print("the exchange closed the connection; no ticket was sent")
