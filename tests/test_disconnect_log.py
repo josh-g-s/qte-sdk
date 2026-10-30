@@ -203,6 +203,46 @@ async def test_a_json_line_carries_the_close_as_a_field(caplog):
     assert line["fields"] == {"close": "close code 1012", "cause": "", "unanswered": ""}
 
 
+class EndsWhileResuming:
+    """Acks each connection, then ends the first ones with `endings`, one each, before
+    answering their resume; answers every later resume and holds it open."""
+
+    def __init__(self, *endings: Ending) -> None:
+        self.endings = endings
+        self.connections = 0
+
+    async def __call__(self, ws: ServerConnection) -> None:
+        n = self.connections
+        self.connections += 1
+        await ws.recv()  # auth
+        await ws.send(ack(log_id=LOG))
+        await ws.recv()  # resume
+        if n < len(self.endings):
+            await self.endings[n](ws)
+            return
+        await ws.send(EMPTY)
+        await ws.wait_closed()
+
+
+async def test_a_close_with_no_code_kept_while_resuming_still_names_its_close(caplog):
+    # A 1001 close or a drop before resume_ack is a ResumeNotAcknowledged with no
+    # close_code: the line takes the close from the connection instead.
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        events = await run(
+            EndsWhileResuming(closing(1001, "exchange stopping"), drop_connection), 2
+        )
+        records = disconnect_records(caplog)
+    errors_seen = [e.error for e in events if isinstance(e, Disconnected)]
+    assert [type(e) for e in errors_seen] == [ResumeNotAcknowledged] * 2
+    assert [e.close_code for e in errors_seen] == [None, None]
+    assert [close_of(r.fields) for r in records] == [
+        'ResumeNotAcknowledged, close code 1001, reason "exchange stopping": the exchange is '
+        "stopping or switching; a ReconnectingSession connects again, and after a switch "
+        "that normally succeeds within seconds",
+        f"ResumeNotAcknowledged, {NO_CLOSE_FRAME}",
+    ]
+
+
 def emitted(monkeypatch: pytest.MonkeyPatch, disconnected: Disconnected) -> dict:
     """What `_log_disconnected` hands the warning thread, caught before it starts."""
     caught: list[dict] = []
