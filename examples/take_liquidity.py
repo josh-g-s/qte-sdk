@@ -216,6 +216,10 @@ class Taker:
         if ends_resume:
             print("the resume was cut short by a message missed or unreadable")
             self.resumed(replayed=False)
+        elif self.in_doubt:
+            # The replay goes on, but its last fill may end the order before the
+            # ResumeComplete: decide now, so the run cannot end as if nothing were lost.
+            self.fills_unknown()
 
     def on_disconnected(self, disconnected: Disconnected) -> None:
         self.up = False
@@ -234,17 +238,23 @@ class Taker:
         self.resuming = False
         if not self.in_doubt:
             return
-        self.in_doubt = False
         if not replayed or self.resume_damaged:
             # A snapshot lists only resting orders, and a market order never rests: its
             # fills while disconnected are not recovered. Nor are they after a replay a
             # message was missed from. It is never sent again.
-            print(
-                "the order's reports while disconnected were not recovered (no complete "
-                "replay), so how it filled is not known: check your fills before running "
-                "this again"
-            )
-            self.missed = self.lost = self.done = True
+            self.fills_unknown()
+        self.in_doubt = False
+
+    def fills_unknown(self) -> None:
+        """The order's reports while disconnected were not all recovered: its outcome is
+        not known, and the run ends with status 1."""
+        self.in_doubt = False
+        print(
+            "the order's reports while disconnected were not recovered (no complete "
+            "replay), so how it filled is not known: check your fills before running "
+            "this again"
+        )
+        self.missed = self.lost = self.done = True
 
     def order_out(self) -> bool:
         """Whether an order may have reached the exchange without its outcome known."""

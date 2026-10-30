@@ -5865,3 +5865,75 @@ async def test_options_bot_names_no_round_trip_for_an_accepted_after_a_drop(
     assert "accepted (answered after a reconnect)" in out
     assert "round trip" not in out
     assert bot.accepted
+
+
+async def test_take_liquidity_takes_a_damaged_replay_as_unknown_even_if_its_order_ends_first(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A report unreadable in the replay, then the order's last fill before the
+    # ResumeComplete: the fill ending the order must not end the run with status 0.
+    from qte_sdk.connection import Disconnected
+
+    def last_fill(session: ScriptedSession) -> Received:
+        fill = Execution(
+            strat_id="take-test",
+            instrument=INSTRUMENT,
+            side=BUY,
+            fill_price=ASK,
+            fill_size=1,
+            remaining_size=0,
+        )
+        return Received("execution", fill, None, report_seq=4)
+
+    script = [
+        *first_session_then_order(),
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        DecodeFailed("execution", ValueError("x"), 3),
+        last_fill,
+        resume_complete(True),
+        book_event(),
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert len(session.refs("new")) == 1
+    assert "how it filled is not known: check your fills" in out
+
+
+class StubView:
+    """A view of resting orders, complete or not, holding at most one order per level."""
+
+    def __init__(self, incomplete: bool) -> None:
+        self.incomplete = incomplete
+        self.orders: dict[tuple[str, int, int], Any] = {}
+
+    def get(self, instrument: str, side: int, price: int) -> Any:
+        return self.orders.get((instrument, side, price))
+
+    def __iter__(self) -> Any:
+        return iter(self.orders.values())
+
+
+async def test_options_bot_adopts_no_order_unseen_by_the_incomplete_view_it_sent_from():
+    # The first snapshot is cut short, so the view misses an earlier run's order at the
+    # level; the bot sends anyway and the duplicate's refusal is lost in a drop. The next,
+    # complete, view shows that order: with no accepted, it is not this run's to cancel.
+    from types import SimpleNamespace
+
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=True)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.send_order()
+    assert bot.ref is not None and bot.taken_before
+    bot.on_disconnected(Disconnected(error=None))
+    view.incomplete = False
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="opt-test", remaining_size=7)
+    bot.resumed(replayed=False)
+    assert bot.gone and bot.missed and not bot.resting

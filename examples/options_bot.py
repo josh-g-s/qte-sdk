@@ -496,7 +496,12 @@ class OptionsBot:
             return
         print(f"sending a LIMIT buy of {size} contract(s): {self.where}")
         earlier = None if self.view is None else self.view.get(contract, BUY, price)
-        self.taken_before = earlier is not None and earlier.strat_id == self.strat_id
+        # From a view that is not complete, an order of this strategy at the level may be
+        # one not seen: take it that one may rest there, so a later view never adopts an
+        # earlier run's order as this one's without an `accepted` for it.
+        self.taken_before = (earlier is not None and earlier.strat_id == self.strat_id) or (
+            self.view is not None and self.view.incomplete
+        )
         self.ref = new_request_ref()
         self.sent_at = time.monotonic()
         await send_new(

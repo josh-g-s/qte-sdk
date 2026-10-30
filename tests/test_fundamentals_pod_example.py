@@ -893,3 +893,23 @@ async def test_a_pod_asks_for_the_account_again_later_when_its_query_cannot_be_s
     await pod.query_account()  # does not raise
     assert pod.account_ref is None
     assert pod.account_wanted and not pod.account_answered
+
+
+@pytest.mark.parametrize(("last", "changed"), [(LOG_B, True), (LOG_A, False)], ids=["B", "A"])
+def test_a_pod_compares_with_its_tickets_log_across_a_connection_of_unknown_log(
+    last: str, changed: bool
+):
+    # The ticket is sent on A; a connection names no log; the next names `last`. The
+    # unknown one in between says nothing: B is another log than the ticket's, A is not.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(RecordingPodSession(), example.parse_args(list(ARGS)))
+    pod.on_connected(pod_connected(LOG_A, False))
+    pod.ticket_ref, pod.ticket_log_id = "r-1", LOG_A  # as send() records them
+    pod.on_disconnected(Disconnected(error=None))
+    pod.on_connected(pod_connected(None, True))
+    assert not pod.log_changed
+    pod.on_disconnected(Disconnected(error=None))
+    pod.on_connected(pod_connected(last, True))
+    assert pod.log_changed is changed
