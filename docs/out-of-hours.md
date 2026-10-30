@@ -1,6 +1,6 @@
 # Using the SDK outside session hours
 
-**Version:** 0.8
+**Version:** 0.9
 
 You can use almost all of the SDK when no session is running: connect, authenticate, read the calendar, subscribe, see the closed market, query your account and fetch past market data. Only order entry is closed. This guide walks through one run, step by step. Each step links to the [quickstart](quickstart.md) section that explains it in full.
 
@@ -9,6 +9,8 @@ You can use almost all of the SDK when no session is running: connect, authentic
 ```sh
 python examples/out_of_hours.py --instrument AAPL
 ```
+
+The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the connection drops, or the exchange restarts, it reconnects by itself and prints the calendar and the state again; the snippets below use `open_session`, which does not reconnect ([quickstart step 9](quickstart.md#9-if-the-connection-drops)).
 
 Install the SDK and set `QTE_URL` and `QTE_TOKEN` first ([quickstart steps 1 and 2](quickstart.md#1-install)). For the worked example you also need a clone of this repository.
 

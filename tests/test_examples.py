@@ -40,11 +40,13 @@ from qte_sdk import replay as qte_replay
 from qte_sdk import update as qte_update
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
 from qte_sdk.contract.v1.common_pb2 import (
+    AUTO_FLATTEN,
     BUY,
     FILLED,
     LIMIT,
     NEW,
     RESTING,
+    TEAM,
     MarketSessionPhase,
     OrderLifecycleState,
     ReasonCodes,
@@ -1160,9 +1162,8 @@ async def test_the_trading_examples_send_no_orders_outside_a_session(name: str, 
             name, url, synthetic_token(), "--instrument", INSTRUMENT, *args
         )
     assert code == 0, out + err
-    # quote_both_sides reconnects, so it resumes first; it still sends no order.
-    expected = ["auth", "resume", "subscribe"] if name == "quote_both_sides.py" else None
-    assert exchange.types() == (expected or ["auth", "subscribe"])
+    # Both reconnect, so each resumes first; neither sends an order.
+    assert exchange.types() == ["auth", "resume", "subscribe"]
 
 
 async def test_quote_both_sides_rests_amends_and_cancels_its_own_orders():
@@ -1821,12 +1822,14 @@ async def test_options_bot_follows_its_order_when_an_amend_moves_it():
 
 async def test_options_bot_cancels_again_when_its_cancel_takes_another_order():
     # The order moves away, another order of the strategy takes its first level, and the
-    # first cancel takes that one: the example cancels again where its order rests.
+    # first cancel takes that one: the example cancels again where its order rests, and
+    # at the end warns that it took an order not its own and exits 1.
     exchange = options_exchange(move_resting_to=(4_950_000,), refill_level=True)
     code, out, err = await run_options_bot(exchange, "--seconds", "10")
-    assert code == 0, out + err
+    assert code == 1, out + err
     assert [c["price"] for c in payloads(exchange, "cancel")] == ["4900000", "4950000"]
     assert exchange.resting == {}
+    assert "WARNING: a cancel took an order of your team at 4.900000" in out
 
 
 async def test_options_bot_warns_and_fails_when_its_orders_reports_were_missed():
@@ -2943,6 +2946,7 @@ async def test_take_liquidity_knows_it_may_have_sent_an_order_whose_send_stalled
     # A reply to the order still counts as this example's.
     taker.on_order_event(Accepted(request_ref=sent[0]))
     fill = Execution(
+        origin=TEAM,
         strat_id="take-test",
         instrument=INSTRUMENT,
         side=example.BUY,
@@ -3003,21 +3007,11 @@ async def test_each_example_stops_in_time_on_a_connection_that_stalls(
         if name == "quote_both_sides.py":
             # Its own part, so this test process does not take over Ctrl+C.
             await example.quote_and_clean_up(session, args, asyncio.current_task())
-        elif name == "print_book.py":
-            # It reconnects: its ReconnectingSession is the stalled one, whose events stall.
+        else:
+            # Each reconnects: its ReconnectingSession is the stalled one, whose events stall.
             example.ReconnectingSession = lambda *args, **kwargs: session
             await example.run("ws://127.0.0.1:1/ws", args)
-        else:
-
-            async def stalled_open_session(url: str) -> StalledSession:
-                return session
-
-            example.open_session = stalled_open_session
-            await example.run("ws://127.0.0.1:1/ws", args)
     assert loop.time() - started < 3  # --seconds plus the close bound, not forever
-    if name == "take_liquidity.py":
-        # The others subscribe through their ReconnectingSession, which no event reached.
-        assert session.sent[0] == "subscribe"
     assert session.close_started
     assert "did not close in time" in capsys.readouterr().out
 
@@ -4829,19 +4823,24 @@ async def test_quote_both_sides_sends_nothing_more_when_the_resume_is_refused():
     assert "it believes it may have: BUY TEST @ 99.960000" in out
 
 
-async def test_options_bot_takes_its_order_from_the_resume_after_a_drop():
-    # Its order is in flight when the connection drops; the snapshot shows it resting, so
-    # it is not sent again and is cancelled on the new session.
+async def test_options_bot_takes_no_order_from_a_snapshot_after_a_drop_before_its_accepted():
+    # Its order is in flight when the connection drops, and the snapshot shows an order of
+    # its strategy resting at its level, with no accepted for this one: it is not sent
+    # again, and it is not taken as this one either. Nothing is cancelled; the run names
+    # the order seen and exits 1.
     exchange = options_exchange(drop_on_new=1)
     code, out, err = await run_options_bot(exchange, "--seconds", "4")
-    assert code == 0, out + err
+    assert code == 1, out + err
     assert exchange.connections == 2
     assert len(payloads(exchange, "new")) == 1
     assert "the order sent may still rest at SPY261120P00665000 BUY @ 4.900000" in out
-    assert "resting: 1 at SPY261120P00665000 BUY @ 4.900000 (from the resume)" in out
-    assert orders_on(exchange, 2, "cancel")
-    assert exchange.resting == {}
-    assert "fills while disconnected are not reported" in out
+    assert "seen on the contract: SPY261120P00665000 BUY @ 4.900000 (1 resting)" in out
+    assert "order_snapshot or the console" in out
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting == {("SPY261120P00665000", "BUY", 4_900_000): ("opt-test", 1)}
+    # Named once, with no generic "messages were missed" warning or "nothing rests" after.
+    assert "WARNING: messages from the exchange were missed" not in out
+    assert "nothing of the order rests" not in out
 
 
 async def test_options_bot_warns_and_fails_when_the_resume_is_refused():
@@ -4850,7 +4849,8 @@ async def test_options_bot_warns_and_fails_when_the_resume_is_refused():
     assert code == 1, out + err
     assert len(payloads(exchange, "new")) == 1  # nothing sent again
     assert "warning: the order reports missed while disconnected were not recovered" in out
-    assert "WARNING: messages from the exchange were missed" in out
+    assert "WARNING: no accepted came for the order sent to" in out
+    assert payloads(exchange, "cancel") == []
 
 
 async def test_options_bot_waits_for_fresh_books_and_greeks_after_a_drop():
@@ -4907,21 +4907,23 @@ async def test_options_bot_claims_no_earlier_order_at_its_level_after_a_drop():
     code, out, err = await run_options_bot(exchange, "--seconds", "4")
     assert code == 1, out + err
     assert exchange.connections == 2
-    assert "whose order rests there now is unknown" in out
+    assert "seen on the contract: SPY261120P00665000 BUY @ 4.900000 (7 resting)" in out
     assert payloads(exchange, "cancel") == []
     assert exchange.resting[earlier] == ("opt-test", 7)
 
 
-async def test_options_bot_sends_no_order_when_the_resume_is_refused_before_it_sent_one():
-    # The first connection drops before the bot could choose; the next one is not resumed,
-    # so its view cannot be put right and it sends no order at all.
+async def test_options_bot_still_sends_its_order_when_the_resume_is_refused_before_it_sent_one():
+    # The first connection drops before the bot could choose; the next one is not resumed.
+    # No order of this run was out, so none of its reports can have been missed: the bot
+    # chooses and sends its one order as usual, and cancels it at the end.
     exchange = options_exchange(drop_after_books=1, refuse_resume_on_reconnect=True)
     code, out, err = await run_options_bot(exchange, "--seconds", "3")
     assert exchange.connections >= 2
-    assert payloads(exchange, "new") == []
-    assert "the order reports missed while disconnected were not recovered" in out
-    assert code == 0, out + err  # as after messages missed before an order: none sent
-    assert out.splitlines()[-1] == "no order was sent"
+    assert orders_on(exchange, 1, "new") == []
+    assert len(payloads(exchange, "new")) == 1
+    assert "the order reports missed while disconnected were not recovered" not in out
+    assert code == 0, out + err
+    assert exchange.resting == {}
 
 
 async def test_options_bot_applies_its_view_as_it_handles_each_event():
@@ -5005,7 +5007,7 @@ async def test_options_bot_does_not_call_its_order_gone_when_one_rests_elsewhere
     exchange = MovedDuringDrop(instruments=options_table(), options=options_market(), drop_on_new=1)
     code, out, err = await run_options_bot(exchange, "--seconds", "3")
     assert code == 1, out + err
-    assert "perhaps this one moved: check it yourself" in out
+    assert "SPY261120P00665000 BUY @ 4.950000" in out
     assert "nothing of the order rests at" not in out
     assert payloads(exchange, "cancel") == []
     assert exchange.resting == {("SPY261120P00665000", "BUY", 4_950_000): ("opt-test", 1)}
@@ -5043,8 +5045,18 @@ async def test_options_bot_acts_only_once_the_events_already_read_are_applied():
         ),
         ("options_bot.py", "--strat-id", "opt-test"),
         ("print_book.py", "--instrument", INSTRUMENT),
+        ("take_liquidity.py", "--instrument", INSTRUMENT, "--strat-id", "take-test"),
+        ("fundamentals_pod.py", "--shares", "100", "--limit", "200"),
+        ("out_of_hours.py", "--instrument", INSTRUMENT),
     ],
-    ids=["quote_both_sides", "options_bot", "print_book"],
+    ids=[
+        "quote_both_sides",
+        "options_bot",
+        "print_book",
+        "take_liquidity",
+        "fundamentals_pod",
+        "out_of_hours",
+    ],
 )
 async def test_each_reconnecting_example_stops_when_its_first_connection_fails(
     args: tuple[str, ...],
@@ -5124,12 +5136,17 @@ class LostFirstCancel(FakeExchange):
         await super().on_order(ws, type_, p)
 
 
-async def test_options_bot_sends_its_cancel_again_when_one_in_flight_at_a_drop_was_lost():
-    # The resume shows the order still resting: the bot does not wait for the lost
-    # cancel's reply, but cancels afresh on the new connection.
-    exchange = LostFirstCancel()
+@pytest.mark.parametrize("replay", [True, False], ids=["replay", "snapshot"])
+async def test_options_bot_sends_its_cancel_again_when_one_in_flight_at_a_drop_was_lost(
+    replay: bool,
+):
+    # The resume shows the order still resting: the bot cancels afresh on the new
+    # connection. Neither a replay nor a snapshot proves the lost cancel was not applied
+    # (it may still be in its order delay), so the run names its level and exits 1.
+    exchange = LostFirstCancel(replay=True, calendar=TERM) if replay else LostFirstCancel()
     code, out, err = await run_options_bot(exchange, "--seconds", "4")
-    assert code == 0, out + err
+    assert code == 1, out + err
+    assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY" in (out + err)
     assert exchange.connections == 2
     assert len(payloads(exchange, "new")) == 1
     assert len(orders_on(exchange, 1, "cancel")) == 1
@@ -5231,28 +5248,30 @@ async def test_options_bot_does_not_subscribe_again_after_a_subscribe_cut_off_by
     assert bot.subscribe_to == []
 
 
+RECONNECTING_EXAMPLES = (
+    "print_book.py",
+    "quote_both_sides.py",
+    "options_bot.py",
+    "take_liquidity.py",
+    "fundamentals_pod.py",
+    "out_of_hours.py",
+)
+
+
 def test_the_reconnecting_examples_bound_each_close_of_the_connection():
     # ReconnectingSession finishes closing even when the wait for it is cut short, so
     # each connection's own close is bounded by CLOSE_SECONDS.
-    for name in ("print_book.py", "quote_both_sides.py", "options_bot.py"):
+    for name in RECONNECTING_EXAMPLES:
         source = (EXAMPLES_DIR / name).read_text()
         assert source.count("ReconnectingSession(") == 1, name
         assert source.count("close_timeout=CLOSE_SECONDS") == 1, name
 
 
-# The arguments each example that does not reconnect needs to run, and the line of its
-# output that reports a dropped connection.
+# The arguments each example that does not reconnect needs to run. Only the smoke test
+# is one-shot; the others reconnect.
 NO_RECONNECT_ARGS = {
-    "take_liquidity.py": (
-        "--instrument", INSTRUMENT, "--strat-id", "close-test", "--side", "buy", "--seconds", "5"
-    ),
-    "fundamentals_pod.py": (
-        "--instrument", "AAPL", "--side", "buy", "--shares", "500", "--limit", "201.50",
-        "--thesis-id", "t-aapl", "--thesis-version", "1",
-    ),
-    "out_of_hours.py": ("--instrument", INSTRUMENT, "--seconds", "5"),
     "smoke_test.py": ("--instruments", INSTRUMENT, "--seconds", "1"),
-}  # fmt: skip
+}
 
 
 @pytest.mark.parametrize("name", sorted(NO_RECONNECT_ARGS))
@@ -5304,3 +5323,2254 @@ async def test_each_example_that_does_not_reconnect_names_the_close_code(
     assert token not in out + err
     if f'reason "{reason}"' not in expected:
         assert reason not in out + err  # a reason the SDK does not show is withheld
+
+
+def test_the_smoke_test_says_it_is_one_shot_and_names_a_reconnecting_example():
+    # Its docstring and its --help both say it exits on any server close and is not a
+    # template for a long-running bot, and point to ReconnectingSession and an example.
+    example = load_example(SMOKE_TEST)
+    parser_text = " ".join(example_help(SMOKE_TEST).split())
+    for text in (" ".join((example.__doc__ or "").split()), parser_text):
+        assert "it exits on any close of the connection by the server" in text
+        assert "not a template for a long-running bot" in text
+        assert "ReconnectingSession" in text
+        assert "examples/print_book.py" in text
+
+
+def example_help(name: str) -> str:
+    """The --help text of example `name`."""
+    import io
+    from contextlib import redirect_stdout
+
+    example = load_example(name)
+    out = io.StringIO()
+    with redirect_stdout(out), pytest.raises(SystemExit):
+        example.parse_args(["--help"])
+    return out.getvalue()
+
+
+class ClosingExchange(FakeExchange):
+    """A FakeExchange whose first connection is closed with `close_code` and `reason`
+    wherever it would drop, and, with `close_after_state`, once it has answered a
+    subscribe outside a session: as an exchange restart (1012) or a server going away
+    (1001) does. Later connections are served as usual."""
+
+    def __init__(
+        self, *, close_code: int, reason: str, close_after_state: bool = False, **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+        self.close_code = close_code
+        self.reason = reason
+        self.close_after_state = close_after_state
+
+    async def drop(self, ws: ServerConnection) -> None:
+        if self.connections > 1:
+            await super().drop(ws)
+            return
+        async with self._lock:
+            await ws.close(self.close_code, self.reason)
+
+    async def answer_closed(self, ws: ServerConnection, instruments: list[str]) -> None:
+        await super().answer_closed(ws, instruments)
+        if self.close_after_state and self.connections == 1:
+            await self.drop(ws)
+
+
+TAKE_ARGS = ("--instrument", INSTRUMENT, "--strat-id", "take-test", "--side", "buy")
+
+
+class ClosingWithEarlierReport(ClosingExchange):
+    """A ClosingExchange that, with `replay`, sends the first connection a report of
+    another strategy before anything else, so that connection's resume cursor is past 0
+    when it closes and the next connection's resume is answered with a replay. A resume
+    from 0 is always answered with a snapshot. Pass a `calendar`: a session resuming
+    from past 0 checks the term against it."""
+
+    async def send(
+        self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
+    ) -> None:
+        await super().send(ws, type_, payload, **envelope)
+        if type_ == "session_ack" and self.connections == 1:
+            other = {
+                "exec_id": "x-other",
+                "strat_id": "other",
+                "instrument": INSTRUMENT,
+                "side": "SELL",
+                "fill_price": str(BID),
+                "fill_size": "1",
+                "remaining_size": "0",
+            }
+            await super().send(ws, "execution", other)
+
+
+@pytest.mark.parametrize(("close_code", "reason"), [(1012, "service restart"), (1001, "")])
+async def test_take_liquidity_survives_a_close_and_takes_its_fills_from_the_replay(
+    close_code: int, reason: str
+):
+    # The order is taken but the connection closes while it is in flight. The new
+    # session resumes, the exchange replays the order's reports, and the run ends as if
+    # nothing had happened. The order is never sent again.
+    exchange = ClosingWithEarlierReport(
+        close_code=close_code, reason=reason, drop_on_new=1, replay=True, calendar=TERM
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "take_liquidity.py", url, synthetic_token(), *TAKE_ARGS, "--seconds", "5"
+        )
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert exchange.types().count("new") == 1
+    assert exchange.types().count("resume") == 2
+    assert "the connection dropped (" in out
+    assert "reconnected: sending nothing until the resume is complete" in out
+    assert out.splitlines()[-1].startswith("filled "), out
+
+
+async def test_take_liquidity_says_its_outcome_is_unknown_after_a_close_with_no_replay():
+    # With a snapshot instead of a replay, a market order's fills while disconnected are
+    # not recovered (it never rests): the example says so, sends nothing again, status 1.
+    exchange = ClosingExchange(close_code=1012, reason="service restart", drop_on_new=1)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "take_liquidity.py", url, synthetic_token(), *TAKE_ARGS, "--seconds", "5"
+        )
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert exchange.types().count("new") == 1
+    assert "how it filled is not known: check your fills" in out
+
+
+async def test_take_liquidity_does_not_trade_from_a_book_held_from_before_a_drop():
+    # A book that came while a resume was unfinished is stale after a drop: the next
+    # session must send nothing until a book sent since then arrives.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("take_liquidity.py")
+    sent: list[str] = []
+
+    class Recording:
+        async def send(self, type_: str, payload: Any) -> None:
+            sent.append(type_)
+
+    taker = example.Taker(Recording(), example.parse_args([*TAKE_ARGS]))
+    taker.up = False  # a session is up but its resume is not complete
+    await taker.on_book(book_event().message)
+    taker.on_disconnected(Disconnected(error=None))
+    taker.resumed(replayed=True)
+    await taker.act()
+    assert sent == []
+    fresh = book_event().message
+    fresh.grid_time = 2
+    await taker.on_book(fresh)
+    assert sent == ["new"]
+
+
+@pytest.mark.parametrize(("close_code", "reason"), [(1012, "service restart"), (1001, "")])
+async def test_out_of_hours_survives_a_close_and_shows_the_closed_market_again(
+    close_code: int, reason: str
+):
+    exchange = ClosingExchange(
+        close_code=close_code,
+        reason=reason,
+        close_after_state=True,
+        closed=True,
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "3"
+        )
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert exchange.types() == ["auth", "subscribe", "auth", "subscribe"]
+    assert "the connection dropped (" in out
+    assert f"reconnected: subscribed to {INSTRUMENT} again" in out
+    # The calendar, the clock and the state are printed again for the new session.
+    assert out.count("exchange time:") == 2
+    assert out.count("next session:") == 2
+    assert out.count("market session 2026-01-05: CLOSED") == 2
+    assert out.splitlines()[-1] == "stopped after 3 seconds"
+
+
+@pytest.mark.parametrize("name", ["take_liquidity.py", "out_of_hours.py"])
+async def test_each_moved_example_ends_on_a_revoked_credential_and_names_the_close(name: str):
+    # A 1008 "credential revoked" is not retried: the token no longer works.
+    exchange = ClosingExchange(
+        close_code=1008,
+        reason="credential revoked",
+        drop_on_new=1,
+        close_after_state=True,
+        closed=name == "out_of_hours.py",
+    )
+    token = synthetic_token()
+    args = TAKE_ARGS if name == "take_liquidity.py" else ("--instrument", INSTRUMENT)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(name, url, token, *args, "--seconds", "5")
+    assert code == 1, out + err
+    assert exchange.connections == 1
+    assert 'close code 1008, reason "credential revoked": your token' in err
+    assert "reconnecting in" not in out
+    assert token not in out + err
+
+
+# Review of #375: the reconnect handling of take_liquidity, out_of_hours and options_bot.
+
+
+def session_info(log_id: str | None = None, server_time: int = 1) -> Any:
+    from qte_sdk.connection import SessionInfo
+
+    return SessionInfo("s-1", "team-a", server_time, CONTRACT_VERSION, True, log_id)
+
+
+def connected_event(*, reconnected: bool, resume: Any = None, log_id: str | None = None) -> Any:
+    from qte_sdk.connection import Connected
+
+    return Connected(session_info(log_id), (INSTRUMENT,), reconnected, resume)
+
+
+def replay_ack(replayed: bool = True) -> Any:
+    from qte_sdk.contract.v1.session_pb2 import ResumeAck
+
+    return ResumeAck(replayed=replayed, as_of_report_seq=5, snapshot_count=0)
+
+
+class ScriptedSession:
+    """Stands in for a `ReconnectingSession`: yields `script` in turn, then waits for good.
+    An entry that is callable is called with this session and yields what it returns, so a
+    reply can name the request_ref of a message sent; an exception is raised. Records each
+    message sent, and raises `fail_sends` on the sends, in turn, while any are left."""
+
+    def __init__(self, script: list[Any], fail_sends: list[Exception] | None = None) -> None:
+        self.script = script
+        self.fail_sends = list(fail_sends or [])
+        self.sent: list[tuple[str, Any]] = []
+        self.instrument_table = None
+        self.calendar = None
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append((type_, payload))
+        if self.fail_sends:
+            raise self.fail_sends.pop(0)
+
+    async def close(self) -> None:
+        pass
+
+    def __aiter__(self) -> Any:
+        return self.events()
+
+    async def events(self) -> Any:
+        for entry in self.script:
+            await asyncio.sleep(0)
+            item = entry(self) if callable(entry) else entry
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+        await asyncio.Event().wait()
+
+    def refs(self, type_: str) -> list[str]:
+        return [payload.request_ref for sent, payload in self.sent if sent == type_]
+
+
+def taken_order(session: ScriptedSession) -> str:
+    [ref] = session.refs("new")
+    return ref
+
+
+def our_accepted(session: ScriptedSession) -> Received:
+    return Received("accepted", Accepted(request_ref=taken_order(session)), None, report_seq=2)
+
+
+def our_fill(session: ScriptedSession) -> Received:
+    fill = Execution(
+        origin=TEAM,
+        strat_id="take-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        fill_price=ASK,
+        fill_size=1,
+        remaining_size=0,
+    )
+    return Received("execution", fill, None, report_seq=3)
+
+
+async def run_taker(
+    script: list[Any], seconds: str = "0.5", fail_sends: list[Exception] | None = None
+) -> tuple[Any, ScriptedSession, Any]:
+    """Run take_liquidity's `run` against a ScriptedSession; its status (or the exception
+    it raised), the session, and the example module."""
+    example = load_example("take_liquidity.py")
+    session = ScriptedSession(script, fail_sends)
+    example.ReconnectingSession = lambda *args, **kwargs: session
+    args = example.parse_args([*TAKE_ARGS, "--seconds", seconds])
+    try:
+        async with asyncio.timeout(RUN_LIMIT):
+            outcome: Any = await example.run("ws://127.0.0.1:1/ws", args)
+    except Exception as error:
+        outcome = error
+    return outcome, session, example
+
+
+def first_session_then_order() -> list[Any]:
+    """A first session, resumed, whose book makes take_liquidity send its order."""
+    from qte_sdk.connection import ResumeComplete
+
+    return [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        ResumeComplete(False, 0, 0),
+        book_event(),
+    ]
+
+
+async def test_take_liquidity_never_resends_an_order_whose_send_a_drop_cut_short():
+    # ConnectionClosed on the send: the order may have reached the exchange, so it stays
+    # recorded as sent and is never sent again, not even from a fresh book once resumed.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("take_liquidity.py")
+    session = ScriptedSession([], fail_sends=[ConnectionClosed(None, None)])
+    taker = example.Taker(session, example.parse_args([*TAKE_ARGS]))
+    await taker.on_book(book_event().message)
+    assert taker.ref is not None
+    taker.on_disconnected(Disconnected(error=None))
+    taker.on_connected(connected_event(reconnected=True, resume=replay_ack()))
+    taker.resumed(replayed=True)
+    fresh = book_event().message
+    fresh.grid_time = 2
+    await taker.on_book(fresh)
+    assert [type_ for type_, _ in session.sent] == ["new"]
+
+
+async def test_take_liquidity_sends_nothing_from_a_session_until_its_resume_completes():
+    # Each Connected holds back the order until its resume completes, whatever came before.
+    example = load_example("take_liquidity.py")
+    session = ScriptedSession([])
+    taker = example.Taker(session, example.parse_args([*TAKE_ARGS]))
+    assert taker.up
+    taker.on_connected(connected_event(reconnected=False, resume=replay_ack(False)))
+    await taker.on_book(book_event().message)
+    assert session.sent == []
+    taker.resumed(replayed=False)
+    await taker.act()
+    assert [type_ for type_, _ in session.sent] == ["new"]
+
+
+async def test_take_liquidity_takes_a_reconnect_with_no_resume_as_its_reports_lost():
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("take_liquidity.py")
+    taker = example.Taker(ScriptedSession([]), example.parse_args([*TAKE_ARGS]))
+    await taker.on_book(book_event().message)
+    taker.on_disconnected(Disconnected(error=None))
+    taker.on_connected(connected_event(reconnected=True, resume=None))
+    assert taker.lost and taker.done and taker.missed
+
+
+async def test_take_liquidity_names_a_message_missed_while_its_order_was_out(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A gap may have lost one of its reports, and a fill names no order: the run counts
+    # nothing more, says its outcome is not known and exits 1 at once.
+    script = [*first_session_then_order(), SeqGap(4, 6), our_accepted, our_fill]
+    outcome, session, _ = await run_taker(script)
+    lines = capsys.readouterr().out.splitlines()
+    assert outcome == 1, lines
+    assert len(session.refs("new")) == 1
+    assert "how it filled is not known: check your fills" in lines[-2], lines
+    assert lines[-1] == (
+        "no fill seen (messages were missed, so this may be incomplete: check your fills)"
+    )
+
+
+@pytest.mark.parametrize(
+    "cut",
+    [
+        lambda: [SeqGap(7, 9)],
+        lambda: [DecodeFailed(None, ValueError("x"))],
+        # A report unreadable in the replay: ResumeComplete follows, but it lacks one.
+        lambda: [DecodeFailed("execution", ValueError("x"), 3), resume_complete(True)],
+    ],
+    ids=["seq-gap", "decode-failed-untyped", "decode-failed-report"],
+)
+async def test_take_liquidity_takes_a_resume_cut_short_as_its_outcome_unknown(
+    cut: Callable[[], list[Any]], capsys: pytest.CaptureFixture[str]
+):
+    # The order is out at the drop; the next resume ends on a message missed or
+    # unreadable. The outcome is not known: exit 1 at once, and never send it again.
+    from qte_sdk.connection import Disconnected
+
+    script = [
+        *first_session_then_order(),
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        *cut(),
+        book_event(),
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert len(session.refs("new")) == 1
+    assert "how it filled is not known: check your fills" in out
+
+
+def resume_complete(replayed: bool) -> Any:
+    from qte_sdk.connection import ResumeComplete
+
+    return ResumeComplete(replayed, 5, 0)
+
+
+def resume_ack_event(replayed: bool = False) -> Any:
+    from qte_sdk.connection import Received
+
+    return Received("resume_ack", replay_ack(replayed), None)
+
+
+@pytest.mark.parametrize("gap", ["seq-gap", "decode-failed"])
+async def test_take_liquidity_sends_once_a_first_resume_is_cut_short_by_a_gap(
+    gap: str, capsys: pytest.CaptureFixture[str]
+):
+    # With nothing sent yet, a resume that ends on a gap with no ResumeComplete still
+    # lets the session act: it waits no longer for a ResumeComplete that never comes. A
+    # SeqGap ends it, and so does a DecodeFailed whose type is not known.
+    missed = SeqGap(1, 3) if gap == "seq-gap" else DecodeFailed(None, ValueError("x"), 3)
+    script = [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        resume_ack_event(),
+        missed,
+        book_event(),
+        our_accepted,
+        our_fill,
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 0, out
+    assert len(session.refs("new")) == 1
+    assert "the resume was cut short" in out
+
+
+@pytest.mark.parametrize("session", ["first", "reconnect"])
+async def test_take_liquidity_names_a_gap_before_the_resume_was_answered(
+    session: str, capsys: pytest.CaptureFixture[str]
+):
+    # A SeqGap among what the session read before the resume_ack does not end the
+    # session's resume: the example waits for its ResumeComplete, and does not say the
+    # resume was cut short by it, even after an earlier session's resume_ack.
+    from qte_sdk.connection import Disconnected, ResumeComplete
+
+    earlier = [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        resume_ack_event(),
+        ResumeComplete(False, 5, 0),
+        Disconnected(error=None),
+    ]
+    script = [
+        *(earlier if session == "reconnect" else []),
+        connected_event(reconnected=session == "reconnect", resume=replay_ack(False)),
+        SeqGap(1, 3),
+        resume_ack_event(),
+        ResumeComplete(False, 5, 0),
+        book_event(),
+        our_accepted,
+        our_fill,
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 0, out
+    assert len(session.refs("new")) == 1
+    assert "the resume was cut short" not in out
+    assert "before the resume was answered: still waiting for the resume to complete" in out
+
+
+def foreign_fill(size: int = 7, report_seq: int = 3) -> Received:
+    """A fill of another market order of the same strategy, instrument and side."""
+    fill = Execution(
+        origin=TEAM,
+        strat_id="take-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        fill_price=ASK,
+        fill_size=size,
+        remaining_size=0,
+    )
+    return Received("execution", fill, None, report_seq=report_seq)
+
+
+@pytest.mark.parametrize("session", ["first", "reconnect"])
+async def test_take_liquidity_sends_nothing_until_a_resume_a_gap_came_before_ends(
+    session: str, capsys: pytest.CaptureFixture[str]
+):
+    # A SeqGap read before the resume_ack does not end the session's resume: a live book
+    # comes through while the replay goes on, and a replayed fill of another market order
+    # of the same strategy follows. Nothing is sent until the ResumeComplete, and that
+    # fill is never counted as this order's.
+    from qte_sdk.connection import Disconnected, ResumeComplete
+
+    earlier = [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        resume_ack_event(),
+        ResumeComplete(False, 5, 0),
+        Disconnected(error=None),
+    ]
+    sent_before_end: list[int] = []
+
+    def resume_ends(s: ScriptedSession) -> Any:
+        sent_before_end.append(len(s.sent))
+        return ResumeComplete(True, 5, 0)
+
+    script = [
+        *(earlier if session == "reconnect" else []),
+        connected_event(reconnected=session == "reconnect", resume=replay_ack(True)),
+        SeqGap(1, 3),
+        book_event(),
+        resume_ack_event(True),
+        foreign_fill(),
+        resume_ends,
+        lambda s: Received("accepted", Accepted(request_ref=taken_order(s)), None, report_seq=6),
+        lambda s: Received("execution", our_fill(s).message, None, report_seq=7),
+    ]
+    outcome, sent, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert sent_before_end == [0], out
+    assert outcome == 0, out
+    assert len(sent.refs("new")) == 1
+    assert "filled 7" not in out and "filled 8" not in out
+    assert "filled 1 of 1" in out
+    assert "still waiting for the resume to complete" in out
+
+
+async def test_take_liquidity_counts_no_fill_of_another_market_order_as_its_own(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A fill of another market order of the same strategy before this order's accepted,
+    # or one that does not fit what is left of this order, is not this order's.
+    script = [
+        *first_session_then_order(),
+        foreign_fill(7, 2),
+        lambda s: Received("accepted", Accepted(request_ref=taken_order(s)), None, report_seq=3),
+        foreign_fill(7, 4),
+        lambda s: Received("execution", our_fill(s).message, None, report_seq=5),
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    lines = capsys.readouterr().out.splitlines()
+    assert outcome == 0, lines
+    assert len(session.refs("new")) == 1
+    assert lines[-1].startswith("filled 1 of 1 at an average"), lines
+    assert sum(line.startswith("FILL ") for line in lines) == 1, lines
+
+
+async def test_take_liquidity_counts_no_fitting_fill_before_its_accepted_as_its_own(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A fill of another 1-lot market order of the strategy fits this order's size, but
+    # comes before this order's accepted: it is not this order's.
+    script = [
+        *first_session_then_order(),
+        foreign_fill(1, 2),
+        lambda s: Received("accepted", Accepted(request_ref=taken_order(s)), None, report_seq=3),
+    ]
+    outcome, _, _ = await run_taker(script)
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert "FILL" not in out and "filled 1 of 1" not in out, out
+
+
+async def test_take_liquidity_counts_no_cancellation_of_another_size_as_its_own(
+    capsys: pytest.CaptureFixture[str],
+):
+    # After its accepted, a cancellation of the strategy's other market order on the same
+    # side cancels 5, which does not fit what is left of this 1-lot order.
+    cancelled = OrderCancelled(
+        origin=TEAM, strat_id="take-test", instrument=INSTRUMENT, side=BUY, cancelled_size=5
+    )
+    script = [
+        *first_session_then_order(),
+        our_accepted,
+        Received("order_cancelled", cancelled, None, report_seq=3),
+    ]
+    outcome, _, _ = await run_taker(script)
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert "cancelled (" not in out, out
+
+
+@pytest.mark.parametrize("case", ["down", "accepted-only", "replay-running"])
+async def test_take_liquidity_takes_a_time_up_with_its_order_unfinished_as_unknown(
+    case: str, capsys: pytest.CaptureFixture[str]
+):
+    # --seconds run out with the order sent and not finished: down with no reconnect,
+    # accepted with no fill or cancel yet, or its replay still running. How it filled is
+    # not known: exit 1, and never say "nothing filled" as if it were.
+    from qte_sdk.connection import Disconnected
+
+    after_send: list[Any] = {
+        "down": [Disconnected(error=None)],
+        "accepted-only": [our_accepted],
+        "replay-running": [
+            Disconnected(error=None),
+            connected_event(reconnected=True, resume=replay_ack()),
+            our_accepted,
+        ],
+    }[case]
+    script = [*first_session_then_order(), *after_send]
+    outcome, session, _ = await run_taker(script)
+    lines = capsys.readouterr().out.splitlines()
+    assert outcome == 1, lines
+    assert len(session.refs("new")) == 1
+    assert "stopped after 0.5 seconds with the order's outcome not known" in lines[-1], lines
+    assert "Check your fills" in lines[-1], lines
+    assert not any("nothing filled" in line for line in lines), lines
+
+
+@pytest.mark.parametrize("kind", ["fill", "cancelled"])
+async def test_take_liquidity_counts_no_engine_orders_report_as_its_own(
+    kind: str, capsys: pytest.CaptureFixture[str]
+):
+    # An AUTO_FLATTEN fill or cancellation after its accepted fits the order's size and
+    # side, but its origin says it is the engine's order, not the team's.
+    report: Any
+    if kind == "fill":
+        report = Execution(
+            origin=AUTO_FLATTEN,
+            strat_id="take-test",
+            instrument=INSTRUMENT,
+            side=BUY,
+            fill_price=ASK,
+            fill_size=1,
+            remaining_size=0,
+        )
+    else:
+        report = OrderCancelled(
+            origin=AUTO_FLATTEN,
+            strat_id="take-test",
+            instrument=INSTRUMENT,
+            side=BUY,
+            cancelled_size=1,
+        )
+    script = [
+        *first_session_then_order(),
+        our_accepted,
+        Received(type(report).__name__.lower(), report, None, report_seq=3),
+    ]
+    outcome, _, _ = await run_taker(script)
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert "FILL" not in out and "cancelled (" not in out and "filled 1 of 1" not in out
+
+
+async def test_take_liquidity_goes_on_after_an_unreadable_book_while_its_order_is_out(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A book cannot have been one of the order's reports: the run goes on and counts the
+    # order's fill, naming the message missed.
+    script = [
+        *first_session_then_order(),
+        our_accepted,
+        DecodeFailed("book", ValueError("x")),
+        our_fill,
+    ]
+    outcome, _, _ = await run_taker(script, seconds="5")
+    lines = capsys.readouterr().out.splitlines()
+    assert outcome == 0, lines
+    assert lines[-1].startswith("filled 1 of 1 at an average"), lines
+    assert "(messages were missed" in lines[-1], lines
+
+
+@pytest.mark.parametrize("foreign", ["fill", "cancelled"])
+async def test_take_liquidity_takes_no_outcome_as_known_after_a_report_lost_while_out(
+    foreign: str, capsys: pytest.CaptureFixture[str]
+):
+    # After its accepted, a live report is unreadable (perhaps its own fill), then a
+    # report of another market order of the strategy fits what is left of the order. A
+    # fill has no request_ref, so it cannot tell: it never exits 0 as if it knew.
+    if foreign == "fill":
+        other: Any = foreign_fill(1, 4)
+    else:
+        cancelled = OrderCancelled(
+            origin=TEAM, strat_id="take-test", instrument=INSTRUMENT, side=BUY, cancelled_size=1
+        )
+        other = Received("order_cancelled", cancelled, None, report_seq=4)
+    script = [
+        *first_session_then_order(),
+        our_accepted,
+        DecodeFailed("execution", ValueError("x"), 3),
+        other,
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert len(session.refs("new")) == 1
+    assert "how it filled is not known: check your fills" in out
+    assert "FILL" not in out and "cancelled (" not in out and "filled 1 of 1" not in out
+
+
+@pytest.mark.parametrize("sent", [True, False], ids=["order-out", "nothing-sent"])
+async def test_take_liquidity_warns_its_order_may_be_out_when_a_reconnect_fails_for_good(
+    sent: bool, capsys: pytest.CaptureFixture[str]
+):
+    # A failure that is not retried on a reconnect (here a refused session) ends the run:
+    # with an order out, it says the order may have filled.
+    from qte_sdk.connection import Disconnected, SessionRejected
+
+    start = (
+        first_session_then_order() if sent else [connected_event(reconnected=False, resume=None)]
+    )
+    script = [*start, Disconnected(error=None), SessionRejected(1, None)]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    err = capsys.readouterr().err
+    assert isinstance(outcome, SessionRejected)
+    assert len(session.refs("new")) == (1 if sent else 0)
+    assert ("the order sent may have reached the exchange and filled" in err) == sent
+
+
+async def test_take_liquidity_names_no_round_trip_for_an_accepted_replayed_after_a_drop(
+    capsys: pytest.CaptureFixture[str],
+):
+    from qte_sdk.connection import Disconnected
+
+    script = [
+        *first_session_then_order(),
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        our_accepted,
+        our_fill,
+        resume_complete(True),
+    ]
+    outcome, _, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 0, out
+    assert "accepted (answered after a reconnect)" in out
+    assert "round trip" not in out
+
+
+async def test_take_liquidity_names_the_round_trip_of_an_accepted_with_no_drop(
+    capsys: pytest.CaptureFixture[str],
+):
+    outcome, _, _ = await run_taker([*first_session_then_order(), our_accepted, our_fill])
+    out = capsys.readouterr().out
+    assert outcome == 0, out
+    assert re.search(r"accepted after a \d+ ms round trip", out), out
+
+
+class ClockMovesOnReconnect(ClosingExchange):
+    """A ClosingExchange whose second connection's session_ack gives a later server_time."""
+
+    async def send(
+        self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
+    ) -> None:
+        if type_ == "session_ack" and self.connections > 1:
+            payload = {**payload, "server_time": str(SERVER_TIME + 3_600_000)}
+        await super().send(ws, type_, payload, **envelope)
+
+
+async def test_out_of_hours_takes_now_from_each_new_sessions_clock():
+    exchange = ClockMovesOnReconnect(
+        close_code=1012,
+        reason="service restart",
+        close_after_state=True,
+        closed=True,
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "3"
+        )
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    times = [line for line in out.splitlines() if line.startswith("exchange time:")]
+    assert len(times) == 2 and times[0] != times[1], out
+    # The wait to the next open is measured from the new clock: an hour less.
+    waits = [line for line in out.splitlines() if line.startswith("next session:")]
+    assert len(waits) == 2 and waits[0] != waits[1], out
+
+
+async def test_options_bot_cancels_again_after_a_drop_with_its_cancel_out_and_no_resume():
+    # The cancel in flight at the drop is lost and the next session is not resumed: the
+    # bot forgets the lost cancel and cancels afresh, once.
+    exchange = LostFirstCancel(refuse_resume_on_reconnect=True)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert exchange.connections == 2
+    assert "the order reports missed while disconnected were not recovered" in out
+    assert len(payloads(exchange, "new")) == 1
+    assert len(orders_on(exchange, 1, "cancel")) == 1
+    assert len(orders_on(exchange, 2, "cancel")) == 1
+    assert exchange.resting == {}, out + err
+
+
+async def test_options_bot_cancels_only_once_after_a_replay_shows_its_cancel_applied():
+    # The replay brings the cancel's order_cancelled: nothing rests, so no cancel again.
+    example = load_example("options_bot.py")
+    from qte_sdk.connection import Disconnected
+
+    view = RestingOrders()
+    session = RecordingSender()
+    bot = example.OptionsBot(session, None, "SPY", "opt-test", False, view)
+    contract, price = "SPY261120P00665000", 4_900_000
+    bot.contract, bot.price, bot.ref, bot.accepted, bot.resting = contract, price, "r1", True, True
+    level = {"strat_id": "opt-test", "instrument": contract, "side": BUY, "price": price}
+    view.apply(OrderState(**level, state=RESTING, remaining_size=1))
+    await bot.act()
+    assert [t for t, _ in session.sent] == ["cancel"]
+    await bot.on_event(Disconnected(error=None))
+    await bot.on_event(connected_event(reconnected=True, resume=replay_ack()))
+    cancelled = OrderCancelled(**level, cancelled_size=1, request_ref=bot.cancel_ref, reason_code=0)
+    await bot.on_event(Received("order_cancelled", cancelled, None, report_seq=5))
+    await bot.on_event(resume_complete(True))
+    assert [t for t, _ in session.sent] == ["cancel"]
+    assert bot.gone
+
+
+async def test_options_bot_forgets_its_option_chain_at_a_drop():
+    # The chain held may be of another day or event log: choose only from one sent since.
+    from qte_sdk.connection import Disconnected
+    from qte_sdk.contract.v1.market_data_pb2 import OptionChain
+
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test")
+    bot.chain = OptionChain()
+    bot.on_disconnected(Disconnected(error=None))
+    assert bot.chain is None
+    assert bot.choose() is None
+    assert bot.why_none == "no option chain was received"
+
+
+async def test_options_bot_names_no_round_trip_for_an_accepted_after_a_drop(
+    capsys: pytest.CaptureFixture[str],
+):
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test")
+    bot.contract, bot.price, bot.ref = "SPY261120P00665000", 4_900_000, "r1"
+    bot.on_disconnected(Disconnected(error=None))
+    bot.on_order_event(Accepted(request_ref="r1"))
+    out = capsys.readouterr().out
+    assert "accepted (answered after a reconnect)" in out
+    assert "round trip" not in out
+    assert bot.accepted
+
+
+async def test_take_liquidity_takes_a_damaged_replay_as_unknown_even_if_its_order_ends_first(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A report unreadable in the replay, then the order's last fill before the
+    # ResumeComplete: the fill ending the order must not end the run with status 0.
+    from qte_sdk.connection import Disconnected
+
+    def last_fill(session: ScriptedSession) -> Received:
+        fill = Execution(
+            origin=TEAM,
+            strat_id="take-test",
+            instrument=INSTRUMENT,
+            side=BUY,
+            fill_price=ASK,
+            fill_size=1,
+            remaining_size=0,
+        )
+        return Received("execution", fill, None, report_seq=4)
+
+    script = [
+        *first_session_then_order(),
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        DecodeFailed("execution", ValueError("x"), 3),
+        last_fill,
+        resume_complete(True),
+        book_event(),
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert len(session.refs("new")) == 1
+    assert "how it filled is not known: check your fills" in out
+
+
+class StubView:
+    """A view of resting orders, complete or not, holding at most one order per level."""
+
+    def __init__(self, incomplete: bool) -> None:
+        self.incomplete = incomplete
+        self.orders: dict[tuple[str, int, int], Any] = {}
+
+    def get(self, instrument: str, side: int, price: int) -> Any:
+        return self.orders.get((instrument, side, price))
+
+    def __iter__(self) -> Any:
+        for (instrument, side, price), order in self.orders.items():
+            key = SimpleNamespace(instrument=instrument, side=side, price=price)
+            yield SimpleNamespace(key=key, **vars(order))
+
+    def apply(self, event: object) -> None:
+        pass  # a test sets the orders and completeness itself
+
+
+async def test_options_bot_cancels_no_earlier_order_at_time_up_after_two_refused_resumes():
+    # An earlier run's order rests at the level. A drop before the bot sends; the resume
+    # is refused, so the view is incomplete and the bot sends anyway. The exchange's
+    # duplicate reject is lost in a second drop and that resume is refused too. At time-up
+    # the bot has no accepted for its order: it cancels nothing and warns.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=True)
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="opt-test", remaining_size=7)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    bot.resumed(replayed=False)  # refused, with nothing sent yet: the bot still sends
+    assert not bot.missed
+    await bot.act_now()
+    assert [t for t, _ in sender.sent] == ["new"]
+    bot.on_disconnected(Disconnected(error=None))  # the duplicate reject is lost
+    bot.resumed(replayed=False)  # refused again
+    await bot.act()  # before time-up it waits: a reply may yet come
+    assert bot.missed and not bot.finished
+    bot.stopping = True  # time is up
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    assert bot.finished and bot.missed
+
+
+@pytest.mark.parametrize("strat_id", ["opt-test", "other-strat"])
+async def test_options_bot_waits_for_its_accepted_before_cancelling_where_the_team_rested(
+    strat_id: str,
+):
+    # A complete view shows an order of the team at the level (of this strategy or
+    # another: the exchange refuses a second order at a level of the team, and a cancel
+    # clears all of the team's). At time-up with no reply yet, the bot cancels nothing
+    # and waits for the reply; once its own accepted comes, it cancels as usual.
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id=strat_id, remaining_size=7)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+async def test_options_bot_cancels_no_other_strategys_order_after_a_refused_resume():
+    # Another strategy of the team rests at the level. The bot's order is taken but the
+    # link drops before its duplicate reject; the reconnect's resume is refused. With no
+    # accepted, a cancel at the level would clear the other strategy's order: none is sent.
+    exchange = options_exchange(drop_on_new=1, refuse_resume_on_reconnect=True)
+    earlier = ("SPY261120P00665000", "BUY", 4_900_000)
+    exchange.resting[earlier] = ("other-strat", 7)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4", "--drain-seconds", "1")
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert len(payloads(exchange, "new")) == 1
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting[earlier] == ("other-strat", 7)
+    assert "WARNING: no accepted came for the order sent to" in out
+
+
+class SilentOnDuplicate(FakeExchange):
+    """Answers nothing to a `new` at a level where the team already rests."""
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        level = (p.get("instrument"), p.get("side"), int(p.get("price", 0)))
+        if type_ == "new" and level in self.resting:
+            self.news += 1
+            return
+        await super().on_order(ws, type_, p)
+
+
+async def test_options_bot_warns_when_no_reply_comes_where_the_team_rested():
+    exchange = SilentOnDuplicate(instruments=options_table(), options=options_market())
+    earlier = ("SPY261120P00665000", "BUY", 4_900_000)
+    exchange.resting[earlier] = ("opt-test", 7)
+    code, out, err = await run_options_bot(exchange, "--seconds", "3", "--drain-seconds", "1")
+    assert code == 1, out + err
+    assert payloads(exchange, "cancel") == []
+    assert "time is up: waiting for the reply to the order sent to" in out
+    assert "WARNING: no accepted came for the order sent to" in out
+
+
+class OtherStrategyRestsFirst(FakeExchange):
+    """On the first `new`, another strategy's order, still in its order delay when the
+    bot's view was complete, comes to rest at the level first: the new is refused as a
+    duplicate, and the reports of both are delayed past the end of the run."""
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        if type_ == "new" and self.news == 0:
+            self.news += 1
+            level = (p["instrument"], p["side"], int(p.get("price", 0)))
+            self.resting[level] = ("other-strategy", 7)
+            return
+        await super().on_order(ws, type_, p)
+
+
+async def interrupt_options_bot_once_sent(exchange: FakeExchange) -> tuple[int, str, str]:
+    """Run the example and send Ctrl+C once the exchange has its `new`."""
+    async with serve_local(exchange) as url:
+        process = await start_options_bot(url, "--seconds", "20", "--drain-seconds", "1")
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                while exchange.news == 0:
+                    await asyncio.sleep(0.05)
+                process.send_signal(signal.SIGINT)
+                out, err = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    assert process.returncode is not None
+    return process.returncode, out.decode(), err.decode()
+
+
+@pytest.mark.parametrize("stop", ["time-up", pytest.param("ctrl-c", marks=SENDS_SIGINT)])
+async def test_options_bot_sends_no_cancel_without_its_accepted(stop: str):
+    # The view is complete and the level empty when the order is sent, but another
+    # strategy's order comes to rest there just before it, so it is refused as a
+    # duplicate. No reply has come by time-up or Ctrl+C: the bot sends no cancel, which
+    # would clear the other order, and warns and exits 1.
+    exchange = OtherStrategyRestsFirst(instruments=options_table(), options=options_market())
+    if stop == "time-up":
+        code, out, err = await run_options_bot(exchange, "--seconds", "2", "--drain-seconds", "1")
+    else:
+        code, out, err = await interrupt_options_bot_once_sent(exchange)
+        assert "interrupted: waiting for the reply to the order sent to" in out
+    assert code == 1, out + err
+    assert len(payloads(exchange, "new")) == 1
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting[("SPY261120P00665000", "BUY", 4_900_000)] == ("other-strategy", 7)
+    assert "WARNING: no accepted came for the order sent to" in out
+    assert "order_snapshot" in out
+
+
+@pytest.mark.parametrize("then", ["accepted", "missed"])
+async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest(then: str):
+    # The level was empty when the order was sent, but by time-up, with no accepted for
+    # it, a complete view shows another strategy's order there: no cancel is sent, and
+    # the bot waits for its reply. If the other order leaves and its own accepted comes,
+    # it cancels as usual; a message missed meanwhile does not end the wait, so an
+    # accepted that comes after it is still cancelled.
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    if then == "accepted":
+        del view.orders[(contract, BUY, price)]
+        bot.on_order_event(Accepted(request_ref=bot.ref))
+        await bot.act()
+        assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    else:
+        await bot.on_event(DecodeFailed("book", ValueError("unreadable"), 2))
+        assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+        del view.orders[(contract, BUY, price)]
+        bot.on_order_event(Accepted(request_ref=bot.ref))
+        await bot.act()
+        assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+async def test_options_bot_cancels_nothing_after_a_refused_resume_where_the_level_was_empty():
+    # The level was empty in a complete view when the order was sent. The order is in
+    # flight at a drop and the resume is refused, so the view stays incomplete: another
+    # order of the team may have come to the level unseen, and this one's duplicate reject
+    # with it. With no accepted, a cancel there could clear that order: none is sent.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    bot.on_disconnected(Disconnected(error=None))
+    view.incomplete = True
+    bot.resumed(replayed=False)  # refused
+    assert bot.reply_lost
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    assert bot.finished and bot.missed
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        SeqGap(2, 5),
+        "report gap",
+        DecodeFailed("reject", ValueError("unreadable"), 2),
+        DecodeFailed(None, ValueError("unreadable"), 2),
+    ],
+    ids=["seq-gap", "report-gap", "unreadable-reject", "unreadable-untyped"],
+)
+async def test_options_bot_waits_for_its_accepted_after_a_live_gap_before_it(gap: object):
+    # The real view is complete and the level empty when the order is sent. A gap on the
+    # live session, or an unreadable order frame, may hide another strategy's order coming
+    # to rest there and this one's duplicate reject: at time-up the bot cancels nothing
+    # and waits for the reply. Once its own accepted comes, it cancels as usual.
+    from qte_sdk.connection import ReportGap
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = RestingOrders()
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    await bot.on_event(ReportGap(3, 5) if gap == "report gap" else gap)
+    assert view.incomplete and bot.missed
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+class NewStillDelayedAtDrop(FakeExchange):
+    """The first `new` is still in its order delay when the connection drops: nothing of
+    it rests when the resume answers, and no reply to it ever comes. With `replay`, the
+    first connection gets a report of another strategy first, so its resume cursor is
+    past 0 and the next resume is answered with a replay; `resumes` records each answer's
+    `replayed`."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.resumes: list[bool] = []
+
+    async def send(
+        self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
+    ) -> None:
+        if type_ == "resume_ack":
+            self.resumes.append(payload["replayed"])
+        await super().send(ws, type_, payload, **envelope)
+        if type_ == "session_ack" and self.connections == 1 and self.replay:
+            other = {
+                "exec_id": "x-other",
+                "strat_id": "other",
+                "instrument": "SPY261120C00670000",
+                "side": "SELL",
+                "fill_price": "1000000",
+                "fill_size": "1",
+                "remaining_size": "0",
+            }
+            await super().send(ws, "execution", other)
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        if type_ == "new" and self.news == 0:
+            self.news += 1
+            self._withhold = True  # the connection drops, with nothing applied or sent
+            return
+        await super().on_order(ws, type_, p)
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["snapshot", "replay"])
+async def test_options_bot_takes_no_empty_resume_before_its_accepted_as_its_order_gone(
+    replay: bool,
+):
+    # The order is in flight at a drop and the resume shows nothing at its level, but no
+    # accepted came for it: it may still be in its order delay. The bot does not say
+    # nothing of it rests; it waits for the reply and, with none, warns and exits 1.
+    exchange = NewStillDelayedAtDrop(
+        instruments=options_table(),
+        options=options_market(),
+        replay=replay,
+        calendar=TERM if replay else None,
+    )
+    code, out, err = await run_options_bot(exchange, "--seconds", "3", "--drain-seconds", "1")
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert exchange.resumes[1:] == [replay]  # the resume after the drop
+    assert len(payloads(exchange, "new")) == 1
+    assert payloads(exchange, "cancel") == []
+    assert "nothing of the order rests at" not in out
+    assert "WARNING: no accepted came for the order sent to" in out
+    assert "order_snapshot" in out
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["snapshot", "replay"])
+async def test_options_bot_cancels_as_usual_once_its_accepted_follows_an_empty_resume(
+    replay: bool,
+):
+    # The resume shows nothing at the level and no accepted came: the bot keeps waiting.
+    # The order then comes to rest after its order delay: its accepted and order_state
+    # arrive, and it is cancelled as usual.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    bot.on_disconnected(Disconnected(error=None))
+    bot.resumed(replayed=replay)
+    assert not bot.gone and not bot.finished
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+class FillsWhileDown(FakeExchange):
+    """The first new is accepted, then the connection drops and the order fills while
+    down: nothing more is sent for it, and nothing of it rests."""
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        if type_ == "new" and self.news == 0:
+            self.news += 1
+            ref = p.get("request_ref")
+            accepted = {"request_ref": ref, "request_type": "NEW", "receipt_time": "1"}
+            await self.send(ws, "accepted", accepted)
+            self._withhold = True  # it fills while down: no order_state, nothing rests
+            return
+        await super().on_order(ws, type_, p)
+
+
+async def test_options_bot_fails_when_an_empty_snapshot_leaves_its_fills_unknown():
+    # Accepted, then the connection drops and the resume is an empty snapshot: the order
+    # is gone, but a snapshot reports no fills made while down. The run says to check
+    # the fills and exits 1, as take_liquidity does.
+    exchange = FillsWhileDown(instruments=options_table(), options=options_market())
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert "nothing of the order rests at SPY261120P00665000 BUY @ 4.900000" in out
+    assert "fills while disconnected are not reported: check your fills" in out
+    assert payloads(exchange, "cancel") == []
+
+
+OPTION_CONTRACT, OPTION_PRICE = "SPY261120P00665000", 4_900_000
+
+
+async def options_bot_unaccepted_at_a_drop(example: Any, view: Any) -> tuple[Any, Any]:
+    """The bot with its order sent, no accepted yet, and the connection just dropped."""
+    from qte_sdk.connection import Disconnected
+
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (OPTION_CONTRACT, OPTION_PRICE, 1, greeks)
+    await bot.act_now()
+    assert [t for t, _ in sender.sent] == ["new"]
+    bot.on_disconnected(Disconnected(error=None))
+    return bot, sender
+
+
+@pytest.mark.parametrize(
+    "prices",
+    [[4_900_000], [4_950_000], [4_900_000, 4_950_000]],
+    ids=["its-level", "another-price", "both"],
+)
+@pytest.mark.parametrize("replay", [False, True], ids=["snapshot", "replay"])
+async def test_options_bot_takes_no_order_of_its_strategy_as_its_own_before_its_accepted(
+    prices: list[int], replay: bool
+):
+    # The order is in flight at a drop. The resume shows orders of its strategy on the
+    # contract, at its level, at another price, or both, and no accepted came: whose they
+    # are is unknown. It cancels nothing, even once an accepted comes, and warns naming
+    # each one and how to check.
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    bot, sender = await options_bot_unaccepted_at_a_drop(example, view)
+    for price in prices:
+        level = (OPTION_CONTRACT, BUY, price)
+        view.orders[level] = SimpleNamespace(strat_id="opt-test", remaining_size=1)
+    bot.resumed(replayed=replay)
+    assert bot.finished and bot.missed and not bot.accepted and not bot.resting
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    [warning] = bot.warnings
+    for price in prices:
+        assert f"{OPTION_CONTRACT} BUY @ {price / 1_000_000:.6f}" in warning
+    assert "order_snapshot or the console" in warning
+
+
+@pytest.mark.parametrize("price", [4_900_000, 4_950_000], ids=["its-level", "another-price"])
+async def test_options_bot_stops_on_an_order_of_its_strategy_reported_live_before_its_accepted(
+    price: int,
+):
+    # The resume after the drop shows nothing of the strategy, so the bot waits for its
+    # reply. A live order_state then reports an order of its strategy on the contract,
+    # with no accepted yet: whose it is is unknown. It stops at once, cancels nothing,
+    # even once an accepted comes, and names that order.
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    bot, sender = await options_bot_unaccepted_at_a_drop(example, view)
+    bot.resumed(replayed=False)
+    assert not bot.finished
+    state = OrderState(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=price,
+        state=RESTING,
+        remaining_size=1,
+    )
+    await bot.on_event(Received("order_state", state, 5))
+    assert bot.finished and bot.missed
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    [warning] = bot.warnings
+    assert f"{OPTION_CONTRACT} BUY @ {price / 1_000_000:.6f}" in warning
+
+
+async def test_options_bot_waits_out_the_drain_after_a_refused_resume_then_a_complete_one():
+    # A first resume is refused, so the reply looks lost. Another drop follows, and its
+    # resume completes, showing nothing of the strategy. That resume may yet bring the
+    # reply: at time-up the bot waits for it rather than giving up at once, and cancels
+    # as usual once its accepted comes.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    bot, sender = await options_bot_unaccepted_at_a_drop(example, view)
+    view.incomplete = True
+    bot.resumed(replayed=False)  # refused
+    assert bot.reply_lost
+    bot.on_disconnected(Disconnected(error=None))
+    view.incomplete = False
+    bot.resumed(replayed=True)
+    assert not bot.reply_lost
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+async def test_options_bot_stops_when_its_first_subscribe_stalls(capsys: Any):
+    # The first session is up and the table read, but the subscribe's send never
+    # completes. --seconds bounds it: the run says so and exits 1, with nothing sent.
+    from google.protobuf import json_format
+
+    from qte_sdk.contract.v1.session_pb2 import Instruments
+
+    example = load_example("options_bot.py")
+    table = json_format.ParseDict(options_table(), Instruments())
+
+    class StalledSession:
+        instrument_table = table
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, type_: str, payload: Any) -> None:
+            self.sent.append(type_)
+            await asyncio.Event().wait()  # the send never completes
+
+    session = StalledSession()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(connected_event(reconnected=False))
+    args = SimpleNamespace(
+        watch_only=False, underlying=None, strat_id="opt-test", seconds=0.5, drain_seconds=0.5
+    )
+    task = asyncio.current_task()
+    progress = example.Progress()
+    async with asyncio.timeout(5):
+        code = await example.trade_from(session, queue, args, task, progress)
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert session.sent == ["subscribe"]
+    assert "the subscribe was not sent within --seconds" in out
+
+
+async def test_options_bot_matches_a_late_reply_to_a_cancel_sent_before_a_drop():
+    # A cancel is in flight at a drop. The resume shows the order still resting, so the
+    # bot cancels afresh. The first cancel's reply then comes late: it took another
+    # strategy's order at the level. That reply is still this example's cancel, so the
+    # run warns of it and exits with status 1.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (OPTION_CONTRACT, OPTION_PRICE, 1, greeks)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    first = bot.cancel_ref
+    assert first is not None
+    bot.on_disconnected(Disconnected(error=None))
+    level = (OPTION_CONTRACT, BUY, OPTION_PRICE)
+    view.orders[level] = SimpleNamespace(strat_id="opt-test", remaining_size=1)
+    bot.resumed(replayed=False)
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+    assert bot.cancel_ref not in (None, first)
+    late = OrderCancelled(
+        strat_id="other",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=OPTION_PRICE,
+        cancelled_size=7,
+        request_ref=first,
+    )
+    bot.on_order_event(late)
+    assert bot.warnings and "that was not this example's" in bot.warnings[0]
+    ours = OrderCancelled(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=OPTION_PRICE,
+        cancelled_size=1,
+        request_ref=bot.cancel_ref,
+    )
+    bot.on_order_event(ours)
+    assert bot.gone and bot.warnings
+
+
+@pytest.mark.parametrize("missing", ["cut-short", "unreadable"])
+async def test_options_bot_stops_on_a_snapshot_frame_of_its_strategy_when_another_is_missing(
+    missing: str,
+):
+    # The order is in flight at a drop. The snapshot that resumes the next session shows
+    # an order of its strategy at another price, but the rest of it is lost (the
+    # connection drops again before it completes) or a frame is unreadable, so the view
+    # never completes. With no accepted, the frame seen is enough: it stops at once,
+    # cancels nothing and names that order.
+    from qte_sdk.connection import Disconnected
+    from qte_sdk.contract.v1.session_pb2 import OrderSnapshot
+
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    bot, sender = await options_bot_unaccepted_at_a_drop(example, view)
+    view.apply(Disconnected(error=None))
+    other_price = 4_950_000
+    frame = OrderSnapshot(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=other_price,
+        remaining_size=1,
+    )
+    if missing == "cut-short":
+        rest = [Disconnected(error=None)]
+    else:
+        rest = [DecodeFailed("order_snapshot", ValueError("x"), 7), resume_complete(False)]
+    for event in [
+        connected_event(reconnected=True, resume=replay_ack(False)),
+        resume_ack_event(False),
+        Received("order_snapshot", frame, 6),
+        *rest,
+    ]:
+        await bot.on_event(event)
+    assert bot.finished and bot.missed and not bot.accepted
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    [warning] = bot.warnings
+    assert f"{OPTION_CONTRACT} BUY @ {other_price / 1_000_000:.6f}" in warning
+
+
+@SENDS_SIGINT
+async def test_options_bot_keeps_one_drain_deadline_across_a_ctrl_c():
+    # The cancel is never confirmed. A Ctrl+C partway through the drain does not start
+    # --drain-seconds again: the run ends when the first drain deadline passes.
+    exchange = options_exchange(confirm_cancels=asyncio.Event())
+    args = ("--seconds", "1", "--drain-seconds", "3")
+    loop = asyncio.get_running_loop()
+    async with serve_local(exchange) as url:
+        process = await start_options_bot(url, *args)
+        seen = bytearray()
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                await read_until(process, b"time is up: cancelling", seen)
+                drain_began = loop.time()
+                await asyncio.sleep(2)
+                process.send_signal(signal.SIGINT)
+                await read_until(process, b"still cancelling", seen)
+                out, err = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    drained = loop.time() - drain_began
+    output = (seen + out).decode() + err.decode()
+    assert process.returncode == 1, output
+    assert drained < 4.3, f"drained for {drained:.2f} s: {output}"
+
+
+async def test_options_bot_takes_a_cancel_of_another_strategys_order_at_its_price_as_not_its_own():
+    # The bot's cancel at its own price is answered by an order_cancelled for another
+    # strategy's order there: that was not this example's order, and where this one
+    # rests is not known. It sends no further cancel to the level: it stops and warns.
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    taken = OrderCancelled(
+        strat_id="other",
+        instrument=contract,
+        side=BUY,
+        price=price,
+        cancelled_size=7,
+        request_ref=bot.cancel_ref,
+    )
+    bot.on_order_event(taken)
+    assert bot.finished
+    [warning] = bot.warnings
+    assert "that was not this example's" in warning
+    assert "order_snapshot or the console" in warning
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    assert "nothing of the order rests" not in bot.summary()
+
+
+async def test_options_bot_cancels_nothing_when_a_snapshot_shows_another_strategy_at_its_level():
+    # The level was empty in a complete view when the order was sent. Another strategy's
+    # order comes to rest there and this one's reply is lost in a drop; the snapshot
+    # shows that order. With no accepted, the bot cancels nothing: it waits for the reply,
+    # which then ends the run with the warning that none came.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    bot.on_disconnected(Disconnected(error=None))
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
+    bot.resumed(replayed=False)
+    assert not bot.finished and not bot.accepted and not bot.warnings
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+
+
+def options_bot_accepted(example: Any, view: Any, sender: Any) -> Any:
+    """The bot with its order sent and accepted, before any cancel."""
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (OPTION_CONTRACT, OPTION_PRICE, 1, greeks)
+    return bot
+
+
+def resume_cut_short(gap: str) -> Any:
+    """What ends a resume with no ResumeComplete: a SeqGap, or a DecodeFailed of no type."""
+    return SeqGap(6, 8) if gap == "seq-gap" else DecodeFailed(None, ValueError("x"), 7)
+
+
+@pytest.mark.parametrize("gap", ["seq-gap", "unreadable"])
+async def test_options_bot_still_cancels_after_a_resume_cut_short(gap: str):
+    # Its order is accepted when the connection drops. The next session's resume is cut
+    # short by a message lost or unreadable, so no ResumeComplete comes. The bot takes
+    # that as the end of the resume, with the reports not recovered, and still cancels.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.on_event(Disconnected(error=None))
+    for event in [
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_cut_short(gap),
+    ]:
+        await bot.on_event(event)
+    assert bot.up and bot.missed
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+@pytest.mark.parametrize("gap", ["seq-gap", "unreadable"])
+async def test_options_bot_sends_no_cancel_before_the_replay_after_an_early_gap(gap: str):
+    # A message is missed before the resume_ack: the session's resume goes on, so the
+    # bot is not up and sends no cancel until the ResumeComplete. Its order filled while
+    # it was down, and the replay says so: no cancel is sent at the level at all, where
+    # another strategy's order may rest by now.
+    from qte_sdk.connection import Disconnected, ResumeComplete
+
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.on_event(Disconnected(error=None))
+    await bot.on_event(connected_event(reconnected=True, resume=replay_ack()))
+    await bot.on_event(resume_cut_short(gap))
+    assert not bot.up
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    await bot.on_event(resume_ack_event(True))
+    bot.on_order_event(
+        Execution(
+            strat_id="opt-test",
+            instrument=OPTION_CONTRACT,
+            side=BUY,
+            order_price=OPTION_PRICE,
+            fill_price=OPTION_PRICE,
+            fill_size=1,
+            remaining_size=0,
+        )
+    )
+    await bot.on_event(ResumeComplete(True, 5, 0))
+    assert bot.up and bot.finished
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+
+
+@pytest.mark.parametrize("gap", ["seq-gap", "unreadable"])
+async def test_options_bot_is_up_after_a_first_resume_cut_short(gap: str):
+    # The first session's resume is cut short before any order is sent: the session is
+    # up all the same, and the bot, having missed a message, sends no order and says why.
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    view.mark_incomplete()
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    for event in [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        resume_ack_event(False),
+        resume_cut_short(gap),
+    ]:
+        await bot.on_event(event)
+    assert bot.up
+    await bot.act()
+    assert sender.sent == []
+    assert "missed" in bot.why_none
+
+
+async def options_bot_resting_with_cancel_out(example: Any, view: Any, sender: Any) -> Any:
+    """The bot with its order accepted and resting, stopping, its first cancel sent."""
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    level = {"strat_id": "opt-test", "instrument": OPTION_CONTRACT, "side": BUY}
+    level["price"] = OPTION_PRICE
+    await bot.on_event(Received("accepted", Accepted(request_ref=bot.ref), None, report_seq=1))
+    resting = OrderState(**level, state=RESTING, remaining_size=1)
+    await bot.on_event(Received("order_state", resting, None, report_seq=2))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    return bot
+
+
+def options_bot_cancelled(
+    ref: str, strat_id: str = "opt-test", seq: int = 6, price: int = OPTION_PRICE
+) -> Any:
+    message = OrderCancelled(
+        strat_id=strat_id,
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=price,
+        cancelled_size=1,
+        request_ref=ref,
+    )
+    return Received("order_cancelled", message, None, report_seq=seq)
+
+
+async def test_options_bot_reads_its_fresh_cancel_when_the_first_lands_late():
+    # A cancel is in flight at a drop. The replay completes before the exchange applies
+    # it (still in its order delay), so the view shows the order resting and the bot
+    # cancels afresh. The first cancel then takes the order; the fresh one, applied an
+    # order delay later, takes another strategy's order that came to rest at the freed
+    # level. The bot reads that reply before it ends, names it and the run fails.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, RestingOrders(), sender)
+    first = bot.cancel_ref
+    for event in [
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_complete(True),
+    ]:
+        await bot.on_event(event)
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+    fresh = bot.cancel_ref
+    assert fresh not in (None, first)
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(options_bot_cancelled(first))
+    queue.put_nowait(options_bot_cancelled(fresh, strat_id="other-strat", seq=7))
+    assert await example.drive(bot, queue, 2.0) == "done"
+    assert queue.empty() and bot.cancel_ref is None and bot.gone
+    assert len(bot.warnings) == 1 and "another order of your team" in bot.warnings[0]
+    assert not bot.unsure  # this example's order was cancelled: it does not rest
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+
+
+async def test_options_bot_does_not_end_with_its_own_cancel_unread():
+    # Its order ends (here filled) while its cancel is in flight: the bot waits for the
+    # cancel's reply, which could take another order of the team at the level, to the
+    # end of the drain, and then is not finished, so the run warns and fails.
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, RestingOrders(), sender)
+    fill = Execution(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        order_price=OPTION_PRICE,
+        fill_price=OPTION_PRICE,
+        fill_size=1,
+        remaining_size=0,
+    )
+    await bot.on_event(Received("execution", fill, None, report_seq=3))
+    assert bot.gone and bot.cancel_ref is not None and not bot.finished
+    assert await example.drive(bot, asyncio.Queue(), 0.1) == "time"
+    assert [t for t, _ in sender.sent] == ["new", "cancel"] and not bot.finished
+    no_order = Reject(request_ref=bot.cancel_ref, reason_code=ReasonCodes.NO_ORDER_AT_LEVEL)
+    await bot.on_event(Received("reject", no_order, None, report_seq=4))
+    assert bot.finished and not bot.warnings and bot.cancel_failed is None
+
+
+async def test_options_bot_reads_a_cancel_in_flight_at_a_drop_after_a_resume_shows_it_gone():
+    # A cancel is in flight at a drop, and the resume shows nothing at the order's level:
+    # the order is gone, but that cancel may still be in its order delay, to take what
+    # comes to rest there. The bot keeps reading for its reply and names what it took.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, view, sender)
+    first = bot.cancel_ref
+    for event in [
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_complete(True),
+    ]:
+        await bot.on_event(event)
+    assert bot.gone and bot.cancel_ref == first and not bot.finished
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    await bot.on_event(options_bot_cancelled(first, strat_id="other-strat"))
+    assert bot.finished and len(bot.warnings) == 1
+    assert "another order of your team" in bot.warnings[0]
+
+
+def test_options_bot_names_its_unanswered_cancel_when_a_reconnect_fails_for_good(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+):
+    # Its order filled while its cancel, sent at 4.90 before an amend moved the order to
+    # 4.91, was in flight; then a reconnect fails for good. The run names the unanswered
+    # cancel at the level it was sent to, and exits 1.
+    from qte_sdk.connection import SessionRejected
+
+    example = load_example("options_bot.py")
+    monkeypatch.setenv("QTE_URL", "ws://127.0.0.1:1/ws")
+
+    async def run(url: str, args: Any, progress: Any) -> int:
+        bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+        bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, 4_910_000, "o", True
+        bot.cancel_ref, bot.cancel_price, bot.gone = "c", OPTION_PRICE, True
+        bot.unanswered_cancels["c"] = OPTION_PRICE
+        progress.bot = bot
+        raise SessionRejected(1, None)
+
+    monkeypatch.setattr(example, "run", run)
+    assert example.main(["--strat-id", "opt-test"]) == 1
+    err = capsys.readouterr().err
+    assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY @ 4.900000" in (
+        err
+    )
+
+
+def options_bot_filled(seq: int) -> Any:
+    fill = Execution(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        order_price=OPTION_PRICE,
+        fill_price=OPTION_PRICE,
+        fill_size=1,
+        remaining_size=0,
+    )
+    return Received("execution", fill, None, report_seq=seq)
+
+
+async def test_options_bot_keeps_a_cancel_a_complete_replay_does_not_answer_unread():
+    # A complete replay shows the order resting with no reply to the cancel in flight at
+    # the drop. The replay covers only what the exchange had applied: that cancel may
+    # still be in its order delay. The bot cancels afresh, that cancel is refused on its
+    # budget and the order then fills: the first cancel is still unread, so the run does
+    # not end on its own and the warning names the first cancel's level.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, RestingOrders(), sender)
+    first = bot.cancel_ref
+    for event in [
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_complete(True),
+    ]:
+        await bot.on_event(event)
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+    budget = ReasonCodes.MESSAGE_BUDGET_EXCEEDED
+    refused = Reject(request_ref=bot.cancel_ref, reason_code=budget)
+    await bot.on_event(Received("reject", refused, None, report_seq=6))
+    await bot.on_event(options_bot_filled(7))
+    assert bot.gone and not bot.finished and list(bot.unanswered_cancels) == [first]
+    assert await example.drive(bot, asyncio.Queue(), 0.1) == "time"
+    warning = example.cancel_unread_warning(bot)
+    assert f"the cancel sent to {OPTION_CONTRACT} BUY @ 4.900000" in warning
+
+
+async def test_options_bot_reads_its_cancel_after_a_resume_cut_short_once_its_order_went():
+    # The order fills with its cancel in flight, then the connection drops and the
+    # resume is cut short. That cancel may still be in its order delay, so the bot keeps
+    # reading for its reply rather than ending with it unread.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, RestingOrders(), sender)
+    first = bot.cancel_ref
+    await bot.on_event(options_bot_filled(3))
+    for event in [
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        SeqGap(6, 8),
+    ]:
+        await bot.on_event(event)
+    assert bot.gone and bot.up and not bot.finished
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    await bot.on_event(options_bot_cancelled(first, strat_id="other-strat", seq=9))
+    assert bot.finished and "another order of your team" in bot.warnings[0]
+
+
+async def options_bot_moved_with_first_cancel_out_then_snapshot(example: Any, sender: Any) -> Any:
+    """Its first cancel is sent at 4.90, an amend moves the order to 4.91, the connection
+    drops and a snapshot shows the order at 4.91: the bot cancels again there."""
+    from qte_sdk.connection import Disconnected
+
+    view = StubView(incomplete=False)
+    bot = await options_bot_resting_with_cancel_out(example, view, sender)
+    moved = OrderState(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=4_910_000,
+        old_price=OPTION_PRICE,
+        state=RESTING,
+        remaining_size=1,
+    )
+    await bot.on_event(Received("order_state", moved, None, report_seq=3))
+    await bot.on_event(Disconnected(error=None))
+    view.orders[(OPTION_CONTRACT, BUY, 4_910_000)] = SimpleNamespace(
+        strat_id="opt-test", remaining_size=1
+    )
+    for event in [
+        connected_event(reconnected=True, resume=replay_ack(False)),
+        resume_ack_event(False),
+        resume_complete(False),
+    ]:
+        await bot.on_event(event)
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+    assert sender.sent[-1][1].price == 4_910_000
+    return bot
+
+
+async def test_options_bot_keeps_an_earlier_cancel_unread_when_a_later_one_is_answered():
+    # After a snapshot the first cancel's outcome is unknown: it may have taken another
+    # order of the team at 4.90 while down. The second cancel's reply at 4.91 proves
+    # nothing about what the first took, so the first stays unread and is named.
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_moved_with_first_cancel_out_then_snapshot(example, sender)
+    second = sender.sent[-1][1].request_ref
+    await bot.on_event(options_bot_cancelled(second, seq=6, price=4_910_000))
+    assert bot.gone and not bot.finished
+    warning = example.cancel_unread_warning(bot)
+    assert f"{OPTION_CONTRACT} BUY @ 4.900000" in warning and "4.910000" not in warning
+
+
+async def test_options_bot_names_the_level_each_unread_cancel_was_sent_to():
+    # The second cancel, at 4.91, is refused on its budget and the order then fills:
+    # only the first, sent to 4.90, is unread, and the warning names 4.90.
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_moved_with_first_cancel_out_then_snapshot(example, sender)
+    budget = Reject(
+        request_ref=sender.sent[-1][1].request_ref,
+        reason_code=ReasonCodes.MESSAGE_BUDGET_EXCEEDED,
+    )
+    await bot.on_event(Received("reject", budget, None, report_seq=6))
+    fill = Execution(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        order_price=4_910_000,
+        fill_price=4_910_000,
+        fill_size=1,
+        remaining_size=0,
+    )
+    await bot.on_event(Received("execution", fill, None, report_seq=7))
+    assert bot.gone and not bot.finished
+    warning = example.cancel_unread_warning(bot)
+    assert f"{OPTION_CONTRACT} BUY @ 4.900000" in warning and "4.910000" not in warning
+
+
+def test_options_bot_names_its_unread_cancel_on_a_second_ctrl_c(capsys: Any):
+    # A second Ctrl+C stops the drain at once, with the order filled and its cancel
+    # unanswered: the run names that cancel's level and exits 1.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.gone = True
+    bot.unanswered_cancels["c"] = OPTION_PRICE
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    err = capsys.readouterr().err
+    assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY @ 4.900000" in (
+        err
+    )
+
+
+async def test_options_bot_does_not_wait_for_a_cancel_it_could_not_send():
+    # The cancel's send raises NotConnected: nothing was sent, so no reply can come and
+    # none is waited for once the order is gone.
+    from qte_sdk.reconnect import NotConnected
+
+    class DownOnCancel(RecordingSender):
+        async def send(self, type_: str, payload: Any) -> None:
+            if type_ == "cancel":
+                raise NotConnected("down")
+            await super().send(type_, payload)
+
+    example = load_example("options_bot.py")
+    sender = DownOnCancel()
+    bot = options_bot_accepted(example, StubView(incomplete=False), sender)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and bot.cancel_ref is None
+    await bot.on_event(options_bot_filled(3))
+    assert bot.gone and bot.finished and not bot.unanswered_cancels
+
+
+async def test_options_bot_sends_no_cancel_after_one_failed_while_another_is_unread():
+    # After a snapshot the first cancel stays unread; the second is rejected for good.
+    # The bot waits for the first one's reply but sends no further cancel meanwhile.
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_moved_with_first_cancel_out_then_snapshot(example, sender)
+    failed = Reject(
+        request_ref=sender.sent[-1][1].request_ref,
+        reason_code=ReasonCodes.MALFORMED_MESSAGE,
+    )
+    await bot.on_event(Received("reject", failed, None, report_seq=6))
+    await bot.act()
+    assert bot.cancel_failed is not None and not bot.finished
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+
+
+def test_options_bot_still_says_its_order_may_rest_on_a_second_ctrl_c_after_a_failed_cancel(
+    capsys: Any,
+):
+    # Its cancel was rejected for good, so the order may still rest, and an earlier
+    # cancel is unread: a second Ctrl+C names both, never that the order is gone.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.cancel_failed = "MALFORMED_MESSAGE"
+    bot.unanswered_cancels["c"] = OPTION_PRICE
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    err = capsys.readouterr().err
+    assert "no reply came by the end" in err and "may still rest" in err
+    assert "is gone" not in err
+
+
+def test_options_bot_does_not_call_a_moved_order_gone_on_a_second_ctrl_c(capsys: Any):
+    # The resume showed this strategy's order at another price, perhaps this one moved,
+    # and a cancel is unread: a second Ctrl+C names that order, never that it is gone.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.gone = bot.unsure = bot.missed = True
+    bot.warnings.append("this strategy has orders on the contract (BUY 1 @ 4.910000)")
+    bot.unanswered_cancels["c"] = OPTION_PRICE
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    err = capsys.readouterr().err
+    assert "no reply came by the end" in err and "BUY 1 @ 4.910000" in err
+    assert "may still rest" in err and "is gone" not in err
+
+
+@pytest.mark.parametrize("ending", ["second_ctrl_c", "reconnect_failed"])
+def test_options_bot_does_not_call_its_order_gone_after_missed_reports(ending: str, capsys: Any):
+    # Its cancel found nothing at its level, but reports were missed (an amend to another
+    # price, say), and an earlier cancel is unread: the order may still rest, so neither
+    # a second Ctrl+C nor a reconnect failing for good says it is gone.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.gone = bot.missed = True
+    bot.unanswered_cancels["c"] = OPTION_PRICE
+    progress = example.Progress(bot=bot)
+    if ending == "second_ctrl_c":
+        assert example.stopped_at_once(progress) == 1
+    else:
+        assert example.ended_for_good(progress, "credential revoked") == 1
+    err = capsys.readouterr().err
+    assert "no reply came by the end" in err and "may still rest" in err
+    assert "is gone" not in err
+
+
+def test_options_bot_says_its_order_is_gone_on_a_second_ctrl_c_with_its_cancels_settled(
+    capsys: Any,
+):
+    # The order is gone, every cancel of it is settled and nothing was missed: a second
+    # Ctrl+C says the order is gone, never that it may still rest.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.gone = True
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    err = capsys.readouterr().err
+    assert "interrupted: this example's order is gone" in err
+    assert "may still rest" not in err
+
+
+async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():
+    # The resume shows the order resting, so the bot cancels it, and that cancel is in
+    # flight when a message is missed live. That gap ends no resume: the cancel is not
+    # forgotten, and none is sent again.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    await bot.on_event(Received("accepted", Accepted(request_ref=bot.ref), None, report_seq=1))
+    await bot.on_event(Disconnected(error=None))
+    view.orders[(OPTION_CONTRACT, BUY, OPTION_PRICE)] = SimpleNamespace(
+        strat_id="opt-test", remaining_size=1
+    )
+    for event in [
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_complete(True),
+    ]:
+        await bot.on_event(event)
+    assert [t for t, _ in sender.sent] == ["new", "cancel"] and bot.cancel_ref is not None
+    await bot.on_event(SeqGap(6, 8))
+    assert bot.missed and bot.up
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+async def test_options_bot_takes_another_strategy_at_its_level_after_a_resume_as_gone():
+    # Accepted, then a drop. The snapshot shows another strategy's order at this one's
+    # level, and none of this strategy on the contract: this one is gone, and nothing is
+    # cancelled, since a cancel there would take the other strategy's order.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.on_disconnected(Disconnected(error=None))
+    view.orders[(OPTION_CONTRACT, BUY, OPTION_PRICE)] = SimpleNamespace(
+        strat_id="other-strat", remaining_size=7
+    )
+    bot.resumed(replayed=False)
+    assert bot.gone and bot.finished and not bot.resting
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+
+
+async def test_options_bot_chooses_again_when_its_new_was_not_sent():
+    # The send of the new raises NotConnected: nothing was sent, so there is no order
+    # that may rest. It is chosen and sent again once the connection takes data.
+    from qte_sdk.reconnect import NotConnected
+
+    class DownOnce(RecordingSender):
+        def __init__(self) -> None:
+            super().__init__()
+            self.down = True
+
+        async def send(self, type_: str, payload: Any) -> None:
+            if self.down:
+                self.down = False
+                raise NotConnected("down")
+            await super().send(type_, payload)
+
+    example = load_example("options_bot.py")
+    sender = DownOnce()
+    bot = options_bot_accepted(example, StubView(incomplete=False), sender)
+    await bot.act()
+    assert sender.sent == [] and bot.ref is None
+    assert bot.summary() == "no order was sent"
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and bot.ref is not None
+
+
+async def test_options_bot_says_the_session_never_came_up(capsys: Any):
+    # The first session's resume never completes, so the session is never up and
+    # nothing is sent. The run says so, rather than that no contract could take the
+    # order, and exits 1.
+    from google.protobuf import json_format
+
+    from qte_sdk.contract.v1.session_pb2 import Instruments
+
+    example = load_example("options_bot.py")
+    table = json_format.ParseDict(options_table(), Instruments())
+
+    class Session(RecordingSender):
+        instrument_table = table
+
+    session = Session()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(connected_event(reconnected=False, resume=replay_ack(False)))
+    args = SimpleNamespace(
+        watch_only=False, underlying=None, strat_id="opt-test", seconds=0.3, drain_seconds=0.3
+    )
+    task = asyncio.current_task()
+    async with asyncio.timeout(5):
+        code = await example.trade_from(session, queue, args, task, example.Progress())
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert [t for t, _ in session.sent] == ["subscribe"]
+    assert "never came up" in out
+    assert "no contract could take the order" not in out
+
+
+async def test_options_bot_stops_with_status_0_on_ctrl_c_before_the_session_came_up(
+    capsys: Any,
+):
+    # Ctrl+C before the first resume completes: no order was sent, so the run stops
+    # with status 0, as for any Ctrl+C before an order, not as a session never up.
+    from google.protobuf import json_format
+
+    from qte_sdk.contract.v1.session_pb2 import Instruments
+
+    example = load_example("options_bot.py")
+    table = json_format.ParseDict(options_table(), Instruments())
+
+    class Session(RecordingSender):
+        instrument_table = table
+
+    session = Session()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(connected_event(reconnected=False, resume=replay_ack(False)))
+    args = SimpleNamespace(
+        watch_only=False, underlying=None, strat_id="opt-test", seconds=5, drain_seconds=0.3
+    )
+    task = asyncio.current_task()
+    assert task is not None
+    asyncio.get_running_loop().call_later(0.2, task.cancel)
+    code = await example.trade_from(session, queue, args, task, example.Progress())
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert [t for t, _ in session.sent] == ["subscribe"]
+    assert "never came up" not in out
+
+
+@pytest.mark.parametrize("ending", ["session-rejected", "credential-revoked"])
+@pytest.mark.parametrize("watch_only", [False, True], ids=["trading", "watch-only"])
+def test_options_bot_names_its_order_when_a_reconnect_fails_for_good(
+    ending: str, watch_only: bool, monkeypatch: pytest.MonkeyPatch, capsys: Any
+):
+    # A reconnect fails for good while its order may rest: the run names the order and
+    # how to check it, and exits 1, so a rerun does not just meet a duplicate. A
+    # watch-only run still ends on its watch-only line.
+    from websockets.exceptions import ConnectionClosedError
+    from websockets.frames import Close
+
+    from qte_sdk.connection import SessionRejected
+
+    example = load_example("options_bot.py")
+    monkeypatch.setenv("QTE_URL", "ws://127.0.0.1:1/ws")
+
+    async def run(url: str, args: Any, progress: Any) -> int:
+        bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", watch_only)
+        bot.contract, bot.price = OPTION_CONTRACT, OPTION_PRICE
+        if watch_only:
+            bot.would_send = f"LIMIT BUY 1 contract(s) of {OPTION_CONTRACT} @ 4.900000"
+        else:
+            bot.ref = "order-ref"
+        progress.bot = bot
+        if ending == "session-rejected":
+            raise SessionRejected(1, None)
+        raise ConnectionClosedError(Close(1008, "credential revoked"), None)
+
+    monkeypatch.setattr(example, "run", run)
+    argv = ["--strat-id", "opt-test", *(["--watch-only"] if watch_only else [])]
+    code = example.main(argv)
+    captured = capsys.readouterr()
+    if watch_only:
+        assert code == 0, captured.out + captured.err
+        assert captured.out.splitlines()[-1].startswith("watch-only: chose")
+        return
+    assert code == 1
+    assert f"may still rest at {OPTION_CONTRACT} BUY @ 4.900000" in captured.err
+    assert "order_snapshot or the console" in captured.err
+    assert "run it again" not in captured.err
+
+
+class RefusesEveryResume(FakeExchange):
+    """Refuses `resume` on every connection, the first included."""
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        refused = {"request_type": "RESUME", "reason_code": "MALFORMED_MESSAGE"}
+        await self.send(ws, "reject", {**refused, "receipt_time": "1"})
+
+
+async def test_options_bot_takes_a_first_session_not_resumed_as_an_incomplete_view():
+    # The exchange does not resume the first session, so the view never sees an earlier
+    # run's order at the level. The order sent there is refused as a duplicate, but the
+    # reply is lost in a drop; the reconnect is not resumed either. Nothing is cancelled.
+    exchange = RefusesEveryResume(
+        drop_on_new=1, instruments=options_table(), options=options_market()
+    )
+    earlier = ("SPY261120P00665000", "BUY", 4_900_000)
+    exchange.resting[earlier] = ("other-strat", 7)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4", "--drain-seconds", "1")
+    assert code == 1, out + err
+    assert len(payloads(exchange, "new")) == 1
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting[earlier] == ("other-strat", 7)
