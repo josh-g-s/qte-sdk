@@ -8,8 +8,9 @@ using a Fundamentals pod's token, then:
 
 What it does, in order:
 
-1. It opens a session and passes every event to one `qte_sdk.tickets.LatestTickets`, from
-   the first, so the route and the ticket states are never missed.
+1. It connects with `qte_sdk.reconnect.ReconnectingSession` and passes every event to one
+   `qte_sdk.tickets.LatestTickets`, from the first, so the route and the ticket states are
+   never missed.
 2. It asks for the team's account (`send_account_query`) and prints the position in
    --instrument from `account_state.positions`.
 3. It waits at most ROUTE_SECONDS (or --seconds, if less) for `execution_route` and
@@ -52,7 +53,8 @@ The rules it follows, which a pod program should follow too:
   it. To keep a running position between queries, use `qte_sdk.account.AccountReports`,
   which applies each fill once against the reply. Under the service the engine's own
   cure ticket and its fills are sent to no one, so ask for `account_state` again after a
-  ticket stops, as this example does.
+  ticket stops, as this example does: if no `account_state` answers it, the example says
+  the position is not known and exits with status 1.
 - Off or paused: with `routing_in_force` `ROUTING_DESK` the service is off and a new
   ticket would go to the pod's Execution desk (`executor` `DESK`), which is paused and
   does not trade this term, so do not send one; from the Winter term (26 October) the
@@ -70,10 +72,35 @@ It sends one ticket, and a second only for the 1713 resend. A ticket is an instr
 the exchange keeps working after this program exits: if --seconds pass before the ticket
 stops, the example says the ticket is still working and names it (on Ctrl+C it says a
 ticket sent may still be working; its id is on the `accepted` line), and you can cancel
-it with `qte_sdk.tickets.send_ticket_cancel`. It does not reconnect; a pod program that
-runs for a session should use `qte_sdk.reconnect.ReconnectingSession`, whose
-`Disconnected` makes `LatestTickets` forget what it held so the next connection's ticket
-states rebuild it.
+it with `qte_sdk.tickets.send_ticket_cancel`. It says so only from a state it holds on the
+connection that is up, with no message missed since: if --seconds pass with the ticket
+unanswered (its `ticket_accepted` lost to a `SeqGap` or unreadable, say), with the
+connection down, with a message missed since the ticket's last state, or after a
+Director's amend whose replacement's state has not come, it says the ticket's state is not
+known and exits with status 1. An unreadable message whose type is known to be no ticket
+answer (a book, say) leaves the ticket's state as it was; it is still named as missed.
+
+On a drop. If the connection drops, or the exchange restarts, the example says so and
+reconnects by itself, waiting longer between attempts (at most 30 seconds). The ticket
+keeps working on the exchange meanwhile. The `Disconnected` makes `LatestTickets` forget
+the route and every ticket state it held, and each new connection is sent the pod's whole
+set of ticket states for the term, working or stopped, so the ticket followed is printed
+afresh from it: a stop, or a Director's amend and its replacement, made while the example
+was down is seen there. Ticket answers are never sent again, so if the connection drops
+after the ticket is sent and before its `ticket_accepted` or `ticket_reject`, the example
+cannot tell whether it is working: it says so, never sends it again, and exits with status
+1; read its `ticket_state` (from `LatestTickets`) before sending another. The session
+does not send an `account_query` again by itself, so a query still unanswered at the drop
+is sent again on the next connection, and on a reconnect before the ticket is sent the
+account is asked for again, so the ticket goes out on the position of the connection it is
+sent on. If the exchange comes back on another event log (a new term, say) than the one the
+ticket was sent on, the ticket is not in its states: the example says what became of it is
+not known and exits with status 1. Only two known `log_id`s that differ count as another
+log. If a reconnect fails for good (a revoked credential, say) while the ticket may be
+working, the example says so. A fill of a child sent while the example was down is
+not replayed; it is already in the ticket's `filled_shares`. --seconds counts the time
+down too. Only the first connection is not retried: if it fails, the example says why and
+stops.
 
 An opening or increasing ticket names the filed thesis that covers it with --thesis-id
 and --thesis-version; a reducing ticket may leave both out. The Team Lead files and signs
@@ -92,13 +119,14 @@ import sys
 from collections.abc import AsyncIterator, Callable
 
 from google.protobuf.message import Message
-from websockets.exceptions import ConnectionClosedError, InvalidHandshake
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.account import is_account_state, send_account_query
 from qte_sdk.connection import (
+    Connected,
     DecodeFailed,
-    Event,
+    Disconnected,
     LivenessTimeout,
     Received,
     SeqGap,
@@ -130,16 +158,22 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     TicketReject,
     TicketState,
 )
-from qte_sdk.orders import is_order_event, reason_code_name, request_ref_of
+from qte_sdk.orders import (
+    Sender,
+    is_order_event,
+    new_request_ref,
+    reason_code_name,
+    request_ref_of,
+)
+from qte_sdk.reconnect import NotConnected, ReconnectingSession, Retrying
 from qte_sdk.session import (
     MissingToken,
     MissingURL,
-    Session,
     SessionNotAcknowledged,
-    open_session,
     resolve_url,
 )
 from qte_sdk.tickets import (
+    TICKET_EVENT_TYPES,
     TWAP,
     VWAP,
     LatestTickets,
@@ -202,6 +236,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def new_log(before: str | None, now: str | None) -> bool:
+    """Whether `now` names another event log than `before`. An unknown log_id (absent or
+    malformed) says nothing either way, so only two known ids that differ count."""
+    return before is not None and now is not None and before != now
+
+
 def enum_name(event: Received, field: str, enum: type, value: int) -> str:
     """The name of an enum field, or the name the exchange sent when this SDK does not
     know it (it then decodes as the zero value)."""
@@ -217,7 +257,7 @@ def enum_name(event: Received, field: str, enum: type, value: int) -> str:
 class Pod:
     """Everything the example has read, from one stream of events."""
 
-    def __init__(self, session: Session, args: argparse.Namespace) -> None:
+    def __init__(self, session: Sender, args: argparse.Namespace) -> None:
         self.session = session
         self.args = args
         self.instrument: str = args.instrument
@@ -226,6 +266,7 @@ class Pod:
         self.account_ref: str | None = None
         self.account: AccountState | None = None
         self.account_answered = False
+        self.account_wanted = False  # whether a query is to be answered
         self.ticket_ref: str | None = None
         self.algorithm: TicketAlgorithm = ALGORITHMS[args.algorithm]
         self.resent = False
@@ -233,6 +274,25 @@ class Pod:
         self.rejected = False
         self.stopped = False
         self.missed = False  # whether any message from the exchange was missed
+        self.connected = False  # whether a session has been up
+        self.up = False  # whether a session is up now
+        # Whether the ticket was sent and its answer lost with a drop, or not sent at all.
+        self.lost = False
+        self.unsent = False
+        # The event log of the current connection, and of the one the ticket was sent on.
+        self.log_id: str | None = None
+        self.ticket_log_id: str | None = None
+        self.log_changed = False
+        # Whether the followed ticket's state is current: answered or stated on this
+        # connection, with no message missed since. A drop, a gap or a Director's amend
+        # whose replacement has not come makes it stale, for the reason `stale_why`.
+        self.state_current = False
+        self.stale_why = "no state of it has come"
+        # How many messages were missed or unreadable so far, at the ticket's send, and
+        # at each state kept: a state kept from before a miss is not current.
+        self.misses = 0
+        self.sent_misses = 0
+        self.state_misses: dict[str, int] = {}
         # The event of each ticket's newest state, kept for the names this SDK does not
         # know (`unknown_enum_names()`), which the message alone does not carry.
         self.state_events: dict[str, Received] = {}
@@ -240,7 +300,16 @@ class Pod:
     async def query_account(self) -> None:
         self.account = None
         self.account_answered = False
-        self.account_ref = await send_account_query(self.session)
+        self.account_wanted = True
+        await self.ask_account()
+
+    async def ask_account(self) -> None:
+        try:
+            self.account_ref = await send_account_query(self.session)
+        except (NotConnected, ConnectionClosed):
+            # Its answer, if any, is lost with the connection: it is sent again on the
+            # next connection.
+            self.account_ref = None
 
     async def send(self) -> None:
         verb = "buy" if self.args.side == "buy" else "sell"
@@ -249,23 +318,66 @@ class Pod:
             f"sending a {name} ticket to {verb} {self.args.shares} {self.instrument} "
             f"with a limit of {to_decimal(self.args.limit_price)}"
         )
-        self.ticket_ref = await send_ticket(
-            self.session,
-            instrument=self.instrument,
-            side=BUY if self.args.side == "buy" else SELL,
-            shares=self.args.shares,
-            limit_price=self.args.limit_price,
-            urgency=URGENCIES[self.args.urgency],
-            thesis_id=self.args.thesis_id,
-            thesis_version=self.args.thesis_version,
-            algorithm=self.algorithm,
-        )
+        # The ref is recorded before the send: once it is, the ticket may have reached the
+        # exchange, even if the send does not finish.
+        self.ticket_ref = new_request_ref()
+        self.ticket_log_id = self.log_id
+        self.sent_misses = self.misses
+        try:
+            await send_ticket(
+                self.session,
+                instrument=self.instrument,
+                side=BUY if self.args.side == "buy" else SELL,
+                shares=self.args.shares,
+                limit_price=self.args.limit_price,
+                urgency=URGENCIES[self.args.urgency],
+                thesis_id=self.args.thesis_id,
+                thesis_version=self.args.thesis_version,
+                algorithm=self.algorithm,
+                request_ref=self.ticket_ref,
+            )
+        except NotConnected as error:
+            # Nothing was sent, so no ticket is working.
+            print(f"not sent, the connection is down: {error}")
+            self.ticket_ref = None
+            self.unsent = True
+        except ConnectionClosed as error:
+            # It may have reached the exchange: the drop that follows says what that means.
+            print(f"the connection dropped as the ticket was sent: {error}")
 
-    async def on_event(self, event: Event) -> None:
+    async def on_event(self, event: object) -> None:
         self.tickets.update(event)  # every event, so nothing it keeps is missed
-        if isinstance(event, SeqGap | DecodeFailed):
+        if isinstance(event, Retrying):
+            if not self.connected and event.error is not None:
+                raise event.error  # the first connection failed: stop
+            print(f"reconnecting in {event.delay:.1f} s (attempt {event.attempt})")
+        elif isinstance(event, Connected):
+            self.on_connected(event)
+            if event.reconnected and self.account_wanted and not self.account_answered:
+                # The session does not send an account_query again by itself.
+                print("asking for the account again: the query sent was not answered")
+                await self.ask_account()
+            elif event.reconnected and self.ticket_ref is None and self.account_wanted:
+                # No ticket is sent yet: the position it is sent on comes from this
+                # connection, which may be on another event log than the last answer.
+                print("asking for the account again: the ticket is sent on this connection")
+                await self.query_account()
+        elif isinstance(event, Disconnected):
+            self.on_disconnected(event)
+        elif isinstance(event, SeqGap | DecodeFailed):
             print("warning: a message from the exchange was missed or unreadable")
             self.missed = True
+            # The ticket's answer or a stop may be the message lost: its state is not
+            # known until a state of it comes. An unreadable message of a known type
+            # that is no ticket answer (a book, say) cannot have been either.
+            if (
+                not isinstance(event, DecodeFailed)
+                or event.type is None
+                or event.type in TICKET_EVENT_TYPES
+                or event.report_seq is not None
+            ):
+                self.misses += 1
+                self.stale("a message was missed since its last state")
         elif is_account_state(event):
             if event.message.request_ref == self.account_ref:
                 self.account = event.message
@@ -315,6 +427,12 @@ class Pod:
             self.rejected = True
         elif isinstance(message, TicketAccepted) and ref is not None and ref == self.ticket_ref:
             self.ticket_id = message.ticket_id
+            # Working from its acceptance, unless a message missed since the send may
+            # have been its stop.
+            if self.sent_misses == self.misses:
+                self.state_current = True
+            else:
+                self.stale("a message was missed since its last state")
             algorithm = enum_name(event, "algorithm", TicketAlgorithm, message.algorithm)
             executor = enum_name(event, "executor", TicketExecutor, message.executor)
             print(
@@ -327,10 +445,43 @@ class Pod:
         elif isinstance(message, TicketState):
             if self.tickets.get(message.ticket_id) is message:  # newer than the one held
                 self.state_events[message.ticket_id] = event
+                self.state_misses[message.ticket_id] = self.misses
                 if message.ticket_id == self.ticket_id:
                     self.on_state(event)
                 elif self.replaces_followed(message):
                     self.follow_replacement(event)
+
+    def on_connected(self, connected: Connected) -> None:
+        info = connected.info
+        if not self.connected:
+            print(f"connected: team {info.team}, unscored session: {info.unscored}")
+        elif new_log(self.log_id, info.log_id):
+            # A new log (a new term, say): a ticket sent on the old one is not in it.
+            print("reconnected to a new event log: the tickets of the old one are not in it")
+        else:
+            print("reconnected: the ticket states are sent again")
+        if self.ticket_out() and new_log(self.ticket_log_id, info.log_id):
+            # Not the log the ticket was sent on: what became of it is not in this one.
+            self.log_changed = True
+        self.log_id = info.log_id
+        self.connected = self.up = True
+
+    def ticket_out(self) -> bool:
+        """Whether a ticket was sent that may still be working."""
+        return self.ticket_ref is not None and not self.stopped and not self.rejected
+
+    def on_disconnected(self, disconnected: Disconnected) -> None:
+        # LatestTickets has forgotten the route and every state it held: the next
+        # connection's states rebuild it, and the states kept here go with them.
+        self.up = False
+        self.stale("no state of it since the reconnect")
+        self.state_events.clear()
+        self.state_misses.clear()
+        why = disconnected.error or "the exchange closed it"
+        print(f"the connection dropped ({why}); reconnecting")
+        if self.ticket_ref is not None and self.ticket_id is None and not self.rejected:
+            # Its ticket_accepted or ticket_reject is never sent again.
+            self.lost = True
 
     def replaces_followed(self, state: TicketState) -> bool:
         """Whether `state` is of a ticket that replaces the one followed, as a Director's
@@ -348,8 +499,18 @@ class Pod:
         self.stopped = False
         self.on_state(event)
 
+    def stale(self, why: str) -> None:
+        self.state_current = False
+        self.stale_why = why
+
     def on_state(self, event: Received) -> None:
         state: TicketState = event.message
+        # A state kept from before a message missed is not current: the one lost may
+        # be newer.
+        if self.state_misses.get(state.ticket_id, self.misses) == self.misses:
+            self.state_current = True
+        else:
+            self.stale("a message was missed since its last state")
         status = enum_name(event, "status", TicketStatus, state.status)
         activity = enum_name(event, "activity", TicketActivity, state.activity)
         print(
@@ -367,6 +528,8 @@ class Pod:
             # accepted at the same instant. Follow it, whether its state came already or
             # is still to come.
             print("a Director amended the ticket: following its replacement")
+            # Stopped: until the replacement's state comes, no ticket is known working.
+            self.stale("amended by a Director, and its replacement's state has not come")
             for newer in list(self.state_events.values()):
                 if self.replaces_followed(newer.message):
                     self.follow_replacement(newer)
@@ -414,15 +577,38 @@ class Pod:
             print("  no account summary: equity unknown (figures not shown)")
 
 
-async def drive(session: Session, pod: Pod, until: Callable[[], bool], seconds: float) -> str:
+async def pump(session: ReconnectingSession, queue: asyncio.Queue) -> None:
+    """Read every event into `queue`, then None when the session is closed, or the exception
+    if it fails for good. Only this task reads the session, so a timeout that ends one wait
+    for events never ends the session's stream."""
+    try:
+        async for event in session:
+            await queue.put(event)
+    except Exception as error:
+        await queue.put(error)
+    else:
+        await queue.put(None)
+
+
+async def next_item(queue: asyncio.Queue) -> object:
+    """The next event from `pump`. Raises the exception that ended the session, if any."""
+    item = await queue.get()
+    if isinstance(item, Exception):
+        raise item
+    return item
+
+
+async def drive(
+    queue: asyncio.Queue, pod: Pod, until: Callable[[], bool], seconds: float | None
+) -> str:
     """Pass events to `pod` until `until()` holds ("done"), `seconds` pass ("time") or the
-    exchange closes the connection ("closed")."""
+    session is closed ("closed")."""
     if until():
         return "done"
     deadline = asyncio.timeout(seconds)
     try:
         async with deadline:
-            async for event in session:
+            while (event := await next_item(queue)) is not None:
                 await pod.on_event(event)
                 if until():
                     return "done"
@@ -442,7 +628,7 @@ CLOSE_SECONDS = 5.0
 
 
 @contextlib.asynccontextmanager
-async def closing(session: Session) -> AsyncIterator[Session]:
+async def closing(session: ReconnectingSession) -> AsyncIterator[ReconnectingSession]:
     """Like `async with session:`, but waits at most CLOSE_SECONDS for the close, so a
     connection that has stopped taking data cannot keep the example from exiting."""
     try:
@@ -455,20 +641,45 @@ async def closing(session: Session) -> AsyncIterator[Session]:
             print("the connection did not close in time; it is dropped as the example exits")
 
 
-async def follow(session: Session, args: argparse.Namespace) -> int:
-    print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
+async def follow(
+    session: ReconnectingSession, queue: asyncio.Queue, args: argparse.Namespace
+) -> int:
     pod = Pod(session, args)
+    try:
+        return await follow_pod(pod, queue, args)
+    except (SessionRejected, OSError, InvalidHandshake, SessionNotAcknowledged):
+        # Not retried, such as a credential revoked while reconnecting.
+        if pod.ticket_out():
+            print(TICKET_OUT_WARNING, file=sys.stderr)
+        raise
+
+
+# Said when the session ends for good while a ticket sent may still be working.
+TICKET_OUT_WARNING = (
+    "WARNING: a ticket sent may still be working on the exchange: read its ticket_state "
+    "before sending another"
+)
+
+
+async def follow_pod(pod: Pod, queue: asyncio.Queue, args: argparse.Namespace) -> int:
+    # Wait for the first session; a first connection that fails raises here.
+    if await drive(queue, pod, lambda: pod.connected, None) == "closed":
+        print("the exchange closed the connection; no ticket was sent")
+        return 1
     await pod.query_account()
     why = await drive(
-        session,
+        queue,
         pod,
-        lambda: pod.tickets.route is not None and pod.account_answered,
+        lambda: pod.up and pod.tickets.route is not None and pod.account_answered,
         min(ROUTE_SECONDS, args.seconds),
     )
     if why == "closed":
         print("the exchange closed the connection; no ticket was sent")
         return 1
     route = pod.tickets.route
+    if not pod.up:
+        print("the connection is down: no ticket was sent; run it again")
+        return 1
     if route is None:
         print(
             "no execution_route arrived: only a Fundamentals pod is sent one (a desk never "
@@ -495,9 +706,33 @@ async def follow(session: Session, args: argparse.Namespace) -> int:
         )
 
     await pod.send()
-    why = await drive(session, pod, lambda: pod.rejected or pod.stopped, args.seconds)
+    why = await drive(
+        queue,
+        pod,
+        lambda: pod.rejected or pod.stopped or pod.lost or pod.unsent or pod.log_changed,
+        args.seconds,
+    )
     if pod.rejected:
         return 0
+    if pod.unsent:
+        print("no ticket was sent; run it again")
+        return 1
+    if pod.log_changed:
+        print(
+            "WARNING: the exchange started a new event log while the ticket was followed, "
+            "so what became of the ticket is not known here. It is not sent again: read "
+            "the team's account and tickets before sending another"
+        )
+        pod.warn_if_missed()
+        return 1
+    if pod.lost:
+        print(
+            "WARNING: the connection dropped before the ticket's answer came, and that answer "
+            "is never sent again, so whether the ticket is working is not known. It is not "
+            "sent again: read its ticket_state before sending another"
+        )
+        pod.warn_if_missed()
+        return 1
     if why == "closed":
         print("the exchange closed the connection")
         if pod.ticket_ref is not None and not pod.stopped:
@@ -506,29 +741,64 @@ async def follow(session: Session, args: argparse.Namespace) -> int:
         return 1
     if why == "time":
         if pod.ticket_id is None:
-            print(f"stopped after {args.seconds:g} seconds: the ticket's answer is not known")
-        else:
+            # Unanswered, or its answer lost to a message missed: it may be working.
             print(
-                f"stopped watching after {args.seconds:g} seconds: ticket {pod.ticket_id} "
-                "is still working on the exchange; cancel it with send_ticket_cancel if "
-                "you do not want it to continue"
+                f"stopped after {args.seconds:g} seconds with no answer to the ticket, so "
+                "whether it is working is not known. It is not sent again: read its "
+                "ticket_state before sending another"
             )
+            pod.warn_if_missed()
+            return 1
+        if not (pod.up and pod.state_current):
+            # Down, or a message missed since its last state: it may have stopped.
+            why = "disconnected" if not pod.up else pod.stale_why
+            print(
+                f"stopped after {args.seconds:g} seconds with the state of ticket "
+                f"{pod.ticket_id} not known ({why}): it may have stopped or still be "
+                "working. Read its ticket_state before sending another"
+            )
+            pod.warn_if_missed()
+            return 1
+        print(
+            f"stopped watching after {args.seconds:g} seconds: ticket {pod.ticket_id} "
+            "is still working on the exchange; cancel it with send_ticket_cancel if "
+            "you do not want it to continue"
+        )
         pod.warn_if_missed()
         return 0
 
     # The ticket stopped. Ask again: the engine's cure fills, if any, show only here.
     await pod.query_account()
-    await drive(session, pod, lambda: pod.account_answered, ACCOUNT_SECONDS)
+    await drive(queue, pod, lambda: pod.account_answered, ACCOUNT_SECONDS)
     pod.print_position("after the stop")
     pod.warn_if_missed()
+    if pod.account is None:
+        # No account_state by the end (refused, lost to a drop, or late): the engine's
+        # cure fills, if any, show only there, so the position is not known.
+        print(
+            "WARNING: the position after the stop is not known, and the engine's cure "
+            "fills, if any, show only in account_state: check it with send_account_query "
+            "or the console"
+        )
+        return 1
     return 0
 
 
 async def run(url: str, args: argparse.Namespace) -> int:
-    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE.
-    session = await open_session(url)
+    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE. It is read
+    # once, here, and kept to authenticate again on each reconnect. Ticket answers and
+    # states are never replayed (each connection is sent the whole set of ticket states
+    # instead), so the session asks for no resume of order reports.
+    # `close_timeout` bounds the close of each connection, since a ReconnectingSession
+    # finishes closing even when the wait for it is cut short.
+    session = ReconnectingSession(url, resume=False, close_timeout=CLOSE_SECONDS)
     async with closing(session):
-        return await follow(session, args)
+        queue: asyncio.Queue = asyncio.Queue()
+        reader = asyncio.create_task(pump(session, queue))
+        try:
+            return await follow(session, queue, args)
+        finally:
+            reader.cancel()
 
 
 def fail(message: str) -> int:
@@ -556,16 +826,15 @@ def main(argv: list[str] | None = None) -> int:
     except SessionRejected as error:
         return fail(f"the exchange refused the session: {error}")
     except LivenessTimeout as error:
-        return fail(
-            f"{error}. This example does not reconnect. A ticket sent may still be "
-            "working: reconnect and read its ticket_state"
-        )
+        # Only the first connection is not retried, so no ticket was sent.
+        return fail(f"{error}; no ticket was sent")
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosedError as error:
+        # Not retried, such as a 1008 "credential revoked": the token no longer works.
         return fail(
-            f"the connection dropped with {describe_close(error)}. This example does not "
-            "reconnect. A ticket sent may still be working: reconnect and read its ticket_state"
+            f"the connection dropped with {describe_close(error)}. A ticket sent may still "
+            "be working: read its ticket_state"
         )
     except KeyboardInterrupt:
         # The ticket, if one was accepted, keeps working on the exchange.

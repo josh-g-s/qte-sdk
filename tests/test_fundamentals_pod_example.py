@@ -1,6 +1,7 @@
 """Tests of `examples/fundamentals_pod.py`, run as a student would start it, against a
 scripted local exchange that serves a Fundamentals pod under automatic execution."""
 
+import asyncio
 import json
 from typing import Any
 
@@ -88,7 +89,11 @@ class PodExchange:
         reject: str | None = None,
         before: list[tuple[str, dict[str, Any]]] | None = None,
         stray_account: dict[str, Any] | None = None,
+        lose_accepted: str | None = None,
     ) -> None:
+        # With `lose_accepted`, the ticket_accepted is lost: "gap" skips its seq, as a
+        # message lost on the way would; "garbled" sends it unreadable.
+        self.lose_accepted = lose_accepted
         # With `reject`, every ticket is refused with that reason.
         self.reject = reject
         # `before` is sent ahead of the ticket_accepted. A frame of type "gap" sends
@@ -171,7 +176,12 @@ class PodExchange:
         )
         for type_, frame_ in self.before:
             await self.send(ws, type_, frame_)
-        await self.send(ws, "ticket_accepted", accepted)
+        if self.lose_accepted == "gap":
+            await self.send(ws, "gap", {})
+        elif self.lose_accepted == "garbled":
+            await self.send(ws, "ticket_accepted", {**accepted, "ticket_id": {"not": "an id"}})
+        else:
+            await self.send(ws, "ticket_accepted", accepted)
         for type_, frame_ in self.after:
             await self.send(ws, type_, frame_)
 
@@ -217,6 +227,38 @@ async def test_a_pod_follows_its_service_ticket_to_complete_and_counts_no_fill()
     assert exchange.types().count("account_query") == 2
     # The second query is sent after the stop.
     assert exchange.types()[-1] == "account_query"
+
+
+class RefusesSecondAccountQuery(PodExchange):
+    """Answers the first account_query, then refuses the next: the position after the
+    stop is not known."""
+
+    async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+        queries = self.types().count("account_query")
+        if type_ == "account_state" and queries == 2:
+            refusal = {
+                "request_ref": payload["request_ref"],
+                "request_type": "ACCOUNT_QUERY",
+                "reason_code": "MALFORMED_MESSAGE",
+                "receipt_time": "1",
+            }
+            await super().send(ws, "reject", refusal)
+            return
+        await super().send(ws, type_, payload)
+
+
+async def test_a_position_not_known_after_the_stop_exits_1():
+    # The ticket stops, but the account query after it gets no account_state: the engine's
+    # cure fills, if any, show only there, so the run says the position is not known.
+    exchange = RefusesSecondAccountQuery(
+        route=route_payload(), accounts=[account(None), account(500)], after=HAPPY
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert "the ticket stopped: TICKET_COMPLETE" in out
+    assert "position after the stop: unknown (no account_state)" in out
+    assert "WARNING: the position after the stop is not known" in out
+    assert exchange.types().count("account_query") == 2
 
 
 def point(time: int, due: int, filled: int) -> dict[str, str]:
@@ -437,8 +479,10 @@ async def test_a_dead_link_is_not_mistaken_for_the_watch_running_out():
     example = load_example("fundamentals_pod.py")
     args = example.parse_args(["--shares", "1", "--limit", "1"])
     pod = example.Pod(DeadLink(), args)
+    queue: asyncio.Queue = asyncio.Queue()
+    await queue.put(LivenessTimeout(5.0))  # as the reader passes on what ended the session
     with pytest.raises(LivenessTimeout):
-        await example.drive(DeadLink(), pod, lambda: False, 600)
+        await example.drive(queue, pod, lambda: False, 600)
 
 
 async def test_a_desk_route_sends_nothing_since_the_desk_does_not_trade_this_term():
@@ -531,6 +575,77 @@ async def test_missed_messages_are_named_when_the_watch_runs_out():
     assert "messages were missed, so the ticket's states printed may be incomplete" in out
 
 
+@pytest.mark.parametrize("lose", ["gap", "garbled"])
+async def test_a_ticket_whose_answer_was_missed_is_not_known_when_the_watch_runs_out(lose: str):
+    # The ticket_accepted is lost to a SeqGap or unreadable: the ticket may be working,
+    # so the run must not end with status 0 as if nothing were out.
+    exchange = PodExchange(
+        route=route_payload(), accounts=[account(None)], after=WORKING, lose_accepted=lose
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert len(exchange.tickets()) == 1
+    assert "no answer to the ticket, so whether it is working is not known" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_a_gap_after_the_last_state_leaves_the_ticket_not_known_at_the_end():
+    # A stop may be the message lost: with no state since, its state is not known.
+    after = [*WORKING, ("gap", {}), ("execution", fill(200))]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "the state of ticket 17 not known (a message was missed since its last state)" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_a_state_held_from_before_a_gap_is_not_taken_as_current_at_the_acceptance():
+    # The ticket's state comes before its acceptance, then a message is lost: the state
+    # applied at the acceptance may be stale (the lost one may be a stop).
+    before = [("ticket_state", state(10, activity="TAKING")), ("gap", {})]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=[], before=before)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "the state of ticket 17 not known (a message was missed since its last state)" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_an_amend_whose_replacement_has_not_come_is_not_known_at_the_end():
+    # The ticket was amended by a Director and has stopped; its replacement's state has
+    # not come by --seconds, so neither ticket is known to be working.
+    after = [*WORKING, ("ticket_state", state(20, status="TICKET_AMENDED_BY_DIRECTOR"))]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "the state of ticket 17 not known (amended by a Director" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_a_gap_between_the_send_and_the_acceptance_leaves_the_ticket_not_known():
+    # A message is lost after the ticket is sent and before its ticket_accepted, and no
+    # state comes: the lost one may be its stop, so the acceptance alone is not current.
+    exchange = PodExchange(
+        route=route_payload(), accounts=[account(None)], after=[], before=[("gap", {})]
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "accepted: ticket 17" in out
+    assert "the state of ticket 17 not known (a message was missed since its last state)" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_an_unreadable_book_leaves_the_tickets_state_current():
+    # A book cannot be the ticket's answer or a stop: the state held stays current, and
+    # the message is still named as missed.
+    after = [*WORKING, ("book", {"instrument": {"not": "an instrument"}})]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 0, out + err
+    assert "warning: a message from the exchange was missed or unreadable" in out
+    assert "ticket 17 is still working on the exchange" in out
+    assert "messages were missed, so the ticket's states printed may be incomplete" in out
+
+
 @pytest.mark.parametrize("seconds", ["0", "-5", "nan"])
 def test_seconds_must_be_above_zero(seconds, capsys):
     example = load_example("fundamentals_pod.py")
@@ -538,3 +653,440 @@ def test_seconds_must_be_above_zero(seconds, capsys):
         example.parse_args(["--shares", "1", "--limit", "1", "--seconds", seconds])
     assert exit_.value.code == 2
     assert "--seconds must be above 0" in capsys.readouterr().err
+
+
+class RestartingPodExchange(PodExchange):
+    """A PodExchange whose first connection is closed with `close_code` and `reason`
+    once the ticket is answered (with `before_answer`, as soon as the ticket arrives,
+    before any answer). Each later connection is sent the route and then `on_reconnect`,
+    the pod's ticket states for the term, as the exchange sends them on every connection."""
+
+    def __init__(
+        self,
+        *,
+        close_code: int = 1012,
+        reason: str = "service restart",
+        before_answer: bool = False,
+        on_reconnect: list[tuple[str, dict[str, Any]]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.close_code = close_code
+        self.reason = reason
+        self.before_answer = before_answer
+        self.on_reconnect = on_reconnect or []
+        self.connections = 0
+
+    async def __call__(self, ws: ServerConnection) -> None:
+        self.connections += 1
+        self._seq = 0  # each connection numbers its messages from 1
+        await super().__call__(ws)
+
+    async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+        await super().send(ws, type_, payload)
+        if type_ == "execution_route" and self.connections > 1:
+            for frame_type, frame_ in self.on_reconnect:
+                await super().send(ws, frame_type, frame_)
+
+    async def answer_ticket(self, ws: ServerConnection, payload: dict[str, Any]) -> None:
+        if self.connections == 1 and self.before_answer:
+            await ws.close(self.close_code, self.reason)
+            return
+        await super().answer_ticket(ws, payload)
+        if self.connections == 1:
+            await ws.close(self.close_code, self.reason)
+
+
+WORKING = [("ticket_state", state(10, activity="TAKING", due_shares="100", filled_shares="0"))]
+COMPLETE = (
+    "ticket_state",
+    state(30, status="TICKET_COMPLETE", due_shares="500", filled_shares="500"),
+)
+
+
+@pytest.mark.parametrize(("close_code", "reason"), [(1012, "service restart"), (1001, "")])
+async def test_a_pod_survives_a_close_and_follows_its_ticket_from_the_states_sent_again(
+    close_code: int, reason: str
+):
+    # The ticket is accepted and working when the exchange restarts. It completes while
+    # the example is down; the new connection's ticket states say so.
+    exchange = RestartingPodExchange(
+        close_code=close_code,
+        reason=reason,
+        route=route_payload(),
+        accounts=[account(0), account(500)],
+        after=WORKING,
+        on_reconnect=[COMPLETE],
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert len(exchange.tickets()) == 1  # never sent again
+    assert "the connection dropped (" in out
+    assert "reconnected: the ticket states are sent again" in out
+    assert "ticket 17: TICKET_COMPLETE, filled 500 of 500" in out
+    assert "the ticket stopped: TICKET_COMPLETE" in out
+    assert (
+        out.splitlines()[-2] == f"position in {INSTRUMENT} after the stop, from account_state: 500"
+    )
+
+
+class NoReconnectPodExchange(RestartingPodExchange):
+    """A RestartingPodExchange that never acknowledges a later connection, so the
+    example is still down when --seconds run out."""
+
+    async def __call__(self, ws: ServerConnection) -> None:
+        if self.connections >= 1:
+            self.connections += 1
+            await ws.wait_closed()
+            return
+        await super().__call__(ws)
+
+
+async def test_a_pod_down_when_the_watch_runs_out_does_not_say_its_ticket_is_working():
+    # The ticket is accepted and working at the close; no reconnect comes before
+    # --seconds. What it did meanwhile is not known: never "still working", status 1.
+    exchange = NoReconnectPodExchange(route=route_payload(), accounts=[account(0)], after=WORKING)
+    code, out, err = await run_pod(exchange, "--seconds", "2")
+    assert code == 1, out + err
+    assert len(exchange.tickets()) == 1
+    assert "the state of ticket 17 not known (disconnected)" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_a_pod_reconnected_with_no_state_of_its_ticket_does_not_say_it_is_working():
+    # The ticket is accepted and working at the close; the new connection is up but
+    # sends no state of it by --seconds. The state held from before the drop is not
+    # current: never "still working", status 1.
+    exchange = RestartingPodExchange(route=route_payload(), accounts=[account(0)], after=WORKING)
+    code, out, err = await run_pod(exchange, "--seconds", "2")
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert len(exchange.tickets()) == 1
+    assert "reconnected: the ticket states are sent again" in out
+    assert "the state of ticket 17 not known (no state of it since the reconnect)" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_a_pod_whose_ticket_answer_is_lost_with_a_close_does_not_send_it_again():
+    # Ticket answers are never sent again, so the example cannot tell whether it works.
+    exchange = RestartingPodExchange(
+        before_answer=True, route=route_payload(), accounts=[account(0)], after=HAPPY
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert len(exchange.tickets()) == 1
+    assert "whether the ticket is working is not known. It is not sent again" in out
+
+
+async def test_a_pod_whose_exchange_starts_a_new_log_says_its_ticket_is_not_known():
+    # A new event log (a new term, say) holds none of the old tickets: the example must
+    # not claim the ticket is still working.
+    class NewLogOnReconnect(RestartingPodExchange):
+        async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+            if type_ == "session_ack":
+                payload = {**payload, "log_id": f"{self.connections:016x}"}
+            await super().send(ws, type_, payload)
+
+    exchange = NewLogOnReconnect(
+        close_code=4001,
+        reason="term change",
+        route=route_payload(),
+        accounts=[account(0)],
+        after=WORKING,
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert len(exchange.tickets()) == 1
+    assert "reconnected to a new event log" in out
+    assert "what became of the ticket is not known here. It is not sent again" in out
+    assert "is still working on the exchange" not in out
+
+
+async def test_a_pod_asks_for_the_account_again_after_a_close_drops_its_query():
+    # The session does not send account_query again: the example does, once reconnected.
+    class DropsFirstQuery(RestartingPodExchange):
+        async def __call__(self, ws: ServerConnection) -> None:
+            if self.connections == 0:
+                self.connections = 1
+                self._seq = 0
+                self.received.append(json.loads(await ws.recv()))
+                ack = {
+                    "session_id": "s-1",
+                    "team": "pod-a",
+                    "server_time": "1",
+                    "contract_version": CONTRACT_VERSION,
+                    "unscored": True,
+                }
+                await self.send(ws, "session_ack", ack)
+                self.received.append(json.loads(await ws.recv()))  # left unanswered
+                await ws.close(1012, "service restart")
+                return
+            await super().__call__(ws)
+
+    exchange = DropsFirstQuery(
+        route=route_payload(), accounts=[account(0), account(500)], after=HAPPY
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    assert "asking for the account again: the query sent was not answered" in out
+    assert exchange.types().count("account_query") == 3  # the lost one, again, after the stop
+    assert len(exchange.tickets()) == 1
+
+
+async def test_a_pod_ends_on_a_revoked_credential_and_names_the_close():
+    exchange = RestartingPodExchange(
+        close_code=1008,
+        reason="credential revoked",
+        route=route_payload(),
+        accounts=[account(0)],
+        after=WORKING,
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert exchange.connections == 1
+    assert 'close code 1008, reason "credential revoked": your token' in err
+    assert "A ticket sent may still be working: read its ticket_state" in err
+    assert "reconnecting in" not in out
+
+
+# Review of #375: the log a ticket was sent on, the account on each connection, and what
+# the pod forgets or keeps at a drop.
+
+LOG_A, LOG_B = "a" * 16, "b" * 16
+
+
+class LogsPerConnection(PodExchange):
+    """A PodExchange whose session_acks name `logs`, one per connection. The first
+    connection answers the account and drops before execution_route; the second accepts
+    the ticket and then closes; the third sends `on_third`. With `revoke_third`, the
+    third connection is closed 1008 "credential revoked" before its session_ack."""
+
+    def __init__(
+        self,
+        *,
+        logs: list[str | None],
+        on_third: list[tuple[str, dict[str, Any]]] | None = None,
+        revoke_third: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.logs = logs
+        self.on_third = on_third or []
+        self.revoke_third = revoke_third
+        self.connections = 0
+
+    async def __call__(self, ws: ServerConnection) -> None:
+        self.connections += 1
+        self._seq = 0
+        if self.connections == 3 and self.revoke_third:
+            self.received.append(json.loads(await ws.recv()))
+            await ws.close(1008, "credential revoked")
+            return
+        await super().__call__(ws)
+
+    async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+        if type_ == "session_ack":
+            payload = {**payload, "log_id": self.logs[self.connections - 1]}
+            if payload["log_id"] is None:
+                del payload["log_id"]
+        if type_ == "execution_route" and self.connections == 1:
+            return  # the first connection drops before its route
+        await super().send(ws, type_, payload)
+        if type_ == "account_state" and self.connections == 1:
+            await ws.close(1012, "service restart")
+        if type_ == "execution_route" and self.connections == 3:
+            for frame_type, frame_ in self.on_third:
+                await super().send(ws, frame_type, frame_)
+
+    async def answer_ticket(self, ws: ServerConnection, payload: dict[str, Any]) -> None:
+        await super().answer_ticket(ws, payload)
+        if self.connections == 2:
+            await ws.close(1012, "service restart")
+
+
+async def test_a_pod_compares_the_log_its_ticket_was_sent_on_not_its_first_connections():
+    # Logs A, then B, then B: the ticket is sent and accepted on B, so the third
+    # connection is on the ticket's own log and the pod keeps following it.
+    exchange = LogsPerConnection(
+        logs=[LOG_A, LOG_B, LOG_B],
+        route=route_payload(),
+        accounts=[account(100), account(0)],
+        after=WORKING,
+        on_third=WORKING,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert exchange.connections == 3
+    assert len(exchange.tickets()) == 1
+    assert "reconnected to a new event log" in out  # A to B, before the ticket
+    assert "what became of the ticket is not known here" not in out
+    assert "ticket 17 is still working on the exchange" in out
+
+
+async def test_a_pod_reads_its_position_again_on_a_reconnect_before_its_ticket():
+    # The account is answered on log A and the link drops before the route; the route
+    # comes on log B. The position the ticket is sent on is B's, not A's.
+    exchange = LogsPerConnection(
+        logs=[LOG_A, LOG_B, LOG_B],
+        route=route_payload(),
+        accounts=[account(100), account(0)],
+        after=WORKING,
+        on_third=WORKING,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert "asking for the account again: the ticket is sent on this connection" in out
+    assert f"position in {INSTRUMENT} at the start, from account_state: 0" in out
+    assert "from account_state: 100" not in out
+    sent = [m["type"] for m in exchange.received]
+    assert sent.index("ticket") > [i for i, t in enumerate(sent) if t == "account_query"][1]
+
+
+async def test_a_pod_takes_no_log_change_from_an_unknown_log_id():
+    # The ticket is sent on a connection that names no log; the next one names one. An
+    # unknown id says nothing either way, so this is not a new log.
+    exchange = LogsPerConnection(
+        logs=[None, None, LOG_B],
+        route=route_payload(),
+        accounts=[account(0), account(0)],
+        after=WORKING,
+        on_third=WORKING,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "4")
+    assert code == 0, out + err
+    assert "reconnected to a new event log" not in out
+    assert "what became of the ticket is not known here" not in out
+    assert "ticket 17 is still working on the exchange" in out
+
+
+async def test_a_pod_warns_its_ticket_may_be_working_when_a_reconnect_fails_for_good():
+    # The third connection is refused for a revoked credential, which is not retried.
+    exchange = LogsPerConnection(
+        logs=[LOG_A, LOG_A, LOG_A],
+        revoke_third=True,
+        route=route_payload(),
+        accounts=[account(0), account(0)],
+        after=WORKING,
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "6")
+    assert code == 1, out + err
+    assert exchange.connections == 3
+    assert "a ticket sent may still be working on the exchange" in err
+
+
+@pytest.mark.parametrize("end", ["working", "stopped", "rejected"])
+async def test_a_pod_warns_of_a_working_ticket_only_until_it_stops(
+    end: str, capsys: pytest.CaptureFixture[str]
+):
+    # A reconnect that fails for good after the ticket has stopped (say during the account
+    # query that follows the stop), or was rejected, says nothing of a ticket that may
+    # still be working.
+    from qte_sdk.connection import SessionRejected
+
+    example = load_example("fundamentals_pod.py")
+    seen: list[Any] = []
+
+    async def fail_for_good(pod: Any, queue: Any, args: Any) -> int:
+        pod.ticket_ref = "ticket-ref"
+        pod.stopped = end == "stopped"
+        pod.rejected = end == "rejected"
+        seen.append(pod)
+        raise SessionRejected(1, None)
+
+    example.follow_pod = fail_for_good
+    with pytest.raises(SessionRejected):
+        await example.follow(RecordingPodSession(), asyncio.Queue(), example.parse_args(list(ARGS)))
+    working = end == "working"
+    assert seen[0].ticket_out() is working
+    err = capsys.readouterr().err
+    assert ("a ticket sent may still be working on the exchange" in err) is working
+
+
+class RecordingPodSession:
+    """A session that records each message type sent, raising `error` on each send."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.sent: list[str] = []
+
+    async def send(self, type_: str, payload: Any) -> None:
+        self.sent.append(type_)
+        if self.error is not None:
+            raise self.error
+
+
+def pod_connected(log_id: str | None, reconnected: bool) -> Any:
+    from qte_sdk.connection import Connected, SessionInfo
+
+    info = SessionInfo("s-1", "pod-a", 1, CONTRACT_VERSION, True, log_id)
+    return Connected(info, (), reconnected)
+
+
+def test_a_pod_takes_no_log_change_before_its_ticket_is_sent():
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(RecordingPodSession(), example.parse_args(list(ARGS)))
+    pod.on_connected(pod_connected(LOG_A, False))
+    pod.on_disconnected(Disconnected(error=None))
+    pod.on_connected(pod_connected(LOG_B, True))
+    assert not pod.log_changed
+
+
+def test_a_pod_forgets_the_ticket_states_it_kept_at_a_drop():
+    # LatestTickets forgets them at a drop; the events kept for their unknown enum names
+    # go with them, so a stale state is never taken for a replacement or a newest state.
+    from qte_sdk.connection import Disconnected, Received
+    from qte_sdk.contract.v1.order_events_pb2 import TicketState
+
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(RecordingPodSession(), example.parse_args(list(ARGS)))
+    pod.state_events["17"] = Received("ticket_state", TicketState(ticket_id="17"), 1)
+    pod.on_disconnected(Disconnected(error=None))
+    assert pod.state_events == {}
+
+
+async def test_a_pod_takes_a_ticket_not_sent_while_down_as_not_sent():
+    from qte_sdk.reconnect import NotConnected
+
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(RecordingPodSession(NotConnected("down")), example.parse_args(list(ARGS)))
+    await pod.send()
+    assert pod.unsent
+    assert pod.ticket_ref is None
+    assert not pod.ticket_out()
+
+
+@pytest.mark.parametrize(
+    "error", [ConnectionClosed(None, None), None], ids=["connection-closed", "not-connected"]
+)
+async def test_a_pod_asks_for_the_account_again_later_when_its_query_cannot_be_sent(error):
+    from qte_sdk.reconnect import NotConnected
+
+    example = load_example("fundamentals_pod.py")
+    session = RecordingPodSession(error or NotConnected("down"))
+    pod = example.Pod(session, example.parse_args(list(ARGS)))
+    await pod.query_account()  # does not raise
+    assert pod.account_ref is None
+    assert pod.account_wanted and not pod.account_answered
+
+
+@pytest.mark.parametrize(("last", "changed"), [(LOG_B, True), (LOG_A, False)], ids=["B", "A"])
+def test_a_pod_compares_with_its_tickets_log_across_a_connection_of_unknown_log(
+    last: str, changed: bool
+):
+    # The ticket is sent on A; a connection names no log; the next names `last`. The
+    # unknown one in between says nothing: B is another log than the ticket's, A is not.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("fundamentals_pod.py")
+    pod = example.Pod(RecordingPodSession(), example.parse_args(list(ARGS)))
+    pod.on_connected(pod_connected(LOG_A, False))
+    pod.ticket_ref, pod.ticket_log_id = "r-1", LOG_A  # as send() records them
+    pod.on_disconnected(Disconnected(error=None))
+    pod.on_connected(pod_connected(None, True))
+    assert not pod.log_changed
+    pod.on_disconnected(Disconnected(error=None))
+    pod.on_connected(pod_connected(last, True))
+    assert pod.log_changed is changed
