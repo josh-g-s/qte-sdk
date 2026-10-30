@@ -133,6 +133,8 @@ from qte_sdk.connection import (
 )
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
+    CANCELLED,
+    FILLED,
     LIMIT,
     RESTING,
     SELL,
@@ -292,12 +294,6 @@ class Quote:
     # Whether fills of the order may have gone unreported: messages were missed, or a
     # snapshot answered a resume.
     fills_unknown: bool = False
-    # Its remaining size at a drop, as the view showed it, to compare with a snapshot.
-    # None when an amend left it unknown: one unanswered, or one applied whose order state
-    # has not come.
-    remaining: int | None = None
-    # True from an amend's `accepted` until an order state of the order is seen.
-    amend_unseen: bool = False
     # One more cancel may go while one is unanswered: a complete resume still showed the
     # order resting.
     again: bool = False
@@ -395,13 +391,6 @@ class Quoter:
         self.market_open = False
         for sent in self.open.values():
             sent.dropped = True
-        for quote in self.quotes.values():
-            order = self.resting(quote) if quote.own else None
-            amending = quote.amend_unseen or any(
-                sent.kind == "amend" and sent.side == quote.side for sent in self.open.values()
-            )
-            known = order is not None and not amending
-            quote.remaining = order.remaining_size if known else None
         error = disconnected.error
         why = error or "the exchange closed it"
         if error is not None and not is_retryable(error):
@@ -471,8 +460,9 @@ class Quoter:
             if not quote.own or quote.price is None:
                 continue  # a new still unanswered stays so: only its own reply settles it
             order = self.resting(quote)
-            if not replayed and (order is None or order.remaining_size != quote.remaining):
-                # A snapshot reports no fills: any while disconnected are not known.
+            if not replayed:
+                # A snapshot reports no fills: any while disconnected are not known, even
+                # with the same size resting, which may be another run's order.
                 quote.fills_unknown = True
             if not complete:
                 continue
@@ -768,8 +758,8 @@ class Quoter:
         """This side has no order now: it may enter a new one."""
         quote.price = None
         quote.cancelling = quote.own = quote.fills_unknown = quote.again = False
-        quote.skipped = quote.amend_unseen = False
-        quote.order_ref = quote.remaining = quote.last_reject = None
+        quote.skipped = False
+        quote.order_ref = quote.last_reject = None
         quote.retry_after = float("-inf")
 
     def believed_resting(self, refs: bool = False) -> str:
@@ -842,7 +832,7 @@ class Quoter:
                 "takes whatever order of its strategy rests at its level, so it may have "
                 "taken one not this run's"
             )
-        elif self.messages and self.view.incomplete:
+        elif self.view.incomplete:
             lines.append(
                 "the view of resting orders is not complete, so an order may rest unseen: "
                 "check with order_snapshot or the console"
@@ -877,11 +867,6 @@ class Quoter:
                     quote.own = True  # applied, so the team's one order at its level
                 elif sent.kind == "cancel" and quote.own and quote.price == sent.price:
                     quote.cancelling = True  # the order_cancelled that follows clears it
-                elif sent.kind == "amend" and quote.own and quote.price == sent.price:
-                    order = self.resting(quote)
-                    # Its order state may come before or after this: until it is seen, the
-                    # size the view shows is not the size the amend set.
-                    quote.amend_unseen = order is None or order.remaining_size != self.size
             case Reject():
                 detail = f" ({message.reason_detail})" if message.HasField("reason_detail") else ""
                 reason = reason_code_name(message.reason_code)
@@ -902,19 +887,23 @@ class Quoter:
                 side = SIDE_NAMES.get(message.side, "?")
                 if message.state in (RESTING, STALE):
                     status = f"resting {side} {message.remaining_size}"
-                else:  # an amend ended the order: FILLED or CANCELLED
+                elif message.state in (FILLED, CANCELLED):  # an amend ended the order
                     status = f"{OrderLifecycleState.Name(message.state)} {side}"
+                else:
+                    status = f"state {message.state}, not known to this example, {side}"
                 print(f"{status} @ {price_text(message.price)} (strategy {message.strat_id})")
                 quote = self.ours(message)
                 if quote is not None:
-                    quote.amend_unseen = False
                     if message.price != quote.price:
                         # Moved by an amend from elsewhere: follow it, so the cancel names
                         # the level where it rests now.
                         print(f"moved by an amend to {price_text(message.price)}")
                         quote.price = message.price
-                    if message.state not in (RESTING, STALE):
+                    if message.state in (FILLED, CANCELLED):
                         self.end(quote, by_this_run=False)
+                    elif message.state not in (RESTING, STALE):
+                        # Not known to end it: still cancel it, but what filled is unsure.
+                        quote.fills_unknown = True
             case Execution() if message.instrument == self.instrument:
                 side = SIDE_NAMES.get(message.side, "?")
                 print(

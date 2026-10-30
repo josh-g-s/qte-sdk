@@ -3049,6 +3049,52 @@ async def test_quote_both_sides_waits_about_a_minute_after_a_budget_reject_while
     assert quoter.ready(buy)
 
 
+async def test_quote_both_sides_takes_any_snapshot_with_its_order_out_as_fills_unknown():
+    # A snapshot reports no fills. Its order may have filled while down and another run of
+    # the strategy rested the same size at the same price: the same size in the snapshot
+    # does not show its fills are known.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    quoter.on_disconnected(Disconnected(error=None))
+    quoter.resumed(replayed=False)
+    assert buy.fills_unknown
+    assert quoter.finish() == 1
+
+
+async def test_quote_both_sides_keeps_its_order_through_an_unknown_order_state():
+    # Only FILLED and CANCELLED end its order. A state this example does not know (from a
+    # newer exchange, say) leaves it unsure: it still cancels, and the run fails.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    state = OrderState(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=BID + TICK,
+        state=99,
+        remaining_size=1,
+    )
+    deliver(example, quoter, "order_state", state)
+    assert buy.own and buy.fills_unknown
+
+
+async def test_quote_both_sides_fails_when_the_first_resume_never_completes(capsys):
+    # With nothing sent, a view never made complete still hides any earlier run's order on
+    # the instrument: no exit 0.
+    example = load_example("quote_both_sides.py")
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
+    view = RestingOrders()
+    view.mark_incomplete()
+    quoter = example.Quoter(RecordingSession(), view, args)
+    assert quoter.finish() == 1
+    assert "the view of resting orders is not complete" in capsys.readouterr().out
+
+
 class NotConnectedSession:
     """A session that is down: every send raises NotConnected, as the message never left."""
 
