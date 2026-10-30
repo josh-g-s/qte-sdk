@@ -113,6 +113,10 @@ class PodExchange:
         self._report_seq = 0
 
     async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+        if type_ == "not json":
+            # A text frame no envelope can be read from: it takes no seq, so it is no gap.
+            await ws.send("not json")
+            return
         self._seq += 1
         if type_ == "gap":
             return
@@ -122,7 +126,7 @@ class PodExchange:
             "payload": payload,
             "seq": self._seq,
         }
-        if type_ == "execution":
+        if type_ == "execution" or payload.get("with report_seq"):
             self._report_seq += 1
             env["report_seq"] = self._report_seq
         await ws.send(json.dumps(env))
@@ -644,6 +648,31 @@ async def test_an_unreadable_book_leaves_the_tickets_state_current():
     assert "warning: a message from the exchange was missed or unreadable" in out
     assert "ticket 17 is still working on the exchange" in out
     assert "messages were missed, so the ticket's states printed may be incomplete" in out
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [
+        pytest.param(("not json", {}), id="no type"),
+        pytest.param(("ticket_state", {"ticket_id": {"not": "an id"}}), id="ticket type"),
+        pytest.param(
+            ("book", {"instrument": {"not": "an instrument"}, "with report_seq": True}),
+            id="report_seq",
+        ),
+    ],
+)
+async def test_an_unreadable_message_that_may_be_the_tickets_answer_leaves_it_not_known(
+    unreadable,
+):
+    # An unreadable message with no type, of a ticket type, or carrying a report_seq may
+    # be the ticket's answer or a stop: the state held before it is not current.
+    after = [*WORKING, unreadable]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "warning: a message from the exchange was missed or unreadable" in out
+    assert "the state of ticket 17 not known (a message was missed since its last state)" in out
+    assert "still working on the exchange" not in out
 
 
 @pytest.mark.parametrize("seconds", ["0", "-5", "nan"])
