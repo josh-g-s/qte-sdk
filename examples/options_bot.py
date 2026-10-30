@@ -1184,8 +1184,9 @@ def stopped_at_once(progress: Progress) -> int:
     if bot.unsure:
         # Gone from its level, but perhaps moved and still resting: the warnings say where.
         return fail(f"interrupted: {bot.summary()}")
-    if bot.gone and bot.cancel_unread and not bot.missed:
-        # Gone with no report missed: an amend moving it would have been seen.
+    if bot.gone and not bot.missed:
+        # Gone with no report missed: an amend moving it would have been seen. A cancel
+        # not yet settled is named in the warning above.
         return fail("interrupted: this example's order is gone")
     return fail(
         f"interrupted: this example's order may still rest at {bot.where}; check and cancel it"

@@ -7177,6 +7177,21 @@ def test_options_bot_does_not_call_its_order_gone_after_missed_reports(ending: s
     assert "is gone" not in err
 
 
+def test_options_bot_says_its_order_is_gone_on_a_second_ctrl_c_with_its_cancels_settled(
+    capsys: Any,
+):
+    # The order is gone, every cancel of it is settled and nothing was missed: a second
+    # Ctrl+C says the order is gone, never that it may still rest.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.gone = True
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    err = capsys.readouterr().err
+    assert "interrupted: this example's order is gone" in err
+    assert "may still rest" not in err
+
+
 async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():
     # The resume shows the order resting, so the bot cancels it, and that cancel is in
     # flight when a message is missed live. That gap ends no resume: the cancel is not

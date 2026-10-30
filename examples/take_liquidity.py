@@ -46,9 +46,10 @@ may be one of its fills; a gap can also end the resume with no `ResumeComplete`.
 read before the `resume_ack` does not end the resume: books come through while the
 replay goes on, so with no order out the example still sends nothing until the resume
 ends. An `accepted` that comes through the resume is printed as answered after a
-reconnect, with no round trip. --seconds counts the time down too. Only the first connection is not retried:
-if it fails, the example says why and stops; a later one that fails for good (a revoked
-credential, say) says why and, with the order out, that it may have filled.
+reconnect, with no round trip. --seconds counts the time down too. Only the first
+connection is not retried: if it fails, the example says why and stops; a later one that
+fails for good (a revoked credential, say) says why and, with the order out, that it may
+have filled.
 """
 
 import argparse
