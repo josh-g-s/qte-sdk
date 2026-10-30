@@ -4835,6 +4835,9 @@ async def test_options_bot_takes_no_order_from_a_snapshot_after_a_drop_before_it
     assert "order_snapshot or the console" in out
     assert payloads(exchange, "cancel") == []
     assert exchange.resting == {("SPY261120P00665000", "BUY", 4_900_000): ("opt-test", 1)}
+    # Named once, with no generic "messages were missed" warning or "nothing rests" after.
+    assert "WARNING: messages from the exchange were missed" not in out
+    assert "nothing of the order rests" not in out
 
 
 async def test_options_bot_warns_and_fails_when_the_resume_is_refused():
@@ -6556,8 +6559,8 @@ async def test_options_bot_keeps_one_drain_deadline_across_a_ctrl_c():
 
 async def test_options_bot_takes_a_cancel_of_another_strategys_order_at_its_price_as_not_its_own():
     # The bot's cancel at its own price is answered by an order_cancelled for another
-    # strategy's order there: that was not this example's order. It warns, and cancels
-    # again where its own order rests.
+    # strategy's order there: that was not this example's order, and where this one
+    # rests is not known. It sends no further cancel to the level: it stops and warns.
     example = load_example("options_bot.py")
     contract, price = "SPY261120P00665000", 4_900_000
     view = StubView(incomplete=False)
@@ -6579,10 +6582,13 @@ async def test_options_bot_takes_a_cancel_of_another_strategys_order_at_its_pric
         request_ref=bot.cancel_ref,
     )
     bot.on_order_event(taken)
-    assert not bot.gone and bot.cancel_ref is None
-    assert bot.warnings and "that was not this example's" in bot.warnings[0]
+    assert bot.finished
+    [warning] = bot.warnings
+    assert "that was not this example's" in warning
+    assert "order_snapshot or the console" in warning
     await bot.act()
-    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    assert "nothing of the order rests" not in bot.summary()
 
 
 async def test_options_bot_cancels_nothing_when_a_snapshot_shows_another_strategy_at_its_level():
@@ -6607,6 +6613,164 @@ async def test_options_bot_cancels_nothing_when_a_snapshot_shows_another_strateg
     bot.stopping = True
     await bot.act()
     assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+
+
+def options_bot_accepted(example: Any, view: Any, sender: Any) -> Any:
+    """The bot with its order sent and accepted, before any cancel."""
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (OPTION_CONTRACT, OPTION_PRICE, 1, greeks)
+    return bot
+
+
+def resume_cut_short(gap: str) -> Any:
+    """What ends a resume with no ResumeComplete: a SeqGap, or a DecodeFailed of no type."""
+    return SeqGap(6, 8) if gap == "seq-gap" else DecodeFailed(None, ValueError("x"), 7)
+
+
+@pytest.mark.parametrize("gap", ["seq-gap", "unreadable"])
+async def test_options_bot_still_cancels_after_a_resume_cut_short(gap: str):
+    # Its order is accepted when the connection drops. The next session's resume is cut
+    # short by a message lost or unreadable, so no ResumeComplete comes. The bot takes
+    # that as the end of the resume, with the reports not recovered, and still cancels.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.on_event(Disconnected(error=None))
+    for event in [
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_cut_short(gap),
+    ]:
+        await bot.on_event(event)
+    assert bot.up and bot.missed
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+@pytest.mark.parametrize("gap", ["seq-gap", "unreadable"])
+async def test_options_bot_is_up_after_a_first_resume_cut_short(gap: str):
+    # The first session's resume is cut short before any order is sent: the session is
+    # up all the same, and the bot, having missed a message, sends no order and says why.
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    view.mark_incomplete()
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    for event in [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        resume_ack_event(False),
+        resume_cut_short(gap),
+    ]:
+        await bot.on_event(event)
+    assert bot.up
+    await bot.act()
+    assert sender.sent == []
+    assert "missed" in bot.why_none
+
+
+async def test_options_bot_chooses_again_when_its_new_was_not_sent():
+    # The send of the new raises NotConnected: nothing was sent, so there is no order
+    # that may rest. It is chosen and sent again once the connection takes data.
+    from qte_sdk.reconnect import NotConnected
+
+    class DownOnce(RecordingSender):
+        def __init__(self) -> None:
+            super().__init__()
+            self.down = True
+
+        async def send(self, type_: str, payload: Any) -> None:
+            if self.down:
+                self.down = False
+                raise NotConnected("down")
+            await super().send(type_, payload)
+
+    example = load_example("options_bot.py")
+    sender = DownOnce()
+    bot = options_bot_accepted(example, StubView(incomplete=False), sender)
+    await bot.act()
+    assert sender.sent == [] and bot.ref is None
+    assert bot.summary() == "no order was sent"
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and bot.ref is not None
+
+
+async def test_options_bot_says_the_session_never_came_up(capsys: Any):
+    # The first session's resume never completes, so the session is never up and
+    # nothing is sent. The run says so, rather than that no contract could take the
+    # order, and exits 1.
+    from google.protobuf import json_format
+
+    from qte_sdk.contract.v1.session_pb2 import Instruments
+
+    example = load_example("options_bot.py")
+    table = json_format.ParseDict(options_table(), Instruments())
+
+    class Session(RecordingSender):
+        instrument_table = table
+
+    session = Session()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(connected_event(reconnected=False, resume=replay_ack(False)))
+    args = SimpleNamespace(
+        watch_only=False, underlying=None, strat_id="opt-test", seconds=0.3, drain_seconds=0.3
+    )
+    task = asyncio.current_task()
+    async with asyncio.timeout(5):
+        code = await example.trade_from(session, queue, args, task, example.Progress())
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert [t for t, _ in session.sent] == ["subscribe"]
+    assert "never came up" in out
+    assert "no contract could take the order" not in out
+
+
+@pytest.mark.parametrize("ending", ["session-rejected", "credential-revoked"])
+@pytest.mark.parametrize("watch_only", [False, True], ids=["trading", "watch-only"])
+def test_options_bot_names_its_order_when_a_reconnect_fails_for_good(
+    ending: str, watch_only: bool, monkeypatch: pytest.MonkeyPatch, capsys: Any
+):
+    # A reconnect fails for good while its order may rest: the run names the order and
+    # how to check it, and exits 1, so a rerun does not just meet a duplicate. A
+    # watch-only run still ends on its watch-only line.
+    from websockets.exceptions import ConnectionClosedError
+    from websockets.frames import Close
+
+    from qte_sdk.connection import SessionRejected
+
+    example = load_example("options_bot.py")
+    monkeypatch.setenv("QTE_URL", "ws://127.0.0.1:1/ws")
+
+    async def run(url: str, args: Any, progress: Any) -> int:
+        bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", watch_only)
+        bot.contract, bot.price = OPTION_CONTRACT, OPTION_PRICE
+        if watch_only:
+            bot.would_send = f"LIMIT BUY 1 contract(s) of {OPTION_CONTRACT} @ 4.900000"
+        else:
+            bot.ref = "order-ref"
+        progress.bot = bot
+        if ending == "session-rejected":
+            raise SessionRejected(1, None)
+        raise ConnectionClosedError(Close(1008, "credential revoked"), None)
+
+    monkeypatch.setattr(example, "run", run)
+    argv = ["--strat-id", "opt-test", *(["--watch-only"] if watch_only else [])]
+    code = example.main(argv)
+    captured = capsys.readouterr()
+    if watch_only:
+        assert code == 0, captured.out + captured.err
+        assert captured.out.splitlines()[-1].startswith("watch-only: chose")
+        return
+    assert code == 1
+    assert f"may still rest at {OPTION_CONTRACT} BUY @ 4.900000" in captured.err
+    assert "order_snapshot or the console" in captured.err
+    assert "run it again" not in captured.err
 
 
 class RefusesEveryResume(FakeExchange):

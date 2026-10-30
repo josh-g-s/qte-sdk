@@ -108,15 +108,30 @@ session state, an option chain, Greeks and a book received since it reconnected.
 order reports cannot be recovered (the exchange did not resume, or messages were missed
 meanwhile) after its order was sent, it treats them as missed, as above, and sends no
 order from then on; a cancel in flight at the drop is then sent afresh, and a reply not
-yet come counts as lost until a later resume completes. Before an order
-is sent, there is nothing of its own to miss, so it chooses and sends as usual. An
+yet come counts as lost until a later resume completes. A resume cut short by a message
+missed or unreadable (a `SeqGap`, or a `DecodeFailed` of no known type) ends with no
+`ResumeComplete`: the example takes it as one that did not recover the reports, so the
+session is up again and an accepted order is still cancelled. Before an order is sent,
+a resume that does not recover the reports leaves nothing of its own to miss, so it
+chooses and sends as usual, but a message missed means it sends no order and says why.
+If the session never comes up (its first resume never completes), it says so, sends
+nothing and exits with status 1. A new whose send finds the connection down
+(`NotConnected`) was not sent: no order of it can rest, and it chooses again once the
+connection is back. An
 `accepted` that comes through the resume is printed as answered after a reconnect, with
 no round trip. If a cancel, one sent before a drop included, takes an order that is not
-its own (one
-that came to the level its order left, or another strategy's at its own price), it cancels
-again where its order rests and, at the end, warns of it and exits with status 1.
+its own at a level its order has left, it cancels again where its order rests and, at
+the end, warns of it and exits with status 1. If it takes another strategy's order at
+its own level, this one does not rest there (the team has one order per level) and
+where it rests is not known: it sends no further cancel, warns that it may still rest
+and how to check, and exits with status 1. When one warning already names the orders
+that may be this one, no generic warning of missed messages follows it.
 --seconds and --drain-seconds count the time down too.
 Only the first connection is not retried: if it fails, the example says why and stops.
+A reconnect that fails for good (a refused session, or a 1008 `credential revoked`)
+while its order may still rest names the order and how to check it (order_snapshot or
+the console) and exits with status 1; a watch-only run still ends on its `watch-only:`
+line.
 --seconds also bounds the first subscribe: if the connection stops taking data before it
 is sent, the example says so and exits with status 1, with no order sent.
 The replay or the snapshot covers only what the exchange had applied when it answered: an
@@ -149,7 +164,7 @@ import time
 from collections.abc import AsyncIterator
 
 from google.protobuf.message import Message
-from websockets.exceptions import ConnectionClosed, InvalidHandshake
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.books import LatestBooks
@@ -160,6 +175,7 @@ from qte_sdk.connection import (
     ReportGap,
     ResumeComplete,
     SessionRejected,
+    describe_close,
 )
 from qte_sdk.contract.v1.common_pb2 import (
     BUY,
@@ -357,6 +373,9 @@ class OptionsBot:
         # come never comes; a later resume that completes clears it.
         self.reply_lost = False
         self.gave_up = False  # stopping with the reply lost: nothing more to wait for
+        # Whether a warning already names the orders that may be this one and how to
+        # check them: the generic "messages were missed" warning would add nothing.
+        self.unsure = False
         self.warnings: list[str] = []  # printed at the end, which then exits with status 1
         # --watch-only: no message is ever sent, so `ref` stays None. `would_send` is the
         # order it would have sent, once chosen; `why_none` why no contract is chosen yet.
@@ -365,6 +384,11 @@ class OptionsBot:
         self.why_none = "no contract was chosen yet"
         # Whether a session is up and its resume complete; nothing is sent until it is.
         self.up = True
+        self.ever_up = False  # whether any session's resume has completed
+        # Whether a session announced a resume still to complete, and whether its
+        # `resume_ack` has been delivered: see `on_missed`.
+        self.resuming = False
+        self.resume_answered = False
         self.unreported_fills = False  # resumed from a snapshot after the order was sent
         self.subscribe_to: list[str] = []  # contracts to subscribe to once a session is up
 
@@ -541,16 +565,22 @@ class OptionsBot:
         print(f"sending a LIMIT buy of {size} contract(s): {self.where}")
         self.ref = new_request_ref()
         self.sent_at = time.monotonic()
-        await send_new(
-            self.session,
-            strat_id=self.strat_id,
-            instrument=contract,  # the contract's OCC symbol
-            side=BUY,
-            order_type=LIMIT,
-            size=size,  # contracts, never shares
-            price=price,
-            request_ref=self.ref,
-        )
+        try:
+            await send_new(
+                self.session,
+                strat_id=self.strat_id,
+                instrument=contract,  # the contract's OCC symbol
+                side=BUY,
+                order_type=LIMIT,
+                size=size,  # contracts, never shares
+                price=price,
+                request_ref=self.ref,
+            )
+        except NotConnected:
+            # Nothing was sent: no order of this example can rest. Choose again once the
+            # connection is back. (A ConnectionClosed may have sent it, so it stays sent.)
+            self.ref = None
+            print("not sent, the connection is down: choosing again once it is back")
 
     async def cancel(self) -> None:
         assert self.contract is not None
@@ -570,6 +600,8 @@ class OptionsBot:
 
     async def on_connected(self, connected: Connected) -> None:
         self.up = False  # until its resume is complete
+        self.resuming = connected.resume is not None
+        self.resume_answered = False
         if connected.reconnected:
             print("reconnected: sending nothing until the resume is complete")
         if connected.resume is None:
@@ -610,6 +642,8 @@ class OptionsBot:
         """A session's resume is complete, or the exchange did not resume it: take this
         example's order from the view of resting orders, and send again."""
         self.up = True
+        self.ever_up = True
+        self.resuming = False
         if self.view is None:
             return
         if self.view.incomplete:
@@ -670,6 +704,7 @@ class OptionsBot:
                 "that is this one"
             )
             self.missed = True
+            self.unsure = True
             self.gone = True
         else:
             print(f"nothing of the order rests at {self.where} (from the resume)")
@@ -723,6 +758,7 @@ class OptionsBot:
             "or the console, and cancel yourself any that is this one"
         )
         self.missed = True
+        self.unsure = True
         self.gone = True
         return True
 
@@ -747,6 +783,8 @@ class OptionsBot:
             await self.on_connected(event)
         elif isinstance(event, ResumeComplete):
             self.resumed(event.replayed)
+        elif isinstance(event, Received) and event.type == "resume_ack":
+            self.resume_answered = True
         item = as_market_data(event)
         if isinstance(item, Disconnected):
             self.on_disconnected(item)
@@ -768,10 +806,32 @@ class OptionsBot:
             if item is not None:
                 self.books.update(item)
                 self.greeks.update(item)
+            self.on_missed(
+                isinstance(item, SeqGap) or (isinstance(item, DecodeFailed) and item.type is None)
+            )
         elif is_order_event(event):
             self.on_order_event(event.message)  # type: ignore[attr-defined]
         if act:
             await self.act()
+
+    def on_missed(self, ends_resume: bool) -> None:
+        """A `SeqGap`, or a `DecodeFailed` whose type is unknown, ends a resume with no
+        `ResumeComplete` (the session stops waiting for it): take it as a resume that did
+        not recover the reports, so the session is up and a cancel can still be sent."""
+        if not self.resuming or not ends_resume:
+            return
+        if self.resume_answered:
+            print("the resume was cut short by a message missed or unreadable")
+        else:
+            # Delivered before the resume_ack, from what the session read ahead: the
+            # session's resume goes on, but the example errs safe and ends it here.
+            print(
+                "a message was missed or unreadable before the resume was answered: "
+                "taking the resume as cut short"
+            )
+        if self.view is not None:
+            self.view.mark_incomplete()
+        self.resumed(replayed=False)
 
     def ours(self, message: OrderState | OrderCancelled | Execution) -> bool:
         """Whether a report is about this example's order: same strategy, contract, side
@@ -858,11 +918,29 @@ class OptionsBot:
                 rested = "cancelled" if self.resting else "not left resting"
                 print(f"{rested}: {message.cancelled_size} at {self.where} ({reason})")
                 self.gone = True
+            case OrderCancelled() if self.own_cancel(ref) and message.price == self.price:
+                # The cancel, this one or one sent before a drop, took another strategy's
+                # order at this example's level. The team has one order per level, so
+                # this one does not rest there, and where it rests is not known: send no
+                # further cancel there, and stop.
+                print(
+                    f"the cancel took another strategy's order at {self.where}, not this "
+                    "one: cancelling nothing more"
+                )
+                self.warnings.append(
+                    f"a cancel at {self.where} took an order of your team there that was "
+                    "not this example's, so this example's order is not there and may "
+                    "still rest elsewhere: check with order_snapshot or the console, and "
+                    "cancel it yourself"
+                )
+                if ref == self.cancel_ref:
+                    self.cancel_ref = None
+                self.unsure = True
+                self.gone = True
             case OrderCancelled() if self.own_cancel(ref):
-                # The cancel, this one or one sent before a drop, took someone else's
-                # order: one at the level this example's order has left, or another
-                # strategy's at its own price. Cancel again where the order rests now; a
-                # NO_ORDER_AT_LEVEL then says none does.
+                # The cancel, this one or one sent before a drop, took an order at a level
+                # this example's order has left. Cancel again where the order rests now;
+                # a NO_ORDER_AT_LEVEL then says none does.
                 print(f"the cancel took an order at {price_text(message.price)}, not this one")
                 self.warnings.append(
                     f"a cancel took an order of your team at {price_text(message.price)} "
@@ -899,6 +977,8 @@ class OptionsBot:
             return "no order was sent"
         if self.rejected:
             return "the order was rejected, so nothing rests"
+        if self.unsure:
+            return f"the order sent to {self.where} may still rest: see the warnings above"
         text = f"nothing of the order rests; {self.filled} contract(s) filled"
         if self.unreported_fills and not self.missed:
             text += (
@@ -1188,6 +1268,8 @@ async def trade_from(
                     raise
                 print("interrupted: still cancelling; press Ctrl+C again to stop at once")
     if bot.watch_only:
+        if not bot.ever_up and bot.would_send is None:
+            bot.why_none = "the session never came up (its resume never completed)"
         return watch_only_outcome(bot)
     for warning in bot.warnings:
         print(f"WARNING: {warning}")
@@ -1212,7 +1294,7 @@ async def trade_from(
             "order_snapshot or the console, and cancel it yourself if it is this one"
         )
         return 1
-    if bot.ref is not None and bot.missed and not bot.rejected:
+    if bot.ref is not None and bot.missed and not bot.rejected and not bot.unsure:
         print(
             "WARNING: messages from the exchange were missed, so the order may have "
             f"moved, filled or still rest (last seen at {bot.where}); check your orders "
@@ -1234,7 +1316,15 @@ async def trade_from(
             f"{bot.where}; check and cancel it yourself"
         )
         return 1
-    if why == "time" and bot.ref is None:
+    if bot.ref is None and not bot.ever_up:
+        print(
+            "the session never came up (its resume never completed), so no order was sent; "
+            "check the exchange and run it again"
+        )
+        return 1
+    if why == "time" and bot.ref is None and bot.missed:
+        print(f"stopped after {args.seconds:g} seconds: no order was sent: {bot.why_none}")
+    elif why == "time" and bot.ref is None:
         print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
     print(bot.summary())
     return 1 if bot.warnings else 0
@@ -1243,6 +1333,29 @@ async def trade_from(
 def fail(message: str) -> int:
     print(message, file=sys.stderr)
     return 1
+
+
+def ended_for_good(progress: Progress, why: str) -> int:
+    """The run's end when the connection fails for good: on the first connection, or on
+    a reconnect that is not retried (a refused session, a revoked credential). An order
+    sent may still rest, so it is named with how to check it; a watch-only run ends on
+    its watch-only line."""
+    bot = progress.bot
+    if progress.watch_only:
+        print(why)
+        if bot is not None:
+            return watch_only_outcome(bot)
+        print("watch-only: NO CONTRACT CHOSEN: the connection ended before the chain was read")
+        return 1
+    if bot is None or bot.ref is None or bot.rejected or (bot.gone and not bot.missed):
+        return fail(why)
+    for warning in bot.warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    return fail(
+        f"{why}. WARNING: this example's order may still rest at {bot.where}: check with "
+        "order_snapshot or the console, and cancel it yourself if it is this one, before "
+        "running this again"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1264,19 +1377,21 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         return fail(f"not sent: {error}")
     except SessionRejected as error:
-        return fail(f"the exchange refused the session: {error}")
+        return ended_for_good(progress, f"the exchange refused the session: {error}")
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
-        return fail(f"could not connect to QTE_URL: {error}")
-    except ConnectionClosed:
-        if progress.watch_only:
-            print("the connection dropped before the session was up")
-            if progress.bot is not None:
-                return watch_only_outcome(progress.bot)
-            print(
-                "watch-only: NO CONTRACT CHOSEN: the connection dropped before the chain was read"
-            )
-            return 1
-        return fail("the connection dropped before the session was up: run it again")
+        return ended_for_good(progress, f"could not connect to QTE_URL: {error}")
+    except ConnectionClosed as error:
+        if progress.bot is None:
+            if progress.watch_only:
+                print("the connection dropped before the session was up")
+                print(
+                    "watch-only: NO CONTRACT CHOSEN: the connection dropped before the chain "
+                    "was read"
+                )
+                return 1
+            return fail("the connection dropped before the session was up: run it again")
+        close = describe_close(error) if isinstance(error, ConnectionClosedError) else "a close"
+        return ended_for_good(progress, f"the connection ended for good with {close}")
     except (KeyboardInterrupt, asyncio.CancelledError):
         # A Ctrl+C before the run could take it over, or a second one while it cancels.
         return stopped_at_once(progress)
