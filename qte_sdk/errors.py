@@ -383,12 +383,12 @@ CODES: dict[str, Entry] = {
         "the session ended, {close}{cause}{unanswered}",
         "Messages sent while disconnected may be missed: market data is not recovered, and "
         "your order reports only by a resume",
-        "Wait for ResumeComplete, then check positions with send_account_query; after a "
-        "credential revoked close, get a new token",
+        "{step}",
         "A ReconnectingSession's session ended: the exchange closed it, the connection "
         "dropped with no close frame, or the link failed; the same drop is delivered as a "
         "Disconnected event",
-        "Wait for ResumeComplete; act on the close's cause",
+        "Follow the line's next step: wait for the resume, or, when the session does not "
+        "reconnect, get a new token or connect again yourself",
     ),
     CONNECT_HANDSHAKE_FAILED: Entry(
         "the opening handshake failed ({kind}{status}); details withheld",

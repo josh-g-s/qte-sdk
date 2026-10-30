@@ -18,19 +18,23 @@ from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
-from qte_sdk import errors, logs, pacing
+from qte_sdk import errors, logs, pacing, reconnect
 from qte_sdk.connection import (
     _CLOSE_CAUSES,
     Connected,
     Disconnected,
     LivenessTimeout,
     ResumeComplete,
+    SessionRejected,
 )
-from qte_sdk.reconnect import ReconnectingSession, Retrying
-from qte_sdk.session import ResumeNotAcknowledged, SessionNotAcknowledged
+from qte_sdk.reconnect import Backoff, ReconnectingSession, Retrying
+from qte_sdk.session import ResumeNotAcknowledged, SessionNotAcknowledged, open_session
 
 LOG = "00000000000000aa"
 NO_CLOSE_FRAME = "close code 1006: the connection dropped with no close frame from the exchange"
+WAIT = "Wait for ResumeComplete, then check positions with send_account_query"
+NEW_TOKEN = "Get a new token from the console; this session does not reconnect"
+NO_RECONNECT = "Check positions with send_account_query; this session does not reconnect: "
 
 
 def close_of(fields: dict) -> str:
@@ -103,14 +107,14 @@ async def test_a_1012_and_a_dropped_connection_are_each_logged_once(caplog):
     assert [r.name for r in records] == ["qte_sdk.reconnect"] * 2
     assert {r.levelno for r in records} == {logging.WARNING}
     assert [r.fields for r in records] == [
-        {"close": "close code 1012", "cause": "", "unanswered": ""},
-        {"close": "close code 1006", "cause": NO_CLOSE_FRAME[15:], "unanswered": ""},
+        {"step": WAIT, "close": "close code 1012", "cause": "", "unanswered": ""},
+        {"step": WAIT, "close": "close code 1006", "cause": NO_CLOSE_FRAME[15:], "unanswered": ""},
     ]
     assert records[0].getMessage() == (
         "QTE-SESSION-DISCONNECTED: the session ended, close code 1012. Messages sent while "
         "disconnected may be missed: market data is not recovered, and your order reports "
         "only by a resume. Wait for ResumeComplete, then check positions with "
-        "send_account_query; after a credential revoked close, get a new token."
+        "send_account_query."
     )
     dropped = records[1].getMessage()
     assert dropped.startswith(f"QTE-SESSION-DISCONNECTED: the session ended, {NO_CLOSE_FRAME}. ")
@@ -155,6 +159,7 @@ async def test_unanswered_requests_are_counted_not_listed(caplog):
     assert seen[0].unanswered == (("new", "n1"), ("cancel", "c1"))
     assert close_of(record.fields) == NO_CLOSE_FRAME
     assert record.fields == {
+        "step": WAIT,
         "close": "close code 1006",
         "cause": NO_CLOSE_FRAME[15:],
         "unanswered": "; 2 unanswered requests (QTE-SESSION-UNANSWERED)",
@@ -200,7 +205,12 @@ async def test_a_json_line_carries_the_close_as_a_field(caplog):
     line = json.loads(logs.JsonFormatter().format(record))
     assert line["code"] == "QTE-SESSION-DISCONNECTED"
     assert line["message"].startswith("the session ended, close code 1012. Messages sent ")
-    assert line["fields"] == {"close": "close code 1012", "cause": "", "unanswered": ""}
+    assert line["fields"] == {
+        "step": WAIT,
+        "close": "close code 1012",
+        "cause": "",
+        "unanswered": "",
+    }
 
 
 class EndsWhileResuming:
@@ -243,15 +253,20 @@ async def test_a_close_with_no_code_kept_while_resuming_still_names_its_close(ca
     ]
 
 
-def emitted(monkeypatch: pytest.MonkeyPatch, disconnected: Disconnected) -> dict:
+def emitted(
+    monkeypatch: pytest.MonkeyPatch,
+    disconnected: Disconnected,
+    no_reconnect: str | None = None,
+    *,
+    resume: bool = True,
+) -> dict:
     """What `_log_disconnected` hands the warning thread, caught before it starts."""
     caught: list[dict] = []
     monkeypatch.setattr(
         pacing, "_emit", lambda message, code, **rest: caught.append(dict(rest, message=message))
     )
-    ReconnectingSession("wss://example.invalid", synthetic_token())._log_disconnected(
-        disconnected, None
-    )
+    rs = ReconnectingSession("wss://example.invalid", synthetic_token(), resume=resume)
+    rs._log_disconnected(disconnected, None, no_reconnect)
     [one] = caught
     return one
 
@@ -278,24 +293,42 @@ class Many(tuple):
         return 999_999_999
 
 
-def every_ending() -> list[Exception]:
-    endings: list[Exception] = [ConnectionClosedError(None, None), LivenessTimeout(3600.0)]
+def every_ending() -> list[tuple[Exception, ConnectionClosedError | None]]:
+    """Every failure a Disconnected can carry, with the close the connection was seen to
+    end with: none, or for a session that closed while connecting or resuming, the close
+    it kept the code of, and the close it kept no code of."""
+    endings: list[tuple[Exception, ConnectionClosedError | None]] = [
+        (ConnectionClosedError(None, None), None),
+        (LivenessTimeout(3600.0), None),
+    ]
     for code, causes in _CLOSE_CAUSES.items():
         for reason in causes:
-            endings.append(ConnectionClosedError(Close(code, reason or ""), None))
+            closed = ConnectionClosedError(Close(code, reason or ""), None)
+            endings.append((closed, None))
             revoked = reason == "credential revoked"
             for cls in (SessionNotAcknowledged, ResumeNotAcknowledged):
-                endings.append(cls("closed", close_code=code, credential_revoked=revoked))
+                endings.append((cls("closed", close_code=code, credential_revoked=revoked), None))
+                endings.append((cls("closed", close_code=code, credential_revoked=revoked), closed))
+                endings.append((cls("closed"), closed))
     return endings
+
+
+# What follows each ending: a reconnect, a revoked token, or the longest other reason.
+GAVE_UP = "it gave up after 999999999 failed attempts (Backoff.max_attempts)"
+AFTERWARDS = [(None, WAIT), (reconnect._REVOKED, NEW_TOKEN), (GAVE_UP, NO_RECONNECT + GAVE_UP)]
 
 
 @pytest.mark.parametrize("form", ["json", "%(message)s", logging.BASIC_FORMAT])
 def test_every_ending_reaches_a_real_pipe_in_one_line_with_its_close_and_count(monkeypatch, form):
     # A pipe takes at most 512 bytes in one write (see qte_sdk.update): a longer line is
-    # written in its short form there, which must fit for every close.
+    # written in its short form there, which must fit for every close and next step.
     from test_update import json_handler, plain_handler, read_all
 
-    endings = every_ending()
+    cases = [
+        (ending, closed, after, step)
+        for ending, closed in every_ending()
+        for after, step in AFTERWARDS
+    ]
     read, write = os.pipe()
     stream = open(write, "w", encoding="utf-8")  # noqa: SIM115
     handler = json_handler(stream) if form == "json" else plain_handler(stream, form)
@@ -305,8 +338,8 @@ def test_every_ending_reaches_a_real_pipe_in_one_line_with_its_close_and_count(m
     rs = ReconnectingSession("wss://example.invalid", synthetic_token())
     data = b""
     try:
-        for ending in endings:
-            rs._log_disconnected(Disconnected(ending, Many()), None)
+        for ending, closed, after, _ in cases:
+            rs._log_disconnected(Disconnected(ending, Many()), closed, after)
             disconnect_records(None)
             # Read after each one, so the pipe never fills and the lines keep their order.
             data += read_all(read)
@@ -315,15 +348,135 @@ def test_every_ending_reaches_a_real_pipe_in_one_line_with_its_close_and_count(m
         stream.close()
         os.close(read)
     lines = data.splitlines(keepends=True)
-    assert len(lines) == len(endings), data
+    assert len(lines) == len(cases), data
     count = "; 999999999 unanswered requests (QTE-SESSION-UNANSWERED)"
-    for line in lines:
+    for line, (_, _, _, step) in zip(lines, cases, strict=True):
         assert len(line) <= 512, (len(line), line)
         assert count.encode() in line
+        if form != "json":  # a JSON line gives the step as next_step, checked below
+            assert f". {step}.".encode() in line, line
     if form == "json":
         parsed = [json.loads(line) for line in lines]
         assert {p["code"] for p in parsed} == {errors.SESSION_DISCONNECTED}
         assert parsed[0]["fields"]["close"] == "close code 1006"
         assert all(set(p["fields"]) == {"close"} for p in parsed)  # every one written short
+        assert all(p["next_step"] == step for p, (*_, step) in zip(parsed, cases, strict=True))
         revoked = [p for p in parsed if p["fields"]["close"].endswith('"credential revoked"')]
-        assert len(revoked) == 3
+        # A close, then each of 2 types with its code, with its code and close, and with
+        # the close only; each with 3 next steps.
+        assert len(revoked) == 7 * 3
+        # The field keeps a long close's reason, which the message leaves out: a failure's
+        # type and its close (4 of each 3 next steps).
+        long = [
+            p
+            for p in parsed
+            if p["fields"]["close"].startswith(("SessionNotAck", "ResumeNotAck"))
+            and p["fields"]["close"].endswith('"too many link_drain messages"')
+        ]
+        assert len(long) == 4 * 3
+        assert all("link_drain" not in p["message"] for p in long)
+
+
+def step_of(records: list[logging.LogRecord]) -> list[str]:
+    return [r.next_step for r in records]
+
+
+async def test_a_revoked_close_says_get_a_new_token(caplog):
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        with pytest.raises(ConnectionClosedError):
+            await run(Ends(closing(1008, "credential revoked")), 1)
+        records = disconnect_records(caplog)
+    assert step_of(records) == [NEW_TOKEN]
+    assert records[0].getMessage().endswith(f". {NEW_TOKEN}.")
+    assert "ResumeComplete" not in records[0].getMessage()
+
+
+async def test_a_revoked_close_while_resuming_says_get_a_new_token(caplog):
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        with pytest.raises(ResumeNotAcknowledged):
+            await run(EndsWhileResuming(closing(1008, "credential revoked")), 1)
+        records = disconnect_records(caplog)
+    assert step_of(records) == [NEW_TOKEN]
+
+
+async def test_a_close_while_resuming_keeps_its_known_reason(caplog):
+    # The failure keeps only the code; the close the connection saw keeps the reason.
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        await run(EndsWhileResuming(closing(1008, "too many link_drain messages")), 1)
+        [record] = disconnect_records(caplog)
+    assert record.fields["close"] == (
+        'ResumeNotAcknowledged, close code 1008, reason "too many link_drain messages"'
+    )
+    assert record.next_step == WAIT
+
+
+async def drops_once(rs_options: dict, handler: Callable[[ServerConnection], Awaitable[None]]):
+    """The events of one ReconnectingSession against `handler` until iteration ends."""
+    seen: list = []
+    async with serve_local(handler) as url:
+        rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep, **rs_options)
+        async with rs, asyncio.timeout(10):
+            async for event in rs:
+                seen.append(event)
+    return seen
+
+
+async def test_with_reconnecting_off_a_drop_says_no_reconnect_follows(caplog):
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        events = await drops_once({"backoff": None}, Ends(drop_connection))
+        records = disconnect_records(caplog)
+    assert isinstance(events[-1], Disconnected)
+    assert step_of(records) == [NO_RECONNECT + "reconnecting is off (backoff=None)"]
+
+
+async def test_with_reconnecting_off_a_close_while_resuming_says_no_reconnect_follows(caplog):
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        with pytest.raises(ResumeNotAcknowledged):
+            await drops_once({"backoff": None}, EndsWhileResuming(closing(1012)))
+        records = disconnect_records(caplog)
+    assert step_of(records) == [NO_RECONNECT + "reconnecting is off (backoff=None)"]
+
+
+async def test_giving_up_says_no_reconnect_follows(caplog):
+    backoff = Backoff(max_attempts=2)
+    with caplog.at_level(logging.WARNING, logger="qte_sdk.reconnect"):
+        with pytest.raises(ResumeNotAcknowledged):
+            await drops_once({"backoff": backoff}, EndsWhileResuming(closing(1012), closing(1012)))
+        records = disconnect_records(caplog)
+    # The first attempt's failure is followed by a retry; the second gives up.
+    assert step_of(records) == [
+        WAIT,
+        NO_RECONNECT + "it gave up after 2 failed attempts (Backoff.max_attempts)",
+    ]
+
+
+def test_a_failure_that_is_not_retryable_says_no_reconnect_follows(monkeypatch):
+    rs = ReconnectingSession("wss://example.invalid", synthetic_token())
+    rejected = SessionRejected(3, None)
+    assert rs._why_no_reconnect(rejected, 1) == "the failure is not retryable"
+    warning = emitted(monkeypatch, Disconnected(rejected), rs._why_no_reconnect(rejected, 1))
+    assert warning["next_step"] == NO_RECONNECT + "the failure is not retryable"
+
+
+def test_with_resuming_off_the_step_waits_for_connected(monkeypatch):
+    warning = emitted(monkeypatch, Disconnected(None), resume=False)
+    assert warning["next_step"] == (
+        "Wait for Connected, then check positions with send_account_query"
+    )
+
+
+@pytest.mark.parametrize("ending", [drop_connection, closing(1012)])
+async def test_open_session_logs_nothing(caplog, ending):
+    async def handler(ws: ServerConnection) -> None:
+        await ws.recv()  # auth
+        await ws.send(ack(log_id=LOG))
+        await ending(ws)
+
+    with caplog.at_level(logging.DEBUG):
+        async with serve_local(handler) as url:
+            with pytest.raises(ConnectionClosedError):
+                async with asyncio.timeout(10):
+                    async with await open_session(url, synthetic_token()) as session:
+                        async for _ in session:
+                            pass
+        assert disconnect_records(caplog) == []
