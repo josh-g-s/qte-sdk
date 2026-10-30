@@ -834,6 +834,23 @@ class Connection:
         self._pending_ws = ws
         return ws
 
+    def _close_seen(self) -> ConnectionClosed | None:
+        """This connection's close as a `ConnectionClosedOK`, for `describe_close` when
+        iteration ended without raising, with any reason not in `_KNOWN_CLOSE_REASONS`
+        withheld; None if no close frame was read or sent."""
+        ws = self._ws if self._ws is not None else self._pending_ws
+        protocol = getattr(ws, "protocol", None)
+        rcvd = getattr(protocol, "close_rcvd", None)
+        sent = getattr(protocol, "close_sent", None)
+        if not isinstance(rcvd, Close) and not isinstance(sent, Close):
+            return None
+        closed = ConnectionClosedOK(
+            rcvd if isinstance(rcvd, Close) else None,
+            sent if isinstance(sent, Close) else None,
+            getattr(protocol, "close_rcvd_then_sent", None),
+        )
+        return _without_close_reasons(closed)
+
     def _close_code_received(self) -> int | None:
         """The close code the peer sent, as soon as `websockets` has read its close frame,
         even if nothing reading this connection has met the close yet, and even while

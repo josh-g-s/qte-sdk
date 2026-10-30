@@ -71,6 +71,7 @@ SESSION_RESUME_NOT_ACKNOWLEDGED = "QTE-SESSION-RESUME-NOT-ACKNOWLEDGED"
 SESSION_RESUME_TIMEOUT = "QTE-SESSION-RESUME-TIMEOUT"
 SESSION_LOG_CHANGED = "QTE-SESSION-LOG-CHANGED"
 SESSION_UNANSWERED = "QTE-SESSION-UNANSWERED"
+SESSION_DISCONNECTED = "QTE-SESSION-DISCONNECTED"
 # CONNECT
 CONNECT_HANDSHAKE_FAILED = "QTE-CONNECT-HANDSHAKE-FAILED"
 CONNECT_LIVENESS_TIMEOUT = "QTE-CONNECT-LIVENESS-TIMEOUT"
@@ -378,6 +379,17 @@ CODES: dict[str, Entry] = {
         "(listed in Disconnected.unanswered as message type and request_ref)",
         "Settle each after ResumeComplete, again after one order delay; never resend blind",
     ),
+    SESSION_DISCONNECTED: Entry(
+        "the session ended, {close}{unanswered}",
+        "Messages sent while disconnected may be missed: market data is not recovered, and "
+        "your order reports only by a resume",
+        "Treat your resting orders and positions as uncertain until the next "
+        "ResumeComplete; if the close says to get a new token, get one first",
+        "A ReconnectingSession's session ended: the exchange closed it, the connection "
+        "dropped with no close frame, or the link failed; the same drop is delivered as a "
+        "Disconnected event",
+        "Wait for ResumeComplete; act on the close's cause",
+    ),
     CONNECT_HANDSHAKE_FAILED: Entry(
         "the opening handshake failed ({kind}{status}); details withheld",
         "{why}",
@@ -678,6 +690,7 @@ FIELDS = frozenset(
     {
         "action",
         "characters",
+        "close",
         "command",
         "count",
         "cursor",
@@ -702,6 +715,7 @@ FIELDS = frozenset(
         "step",
         "strerror",
         "type",
+        "unanswered",
         "underlying",
         "version",
         "what",

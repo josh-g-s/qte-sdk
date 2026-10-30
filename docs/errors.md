@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.27
+**Version:** 0.28
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -254,6 +254,12 @@ Log lines. `qte_sdk.logs.configure()` (which the commands and examples call) wit
 - Raised as: a WARNING from the `qte_sdk.reconnect` logger, with `count` and `refs` (each request's message type and `request_ref`, never its contents), logged by a `ReconnectingSession` when a session drops; the same requests are in that `Disconnected`'s `unanswered`, as (message type, request_ref) pairs. The log shortens a ref of 32 hex digits, such as one `new_request_ref` made, to its first 12 and `...`, since a log withholds anything shaped like a token; `unanswered` has it whole.
 - Cause: These requests were sent on the session that dropped and got no answer echoing their `request_ref` (`accepted`, `reject`, `order_cancelled`, `account_state`, `ticket_accepted`, `ticket_reject`, `break_request_state` or `break_request_reject`). They are unconfirmed, not lost: each may or may not have reached the exchange, and a resume that omits one does not prove it is gone, since one still waiting out its order delay can be applied after `ResumeComplete`. A `reject` with no `request_ref` cannot be matched, so its request stays listed. A ref sent again while still listed is listed once, under its first message type, until the first answer echoing it; give each request its own ref.
 - Fix: After `ResumeComplete`, settle each against `RestingOrders`, your fills and (after a snapshot) your position from `send_account_query`, then check again after one order delay. Never resend an order only because it is not resting. Send a `cancel` again if its target still rests. Never repeat an `amend` as sent: it sets the remaining size, so work out the size you want from what now rests.
+
+### QTE-SESSION-DISCONNECTED
+
+- Raised as: a WARNING from the `qte_sdk.reconnect` logger, with `close` and `unanswered`, logged by a `ReconnectingSession` once for each `Disconnected` it delivers (not for each retry, which is a `Retrying` event, and not when you call `close`). `close` is the `qte_sdk.connection.describe_close` line, such as `close code 1012` or `close code 1006: the connection dropped with no close frame from the exchange`; when the session ended another way, such as a link presumed dead, it is the failure's type and code, such as `LivenessTimeout (QTE-CONNECT-LIVENESS-TIMEOUT)`, and never its message. `unanswered` is empty, or the number of requests with no answer, such as `; 2 unanswered requests, listed by QTE-SESSION-UNANSWERED`: their refs are in that warning, logged for the same drop.
+- Cause: The session ended: the exchange closed it, the connection dropped with no close frame, or the link failed. The same drop is delivered as a `Disconnected` event; this line makes it visible in a log too. A session from `open_session` logs nothing: its iteration ends or raises instead.
+- Fix: Treat your resting orders and positions as uncertain until the next `ResumeComplete`. Act on the close's cause: for 1008 `credential revoked`, get a new token; for most others, the `ReconnectingSession` reconnects and resumes by itself.
 
 ## CONNECT
 

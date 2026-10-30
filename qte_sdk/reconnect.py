@@ -148,6 +148,12 @@ logged at WARNING through the `qte_sdk.reconnect` logger, with their count and r
 not lost: each may or may not have reached the exchange, and a resume that omits one does
 not prove it is gone. The list starts empty on each session.
 
+Each `Disconnected` delivered is also logged once, as `QTE-SESSION-DISCONNECTED` at WARNING
+through the `qte_sdk.reconnect` logger, with `describe_close` of the close (or, when the
+session ended another way, the failure's type and code) and the number of unanswered
+requests when there are any. A retry is not logged again (it is a `Retrying` event), nor is
+a session ended by `close`.
+
 Which failures are retried (`is_retryable`): a dropped or closed connection, a connection
 that could not be opened (`OSError` or a timeout), a handshake answered with a malformed
 response or with HTTP 5xx, 408 or 429, and a session that closed before it was
@@ -198,6 +204,7 @@ from qte_sdk.connection import (
     ResumeComplete,
     SessionRejected,
     _credential_revoked,
+    describe_close,
 )
 from qte_sdk.contract.v1.order_events_pb2 import AccountState
 from qte_sdk.contract.v1.session_pb2 import (
@@ -661,6 +668,7 @@ class ReconnectingSession:
                             disconnected = Disconnected(failure, self._take_unanswered())
                             if self.resting is not None:
                                 self.resting.apply(disconnected)
+                            self._log_disconnected(disconnected, None)
                             yield disconnected
                             if self._closed:
                                 return
@@ -724,6 +732,7 @@ class ReconnectingSession:
                 self._session = None
                 if self._closed:
                     return
+                self._log_disconnected(disconnected, session)
                 yield disconnected
                 if self._closed:
                     return
@@ -1087,6 +1096,29 @@ class ReconnectingSession:
             )
         return unanswered
 
+    def _log_disconnected(self, disconnected: Disconnected, session: Session | None) -> None:
+        """Log `QTE-SESSION-DISCONNECTED` for a `Disconnected` about to be delivered: once
+        per drop, never for a retry, and not when `close` ended the session. It carries
+        `describe_close` of the close, or the failure's type and code when the session
+        ended another way, and the number of unanswered requests when there are any (their
+        refs are in `QTE-SESSION-UNANSWERED`). Written from a thread of its own, as every
+        SDK warning is (see `qte_sdk.pacing._warn`), never on the event loop."""
+        close = _ended_by(disconnected.error, session)
+        count = len(disconnected.unanswered)
+        unanswered = (
+            f"; {count} unanswered request{'' if count == 1 else 's'}, listed by "
+            f"{_errors.SESSION_UNANSWERED}"
+            if count
+            else ""
+        )
+        _pacing._warn(
+            _errors.SESSION_DISCONNECTED,
+            short_what=f"the session ended, {close.split(': ', 1)[0]}{unanswered}",
+            target=_log,
+            close=close,
+            unanswered=unanswered,
+        )
+
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):
             return True
@@ -1100,6 +1132,22 @@ class ReconnectingSession:
             return error
         assert isinstance(replacement, Exception)
         return replacement
+
+
+def _ended_by(failure: Exception | None, session: Session | None) -> str:
+    """How a session ended, in one line that cannot hold the token: `describe_close` of
+    its close, or for any other failure its type name and code (such as
+    `LivenessTimeout (QTE-CONNECT-LIVENESS-TIMEOUT)`), never its message."""
+    if isinstance(failure, ConnectionClosed):
+        return describe_close(failure)
+    if failure is None:
+        closed = session.connection._close_seen() if session is not None else None
+        if closed is not None:
+            return describe_close(closed)
+        return "the exchange closed the connection"
+    name = type(failure).__name__
+    code = getattr(failure, "code", None)
+    return f"{name} ({code})" if isinstance(code, str) and code in _errors.CODES else name
 
 
 _CLOSED = object()
