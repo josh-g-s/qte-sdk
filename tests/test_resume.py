@@ -12,7 +12,7 @@ from contextlib import aclosing
 import pytest
 from fake_exchange import LoopClock, drop_connection, frame, serve_local, wait_until
 from test_calendar import CALENDAR, CALENDAR_PAYLOAD, calendar_frame
-from test_reconnect import EMPTY, Clock, auth, resume, resume_ack
+from test_reconnect import DROP_CODES, EMPTY, Clock, auth, resume, resume_ack
 from test_session import ack, assert_token_absent, session_reject, synthetic_token
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection
@@ -1466,11 +1466,12 @@ async def test_a_halt_reject_read_before_a_new_terms_calendar_is_counted_once(mo
     from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 
     caught: list[str] = []
-    # The drop's QTE-SESSION-UNANSWERED for "r" is not the warning this test counts.
+    # The drop's QTE-SESSION-UNANSWERED for "r" and its QTE-SESSION-DISCONNECTED are not
+    # the warning this test counts.
     monkeypatch.setattr(
         pacing,
         "_emit",
-        lambda message, code, **_: code == errors.SESSION_UNANSWERED or caught.append(message),
+        lambda message, code, **_: code in DROP_CODES or caught.append(message),
     )
     monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
     received: list[dict] = []

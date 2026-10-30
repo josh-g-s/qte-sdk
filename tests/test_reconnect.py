@@ -125,6 +125,8 @@ EMPTY = resume_ack()
 # What follows each `Connected` when the exchange answers with the empty marker: the
 # `resume_ack` itself, then the resume's completion.
 RESUMED = [Received, ResumeComplete]
+# Logged on each drop; a test counting another warning leaves them out.
+DROP_CODES = (errors.SESSION_UNANSWERED, errors.SESSION_DISCONNECTED)
 
 
 def session(
@@ -1264,11 +1266,12 @@ async def test_a_reject_replayed_after_a_reconnect_never_names_a_later_order(mon
     from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 
     caught: list[str] = []
-    # The drop's QTE-SESSION-UNANSWERED for "r" is not the warning this test counts.
+    # The drop's QTE-SESSION-UNANSWERED for "r" and its QTE-SESSION-DISCONNECTED are not
+    # the warning this test counts.
     monkeypatch.setattr(
         pacing,
         "_emit",
-        lambda message, code, **_: code == errors.SESSION_UNANSWERED or caught.append(message),
+        lambda message, code, **_: code in DROP_CODES or caught.append(message),
     )
     reject = {
         "request_ref": "r",
@@ -1369,7 +1372,12 @@ def test_an_earlier_connections_answer_is_not_read_again_before_the_term_is_know
     from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 
     caught: list[str] = []
-    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    # The drop's QTE-SESSION-DISCONNECTED is not the warning this test counts.
+    monkeypatch.setattr(
+        pacing,
+        "_emit",
+        lambda message, code, **_: code in DROP_CODES or caught.append(message),
+    )
     monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
     rs._reports.restore((2, frozenset()))
@@ -1400,7 +1408,12 @@ def test_an_earlier_connections_answer_is_not_read_again_unless_its_term_is_name
     from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 
     caught: list[str] = []
-    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    # The drop's QTE-SESSION-DISCONNECTED is not the warning this test counts.
+    monkeypatch.setattr(
+        pacing,
+        "_emit",
+        lambda message, code, **_: code in DROP_CODES or caught.append(message),
+    )
     monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
     halts = rs._chain_halts
@@ -1427,7 +1440,12 @@ def test_an_earlier_connections_answer_is_read_again_once_the_term_is_the_same(m
     from qte_sdk.contract.v1.order_entry_pb2 import NewOrder
 
     caught: list[str] = []
-    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    # The drop's QTE-SESSION-DISCONNECTED is not the warning this test counts.
+    monkeypatch.setattr(
+        pacing,
+        "_emit",
+        lambda message, code, **_: code in DROP_CODES or caught.append(message),
+    )
     monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
     rs = ReconnectingSession("ws://127.0.0.1:9", synthetic_token())
     rs._reports.restore((2, frozenset()))
@@ -1464,7 +1482,12 @@ async def test_a_chain_halt_read_before_the_ack_shares_the_reconnecting_sessions
     from qte_sdk import options, pacing
 
     caught: list[str] = []
-    monkeypatch.setattr(pacing, "_emit", lambda message, code, **_: caught.append(message))
+    # The drop's QTE-SESSION-DISCONNECTED is not the warning this test counts.
+    monkeypatch.setattr(
+        pacing,
+        "_emit",
+        lambda message, code, **_: code in DROP_CODES or caught.append(message),
+    )
     monkeypatch.setattr(options, "_monotonic", lambda: 1000.0)
     cancel = frame(
         "order_cancelled",

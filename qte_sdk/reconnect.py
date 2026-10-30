@@ -148,6 +148,12 @@ logged at WARNING through the `qte_sdk.reconnect` logger, with their count and r
 not lost: each may or may not have reached the exchange, and a resume that omits one does
 not prove it is gone. The list starts empty on each session.
 
+Each `Disconnected` delivered is also logged once, as `QTE-SESSION-DISCONNECTED` at WARNING
+through the `qte_sdk.reconnect` logger, with `describe_close` of the close (or, when the
+session ended another way, the failure's type and code) and the number of unanswered
+requests when there are any. A retry is not logged again (it is a `Retrying` event), nor is
+a session ended by `close`.
+
 Which failures are retried (`is_retryable`): a dropped or closed connection, a connection
 that could not be opened (`OSError` or a timeout), a handshake answered with a malformed
 response or with HTTP 5xx, 408 or 429, and a session that closed before it was
@@ -179,12 +185,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from google.protobuf.message import Message
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError
+from websockets.frames import Close
 
 from qte_sdk import errors as _errors
 from qte_sdk import options as _options
 from qte_sdk import pacing as _pacing
 from qte_sdk.connection import (
+    CREDENTIAL_REVOKED_CLOSE_REASON,
     TERM_CHANGE_CLOSE_CODE,
     Connected,
     Connection,
@@ -198,6 +206,8 @@ from qte_sdk.connection import (
     ResumeComplete,
     SessionRejected,
     _credential_revoked,
+    _without_close_reasons,
+    describe_close,
 )
 from qte_sdk.contract.v1.order_events_pb2 import AccountState
 from qte_sdk.contract.v1.session_pb2 import (
@@ -431,6 +441,8 @@ class ReconnectingSession:
         # Set when the exchange closed the current attempt's connection for a term change,
         # which an attempt checks even when a cancellation hides the error that said so.
         self._term_change_seen = False
+        # How the last failed attempt's connection ended, for its QTE-SESSION-DISCONNECTED.
+        self._attempt_close: ConnectionClosed | None = None
         # Each request_ref sent on the current session and not yet answered, mapped to its
         # message type, in the order sent: what its Disconnected names in `unanswered`.
         self._unanswered: dict[str, str] = {}
@@ -655,16 +667,23 @@ class ReconnectingSession:
                     if failure is not None:
                         failures += 1
                         last = failure
+                        gives_up = self._gives_up(failure, failures)
                         if acknowledged:
                             # The session was up, if only briefly: whatever it had received
                             # is lost, so this is a disconnect like any other.
                             disconnected = Disconnected(failure, self._take_unanswered())
                             if self.resting is not None:
                                 self.resting.apply(disconnected)
+                            self._log_disconnected(
+                                disconnected,
+                                self._attempt_close,
+                                self._why_no_reconnect(failure, failures) if gives_up else None,
+                            )
+                            self._attempt_close = None
                             yield disconnected
                             if self._closed:
                                 return
-                        if self._gives_up(failure, failures):
+                        if gives_up:
                             raise failure
 
                 assert session is not None
@@ -724,6 +743,12 @@ class ReconnectingSession:
                 self._session = None
                 if self._closed:
                     return
+                ends = (failure is not None and not is_retryable(failure)) or self.backoff is None
+                self._log_disconnected(
+                    disconnected,
+                    session.connection._close_seen(),
+                    self._why_no_reconnect(failure, None) if ends else None,
+                )
                 yield disconnected
                 if self._closed:
                     return
@@ -805,6 +830,7 @@ class ReconnectingSession:
         log_reset = False
         acked_log_id: str | None = None
         self._term_change_seen = False
+        self._attempt_close = None
         # Answers read from here on, before the ack included, are this connection's.
         self._chain_halts._connecting()
         try:
@@ -910,6 +936,17 @@ class ReconnectingSession:
                 # It may repeat the token, so it is not kept in this frame while the close
                 # below is awaited, where a cancellation would show it in the traceback.
                 del drained
+            # How the connection ended, kept before the close below sends a frame of its
+            # own, for the QTE-SESSION-DISCONNECTED line of a resume that failed without a
+            # close code (a 1001 close, or a drop with no close frame).
+            ended = session._failure
+            seen = (
+                ended if isinstance(ended, ConnectionClosed) else session.connection._close_seen()
+            )
+            # Kept redacted, as every close this class holds is: only known reasons stay.
+            self._attempt_close = None if seen is None else _without_close_reasons(seen)
+            del seen
+            del ended
             await self._close_session(session)
             self._session = None
             session = None
@@ -1087,6 +1124,68 @@ class ReconnectingSession:
             )
         return unanswered
 
+    def _why_no_reconnect(self, failure: Exception | None, failures: int | None) -> str:
+        """Why no reconnect follows a disconnect that ends iteration, for the next step of
+        its `QTE-SESSION-DISCONNECTED`: `failures` is the count of failed attempts in a
+        row, or None after a session that was up."""
+        if _revoked(failure):
+            return _REVOKED
+        if self.backoff is None:
+            return "reconnecting is off (backoff=None)"
+        if failure is not None and not is_retryable(failure):
+            return "the failure is not retryable"
+        return f"it gave up after {failures} attempts (Backoff.max_attempts)"
+
+    def _log_disconnected(
+        self,
+        disconnected: Disconnected,
+        closed: ConnectionClosed | None,
+        no_reconnect: str | None = None,
+    ) -> None:
+        """Log `QTE-SESSION-DISCONNECTED` for a `Disconnected` about to be delivered: once
+        per drop, never for a retry, and not when `close` ended the session. It carries
+        `describe_close` of the close, or the failure's type and code when the session
+        ended another way, and the number of unanswered requests when there are any (their
+        refs are in `QTE-SESSION-UNANSWERED`). Its next step depends on what follows: the
+        new session (and its resume, if it resumes); or, when no reconnect follows
+        (`no_reconnect` says why), a new token after a revoked close, and otherwise a check
+        of positions. Written from a thread of its own, as every SDK warning is (see
+        `qte_sdk.pacing._warn`), never on the event loop."""
+        if no_reconnect == _REVOKED:
+            step = "Get a new token from the console; this session does not reconnect"
+        elif no_reconnect is not None:
+            step = (
+                "Open a new session, then check positions; this session does not reconnect: "
+                f"{no_reconnect}"
+            )
+        else:
+            # A refused resume, and resuming off, give a Connected with no ResumeComplete.
+            step = _WAIT_STEP
+        close, found, cause = _ended_by(disconnected.error, closed).partition(": ")
+        count = len(disconnected.unanswered)
+        unanswered = (
+            f"; {count} unanswered request{'' if count == 1 else 's'} "
+            f"({_errors.SESSION_UNANSWERED})"
+            if count
+            else ""
+        )
+        # On a pipe, socket or terminal, a line over 512 bytes is written short (see
+        # `_pacing._warn`): without the cause, which `describe_close` and docs/errors.md
+        # give for the code, and with only the close as a field (the count and the next
+        # step stay in the message). Its message names the close without a reason when the
+        # close is long; the field keeps the reason. So it fits for every close.
+        short_close = close if len(close) <= _SHORT_CLOSE else _CLOSE_REASON.sub("", close)
+        _pacing._warn(
+            _errors.SESSION_DISCONNECTED,
+            short_what=f"the session ended, {short_close}{unanswered}",
+            short_fields=("close",),
+            target=_log,
+            step=step,
+            close=close,
+            cause=f": {cause}" if found else "",
+            unanswered=unanswered,
+        )
+
     def _gives_up(self, failure: Exception, failures: int) -> bool:
         if self.backoff is None or not is_retryable(failure):
             return True
@@ -1101,6 +1200,58 @@ class ReconnectingSession:
         assert isinstance(replacement, Exception)
         return replacement
 
+
+def _ended_by(failure: Exception | None, closed: ConnectionClosed | None) -> str:
+    """How a session ended, in one line that cannot hold the token: `describe_close` of
+    its close; for a failure while connecting or resuming, its type name and the close
+    (such as `ResumeNotAcknowledged, close code 1012`), from its close code or else from
+    `closed`, how the connection was seen to end; for any other failure its type name and
+    code (such as `LivenessTimeout (QTE-CONNECT-LIVENESS-TIMEOUT)`); never its message."""
+    if isinstance(failure, ConnectionClosed):
+        return describe_close(failure)
+    if failure is None:
+        if closed is not None:
+            return describe_close(closed)
+        return "the exchange closed the connection"
+    name = type(failure).__name__
+    # A session that closed while connecting or resuming keeps the close's code, and
+    # whether it said the token was revoked: the only reason that changes what to do.
+    close_code = getattr(failure, "close_code", None)
+    if isinstance(close_code, int) and not isinstance(close_code, bool):
+        if closed is not None and closed.rcvd is not None and closed.rcvd.code == close_code:
+            # The close as the connection saw it keeps its reason, if a known one.
+            return f"{name}, {describe_close(closed)}"
+        revoked = getattr(failure, "credential_revoked", False) is True
+        reason = CREDENTIAL_REVOKED_CLOSE_REASON if revoked else ""
+        return f"{name}, {describe_close(ConnectionClosedError(Close(close_code, reason), None))}"
+    if isinstance(failure, SessionNotAcknowledged) and closed is not None:
+        # Closed with no code it keeps: a normal close (such as 1001), or a drop.
+        return f"{name}, {describe_close(closed)}"
+    code = getattr(failure, "code", None)
+    return f"{name} ({code})" if isinstance(code, str) and code in _errors.CODES else name
+
+
+def _revoked(failure: Exception | None) -> bool:
+    """Whether `failure` says the token was revoked: a close, or a session that closed so
+    while connecting or resuming."""
+    return _credential_revoked(failure) or (
+        isinstance(failure, SessionNotAcknowledged) and failure.credential_revoked is True
+    )
+
+
+# The next step of QTE-SESSION-DISCONNECTED while the session reconnects.
+_WAIT_STEP = (
+    "Wait for Connected, and ResumeComplete if it resumes, then check positions with "
+    "send_account_query"
+)
+
+# What `_why_no_reconnect` gives for a revoked token, which has a next step of its own.
+_REVOKED = "credential revoked"
+
+# The longest close the short form of QTE-SESSION-DISCONNECTED names with its reason; a
+# longer one is named by its code (`_CLOSE_REASON` removed).
+_SHORT_CLOSE = 64
+_CLOSE_REASON = re.compile(r', reason "[^"]*"')
 
 _CLOSED = object()
 
