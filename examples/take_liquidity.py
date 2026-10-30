@@ -41,11 +41,11 @@ drop is never sent again. If the exchange replays the reports missed, the order'
 snapshot of the resting orders instead, or does not resume, the reports missed are not
 recovered, and a market order never rests, so nothing says how it filled: the example says
 so, tells you to check your fills, and exits with status 1. So it does, too, if a message is
-missed or unreadable during the resume (a `SeqGap` or `DecodeFailed`), since the report lost
-may be one of its fills; a gap can also end the resume with no `ResumeComplete`. One
-read before the `resume_ack` does not end the resume: books come through while the
-replay goes on, so with no order out the example still sends nothing until the resume
-ends. An `accepted` that comes through the resume is printed as answered after a
+missed or unreadable during the resume (a `SeqGap` or `DecodeFailed`), or while its order
+is out, since the report lost may be one of its fills; a gap can also end the resume with
+no `ResumeComplete`. One read before the `resume_ack` does not end the resume: books come
+through while the replay goes on, so with no order out the example still sends nothing
+until the resume ends. An `accepted` that comes through the resume is printed as answered after a
 reconnect, with no round trip. --seconds counts the time down too. Only the first
 connection is not retried: if it fails, the example says why and stops; a later one that
 fails for good (a revoked credential, say) says why and, with the order out, that it may
@@ -146,6 +146,7 @@ class Taker:
         # Whether the order was in flight at a drop, until a resume says what became of it.
         self.in_doubt = False
         self.lost = False  # its reports while disconnected were not recovered
+        self.unsure = False  # a message was missed while the order was out
         # Whether a resume announced by a session is still to complete, and whether its
         # `resume_ack` has been delivered: a gap before it does not end the resume.
         self.resuming = False
@@ -220,6 +221,11 @@ class Taker:
         also ends the resume with no `ResumeComplete` (the session stops waiting for it),
         so it counts as a resume that did not recover the reports missed."""
         self.missed = True
+        if self.order_out():
+            # The report lost may be one of this order's, and a fill carries no
+            # request_ref: what follows cannot be told from another order's, so the
+            # outcome is not known for sure and the run ends with status 1.
+            self.unsure = True
         if not self.resuming:
             return
         if ends_resume and self.resume_answered:
@@ -418,7 +424,7 @@ async def run(url: str, args: argparse.Namespace) -> int:
                         taker.on_order_event(event.message)
                     if taker.done:
                         print(taker.summary())
-                        return 1 if taker.lost else 0
+                        return 1 if taker.lost or taker.unsure else 0
                     await taker.act()  # a book held may be acted on once a resume completes
         except TimeoutError:
             if not deadline.expired():

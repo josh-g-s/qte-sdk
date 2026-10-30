@@ -5665,11 +5665,12 @@ async def test_take_liquidity_takes_a_reconnect_with_no_resume_as_its_reports_lo
 async def test_take_liquidity_names_a_message_missed_while_its_order_was_out(
     capsys: pytest.CaptureFixture[str],
 ):
-    # A gap may have lost one of its fills: the summary says it may be incomplete.
+    # A gap may have lost one of its fills: the summary says it may be incomplete, and
+    # the run exits 1, since its outcome is not known for sure.
     script = [*first_session_then_order(), SeqGap(4, 6), our_accepted, our_fill]
     outcome, session, _ = await run_taker(script)
     lines = capsys.readouterr().out.splitlines()
-    assert outcome == 0, lines
+    assert outcome == 1, lines
     assert len(session.refs("new")) == 1
     assert lines[-1] == (
         "filled 1 of 1 at an average of about 100.050000 (messages were missed, so this "
@@ -5850,6 +5851,33 @@ async def test_take_liquidity_counts_no_fill_of_another_market_order_as_its_own(
     assert len(session.refs("new")) == 1
     assert lines[-1].startswith("filled 1 of 1 at an average"), lines
     assert sum(line.startswith("FILL ") for line in lines) == 1, lines
+
+
+@pytest.mark.parametrize("foreign", ["fill", "cancelled"])
+async def test_take_liquidity_takes_no_outcome_as_known_after_a_report_lost_while_out(
+    foreign: str, capsys: pytest.CaptureFixture[str]
+):
+    # After its accepted, a live report is unreadable (perhaps its own fill), then a
+    # report of another market order of the strategy fits what is left of the order. A
+    # fill has no request_ref, so it cannot tell: it never exits 0 as if it knew.
+    if foreign == "fill":
+        other: Any = foreign_fill(1, 4)
+    else:
+        cancelled = OrderCancelled(
+            strat_id="take-test", instrument=INSTRUMENT, side=BUY, cancelled_size=1
+        )
+        other = Received("order_cancelled", cancelled, None, report_seq=4)
+    script = [
+        *first_session_then_order(),
+        our_accepted,
+        DecodeFailed("execution", ValueError("x"), 3),
+        other,
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert len(session.refs("new")) == 1
+    assert "check your fills" in out
 
 
 @pytest.mark.parametrize("sent", [True, False], ids=["order-out", "nothing-sent"])
