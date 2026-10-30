@@ -5959,6 +5959,9 @@ class StubView:
     def __iter__(self) -> Any:
         return iter(self.orders.values())
 
+    def apply(self, event: object) -> None:
+        pass  # a test sets the orders and completeness itself
+
 
 async def test_options_bot_adopts_no_order_unseen_by_the_incomplete_view_it_sent_from():
     # The first snapshot is cut short, so the view misses an earlier run's order at the
@@ -6082,7 +6085,8 @@ async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest(t
     # The level was empty when the order was sent, but by time-up, with no accepted for
     # it, a complete view shows another strategy's order there: no cancel is sent, and
     # the bot waits for its reply. If the other order leaves and its own accepted comes,
-    # it cancels as usual; if a message is missed instead, it stops and cancels nothing.
+    # it cancels as usual; a message missed meanwhile does not end the wait, so an
+    # accepted that comes after it is still cancelled.
     example = load_example("options_bot.py")
     contract, price = "SPY261120P00665000", 4_900_000
     view = StubView(incomplete=False)
@@ -6102,9 +6106,39 @@ async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest(t
         await bot.act()
         assert [t for t, _ in sender.sent] == ["new", "cancel"]
     else:
-        bot.missed = True
+        await bot.on_event(DecodeFailed("book", ValueError("unreadable"), 2))
+        assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+        del view.orders[(contract, BUY, price)]
+        bot.on_order_event(Accepted(request_ref=bot.ref))
         await bot.act()
-        assert [t for t, _ in sender.sent] == ["new"] and bot.finished
+        assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+@pytest.mark.parametrize("then", ["gap", "departure"])
+async def test_options_bot_counts_another_strategys_order_seen_on_a_queued_event(then: str):
+    # Events already queued are applied without acting. Another strategy's order seen on
+    # one of them counts even if a later one (a gap, or its departure) hides it by the
+    # time the bot acts: no cancel goes out before its own accepted.
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
+    await bot.on_event(Received("book", None, 2), act=False)
+    del view.orders[(contract, BUY, price)]
+    if then == "gap":
+        view.incomplete = True
+        await bot.on_event(SeqGap(2, 4), act=False)
+    else:
+        await bot.on_event(Received("book", None, 3), act=False)
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    assert bot.taken_before
 
 
 class RefusesEveryResume(FakeExchange):

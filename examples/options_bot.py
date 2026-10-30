@@ -90,10 +90,11 @@ level where an order of the team already rested, of any strategy, as from an ear
 or may have rested unseen because its view of resting orders was not complete (as when
 the exchange does not resume even the first session), it never cancels there before its
 own `accepted` comes: the exchange refuses such a duplicate, and a cancel would clear the
-order already there. At the end it waits for the reply; if the reply was lost, or none
-comes, it cannot tell whose order rests there: it cancels nothing, warns and exits with
-status 1. An order of another strategy that a complete view shows at its level before its
-own `accepted` is treated the same way. If a cancel takes an order that is not its own (one
+order already there. At the end it waits for the reply, through a message missed
+meanwhile; if a resume lost the reply, or none comes, it cannot tell whose order rests
+there: it cancels nothing, warns and exits with status 1. An order of another strategy
+that a complete view shows at its level at any time before its own `accepted` is treated
+the same way. If a cancel takes an order that is not its own (one
 that came to the level its order left), it cancels again where its order rests and, at the
 end, warns of it and exits with status 1.
 --seconds and --drain-seconds count the time down too.
@@ -333,6 +334,7 @@ class OptionsBot:
         self.cancel_failed: str | None = None
         self.stopping = False  # no new order; cancel the one sent, if any
         self.missed = False  # whether any message from the exchange was missed
+        self.reply_lost = False  # whether a resume failed to recover the order reports
         self.warnings: list[str] = []  # printed at the end, which then exits with status 1
         # --watch-only: no message is ever sent, so `ref` stays None. `would_send` is the
         # order it would have sent, once chosen; `why_none` why no contract is chosen yet.
@@ -475,16 +477,14 @@ class OptionsBot:
             if not self.stopping and not self.missed and self.would_send is None:
                 await self.send_order()
             return
-        if not self.accepted and self.other_strategy_rests():
-            # An order of another strategy came to the level before this one was
-            # accepted: the level is shared, as if it had rested there at the send.
-            self.taken_before = True
+        self.note_level()
         if self.taken_before and not self.accepted:
             # An order of the team rested, or may have rested unseen, at the level while
             # this one was not yet accepted, and no `accepted` says the exchange took this
-            # one: a cancel there could remove that order. Cancel nothing. Once its reply
-            # can no longer be counted on, stop and warn; until then, wait for it.
-            if self.stopping and self.missed:
+            # one: a cancel there could remove that order. Cancel nothing. Once a resume
+            # has lost its reply for good, stop and warn; until then (a message missed
+            # on a live session, say), wait for it until the run ends.
+            if self.stopping and self.reply_lost:
                 self.owner_unknown()
             return
         if (self.resting or self.stopping) and self.cancel_ref is None:
@@ -492,6 +492,13 @@ class OptionsBot:
                 return
             if time.monotonic() >= self.retry_after:
                 await self.cancel()
+
+    def note_level(self) -> None:
+        """Before this order is accepted, take the level as shared once another
+        strategy's order is seen there, on any event: one seen only until a later
+        event (a gap, or its own departure) still counts."""
+        if self.ref is not None and not self.accepted and self.other_strategy_rests():
+            self.taken_before = True
 
     def other_strategy_rests(self) -> bool:
         """Whether a complete view shows an order of another strategy at the level."""
@@ -612,6 +619,7 @@ class OptionsBot:
             # order is cancelled afresh.
             print("warning: the order reports missed while disconnected were not recovered")
             self.missed = True
+            self.reply_lost = True  # a reply not yet come is never sent again
             self.cancel_ref = None
             return
         if self.ref is None or self.finished:
@@ -702,6 +710,7 @@ class OptionsBot:
                 self.greeks.update(item)
         elif is_order_event(event):
             self.on_order_event(event.message)  # type: ignore[attr-defined]
+        self.note_level()  # on every event, not only when acting
         if act:
             await self.act()
 
