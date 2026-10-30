@@ -1820,12 +1820,14 @@ async def test_options_bot_follows_its_order_when_an_amend_moves_it():
 
 async def test_options_bot_cancels_again_when_its_cancel_takes_another_order():
     # The order moves away, another order of the strategy takes its first level, and the
-    # first cancel takes that one: the example cancels again where its order rests.
+    # first cancel takes that one: the example cancels again where its order rests, and
+    # at the end warns that it took an order not its own and exits 1.
     exchange = options_exchange(move_resting_to=(4_950_000,), refill_level=True)
     code, out, err = await run_options_bot(exchange, "--seconds", "10")
-    assert code == 0, out + err
+    assert code == 1, out + err
     assert [c["price"] for c in payloads(exchange, "cancel")] == ["4900000", "4950000"]
     assert exchange.resting == {}
+    assert "WARNING: a cancel took an order of your team at 4.900000" in out
 
 
 async def test_options_bot_warns_and_fails_when_its_orders_reports_were_missed():
@@ -6073,3 +6075,46 @@ async def test_options_bot_warns_when_no_reply_comes_where_the_team_rested():
     assert payloads(exchange, "cancel") == []
     assert "time is up: waiting for the reply to the order sent to" in out
     assert "WARNING: no reply came for the order sent to" in out
+
+
+async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest():
+    # The level was empty when the order was sent, but by time-up, with no accepted for
+    # it, a complete view shows another strategy's order there: no cancel is sent.
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    assert not bot.taken_before
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    assert bot.finished and bot.warnings
+
+
+class RefusesEveryResume(FakeExchange):
+    """Refuses `resume` on every connection, the first included."""
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        refused = {"request_type": "RESUME", "reason_code": "MALFORMED_MESSAGE"}
+        await self.send(ws, "reject", {**refused, "receipt_time": "1"})
+
+
+async def test_options_bot_takes_a_first_session_not_resumed_as_an_incomplete_view():
+    # The exchange does not resume the first session, so the view never sees an earlier
+    # run's order at the level. The order sent there is refused as a duplicate, but the
+    # reply is lost in a drop; the reconnect is not resumed either. Nothing is cancelled.
+    exchange = RefusesEveryResume(
+        drop_on_new=1, instruments=options_table(), options=options_market()
+    )
+    earlier = ("SPY261120P00665000", "BUY", 4_900_000)
+    exchange.resting[earlier] = ("other-strat", 7)
+    code, out, err = await run_options_bot(exchange, "--seconds", "4", "--drain-seconds", "1")
+    assert code == 1, out + err
+    assert len(payloads(exchange, "new")) == 1
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting[earlier] == ("other-strat", 7)

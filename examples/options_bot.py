@@ -87,11 +87,15 @@ is sent, there is nothing of its own to miss, so it chooses and sends as usual. 
 `accepted` that comes through the resume is printed as answered after a reconnect, with
 no round trip. If its order went to a
 level where an order of the team already rested, of any strategy, as from an earlier run,
-or may have rested unseen because its view of resting orders was not complete, it never
-cancels there before its own `accepted` comes: the exchange refuses such a duplicate, and a
-cancel would clear the order already there. At the end it waits for the reply; if the reply
-was lost, or none comes, it cannot tell whose order rests there: it cancels nothing, warns
-and exits with status 1.
+or may have rested unseen because its view of resting orders was not complete (as when
+the exchange does not resume even the first session), it never cancels there before its
+own `accepted` comes: the exchange refuses such a duplicate, and a cancel would clear the
+order already there. At the end it waits for the reply; if the reply was lost, or none
+comes, it cannot tell whose order rests there: it cancels nothing, warns and exits with
+status 1. So it does, too, if with no `accepted` for its order a complete view shows an
+order of another strategy at its level. If a cancel takes an order that is not its own (one
+that came to the level its order left), it cancels again where its order rests and, at the
+end, warns of it and exits with status 1.
 --seconds and --drain-seconds count the time down too.
 Only the first connection is not retried: if it fails, the example says why and stops.
 The replay or the snapshot covers only what the exchange had applied when it answered: if
@@ -328,6 +332,7 @@ class OptionsBot:
         self.cancel_failed: str | None = None
         self.stopping = False  # no new order; cancel the one sent, if any
         self.missed = False  # whether any message from the exchange was missed
+        self.warnings: list[str] = []  # printed at the end, which then exits with status 1
         # --watch-only: no message is ever sent, so `ref` stays None. `would_send` is the
         # order it would have sent, once chosen; `why_none` why no contract is chosen yet.
         self.watch_only = watch_only
@@ -477,11 +482,31 @@ class OptionsBot:
             if self.stopping and self.missed:
                 self.owner_unknown()
             return
+        if not self.accepted and self.other_strategy_rests():
+            # The level holds an order of another strategy of the team, and no `accepted`
+            # says this one ever rested: a cancel would clear that order. Cancel nothing.
+            print(
+                f"an order of another strategy of your team rests at {self.where}, and no "
+                "accepted came for this one: cancelling nothing there"
+            )
+            self.warnings.append(
+                f"an order of another strategy rests at {self.where} and this example's "
+                "order was never seen accepted, so nothing was cancelled: check your orders"
+            )
+            self.gone = True
+            return
         if (self.resting or self.stopping) and self.cancel_ref is None:
             if self.retry_at is not None and self.grid_points < self.retry_at:
                 return
             if time.monotonic() >= self.retry_after:
                 await self.cancel()
+
+    def other_strategy_rests(self) -> bool:
+        """Whether a complete view shows an order of another strategy at the level."""
+        if self.view is None or self.view.incomplete or self.contract is None:
+            return False
+        order = self.view.get(self.contract, BUY, self.price)
+        return order is not None and order.strat_id != self.strat_id
 
     async def send_order(self) -> None:
         choice = self.choose()
@@ -761,6 +786,10 @@ class OptionsBot:
                 # The cancel took an order at the level this example's order has left,
                 # someone else's: cancel again where the order rests now.
                 print(f"the cancel took an order at {price_text(message.price)}, not this one")
+                self.warnings.append(
+                    f"a cancel took an order of your team at {price_text(message.price)} "
+                    "that was not this example's: check your orders"
+                )
                 self.cancel_ref = None
 
     def on_cancel_reject(self, message: Reject) -> None:
@@ -1009,7 +1038,11 @@ async def trade_from(
         print(f"no option contract is listed on {underlying}; no order was sent")
         return 0
     print(f"{len(contracts)} contract(s) listed on {underlying}; subscribing to them")
-    bot = OptionsBot(session, table, underlying, args.strat_id, args.watch_only, RestingOrders())
+    # Incomplete until the first resume's snapshot: if the exchange does not resume the
+    # first session, orders of the team may rest that the view never sees.
+    view = RestingOrders()
+    view.mark_incomplete()
+    bot = OptionsBot(session, table, underlying, args.strat_id, args.watch_only, view)
     progress.bot = bot
     for event in early:
         await bot.on_event(event)  # the first Connected among them; nothing is sent yet
@@ -1057,6 +1090,8 @@ async def trade_from(
                 print("interrupted: still cancelling; press Ctrl+C again to stop at once")
     if bot.watch_only:
         return watch_only_outcome(bot)
+    for warning in bot.warnings:
+        print(f"WARNING: {warning}")
     if bot.cancel_failed is not None:
         print(
             f"WARNING: the cancel was rejected ({bot.cancel_failed}), so the order may "
@@ -1102,7 +1137,7 @@ async def trade_from(
     if why == "time" and bot.ref is None:
         print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
     print(bot.summary())
-    return 0
+    return 1 if bot.warnings else 0
 
 
 def fail(message: str) -> int:
