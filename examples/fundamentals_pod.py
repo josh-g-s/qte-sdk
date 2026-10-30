@@ -71,7 +71,11 @@ It sends one ticket, and a second only for the 1713 resend. A ticket is an instr
 the exchange keeps working after this program exits: if --seconds pass before the ticket
 stops, the example says the ticket is still working and names it (on Ctrl+C it says a
 ticket sent may still be working; its id is on the `accepted` line), and you can cancel
-it with `qte_sdk.tickets.send_ticket_cancel`.
+it with `qte_sdk.tickets.send_ticket_cancel`. It says so only from a state it holds on the
+connection that is up, with no message missed since: if --seconds pass with the ticket
+unanswered (its `ticket_accepted` lost to a `SeqGap` or unreadable, say), with the
+connection down, or with a message missed since the ticket's last state, it says the
+ticket's state is not known and exits with status 1.
 
 On a drop. If the connection drops, or the exchange restarts, the example says so and
 reconnects by itself, waiting longer between attempts (at most 30 seconds). The ticket
@@ -275,6 +279,9 @@ class Pod:
         self.log_id: str | None = None
         self.ticket_log_id: str | None = None
         self.log_changed = False
+        # Whether the followed ticket's state is current: answered or stated on this
+        # connection, with no message missed since. A drop or a gap makes it stale.
+        self.state_current = False
         # The event of each ticket's newest state, kept for the names this SDK does not
         # know (`unknown_enum_names()`), which the message alone does not carry.
         self.state_events: dict[str, Received] = {}
@@ -348,6 +355,9 @@ class Pod:
         elif isinstance(event, SeqGap | DecodeFailed):
             print("warning: a message from the exchange was missed or unreadable")
             self.missed = True
+            # The ticket's answer or a stop may be the message lost: its state is not
+            # known until a state of it comes.
+            self.state_current = False
         elif is_account_state(event):
             if event.message.request_ref == self.account_ref:
                 self.account = event.message
@@ -397,6 +407,7 @@ class Pod:
             self.rejected = True
         elif isinstance(message, TicketAccepted) and ref is not None and ref == self.ticket_ref:
             self.ticket_id = message.ticket_id
+            self.state_current = True
             algorithm = enum_name(event, "algorithm", TicketAlgorithm, message.algorithm)
             executor = enum_name(event, "executor", TicketExecutor, message.executor)
             print(
@@ -437,6 +448,7 @@ class Pod:
         # LatestTickets has forgotten the route and every state it held: the next
         # connection's states rebuild it, and the states kept here go with them.
         self.up = False
+        self.state_current = False
         self.state_events.clear()
         why = disconnected.error or "the exchange closed it"
         print(f"the connection dropped ({why}); reconnecting")
@@ -462,6 +474,7 @@ class Pod:
 
     def on_state(self, event: Received) -> None:
         state: TicketState = event.message
+        self.state_current = True
         status = enum_name(event, "status", TicketStatus, state.status)
         activity = enum_name(event, "activity", TicketActivity, state.activity)
         print(
@@ -690,13 +703,29 @@ async def follow_pod(pod: Pod, queue: asyncio.Queue, args: argparse.Namespace) -
         return 1
     if why == "time":
         if pod.ticket_id is None:
-            print(f"stopped after {args.seconds:g} seconds: the ticket's answer is not known")
-        else:
+            # Unanswered, or its answer lost to a message missed: it may be working.
             print(
-                f"stopped watching after {args.seconds:g} seconds: ticket {pod.ticket_id} "
-                "is still working on the exchange; cancel it with send_ticket_cancel if "
-                "you do not want it to continue"
+                f"stopped after {args.seconds:g} seconds with no answer to the ticket, so "
+                "whether it is working is not known. It is not sent again: read its "
+                "ticket_state before sending another"
             )
+            pod.warn_if_missed()
+            return 1
+        if not (pod.up and pod.state_current):
+            # Down, or a message missed since its last state: it may have stopped.
+            why = "disconnected" if not pod.up else "a message was missed since its last state"
+            print(
+                f"stopped after {args.seconds:g} seconds with the state of ticket "
+                f"{pod.ticket_id} not known ({why}): it may have stopped or still be "
+                "working. Read its ticket_state before sending another"
+            )
+            pod.warn_if_missed()
+            return 1
+        print(
+            f"stopped watching after {args.seconds:g} seconds: ticket {pod.ticket_id} "
+            "is still working on the exchange; cancel it with send_ticket_cancel if "
+            "you do not want it to continue"
+        )
         pod.warn_if_missed()
         return 0
 

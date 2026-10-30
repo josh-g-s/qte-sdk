@@ -89,7 +89,11 @@ class PodExchange:
         reject: str | None = None,
         before: list[tuple[str, dict[str, Any]]] | None = None,
         stray_account: dict[str, Any] | None = None,
+        lose_accepted: str | None = None,
     ) -> None:
+        # With `lose_accepted`, the ticket_accepted is lost: "gap" skips its seq, as a
+        # message lost on the way would; "garbled" sends it unreadable.
+        self.lose_accepted = lose_accepted
         # With `reject`, every ticket is refused with that reason.
         self.reject = reject
         # `before` is sent ahead of the ticket_accepted. A frame of type "gap" sends
@@ -172,7 +176,12 @@ class PodExchange:
         )
         for type_, frame_ in self.before:
             await self.send(ws, type_, frame_)
-        await self.send(ws, "ticket_accepted", accepted)
+        if self.lose_accepted == "gap":
+            await self.send(ws, "gap", {})
+        elif self.lose_accepted == "garbled":
+            await self.send(ws, "ticket_accepted", {**accepted, "ticket_id": {"not": "an id"}})
+        else:
+            await self.send(ws, "ticket_accepted", accepted)
         for type_, frame_ in self.after:
             await self.send(ws, type_, frame_)
 
@@ -534,6 +543,30 @@ async def test_missed_messages_are_named_when_the_watch_runs_out():
     assert "messages were missed, so the ticket's states printed may be incomplete" in out
 
 
+@pytest.mark.parametrize("lose", ["gap", "garbled"])
+async def test_a_ticket_whose_answer_was_missed_is_not_known_when_the_watch_runs_out(lose: str):
+    # The ticket_accepted is lost to a SeqGap or unreadable: the ticket may be working,
+    # so the run must not end with status 0 as if nothing were out.
+    exchange = PodExchange(
+        route=route_payload(), accounts=[account(None)], after=WORKING, lose_accepted=lose
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert len(exchange.tickets()) == 1
+    assert "no answer to the ticket, so whether it is working is not known" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_a_gap_after_the_last_state_leaves_the_ticket_not_known_at_the_end():
+    # A stop may be the message lost: with no state since, its state is not known.
+    after = [*WORKING, ("gap", {}), ("execution", fill(200))]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "the state of ticket 17 not known (a message was missed since its last state)" in out
+    assert "still working on the exchange" not in out
+
+
 @pytest.mark.parametrize("seconds", ["0", "-5", "nan"])
 def test_seconds_must_be_above_zero(seconds, capsys):
     example = load_example("fundamentals_pod.py")
@@ -617,6 +650,29 @@ async def test_a_pod_survives_a_close_and_follows_its_ticket_from_the_states_sen
     assert (
         out.splitlines()[-2] == f"position in {INSTRUMENT} after the stop, from account_state: 500"
     )
+
+
+class NoReconnectPodExchange(RestartingPodExchange):
+    """A RestartingPodExchange that never acknowledges a later connection, so the
+    example is still down when --seconds run out."""
+
+    async def __call__(self, ws: ServerConnection) -> None:
+        if self.connections >= 1:
+            self.connections += 1
+            await ws.wait_closed()
+            return
+        await super().__call__(ws)
+
+
+async def test_a_pod_down_when_the_watch_runs_out_does_not_say_its_ticket_is_working():
+    # The ticket is accepted and working at the close; no reconnect comes before
+    # --seconds. What it did meanwhile is not known: never "still working", status 1.
+    exchange = NoReconnectPodExchange(route=route_payload(), accounts=[account(0)], after=WORKING)
+    code, out, err = await run_pod(exchange, "--seconds", "2")
+    assert code == 1, out + err
+    assert len(exchange.tickets()) == 1
+    assert "the state of ticket 17 not known (disconnected)" in out
+    assert "still working on the exchange" not in out
 
 
 async def test_a_pod_whose_ticket_answer_is_lost_with_a_close_does_not_send_it_again():
