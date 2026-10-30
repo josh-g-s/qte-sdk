@@ -567,6 +567,28 @@ async def test_a_gap_after_the_last_state_leaves_the_ticket_not_known_at_the_end
     assert "still working on the exchange" not in out
 
 
+async def test_a_state_held_from_before_a_gap_is_not_taken_as_current_at_the_acceptance():
+    # The ticket's state comes before its acceptance, then a message is lost: the state
+    # applied at the acceptance may be stale (the lost one may be a stop).
+    before = [("ticket_state", state(10, activity="TAKING")), ("gap", {})]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=[], before=before)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "the state of ticket 17 not known (a message was missed since its last state)" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_an_amend_whose_replacement_has_not_come_is_not_known_at_the_end():
+    # The ticket was amended by a Director and has stopped; its replacement's state has
+    # not come by --seconds, so neither ticket is known to be working.
+    after = [*WORKING, ("ticket_state", state(20, status="TICKET_AMENDED_BY_DIRECTOR"))]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "the state of ticket 17 not known (amended by a Director" in out
+    assert "still working on the exchange" not in out
+
+
 @pytest.mark.parametrize("seconds", ["0", "-5", "nan"])
 def test_seconds_must_be_above_zero(seconds, capsys):
     example = load_example("fundamentals_pod.py")
