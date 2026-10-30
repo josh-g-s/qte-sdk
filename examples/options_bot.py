@@ -1184,7 +1184,8 @@ def stopped_at_once(progress: Progress) -> int:
     if bot.unsure:
         # Gone from its level, but perhaps moved and still resting: the warnings say where.
         return fail(f"interrupted: {bot.summary()}")
-    if bot.gone and bot.cancel_unread:
+    if bot.gone and bot.cancel_unread and not bot.missed:
+        # Gone with no report missed: an amend moving it would have been seen.
         return fail("interrupted: this example's order is gone")
     return fail(
         f"interrupted: this example's order may still rest at {bot.where}; check and cancel it"
@@ -1359,7 +1360,7 @@ async def trade_from(
         print(f"WARNING: {warning}")
     if bot.unanswered_cancels:
         print(cancel_unread_warning(bot))
-    if bot.gone and bot.cancel_unread:
+    if bot.gone and bot.cancel_unread and not bot.missed:
         return 1
     if bot.cancel_failed is not None:
         print(
@@ -1450,7 +1451,7 @@ def ended_for_good(progress: Progress, why: str) -> int:
         print(f"WARNING: {warning}", file=sys.stderr)
     if bot.unanswered_cancels:
         print(cancel_unread_warning(bot), file=sys.stderr)
-    if bot.gone and (bot.cancel_unread or not bot.missed):
+    if bot.gone and not bot.missed:
         return fail(why)
     return fail(
         f"{why}. WARNING: this example's order may still rest at {bot.where}: check with "

@@ -7081,6 +7081,26 @@ def test_options_bot_does_not_call_a_moved_order_gone_on_a_second_ctrl_c(capsys:
     assert "may still rest" in err and "is gone" not in err
 
 
+@pytest.mark.parametrize("ending", ["second_ctrl_c", "reconnect_failed"])
+def test_options_bot_does_not_call_its_order_gone_after_missed_reports(ending: str, capsys: Any):
+    # Its cancel found nothing at its level, but reports were missed (an amend to another
+    # price, say), and an earlier cancel is unread: the order may still rest, so neither
+    # a second Ctrl+C nor a reconnect failing for good says it is gone.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.gone = bot.missed = True
+    bot.unanswered_cancels["c"] = OPTION_PRICE
+    progress = example.Progress(bot=bot)
+    if ending == "second_ctrl_c":
+        assert example.stopped_at_once(progress) == 1
+    else:
+        assert example.ended_for_good(progress, "credential revoked") == 1
+    err = capsys.readouterr().err
+    assert "no reply came by the end" in err and "may still rest" in err
+    assert "is gone" not in err
+
+
 async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():
     # The resume shows the order resting, so the bot cancels it, and that cancel is in
     # flight when a message is missed live. That gap ends no resume: the cancel is not
