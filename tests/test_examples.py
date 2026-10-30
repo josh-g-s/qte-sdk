@@ -5133,12 +5133,23 @@ class LostFirstCancel(FakeExchange):
         await super().on_order(ws, type_, p)
 
 
-async def test_options_bot_sends_its_cancel_again_when_one_in_flight_at_a_drop_was_lost():
+@pytest.mark.parametrize("replay", [True, False], ids=["replay", "snapshot"])
+async def test_options_bot_sends_its_cancel_again_when_one_in_flight_at_a_drop_was_lost(
+    replay: bool,
+):
     # The resume shows the order still resting: the bot does not wait for the lost
-    # cancel's reply, but cancels afresh on the new connection.
-    exchange = LostFirstCancel()
+    # cancel's reply, but cancels afresh on the new connection. A complete replay with
+    # no reply to the lost cancel proves it was not applied; a snapshot does not, so
+    # that run names the cancel's level and exits 1.
+    exchange = LostFirstCancel(replay=True, calendar=TERM) if replay else LostFirstCancel()
     code, out, err = await run_options_bot(exchange, "--seconds", "4")
-    assert code == 0, out + err
+    if replay:
+        assert code == 0, out + err
+    else:
+        assert code == 1, out + err
+        assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY" in (
+            out + err
+        )
     assert exchange.connections == 2
     assert len(payloads(exchange, "new")) == 1
     assert len(orders_on(exchange, 1, "cancel")) == 1
@@ -6729,12 +6740,14 @@ async def options_bot_resting_with_cancel_out(example: Any, view: Any, sender: A
     return bot
 
 
-def options_bot_cancelled(ref: str, strat_id: str = "opt-test", seq: int = 6) -> Any:
+def options_bot_cancelled(
+    ref: str, strat_id: str = "opt-test", seq: int = 6, price: int = OPTION_PRICE
+) -> Any:
     message = OrderCancelled(
         strat_id=strat_id,
         instrument=OPTION_CONTRACT,
         side=BUY,
-        price=OPTION_PRICE,
+        price=price,
         cancelled_size=1,
         request_ref=ref,
     )
@@ -6838,7 +6851,7 @@ def test_options_bot_names_its_unanswered_cancel_when_a_reconnect_fails_for_good
         bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
         bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, 4_910_000, "o", True
         bot.cancel_ref, bot.cancel_price, bot.gone = "c", OPTION_PRICE, True
-        bot.unanswered_cancels.append("c")
+        bot.unanswered_cancels["c"] = OPTION_PRICE
         progress.bot = bot
         raise SessionRejected(1, None)
 
@@ -6863,10 +6876,11 @@ def options_bot_filled(seq: int) -> Any:
     return Received("execution", fill, None, report_seq=seq)
 
 
-async def test_options_bot_reads_an_earlier_cancel_after_the_fresh_one_was_rejected():
-    # The resume shows the order resting with a cancel in flight at the drop, so the bot
-    # cancels afresh. The fresh cancel is refused on its budget and the order then fills:
-    # the first cancel may still be in its order delay, so its reply is still read.
+async def test_options_bot_settles_a_cancel_a_complete_replay_shows_not_applied():
+    # A complete replay shows the order resting with no reply to the cancel in flight at
+    # the drop: that cancel was not applied, so it is settled, and the bot cancels
+    # afresh. The fresh cancel is refused on its budget and the order then fills: the
+    # run ends, and a late reply to the first cancel is still matched as its own.
     from qte_sdk.connection import Disconnected
 
     example = load_example("options_bot.py")
@@ -6884,7 +6898,7 @@ async def test_options_bot_reads_an_earlier_cancel_after_the_fresh_one_was_rejec
     refused = Reject(request_ref=bot.cancel_ref, reason_code=budget)
     await bot.on_event(Received("reject", refused, None, report_seq=6))
     await bot.on_event(options_bot_filled(7))
-    assert bot.gone and not bot.finished
+    assert bot.gone and bot.finished and not bot.unanswered_cancels
     await bot.on_event(options_bot_cancelled(first, strat_id="other-strat", seq=8))
     assert bot.finished and "another order of your team" in bot.warnings[0]
 
@@ -6911,6 +6925,116 @@ async def test_options_bot_reads_its_cancel_after_a_resume_cut_short_once_its_or
     assert [t for t, _ in sender.sent] == ["new", "cancel"]
     await bot.on_event(options_bot_cancelled(first, strat_id="other-strat", seq=9))
     assert bot.finished and "another order of your team" in bot.warnings[0]
+
+
+async def options_bot_moved_with_first_cancel_out_then_snapshot(example: Any, sender: Any) -> Any:
+    """Its first cancel is sent at 4.90, an amend moves the order to 4.91, the connection
+    drops and a snapshot shows the order at 4.91: the bot cancels again there."""
+    from qte_sdk.connection import Disconnected
+
+    view = StubView(incomplete=False)
+    bot = await options_bot_resting_with_cancel_out(example, view, sender)
+    moved = OrderState(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=4_910_000,
+        old_price=OPTION_PRICE,
+        state=RESTING,
+        remaining_size=1,
+    )
+    await bot.on_event(Received("order_state", moved, None, report_seq=3))
+    await bot.on_event(Disconnected(error=None))
+    view.orders[(OPTION_CONTRACT, BUY, 4_910_000)] = SimpleNamespace(
+        strat_id="opt-test", remaining_size=1
+    )
+    for event in [
+        connected_event(reconnected=True, resume=replay_ack(False)),
+        resume_ack_event(False),
+        resume_complete(False),
+    ]:
+        await bot.on_event(event)
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+    assert sender.sent[-1][1].price == 4_910_000
+    return bot
+
+
+async def test_options_bot_keeps_an_earlier_cancel_unread_when_a_later_one_is_answered():
+    # After a snapshot the first cancel's outcome is unknown: it may have taken another
+    # order of the team at 4.90 while down. The second cancel's reply at 4.91 proves
+    # nothing about what the first took, so the first stays unread and is named.
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_moved_with_first_cancel_out_then_snapshot(example, sender)
+    second = sender.sent[-1][1].request_ref
+    await bot.on_event(options_bot_cancelled(second, seq=6, price=4_910_000))
+    assert bot.gone and not bot.finished
+    warning = example.cancel_unread_warning(bot)
+    assert f"{OPTION_CONTRACT} BUY @ 4.900000" in warning and "4.910000" not in warning
+
+
+async def test_options_bot_names_the_level_each_unread_cancel_was_sent_to():
+    # The second cancel, at 4.91, is refused on its budget and the order then fills:
+    # only the first, sent to 4.90, is unread, and the warning names 4.90.
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_moved_with_first_cancel_out_then_snapshot(example, sender)
+    budget = Reject(
+        request_ref=sender.sent[-1][1].request_ref,
+        reason_code=ReasonCodes.MESSAGE_BUDGET_EXCEEDED,
+    )
+    await bot.on_event(Received("reject", budget, None, report_seq=6))
+    fill = Execution(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        order_price=4_910_000,
+        fill_price=4_910_000,
+        fill_size=1,
+        remaining_size=0,
+    )
+    await bot.on_event(Received("execution", fill, None, report_seq=7))
+    assert bot.gone and not bot.finished
+    warning = example.cancel_unread_warning(bot)
+    assert f"{OPTION_CONTRACT} BUY @ 4.900000" in warning and "4.910000" not in warning
+
+
+def test_options_bot_names_its_unread_cancel_on_a_second_ctrl_c(capsys: Any):
+    # A second Ctrl+C stops the drain at once, with the order filled and its cancel
+    # unanswered: the run names that cancel's level and exits 1.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.gone = True
+    bot.unanswered_cancels["c"] = OPTION_PRICE
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    err = capsys.readouterr().err
+    assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY @ 4.900000" in (
+        err
+    )
+
+
+async def test_options_bot_does_not_wait_for_a_cancel_it_could_not_send():
+    # The cancel's send raises NotConnected: nothing was sent, so no reply can come and
+    # none is waited for once the order is gone.
+    from qte_sdk.reconnect import NotConnected
+
+    class DownOnCancel(RecordingSender):
+        async def send(self, type_: str, payload: Any) -> None:
+            if type_ == "cancel":
+                raise NotConnected("down")
+            await super().send(type_, payload)
+
+    example = load_example("options_bot.py")
+    sender = DownOnCancel()
+    bot = options_bot_accepted(example, StubView(incomplete=False), sender)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and bot.cancel_ref is None
+    await bot.on_event(options_bot_filled(3))
+    assert bot.gone and bot.finished and not bot.unanswered_cancels
 
 
 async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():

@@ -130,9 +130,10 @@ and how to check, and exits with status 1. Once its order is gone it still reads
 reply to a cancel of its own in flight before it ends: applied late (a resume can show
 the order resting while a cancel sent before the drop is still in its order delay, so it
 cancels again), a cancel takes whatever of the team rests at the level by then. If it took
-another order, or no reply came by the end, it names it and exits with status 1. A reply
-from the book to a later cancel settles the earlier ones, since the exchange applies
-messages in the order it took them in. When one
+another order, or no reply came by the end, it names it and exits with status 1. A cancel
+is settled only by its own reply, by a send that raised `NotConnected` (nothing sent), or
+by a complete replay with no reply to it while the order still rests (it was not applied);
+any other cancel unsettled at the end has its level named, and the run exits 1. When one
 warning already names the orders that may be this one, no generic warning of missed
 messages follows it.
 --seconds and --drain-seconds count the time down too.
@@ -369,9 +370,9 @@ class OptionsBot:
         # Cancels sent before a drop and forgotten at the resume: a late reply to one is
         # still this example's cancel, so it is matched by these.
         self.earlier_cancel_refs: set[str] = set()
-        # Every cancel sent whose reply (its order_cancelled or reject) has not been read,
-        # in the order sent: see `cancel_unread`.
-        self.unanswered_cancels: list[str] = []
+        # Every cancel sent and not yet settled, by request_ref, with the price it was
+        # sent to: see `answered` and `cancel_unread`.
+        self.unanswered_cancels: dict[str, int] = {}
         self.cancel_price = 0
         self.grid_points = 0
         self.retry_at: int | None = None
@@ -414,21 +415,22 @@ class OptionsBot:
 
     @property
     def cancel_unread(self) -> bool:
-        """Whether the order is gone with a cancel of this example, the one in flight or
-        one sent before a drop, not yet answered. Applied after the order went, such a
-        cancel takes whatever of the team rests at the level by then, so the example
+        """Whether the order has ended with a cancel of this example, the one in flight or
+        one sent before a drop, not yet settled. Applied after the order went, such a
+        cancel takes whatever of the team rests at its level by then, so the example
         never ends before its reply (or the drain's end), whatever the resume showed."""
-        return self.gone and bool(self.unanswered_cancels)
+        ended = self.gone or self.cancel_failed is not None
+        return ended and bool(self.unanswered_cancels)
+
+    @property
+    def unread_levels(self) -> str:
+        """The levels the cancels not yet settled were sent to."""
+        prices = sorted(set(self.unanswered_cancels.values()))
+        return "; ".join(f"{self.contract} BUY @ {price_text(price)}" for price in prices)
 
     @property
     def where(self) -> str:
         return f"{self.contract} BUY @ {price_text(self.price)}"
-
-    @property
-    def cancel_where(self) -> str:
-        """The level the cancel in flight names, which an amend may have moved the order
-        from since."""
-        return f"{self.contract} BUY @ {price_text(self.cancel_price)}"
 
     # Choosing a contract
 
@@ -615,17 +617,24 @@ class OptionsBot:
     async def cancel(self) -> None:
         assert self.contract is not None
         self.cancel_ref = new_request_ref()  # recorded first, so its reply is matched
-        self.unanswered_cancels.append(self.cancel_ref)
+        self.unanswered_cancels[self.cancel_ref] = self.price
         self.cancel_price = self.price
         self.budget_reject = None
         print(f"cancelling {self.where}")
-        await send_cancel(
-            self.session,
-            instrument=self.contract,
-            side=BUY,
-            price=self.price,
-            request_ref=self.cancel_ref,
-        )
+        try:
+            await send_cancel(
+                self.session,
+                instrument=self.contract,
+                side=BUY,
+                price=self.price,
+                request_ref=self.cancel_ref,
+            )
+        except NotConnected:
+            # Nothing was sent, so no reply can come: settled. (A ConnectionClosed may
+            # have sent it, so that one stays unsettled.)
+            del self.unanswered_cancels[self.cancel_ref]
+            self.cancel_ref = None
+            raise
 
     # The connection
 
@@ -723,6 +732,10 @@ class OptionsBot:
             if not self.resting:
                 print(f"resting: {order.remaining_size} at {self.where} (from the resume)")
             self.resting = True
+            if replayed:
+                # A complete replay holds the reply to every cancel the exchange applied:
+                # one not in it, with the order still resting, was not applied. Settled.
+                self.unanswered_cancels.clear()
             self.forget_cancel()
         elif seen:
             # Not at its level, but orders of this strategy rest on the contract: perhaps
@@ -894,23 +907,8 @@ class OptionsBot:
         try:
             self.on_order_report(message, ref)
         finally:
-            if isinstance(message, OrderCancelled | Reject) and ref in self.unanswered_cancels:
-                self.answered(ref, message)
-
-    def answered(self, ref: str, reply: OrderCancelled | Reject) -> None:
-        """A cancel's reply is read. The exchange applies messages in the order it took
-        them in, so a reply from the book (an order_cancelled, or nothing at the level)
-        also settles every cancel sent before it: one that reached the exchange was
-        applied first, and one that did not (lost in a drop) never will be. A reject on
-        receipt, such as a budget's, comes before the order delay and settles only its own."""
-        position = self.unanswered_cancels.index(ref)
-        from_book = isinstance(reply, OrderCancelled) or (
-            reply.reason_code == ReasonCodes.NO_ORDER_AT_LEVEL
-        )
-        if from_book:
-            del self.unanswered_cancels[: position + 1]
-        else:
-            del self.unanswered_cancels[position]
+            if isinstance(message, OrderCancelled | Reject) and ref is not None:
+                self.unanswered_cancels.pop(ref, None)  # its own reply settles it
 
     def on_order_report(self, message: Message, ref: str | None) -> None:
         if (
@@ -1182,6 +1180,10 @@ def stopped_at_once(progress: Progress) -> int:
     if bot is None or bot.ref is None:
         print("interrupted: no order was sent")
         return 0
+    if bot.unanswered_cancels:
+        print(cancel_unread_warning(bot), file=sys.stderr)
+    if bot.cancel_unread:
+        return fail("interrupted: this example's order is gone")
     return fail(
         f"interrupted: this example's order may still rest at {bot.where}; check and cancel it"
     )
@@ -1323,9 +1325,9 @@ async def trade_from(
         return watch_only_outcome(bot)
     if why == "closed":
         print("the exchange closed the connection")
-        if bot.cancel_unread:
+        if bot.unanswered_cancels:
             print(cancel_unread_warning(bot))
-        elif bot.ref is not None and not bot.finished:
+        if bot.ref is not None and not bot.finished and not bot.cancel_unread:
             print(f"WARNING: the order may still rest at {bot.where}; check and cancel it")
         return 1
     if not bot.finished and bot.ref is not None:
@@ -1333,7 +1335,7 @@ async def trade_from(
         if not bot.accepted:
             print(f"{reason}: waiting for the reply to the order sent to {bot.where}")
         elif bot.cancel_unread:
-            print(f"{reason}: waiting for the reply to the cancel sent to {bot.cancel_where}")
+            print(f"{reason}: waiting for the reply to the cancel sent to {bot.unread_levels}")
         else:
             print(f"{reason}: cancelling {bot.where}")
         bot.stopping = True
@@ -1353,8 +1355,9 @@ async def trade_from(
         return watch_only_outcome(bot)
     for warning in bot.warnings:
         print(f"WARNING: {warning}")
-    if bot.cancel_unread:
+    if bot.unanswered_cancels:
         print(cancel_unread_warning(bot))
+    if bot.cancel_unread:
         return 1
     if bot.cancel_failed is not None:
         print(
@@ -1410,14 +1413,15 @@ async def trade_from(
     elif why == "time" and bot.ref is None:
         print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
     print(bot.summary())
-    return 1 if bot.warnings else 0
+    return 1 if bot.warnings or bot.unanswered_cancels else 0
 
 
 def cancel_unread_warning(bot: OptionsBot) -> str:
+    many = "s" if len(set(bot.unanswered_cancels.values())) > 1 else ""
     return (
-        f"WARNING: the order is gone, but no reply came by the end for the cancel sent to "
-        f"{bot.cancel_where}: applied late, it may take another order of your team there. "
-        "Check with order_snapshot or the console"
+        f"WARNING: no reply came by the end for the cancel{many} sent to {bot.unread_levels}: "
+        "applied late, a cancel takes whatever order of your team rests at its level by "
+        "then. Check with order_snapshot or the console"
     )
 
 
@@ -1442,9 +1446,9 @@ def ended_for_good(progress: Progress, why: str) -> int:
         return fail(why)
     for warning in bot.warnings:
         print(f"WARNING: {warning}", file=sys.stderr)
-    if bot.cancel_unread:
-        return fail(f"{why}. {cancel_unread_warning(bot)}")
-    if bot.gone and not bot.missed:
+    if bot.unanswered_cancels:
+        print(cancel_unread_warning(bot), file=sys.stderr)
+    if bot.cancel_unread or (bot.gone and not bot.missed):
         return fail(why)
     return fail(
         f"{why}. WARNING: this example's order may still rest at {bot.where}: check with "
