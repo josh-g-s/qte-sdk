@@ -77,7 +77,8 @@ connection that is up, with no message missed since: if --seconds pass with the 
 unanswered (its `ticket_accepted` lost to a `SeqGap` or unreadable, say), with the
 connection down, with a message missed since the ticket's last state, or after a
 Director's amend whose replacement's state has not come, it says the ticket's state is not
-known and exits with status 1.
+known and exits with status 1. An unreadable message whose type is known to be no ticket
+answer (a book, say) leaves the ticket's state as it was; it is still named as missed.
 
 On a drop. If the connection drops, or the exchange restarts, the example says so and
 reconnects by itself, waiting longer between attempts (at most 30 seconds). The ticket
@@ -172,6 +173,7 @@ from qte_sdk.session import (
     resolve_url,
 )
 from qte_sdk.tickets import (
+    TICKET_EVENT_TYPES,
     TWAP,
     VWAP,
     LatestTickets,
@@ -366,9 +368,16 @@ class Pod:
             print("warning: a message from the exchange was missed or unreadable")
             self.missed = True
             # The ticket's answer or a stop may be the message lost: its state is not
-            # known until a state of it comes.
-            self.misses += 1
-            self.stale("a message was missed since its last state")
+            # known until a state of it comes. An unreadable message of a known type
+            # that is no ticket answer (a book, say) cannot have been either.
+            if (
+                not isinstance(event, DecodeFailed)
+                or event.type is None
+                or event.type in TICKET_EVENT_TYPES
+                or event.report_seq is not None
+            ):
+                self.misses += 1
+                self.stale("a message was missed since its last state")
         elif is_account_state(event):
             if event.message.request_ref == self.account_ref:
                 self.account = event.message

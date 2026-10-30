@@ -621,6 +621,31 @@ async def test_an_amend_whose_replacement_has_not_come_is_not_known_at_the_end()
     assert "still working on the exchange" not in out
 
 
+async def test_a_gap_between_the_send_and_the_acceptance_leaves_the_ticket_not_known():
+    # A message is lost after the ticket is sent and before its ticket_accepted, and no
+    # state comes: the lost one may be its stop, so the acceptance alone is not current.
+    exchange = PodExchange(
+        route=route_payload(), accounts=[account(None)], after=[], before=[("gap", {})]
+    )
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 1, out + err
+    assert "accepted: ticket 17" in out
+    assert "the state of ticket 17 not known (a message was missed since its last state)" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_an_unreadable_book_leaves_the_tickets_state_current():
+    # A book cannot be the ticket's answer or a stop: the state held stays current, and
+    # the message is still named as missed.
+    after = [*WORKING, ("book", {"instrument": {"not": "an instrument"}})]
+    exchange = PodExchange(route=route_payload(), accounts=[account(None)], after=after)
+    code, out, err = await run_pod(exchange, "--seconds", "1")
+    assert code == 0, out + err
+    assert "warning: a message from the exchange was missed or unreadable" in out
+    assert "ticket 17 is still working on the exchange" in out
+    assert "messages were missed, so the ticket's states printed may be incomplete" in out
+
+
 @pytest.mark.parametrize("seconds", ["0", "-5", "nan"])
 def test_seconds_must_be_above_zero(seconds, capsys):
     example = load_example("fundamentals_pod.py")
@@ -726,6 +751,20 @@ async def test_a_pod_down_when_the_watch_runs_out_does_not_say_its_ticket_is_wor
     assert code == 1, out + err
     assert len(exchange.tickets()) == 1
     assert "the state of ticket 17 not known (disconnected)" in out
+    assert "still working on the exchange" not in out
+
+
+async def test_a_pod_reconnected_with_no_state_of_its_ticket_does_not_say_it_is_working():
+    # The ticket is accepted and working at the close; the new connection is up but
+    # sends no state of it by --seconds. The state held from before the drop is not
+    # current: never "still working", status 1.
+    exchange = RestartingPodExchange(route=route_payload(), accounts=[account(0)], after=WORKING)
+    code, out, err = await run_pod(exchange, "--seconds", "2")
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert len(exchange.tickets()) == 1
+    assert "reconnected: the ticket states are sent again" in out
+    assert "the state of ticket 17 not known (no state of it since the reconnect)" in out
     assert "still working on the exchange" not in out
 
 
