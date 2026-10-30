@@ -6141,6 +6141,137 @@ async def test_options_bot_counts_another_strategys_order_seen_on_a_queued_event
     assert bot.taken_before
 
 
+async def test_options_bot_cancels_nothing_after_a_refused_resume_where_the_level_was_empty():
+    # The level was empty in a complete view when the order was sent. The order is in
+    # flight at a drop and the resume is refused, so the view stays incomplete: another
+    # order of the team may have come to the level unseen, and this one's duplicate reject
+    # with it. With no accepted, a cancel there could clear that order: none is sent.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    assert not bot.taken_before
+    bot.on_disconnected(Disconnected(error=None))
+    view.incomplete = True
+    bot.resumed(replayed=False)  # refused
+    assert bot.taken_before
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    assert bot.finished and bot.missed
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        SeqGap(2, 5),
+        "report gap",
+        DecodeFailed("reject", ValueError("unreadable"), 2),
+        DecodeFailed(None, ValueError("unreadable"), 2),
+    ],
+    ids=["seq-gap", "report-gap", "unreadable-reject", "unreadable-untyped"],
+)
+async def test_options_bot_waits_for_its_accepted_after_a_live_gap_before_it(gap: object):
+    # The real view is complete and the level empty when the order is sent. A gap on the
+    # live session, or an unreadable order frame, may hide another strategy's order coming
+    # to rest there and this one's duplicate reject: at time-up the bot cancels nothing
+    # and waits for the reply. Once its own accepted comes, it cancels as usual.
+    from qte_sdk.connection import ReportGap
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = RestingOrders()
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    assert not bot.taken_before
+    await bot.on_event(ReportGap(3, 5) if gap == "report gap" else gap)
+    assert view.incomplete and bot.missed and bot.taken_before
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+@pytest.mark.parametrize("while_down", ["stale entry", "unreadable book"])
+async def test_options_bot_adopts_its_order_from_a_snapshot_after_a_drop(while_down: str):
+    # The level was empty in a complete view when the order was sent; the link drops
+    # before its accepted. While the view waits for the resume it is incomplete, and what
+    # it shows then (a stale entry of another strategy at the level) or an unreadable
+    # book frame says nothing of the level. The snapshot shows this strategy's order
+    # there: the bot takes it as its own and cancels it.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    bot.on_disconnected(Disconnected(error=None))
+    view.incomplete = True
+    if while_down == "stale entry":
+        view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
+        await bot.on_event(Received("book", None, 2), act=False)
+    else:
+        await bot.on_event(DecodeFailed("book", ValueError("unreadable"), 2), act=False)
+    assert not bot.taken_before
+    view.incomplete = False
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="opt-test", remaining_size=1)
+    bot.resumed(replayed=False)
+    assert bot.accepted and bot.resting and not bot.gone
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_options_bot_takes_a_cancel_of_another_strategys_order_at_its_price_as_not_its_own(
+    accepted: bool,
+):
+    # The bot's cancel at its own price is answered by an order_cancelled for another
+    # strategy's order there: that was not this example's order. It warns, and cancels
+    # again where its own order rests.
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    if accepted:
+        bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    taken = OrderCancelled(
+        strat_id="other",
+        instrument=contract,
+        side=BUY,
+        price=price,
+        cancelled_size=7,
+        request_ref=bot.cancel_ref,
+    )
+    bot.on_order_event(taken)
+    assert not bot.gone and bot.cancel_ref is None
+    assert bot.warnings and "that was not this example's" in bot.warnings[0]
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+
+
 class RefusesEveryResume(FakeExchange):
     """Refuses `resume` on every connection, the first included."""
 

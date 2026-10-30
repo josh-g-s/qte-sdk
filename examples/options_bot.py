@@ -64,8 +64,9 @@ What it cannot tell apart. It follows its order by strategy, contract, side and 
 level, and follows an amend's move to a new level. If anything else acts on that
 strategy's buy orders in the contract while it runs (another program, or an amend that
 fills at once), its reports may be misread, so use a strategy nothing else is using. If
-messages from the exchange are missed after the order is sent, it still cancels, but then
-exits with status 1 and a warning to check your orders and fills.
+messages from the exchange are missed after its order is accepted, it still cancels, but
+then exits with status 1 and a warning to check your orders and fills; missed before its
+`accepted`, they are treated as below.
 
 On a drop. The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the
 connection drops, or the exchange restarts, it reconnects by itself, waiting longer between
@@ -87,16 +88,18 @@ is sent, there is nothing of its own to miss, so it chooses and sends as usual. 
 `accepted` that comes through the resume is printed as answered after a reconnect, with
 no round trip. If its order went to a
 level where an order of the team already rested, of any strategy, as from an earlier run,
-or may have rested unseen because its view of resting orders was not complete (as when
-the exchange does not resume even the first session), it never cancels there before its
-own `accepted` comes: the exchange refuses such a duplicate, and a cancel would clear the
-order already there. At the end it waits for the reply, through a message missed
-meanwhile; if a resume lost the reply, or none comes, it cannot tell whose order rests
-there: it cancels nothing, warns and exits with status 1. An order of another strategy
-that a complete view shows at its level at any time before its own `accepted` is treated
-the same way. If a cancel takes an order that is not its own (one
-that came to the level its order left), it cancels again where its order rests and, at the
-end, warns of it and exits with status 1.
+or may have rested unseen because its view of resting orders was not complete when it
+was sent (as when the exchange does not resume even the first session) or went incomplete
+before its `accepted` came (a gap, an unreadable order report, or a resume that did not
+recover the reports; a drop alone, which a replay puts right, does not count), it never
+cancels there before its own `accepted` comes: the exchange refuses such a duplicate, and
+a cancel would clear the order already there. At the end it waits for the reply, through
+a message missed meanwhile; if a resume lost the reply, or none comes, it cannot tell
+whose order rests there: it cancels nothing, warns and exits with status 1. An order of
+another strategy that a complete view shows at its level at any time before its own
+`accepted` is treated the same way. If a cancel takes an order that is not its own (one
+that came to the level its order left, or another strategy's at its own price), it cancels
+again where its order rests and, at the end, warns of it and exits with status 1.
 --seconds and --drain-seconds count the time down too.
 Only the first connection is not retried: if it fails, the example says why and stops.
 The replay or the snapshot covers only what the exchange had applied when it answered: if
@@ -186,6 +189,7 @@ from qte_sdk.options import (
     vol_to_decimal,
 )
 from qte_sdk.orders import (
+    ORDER_EVENT_TYPES,
     is_order_event,
     new_request_ref,
     reason_code_name,
@@ -619,6 +623,11 @@ class OptionsBot:
             # order is cancelled afresh.
             print("warning: the order reports missed while disconnected were not recovered")
             self.missed = True
+            if not self.accepted:
+                # Another order of the team may have come to the level unseen meanwhile,
+                # and the exchange would refuse this one as a duplicate: never cancel
+                # there without an `accepted` for this one.
+                self.taken_before = True
             self.reply_lost = True  # a reply not yet come is never sent again
             self.cancel_ref = None
             return
@@ -705,6 +714,11 @@ class OptionsBot:
         elif isinstance(item, SeqGap | DecodeFailed) or isinstance(event, ReportGap):
             print("warning: a message from the exchange was missed or unreadable")
             self.missed = True  # no order is sent after this; one sent is still cancelled
+            if self.ref is not None and not self.accepted and self.hides_reports(item):
+                # The view is no longer complete, so an order of the team may have come
+                # to the level unseen, and this one's duplicate reject with it: take it
+                # that one rests there, as at a send from an incomplete view.
+                self.taken_before = True
             if item is not None:
                 self.books.update(item)
                 self.greeks.update(item)
@@ -713,6 +727,15 @@ class OptionsBot:
         self.note_level()  # on every event, not only when acting
         if act:
             await self.act()
+
+    def hides_reports(self, item: object) -> bool:
+        """Whether a gap or an unreadable frame left the view of resting orders
+        incomplete: a frame of market data that could not be read hides no report."""
+        if self.view is None or not self.view.incomplete:
+            return False
+        if isinstance(item, DecodeFailed) and item.type is not None:
+            return item.type in ORDER_EVENT_TYPES or item.type in ("order_snapshot", "resume_ack")
+        return True
 
     def ours(self, message: OrderState | OrderCancelled | Execution) -> bool:
         """Whether a report is about this example's order: same strategy, contract, side
@@ -776,16 +799,22 @@ class OptionsBot:
                 if message.remaining_size == 0:
                     self.gone = True
             case OrderCancelled() if self.ours(message) or (
-                # This example's own cancel, at the level where its order rests.
-                ref is not None and ref == self.cancel_ref and message.price == self.price
+                # This example's own cancel, at the level where its order rests, and of
+                # an order of its strategy: a cancel clears the team's order at the
+                # level, whichever strategy's it is.
+                ref is not None
+                and ref == self.cancel_ref
+                and message.price == self.price
+                and message.strat_id == self.strat_id
             ):
                 reason = reason_code_name(message.reason_code)
                 rested = "cancelled" if self.resting else "not left resting"
                 print(f"{rested}: {message.cancelled_size} at {self.where} ({reason})")
                 self.gone = True
             case OrderCancelled() if ref is not None and ref == self.cancel_ref:
-                # The cancel took an order at the level this example's order has left,
-                # someone else's: cancel again where the order rests now.
+                # The cancel took someone else's order: one at the level this example's
+                # order has left, or another strategy's at its own price. Cancel again
+                # where the order rests now; a NO_ORDER_AT_LEVEL then says none does.
                 print(f"the cancel took an order at {price_text(message.price)}, not this one")
                 self.warnings.append(
                     f"a cancel took an order of your team at {price_text(message.price)} "
