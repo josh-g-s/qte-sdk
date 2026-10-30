@@ -46,15 +46,15 @@ snapshot of the resting orders instead, or does not resume, the reports missed a
 recovered, and a market order never rests, so nothing says how it filled: the example says
 so, tells you to check your fills, and exits with status 1. So it does, too, if a message is
 missed or unreadable during the resume (a `SeqGap` or `DecodeFailed`), or while its order
-is out, since the report lost may be one of its fills (an unreadable message whose type is
-known to be no order report, a book say, is not); a gap can also end the resume with
-no `ResumeComplete`. One read before the `resume_ack` does not end the resume: books come
-through while the replay goes on, so with no order out the example still sends nothing
-until the resume ends. An `accepted` that comes through the resume is printed as answered after a
-reconnect, with no round trip. --seconds counts the time down too. Only the first
-connection is not retried: if it fails, the example says why and stops; a later one that
-fails for good (a revoked credential, say) says why and, with the order out, that it may
-have filled.
+is out, since the report lost may be one of its fills (outside a resume, an unreadable
+message whose type is known to be no order report, a book say, is not); a gap can also
+end the resume with no `ResumeComplete`. One read before the `resume_ack` does not end
+the resume: books come through while the replay goes on, so with no order out the example
+still sends nothing until the resume ends. An `accepted` that comes through the resume is
+printed as answered after a reconnect, with no round trip. --seconds counts the time down
+too. Only the first connection is not retried: if it fails, the example says why and
+stops; a later one that fails for good (a revoked credential, say) says why and, with the
+order out, that it may have filled.
 """
 
 import argparse
