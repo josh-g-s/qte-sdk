@@ -6714,6 +6714,141 @@ async def test_options_bot_is_up_after_a_first_resume_cut_short(gap: str):
     assert "missed" in bot.why_none
 
 
+async def options_bot_resting_with_cancel_out(example: Any, view: Any, sender: Any) -> Any:
+    """The bot with its order accepted and resting, stopping, its first cancel sent."""
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    level = {"strat_id": "opt-test", "instrument": OPTION_CONTRACT, "side": BUY}
+    level["price"] = OPTION_PRICE
+    await bot.on_event(Received("accepted", Accepted(request_ref=bot.ref), None, report_seq=1))
+    resting = OrderState(**level, state=RESTING, remaining_size=1)
+    await bot.on_event(Received("order_state", resting, None, report_seq=2))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    return bot
+
+
+def options_bot_cancelled(ref: str, strat_id: str = "opt-test", seq: int = 6) -> Any:
+    message = OrderCancelled(
+        strat_id=strat_id,
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=OPTION_PRICE,
+        cancelled_size=1,
+        request_ref=ref,
+    )
+    return Received("order_cancelled", message, None, report_seq=seq)
+
+
+async def test_options_bot_reads_its_fresh_cancel_when_the_first_lands_late():
+    # A cancel is in flight at a drop. The replay completes before the exchange applies
+    # it (still in its order delay), so the view shows the order resting and the bot
+    # cancels afresh. The first cancel then takes the order; the fresh one, applied an
+    # order delay later, takes another strategy's order that came to rest at the freed
+    # level. The bot reads that reply before it ends, names it and the run fails.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, RestingOrders(), sender)
+    first = bot.cancel_ref
+    for event in [
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_complete(True),
+    ]:
+        await bot.on_event(event)
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+    fresh = bot.cancel_ref
+    assert fresh not in (None, first)
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(options_bot_cancelled(first))
+    queue.put_nowait(options_bot_cancelled(fresh, strat_id="other-strat", seq=7))
+    assert await example.drive(bot, queue, 2.0) == "done"
+    assert queue.empty() and bot.cancel_ref is None and bot.gone
+    assert len(bot.warnings) == 1 and "another order of your team" in bot.warnings[0]
+    assert not bot.unsure  # this example's order was cancelled: it does not rest
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+
+
+async def test_options_bot_does_not_end_with_its_own_cancel_unread():
+    # Its order ends (here filled) while its cancel is in flight: the bot waits for the
+    # cancel's reply, which could take another order of the team at the level, to the
+    # end of the drain, and then is not finished, so the run warns and fails.
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, RestingOrders(), sender)
+    fill = Execution(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        order_price=OPTION_PRICE,
+        fill_price=OPTION_PRICE,
+        fill_size=1,
+        remaining_size=0,
+    )
+    await bot.on_event(Received("execution", fill, None, report_seq=3))
+    assert bot.gone and bot.cancel_ref is not None and not bot.finished
+    assert await example.drive(bot, asyncio.Queue(), 0.1) == "time"
+    assert [t for t, _ in sender.sent] == ["new", "cancel"] and not bot.finished
+    no_order = Reject(request_ref=bot.cancel_ref, reason_code=ReasonCodes.NO_ORDER_AT_LEVEL)
+    await bot.on_event(Received("reject", no_order, None, report_seq=4))
+    assert bot.finished and not bot.warnings and bot.cancel_failed is None
+
+
+async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():
+    # The resume shows the order resting, so the bot cancels it, and that cancel is in
+    # flight when a message is missed live. That gap ends no resume: the cancel is not
+    # forgotten, and none is sent again.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    await bot.on_event(Received("accepted", Accepted(request_ref=bot.ref), None, report_seq=1))
+    await bot.on_event(Disconnected(error=None))
+    view.orders[(OPTION_CONTRACT, BUY, OPTION_PRICE)] = SimpleNamespace(
+        strat_id="opt-test", remaining_size=1
+    )
+    for event in [
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_complete(True),
+    ]:
+        await bot.on_event(event)
+    assert [t for t, _ in sender.sent] == ["new", "cancel"] and bot.cancel_ref is not None
+    await bot.on_event(SeqGap(6, 8))
+    assert bot.missed and bot.up
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+async def test_options_bot_takes_another_strategy_at_its_level_after_a_resume_as_gone():
+    # Accepted, then a drop. The snapshot shows another strategy's order at this one's
+    # level, and none of this strategy on the contract: this one is gone, and nothing is
+    # cancelled, since a cancel there would take the other strategy's order.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.on_disconnected(Disconnected(error=None))
+    view.orders[(OPTION_CONTRACT, BUY, OPTION_PRICE)] = SimpleNamespace(
+        strat_id="other-strat", remaining_size=7
+    )
+    bot.resumed(replayed=False)
+    assert bot.gone and bot.finished and not bot.resting
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+
+
 async def test_options_bot_chooses_again_when_its_new_was_not_sent():
     # The send of the new raises NotConnected: nothing was sent, so there is no order
     # that may rest. It is chosen and sent again once the connection takes data.

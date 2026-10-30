@@ -126,8 +126,13 @@ its own at a level its order has left, it cancels again where its order rests an
 the end, warns of it and exits with status 1. If it takes another strategy's order at
 its own level, this one does not rest there (the team has one order per level) and
 where it rests is not known: it sends no further cancel, warns that it may still rest
-and how to check, and exits with status 1. When one warning already names the orders
-that may be this one, no generic warning of missed messages follows it.
+and how to check, and exits with status 1. Once its order is gone it still reads the
+reply to a cancel of its own in flight before it ends: applied late (a resume can show
+the order resting while a cancel sent before the drop is still in its order delay, so it
+cancels again), a cancel takes whatever of the team rests at the level by then. If it took
+another order, or no reply came by the end, it names it and exits with status 1. When one
+warning already names the orders that may be this one, no generic warning of missed
+messages follows it.
 --seconds and --drain-seconds count the time down too.
 Only the first connection is not retried: if it fails, the example says why and stops.
 A reconnect that fails for good (a refused session, or a 1008 `credential revoked`)
@@ -396,9 +401,18 @@ class OptionsBot:
 
     @property
     def finished(self) -> bool:
+        if self.cancel_unread:
+            return False  # its reply may yet take another order of the team: read it
         if self.rejected or self.gone or self.gave_up or self.cancel_failed is not None:
             return True
         return self.stopping and self.ref is None
+
+    @property
+    def cancel_unread(self) -> bool:
+        """Whether the order is gone with this example's cancel still in flight. Applied
+        after the order went, that cancel takes whatever of the team rests at the level
+        by then, so the example never ends before its reply (or the drain's end)."""
+        return self.gone and self.cancel_ref is not None
 
     @property
     def where(self) -> str:
@@ -665,6 +679,8 @@ class OptionsBot:
         self.reply_lost = False
         if self.ref is None or self.finished:
             return  # no order was sent, so there is nothing to take from the view
+        if self.gone:
+            return  # the order is gone: its cancel in flight keeps its ref, so is still read
         # An order or a cancel in flight at the drop is never sent again: the view, from
         # the replay or the snapshot, says what became of it.
         self.forget_cancel()
@@ -909,6 +925,19 @@ class OptionsBot:
                 self.filled += message.fill_size
                 if message.remaining_size == 0:
                     self.gone = True
+            case OrderCancelled() if self.gone and self.own_cancel(ref):
+                # The order is already gone (a cancel before this one took it, or a fill),
+                # and this cancel, applied after, took another order of the team at the
+                # level: name it.
+                level = self.level_text(message.side, message.price)
+                print(f"the cancel took another order at {level}, after this one was gone")
+                self.warnings.append(
+                    f"a cancel at {level}, applied after this example's order was gone, "
+                    "took another order of your team there: check your orders, and place "
+                    "that one again if it should rest"
+                )
+                if ref == self.cancel_ref:
+                    self.cancel_ref = None
             case OrderCancelled() if self.ours(message) or (
                 # This example's own cancel, at the level where its order rests, and of
                 # an order of its strategy: a cancel clears the team's order at the
@@ -920,6 +949,8 @@ class OptionsBot:
                 reason = reason_code_name(message.reason_code)
                 rested = "cancelled" if self.resting else "not left resting"
                 print(f"{rested}: {message.cancelled_size} at {self.where} ({reason})")
+                if ref == self.cancel_ref:
+                    self.cancel_ref = None
                 self.gone = True
             case OrderCancelled() if self.own_cancel(ref) and message.price == self.price:
                 # The cancel, this one or one sent before a drop, took another strategy's
@@ -955,6 +986,9 @@ class OptionsBot:
     def on_cancel_reject(self, message: Reject) -> None:
         reason = reason_code_name(message.reason_code)
         self.cancel_ref = None
+        if self.gone:
+            print(f"cancel rejected ({reason}): the order was already gone")
+            return
         if message.reason_code == ReasonCodes.NO_ORDER_AT_LEVEL:
             if self.cancel_price != self.price:
                 return  # the order moved after this cancel was sent: cancel it again
@@ -1250,13 +1284,17 @@ async def trade_from(
         return watch_only_outcome(bot)
     if why == "closed":
         print("the exchange closed the connection")
-        if bot.ref is not None and not bot.finished:
+        if bot.cancel_unread:
+            print(cancel_unread_warning(bot))
+        elif bot.ref is not None and not bot.finished:
             print(f"WARNING: the order may still rest at {bot.where}; check and cancel it")
         return 1
     if not bot.finished and bot.ref is not None:
         reason = {"time": "time is up", "interrupted": "interrupted"}[why]
         if not bot.accepted:
             print(f"{reason}: waiting for the reply to the order sent to {bot.where}")
+        elif bot.cancel_unread:
+            print(f"{reason}: waiting for the reply to the cancel sent to {bot.where}")
         else:
             print(f"{reason}: cancelling {bot.where}")
         bot.stopping = True
@@ -1276,6 +1314,9 @@ async def trade_from(
         return watch_only_outcome(bot)
     for warning in bot.warnings:
         print(f"WARNING: {warning}")
+    if bot.cancel_unread:
+        print(cancel_unread_warning(bot))
+        return 1
     if bot.cancel_failed is not None:
         print(
             f"WARNING: the cancel was rejected ({bot.cancel_failed}), so the order may "
@@ -1331,6 +1372,14 @@ async def trade_from(
         print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
     print(bot.summary())
     return 1 if bot.warnings else 0
+
+
+def cancel_unread_warning(bot: OptionsBot) -> str:
+    return (
+        f"WARNING: the order is gone, but no reply came by the end for the cancel sent to "
+        f"{bot.where}: applied late, it may take another order of your team there. "
+        "Check with order_snapshot or the console"
+    )
 
 
 def fail(message: str) -> int:
