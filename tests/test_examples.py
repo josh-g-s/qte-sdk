@@ -3176,6 +3176,48 @@ async def test_quote_both_sides_stops_and_cancels_on_a_risk_notice_of_an_unknown
     assert "a risk notice of a kind this example does not know (99)" in out
 
 
+async def test_quote_both_sides_takes_an_unspecified_risk_notice_kind_as_unknown(capsys):
+    # A kind name newer than this SDK decodes as 0, UNSPECIFIED: it too is not known, so
+    # it stops the run like an unknown number.
+    example = load_example("quote_both_sides.py")
+    quoter, _ = own_buy(example)
+    notice = Received("risk_notice", RiskNotice(kind=0), None)
+    assert example.apply_received(quoter, quoter.view, notice) == "unreliable"
+    assert quoter.halt is not None
+    assert "not known to this example" in capsys.readouterr().out
+
+
+def cancelled_at(price: int, strat_id: str = "quote-test") -> OrderCancelled:
+    return OrderCancelled(
+        strat_id=strat_id,
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=price,
+        cancelled_size=1,
+        reason_code=ReasonCodes.PURGE_STALE,
+    )
+
+
+async def test_quote_both_sides_still_fails_once_an_unattributed_order_has_gone(capsys):
+    # A resume shows an order of its strategy it cannot tell is its own. It stops, and
+    # that order then leaves the view (purged, say): the run must still exit 1 and name it.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    deliver(example, quoter, "order_cancelled", cancelled_at(BID + TICK))
+    assert not buy.own
+    resting_at(quoter, "quote-test", BID + 2 * TICK)
+    assert not quoter.resumed(replayed=True)
+    deliver(example, quoter, "order_cancelled", cancelled_at(BID + 2 * TICK))
+    assert quoter.strategy_orders() == []
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert (
+        "WARNING: an order of this strategy was seen at BUY TEST @ 99.970000, which this "
+        "example could not tell was its own: it was not cancelled, and it has gone since"
+    ) in out
+
+
 def own_both(example: Any) -> tuple[Any, Any, Any]:
     """own_buy, with its sell its own order too, accepted and reported resting."""
     quoter, buy = own_buy(example)

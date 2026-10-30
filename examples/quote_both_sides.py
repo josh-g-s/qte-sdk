@@ -373,6 +373,9 @@ class Quoter:
         self.pause_until = float("-inf")
         # Why quoting must stop for a reason other than missed messages, or None.
         self.halt: str | None = None
+        # The levels of orders of its strategy a resume showed that it could not tell were
+        # its own, kept so the run still fails once they have gone from the view.
+        self.unattributed_seen: set[tuple[int, int]] = set()
 
     def where(self, side: int, price: int) -> str:
         return f"{SIDE_NAMES.get(side, '?')} {self.instrument} @ {price_text(price)}"
@@ -501,6 +504,7 @@ class Quoter:
                 quote.again = True  # still resting, its cancel unanswered: one more may go
         unknown = self.unattributed() if complete else []
         for order in unknown:
+            self.unattributed_seen.add((order.key.side, order.key.price))
             # Not this run's own order, nor an earlier run's: perhaps the order of a new
             # whose accepted the resume did not show, or one of its own moved while it was
             # down. Whose it is cannot be told, so it is never cancelled.
@@ -855,6 +859,12 @@ class Quoter:
                     f"{self.where(order.key.side, order.key.price)} "
                     f"({order.remaining_size} resting): not cancelled: whose it is cannot be told"
                 )
+        for side, price in sorted(self.unattributed_seen - self.strategy_levels()):
+            lines.append(
+                f"an order of this strategy was seen at {self.where(side, price)}, which this "
+                "example could not tell was its own: it was not cancelled, and it has gone "
+                "since: check your fills and position (send_account_query)"
+            )
         lines.extend(self.warnings)
         if lines and self.paused():
             lines.append(
@@ -972,7 +982,8 @@ class Quoter:
                 print(f"cancelled {side} {message.cancelled_size} @ {price} ({reason})")
                 self.on_cancelled(message, ref)
             case RiskNotice():
-                if message.kind in RiskNoticeKind.values():
+                # A kind name newer than this SDK decodes as 0, UNSPECIFIED: not known either.
+                if message.kind != 0 and message.kind in RiskNoticeKind.values():
                     print(f"risk notice: {RiskNoticeKind.Name(message.kind)}")
                 else:
                     # The enum allows kinds newer than this example: what one means is not
