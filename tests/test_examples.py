@@ -6655,6 +6655,45 @@ async def test_options_bot_still_cancels_after_a_resume_cut_short(gap: str):
 
 
 @pytest.mark.parametrize("gap", ["seq-gap", "unreadable"])
+async def test_options_bot_sends_no_cancel_before_the_replay_after_an_early_gap(gap: str):
+    # A message is missed before the resume_ack: the session's resume goes on, so the
+    # bot is not up and sends no cancel until the ResumeComplete. Its order filled while
+    # it was down, and the replay says so: no cancel is sent at the level at all, where
+    # another strategy's order may rest by now.
+    from qte_sdk.connection import Disconnected, ResumeComplete
+
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    sender = RecordingSender()
+    bot = options_bot_accepted(example, view, sender)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.on_event(Disconnected(error=None))
+    await bot.on_event(connected_event(reconnected=True, resume=replay_ack()))
+    await bot.on_event(resume_cut_short(gap))
+    assert not bot.up
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    await bot.on_event(resume_ack_event(True))
+    bot.on_order_event(
+        Execution(
+            strat_id="opt-test",
+            instrument=OPTION_CONTRACT,
+            side=BUY,
+            order_price=OPTION_PRICE,
+            fill_price=OPTION_PRICE,
+            fill_size=1,
+            remaining_size=0,
+        )
+    )
+    await bot.on_event(ResumeComplete(True, 5, 0))
+    assert bot.up and bot.finished
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+
+
+@pytest.mark.parametrize("gap", ["seq-gap", "unreadable"])
 async def test_options_bot_is_up_after_a_first_resume_cut_short(gap: str):
     # The first session's resume is cut short before any order is sent: the session is
     # up all the same, and the bot, having missed a message, sends no order and says why.
@@ -6729,6 +6768,37 @@ async def test_options_bot_says_the_session_never_came_up(capsys: Any):
     assert [t for t, _ in session.sent] == ["subscribe"]
     assert "never came up" in out
     assert "no contract could take the order" not in out
+
+
+async def test_options_bot_stops_with_status_0_on_ctrl_c_before_the_session_came_up(
+    capsys: Any,
+):
+    # Ctrl+C before the first resume completes: no order was sent, so the run stops
+    # with status 0, as for any Ctrl+C before an order, not as a session never up.
+    from google.protobuf import json_format
+
+    from qte_sdk.contract.v1.session_pb2 import Instruments
+
+    example = load_example("options_bot.py")
+    table = json_format.ParseDict(options_table(), Instruments())
+
+    class Session(RecordingSender):
+        instrument_table = table
+
+    session = Session()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(connected_event(reconnected=False, resume=replay_ack(False)))
+    args = SimpleNamespace(
+        watch_only=False, underlying=None, strat_id="opt-test", seconds=5, drain_seconds=0.3
+    )
+    task = asyncio.current_task()
+    assert task is not None
+    asyncio.get_running_loop().call_later(0.2, task.cancel)
+    code = await example.trade_from(session, queue, args, task, example.Progress())
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert [t for t, _ in session.sent] == ["subscribe"]
+    assert "never came up" not in out
 
 
 @pytest.mark.parametrize("ending", ["session-rejected", "credential-revoked"])

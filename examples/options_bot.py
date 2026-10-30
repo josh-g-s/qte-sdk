@@ -109,13 +109,15 @@ order reports cannot be recovered (the exchange did not resume, or messages were
 meanwhile) after its order was sent, it treats them as missed, as above, and sends no
 order from then on; a cancel in flight at the drop is then sent afresh, and a reply not
 yet come counts as lost until a later resume completes. A resume cut short by a message
-missed or unreadable (a `SeqGap`, or a `DecodeFailed` of no known type) ends with no
-`ResumeComplete`: the example takes it as one that did not recover the reports, so the
-session is up again and an accepted order is still cancelled. Before an order is sent,
+missed or unreadable (a `SeqGap`, or a `DecodeFailed` of no known type) after its
+`resume_ack` ends with no `ResumeComplete`: the example takes it as one that did not
+recover the reports, so the session is up again and an accepted order is still cancelled.
+One missed before the `resume_ack` does not end the resume: the example sends nothing
+until its `ResumeComplete`, since the replay may yet say the order is gone. Before an order is sent,
 a resume that does not recover the reports leaves nothing of its own to miss, so it
 chooses and sends as usual, but a message missed means it sends no order and says why.
-If the session never comes up (its first resume never completes), it says so, sends
-nothing and exits with status 1. A new whose send finds the connection down
+If the session never comes up (its first resume never completes) by --seconds, it says
+so, sends nothing and exits with status 1. A new whose send finds the connection down
 (`NotConnected`) was not sent: no order of it can rest, and it chooses again once the
 connection is back. An
 `accepted` that comes through the resume is printed as answered after a reconnect, with
@@ -815,22 +817,23 @@ class OptionsBot:
             await self.act()
 
     def on_missed(self, ends_resume: bool) -> None:
-        """A `SeqGap`, or a `DecodeFailed` whose type is unknown, ends a resume with no
-        `ResumeComplete` (the session stops waiting for it): take it as a resume that did
-        not recover the reports, so the session is up and a cancel can still be sent."""
+        """A `SeqGap`, or a `DecodeFailed` whose type is unknown, after the resume_ack ends
+        the resume with no `ResumeComplete` (the session stops waiting for it): take it as
+        a resume that did not recover the reports, so the session is up and a cancel can
+        still be sent. Before the resume_ack, the session's resume goes on, and the replay
+        or snapshot may yet say what became of the order: wait for its `ResumeComplete`,
+        sending nothing, with the view taken as incomplete to err safe."""
         if not self.resuming or not ends_resume:
             return
-        if self.resume_answered:
-            print("the resume was cut short by a message missed or unreadable")
-        else:
-            # Delivered before the resume_ack, from what the session read ahead: the
-            # session's resume goes on, but the example errs safe and ends it here.
-            print(
-                "a message was missed or unreadable before the resume was answered: "
-                "taking the resume as cut short"
-            )
         if self.view is not None:
             self.view.mark_incomplete()
+        if not self.resume_answered:
+            print(
+                "a message was missed or unreadable before the resume was answered: "
+                "still waiting for the resume to complete"
+            )
+            return
+        print("the resume was cut short by a message missed or unreadable")
         self.resumed(replayed=False)
 
     def ours(self, message: OrderState | OrderCancelled | Execution) -> bool:
@@ -1316,7 +1319,7 @@ async def trade_from(
             f"{bot.where}; check and cancel it yourself"
         )
         return 1
-    if bot.ref is None and not bot.ever_up:
+    if why == "time" and bot.ref is None and not bot.ever_up:
         print(
             "the session never came up (its resume never completed), so no order was sent; "
             "check the exchange and run it again"
