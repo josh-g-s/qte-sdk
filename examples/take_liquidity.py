@@ -221,12 +221,17 @@ class Taker:
         also ends the resume with no `ResumeComplete` (the session stops waiting for it),
         so it counts as a resume that did not recover the reports missed."""
         self.missed = True
-        if self.order_out():
-            # The report lost may be one of this order's, and a fill carries no
-            # request_ref: what follows cannot be told from another order's, so the
-            # outcome is not known for sure and the run ends with status 1.
-            self.unsure = True
         if not self.resuming:
+            if self.order_out():
+                # The report lost may be one of this order's, and a fill carries no
+                # request_ref: what follows cannot be told from another order's, so
+                # nothing more is counted and the run ends with status 1.
+                print(
+                    "a message was missed while the order was out, and a fill names no "
+                    "order, so how it filled is not known: check your fills before running "
+                    "this again"
+                )
+                self.unsure = self.done = True
             return
         if ends_resume and self.resume_answered:
             print("the resume was cut short by a message missed or unreadable")

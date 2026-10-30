@@ -5665,16 +5665,16 @@ async def test_take_liquidity_takes_a_reconnect_with_no_resume_as_its_reports_lo
 async def test_take_liquidity_names_a_message_missed_while_its_order_was_out(
     capsys: pytest.CaptureFixture[str],
 ):
-    # A gap may have lost one of its fills: the summary says it may be incomplete, and
-    # the run exits 1, since its outcome is not known for sure.
+    # A gap may have lost one of its reports, and a fill names no order: the run counts
+    # nothing more, says its outcome is not known and exits 1 at once.
     script = [*first_session_then_order(), SeqGap(4, 6), our_accepted, our_fill]
     outcome, session, _ = await run_taker(script)
     lines = capsys.readouterr().out.splitlines()
     assert outcome == 1, lines
     assert len(session.refs("new")) == 1
+    assert "how it filled is not known: check your fills" in lines[-2], lines
     assert lines[-1] == (
-        "filled 1 of 1 at an average of about 100.050000 (messages were missed, so this "
-        "may be incomplete: check your fills)"
+        "nothing filled (messages were missed, so this may be incomplete: check your fills)"
     )
 
 
@@ -5877,7 +5877,8 @@ async def test_take_liquidity_takes_no_outcome_as_known_after_a_report_lost_whil
     out = capsys.readouterr().out
     assert outcome == 1, out
     assert len(session.refs("new")) == 1
-    assert "check your fills" in out
+    assert "how it filled is not known: check your fills" in out
+    assert "FILL" not in out and "cancelled (" not in out and "filled 1 of 1" not in out
 
 
 @pytest.mark.parametrize("sent", [True, False], ids=["order-out", "nothing-sent"])
