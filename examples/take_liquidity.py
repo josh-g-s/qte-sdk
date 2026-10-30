@@ -63,6 +63,7 @@ from qte_sdk.books import LatestBooks
 from qte_sdk.connection import (
     Connected,
     Disconnected,
+    Received,
     ReportGap,
     ResumeComplete,
     SessionRejected,
@@ -136,10 +137,10 @@ class Taker:
         # Whether the order was in flight at a drop, until a resume says what became of it.
         self.in_doubt = False
         self.lost = False  # its reports while disconnected were not recovered
-        # Whether a resume announced by a session is still to complete, and whether a
-        # message was missed or unreadable during it, so its replay may lack a report.
+        # Whether a resume announced by a session is still to complete, and whether its
+        # `resume_ack` has been delivered: a gap before it does not end the resume.
         self.resuming = False
-        self.resume_damaged = False
+        self.resume_answered = False
         # Whether the connection dropped after the order was sent: its `accepted` then
         # comes through a resume, and the time to it is no round trip.
         self.dropped_since_send = False
@@ -198,7 +199,7 @@ class Taker:
     def on_connected(self, connected: Connected) -> None:
         self.up = False  # until its resume is complete
         self.resuming = connected.resume is not None
-        self.resume_damaged = False
+        self.resume_answered = False
         if connected.reconnected:
             print("reconnected: sending nothing until the resume is complete")
         if connected.resume is None:
@@ -212,9 +213,16 @@ class Taker:
         self.missed = True
         if not self.resuming:
             return
-        self.resume_damaged = True
         if ends_resume:
-            print("the resume was cut short by a message missed or unreadable")
+            if self.resume_answered:
+                print("the resume was cut short by a message missed or unreadable")
+            else:
+                # Delivered before the resume_ack, from what the session read ahead: the
+                # session's resume goes on, but the example errs safe and ends it here.
+                print(
+                    "a message was missed or unreadable before the resume was answered: "
+                    "taking the resume as cut short"
+                )
             self.resumed(replayed=False)
         elif self.in_doubt:
             # The replay goes on, but its last fill may end the order before the
@@ -238,10 +246,10 @@ class Taker:
         self.resuming = False
         if not self.in_doubt:
             return
-        if not replayed or self.resume_damaged:
+        if not replayed:
             # A snapshot lists only resting orders, and a market order never rests: its
-            # fills while disconnected are not recovered. Nor are they after a replay a
-            # message was missed from. It is never sent again.
+            # fills while disconnected are not recovered. It is never sent again. (A
+            # replay a message was missed from is taken as not recovered in on_missed.)
             self.fills_unknown()
         self.in_doubt = False
 
@@ -369,6 +377,8 @@ async def run(url: str, args: argparse.Namespace) -> int:
                         taker.on_connected(event)
                     elif isinstance(event, ResumeComplete):
                         taker.resumed(event.replayed)
+                    elif isinstance(event, Received) and event.type == "resume_ack":
+                        taker.resume_answered = True
                     elif isinstance(item, Disconnected):
                         taker.on_disconnected(item)
                     elif isinstance(item, Book):

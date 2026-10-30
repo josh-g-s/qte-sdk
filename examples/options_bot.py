@@ -86,8 +86,12 @@ order from then on; a cancel in flight at the drop is then sent afresh. Before a
 is sent, there is nothing of its own to miss, so it chooses and sends as usual. An
 `accepted` that comes through the resume is printed as answered after a reconnect, with
 no round trip. If its order went to a
-level where an order of its strategy already rested, as from an earlier run, and the reply
-was lost, it cannot tell whose order rests there: it cancels nothing and warns instead.
+level where an order of the team already rested, of any strategy, as from an earlier run,
+or may have rested unseen because its view of resting orders was not complete, it never
+cancels there before its own `accepted` comes: the exchange refuses such a duplicate, and a
+cancel would clear the order already there. At the end it waits for the reply; if the reply
+was lost, or none comes, it cannot tell whose order rests there: it cancels nothing, warns
+and exits with status 1.
 --seconds and --drain-seconds count the time down too.
 Only the first connection is not retried: if it fails, the example says why and stops.
 The replay or the snapshot covers only what the exchange had applied when it answered: if
@@ -286,8 +290,8 @@ class OptionsBot:
         # The team's resting orders, from the session's order reports, applied as each event
         # is handled; read after a resume.
         self.view = view
-        # Whether an order of this strategy already rested at the level when the order was
-        # sent, as from an earlier run: see `resumed`.
+        # Whether an order of the team rested, or may have rested unseen, at the level when
+        # the order was sent, as from an earlier run: see `act_now` and `resumed`.
         self.taken_before = False
         self.table = table
         self.underlying = underlying
@@ -465,6 +469,14 @@ class OptionsBot:
             if not self.stopping and not self.missed and self.would_send is None:
                 await self.send_order()
             return
+        if self.taken_before and not self.accepted:
+            # An order of the team rested, or may have rested unseen, at the level
+            # when this one was sent, and no `accepted` says the exchange took this one: a
+            # cancel there could remove the earlier order. Cancel nothing. Once its reply
+            # can no longer be counted on, stop and warn; until then, wait for it.
+            if self.stopping and self.missed:
+                self.owner_unknown()
+            return
         if (self.resting or self.stopping) and self.cancel_ref is None:
             if self.retry_at is not None and self.grid_points < self.retry_at:
                 return
@@ -496,12 +508,11 @@ class OptionsBot:
             return
         print(f"sending a LIMIT buy of {size} contract(s): {self.where}")
         earlier = None if self.view is None else self.view.get(contract, BUY, price)
-        # From a view that is not complete, an order of this strategy at the level may be
-        # one not seen: take it that one may rest there, so a later view never adopts an
-        # earlier run's order as this one's without an `accepted` for it.
-        self.taken_before = (earlier is not None and earlier.strat_id == self.strat_id) or (
-            self.view is not None and self.view.incomplete
-        )
+        # The exchange refuses an order where the team already rests, and a cancel clears
+        # every order of the team at the level, of any strategy. From a view that is not
+        # complete, such an order may be one not seen: take it that one may rest there, so
+        # this example never cancels or adopts it without an `accepted` for its own order.
+        self.taken_before = earlier is not None or (self.view is not None and self.view.incomplete)
         self.ref = new_request_ref()
         self.sent_at = time.monotonic()
         await send_new(
@@ -600,12 +611,7 @@ class OptionsBot:
                 # Its order went to a level where an order of this strategy already rested,
                 # and its reply was lost: the exchange refuses such a duplicate, but whose
                 # order rests now is unknown, so it is not cancelled as this example's.
-                print(
-                    f"an order of this strategy already rested at {self.where} when this "
-                    "one was sent, so whose order rests there now is unknown: check it yourself"
-                )
-                self.missed = True
-                self.gone = True
+                self.owner_unknown()
                 return
         if order is not None and order.strat_id == self.strat_id:
             if not self.resting:
@@ -628,6 +634,18 @@ class OptionsBot:
         else:
             print(f"nothing of the order rests at {self.where} (from the resume)")
             self.gone = True
+
+    def owner_unknown(self) -> None:
+        """Stop without cancelling: an order of the team rested, or may have rested,
+        at the level when this one was sent, and its reply was lost, so whose order rests
+        there now is unknown. The run ends with status 1."""
+        print(
+            f"an order of your team rested, or may have rested, at {self.where} when "
+            "this one was sent, and its reply was lost, so whose order rests there now is "
+            "unknown: cancelling nothing, check it yourself"
+        )
+        self.missed = True
+        self.gone = True
 
     # Receiving
 
@@ -1024,7 +1042,10 @@ async def trade_from(
         return 1
     if not bot.finished and bot.ref is not None:
         reason = {"time": "time is up", "interrupted": "interrupted"}[why]
-        print(f"{reason}: cancelling {bot.where}")
+        if bot.taken_before and not bot.accepted:
+            print(f"{reason}: waiting for the reply to the order sent to {bot.where}")
+        else:
+            print(f"{reason}: cancelling {bot.where}")
         bot.stopping = True
         while True:
             try:
@@ -1047,6 +1068,13 @@ async def trade_from(
             f"WARNING: your team already has an order resting at {bot.where}, perhaps "
             "one an earlier run left, so this one was rejected. That order still rests: "
             "cancel it yourself with a cancel at that contract, side and price"
+        )
+        return 1
+    if bot.ref is not None and bot.taken_before and not bot.accepted and not bot.finished:
+        print(
+            f"WARNING: no reply came for the order sent to {bot.where}, where an order of "
+            "your team rested, or may have rested, so nothing was cancelled there: "
+            "check your orders"
         )
         return 1
     if bot.ref is not None and bot.missed and not bot.rejected:

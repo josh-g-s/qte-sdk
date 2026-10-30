@@ -826,6 +826,31 @@ async def test_a_pod_warns_its_ticket_may_be_working_when_a_reconnect_fails_for_
     assert "a ticket sent may still be working on the exchange" in err
 
 
+@pytest.mark.parametrize("stopped", [False, True], ids=["working", "stopped"])
+async def test_a_pod_warns_of_a_working_ticket_only_until_it_stops(
+    stopped: bool, capsys: pytest.CaptureFixture[str]
+):
+    # A reconnect that fails for good after the ticket has stopped (say during the account
+    # query that follows the stop) says nothing of a ticket that may still be working.
+    from qte_sdk.connection import SessionRejected
+
+    example = load_example("fundamentals_pod.py")
+    seen: list[Any] = []
+
+    async def fail_for_good(pod: Any, queue: Any, args: Any) -> int:
+        pod.ticket_ref = "ticket-ref"
+        pod.stopped = stopped
+        seen.append(pod)
+        raise SessionRejected(1, None)
+
+    example.follow_pod = fail_for_good
+    with pytest.raises(SessionRejected):
+        await example.follow(RecordingPodSession(), asyncio.Queue(), example.parse_args(list(ARGS)))
+    assert seen[0].ticket_out() is not stopped
+    err = capsys.readouterr().err
+    assert ("a ticket sent may still be working on the exchange" in err) is not stopped
+
+
 class RecordingPodSession:
     """A session that records each message type sent, raising `error` on each send."""
 
