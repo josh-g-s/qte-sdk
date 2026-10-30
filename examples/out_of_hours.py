@@ -6,7 +6,7 @@ then:
     python examples/out_of_hours.py --instrument AAPL
 
 The example is the runnable part of docs/out-of-hours.md. It opens a session, prints the
-exchange's time, waits for the exchange's calendar and prints the last session that has
+exchange's time, reads the exchange's calendar and prints the last session that has
 closed and when the next one opens, then subscribes to one instrument and prints the
 market session state the exchange answers with and, when that state names it, the wait
 until the next session opens. It stops after --seconds.
@@ -22,6 +22,14 @@ close if it has one. The example prints the ones that arrive, and says so when n
 which is expected for an instrument with no official close yet. During a session the
 state is OPEN and the example simply stops, since this is not a way to watch a live
 market (use print_book.py for that).
+
+On a drop. The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the
+connection drops, or the exchange restarts, as it may outside a session, it says so and
+reconnects by itself, waiting longer between attempts (at most 30 seconds), and
+subscribes again. Each new session has its own calendar and its own clock, so the example
+prints them afresh, with the session state the new subscription answers with. --seconds
+counts the time down too. Only the first connection is not retried: if it fails, the
+example says why and stops.
 """
 
 import argparse
@@ -38,30 +46,27 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.calendar import Calendar, next_session
-from qte_sdk.connection import SessionRejected, describe_close
+from qte_sdk.connection import Connected, Disconnected, Received, SessionRejected, describe_close
 from qte_sdk.contract.v1.common_pb2 import MarketSessionPhase
 from qte_sdk.market_data import (
     OfficialClose,
     Reject,
     SessionState,
-    market_data,
-    subscribe,
+    as_market_data,
     until_next_open,
 )
 from qte_sdk.orders import reason_code_name
+from qte_sdk.reconnect import ReconnectingSession, Retrying
 from qte_sdk.session import (
     MissingToken,
     MissingURL,
-    Session,
     SessionNotAcknowledged,
-    open_session,
     resolve_url,
 )
 from qte_sdk.units import to_datetime, to_decimal, to_timedelta
 
-# The longest wait for the calendar, and for the connection to close at the end. Local
-# choices, not values the exchange sets.
-CALENDAR_SECONDS = 5.0
+# The longest wait for the connection to close at the end. A local choice, not a value
+# the exchange sets.
 CLOSE_SECONDS = 5.0
 
 
@@ -120,7 +125,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def show_calendar(calendar: Calendar | None, now: int) -> None:
     """Print the last session that has closed and when the next one opens.
 
-    `now` is the exchange's current time, `session.info.server_time`."""
+    `now` is the exchange's current time, the `server_time` of the session's info."""
     if calendar is None:
         print("calendar: none received")
         return
@@ -149,7 +154,7 @@ def show_next_open(state: SessionState, now: int) -> None:
 
 
 @contextlib.asynccontextmanager
-async def closing(session: Session) -> AsyncIterator[Session]:
+async def closing(session: ReconnectingSession) -> AsyncIterator[ReconnectingSession]:
     """Like `async with session:`, but waits at most CLOSE_SECONDS for the close."""
     try:
         yield session
@@ -162,40 +167,87 @@ async def closing(session: Session) -> AsyncIterator[Session]:
 
 
 async def run(url: str, args: argparse.Namespace) -> int:
-    # The token comes from the QTE_TOKEN environment variable.
-    session = await open_session(url)
+    # The token comes from the QTE_TOKEN environment variable. It is read once, here, and
+    # kept to authenticate again on each reconnect. Every new session subscribes to the
+    # instrument again; it sends no orders, so it asks for no resume of order reports.
+    # `close_timeout` bounds the close of each connection, since a ReconnectingSession
+    # finishes closing even when the wait for it is cut short.
+    session = ReconnectingSession(
+        url, instruments=[args.instrument], resume=False, close_timeout=CLOSE_SECONDS
+    )
     async with closing(session):
-        print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
-        # The exchange's clock when it acknowledged the session: "now" from here on.
-        print(f"exchange time: {show_time(session.info.server_time)}")
+        connected = False
+        now = 0  # the exchange's clock when it acknowledged the current session
+        calendar_shown = False
         seen_closed = False
         closes = 0
+        deadline = asyncio.timeout(args.seconds)
         try:
-            async with asyncio.timeout(args.seconds):
-                calendar = await session.wait_for_calendar(
-                    timeout=min(CALENDAR_SECONDS, args.seconds / 2)
-                )
-                show_calendar(calendar, session.info.server_time)
-                await subscribe(session, [args.instrument])
-                async with aclosing(market_data(session)) as items:
-                    async for item in items:
-                        if isinstance(item, SessionState):
-                            phase = MarketSessionPhase.Name(item.state)
-                            print(f"market session {item.session_date}: {phase}")
-                            if item.state != MarketSessionPhase.CLOSED:
-                                print("a session is under way: run this outside one")
-                                return 0
-                            seen_closed = True
-                            show_next_open(item, session.info.server_time)
-                        elif isinstance(item, OfficialClose):
-                            closes += 1
-                            close = to_decimal(item.value)
-                            print(f"official close {item.instrument}: {close}")
-                        elif isinstance(item, Reject):
-                            reason = reason_code_name(item.reason_code)
-                            print(f"subscription refused: {reason}")
-                            return 1
+            async with deadline, aclosing(session.events()) as events:
+                async for event in events:
+                    if isinstance(event, Retrying):
+                        if not connected and event.error is not None:
+                            raise event.error  # the first connection failed: stop
+                        print(f"reconnecting in {event.delay:.1f} s (attempt {event.attempt})")
+                        continue
+                    if isinstance(event, Connected):
+                        info = event.info
+                        if not connected:
+                            print(f"connected: team {info.team}, unscored session: {info.unscored}")
+                        else:
+                            print(f"reconnected: subscribed to {args.instrument} again")
+                        connected = True
+                        # The exchange's clock when it acknowledged the session: "now" from
+                        # here on, until the next session.
+                        now = info.server_time
+                        print(f"exchange time: {show_time(now)}")
+                        calendar_shown = False
+                        if session.calendar is not None:  # read ahead already
+                            show_calendar(session.calendar, now)
+                            calendar_shown = True
+                        continue
+                    if isinstance(event, Disconnected):
+                        # Each new session sends its own calendar and state: show them afresh.
+                        why = event.error or "the exchange closed it"
+                        print(f"the connection dropped ({why}); reconnecting")
+                        continue
+                    if (
+                        isinstance(event, Received)
+                        and event.type == "calendar"
+                        and not calendar_shown
+                    ):
+                        # The exchange sends it straight after it acknowledges the session.
+                        show_calendar(session.calendar, now)
+                        calendar_shown = True
+                        continue
+                    item = as_market_data(event)
+                    if item is None:
+                        continue  # not market data, such as the instruments table
+                    shown = isinstance(item, SessionState | OfficialClose | Reject)
+                    if shown and not calendar_shown:
+                        show_calendar(None, now)  # an exchange that sends none
+                        calendar_shown = True
+                    if isinstance(item, SessionState):
+                        phase = MarketSessionPhase.Name(item.state)
+                        print(f"market session {item.session_date}: {phase}")
+                        if item.state != MarketSessionPhase.CLOSED:
+                            print("a session is under way: run this outside one")
+                            return 0
+                        seen_closed = True
+                        show_next_open(item, now)
+                    elif isinstance(item, OfficialClose):
+                        closes += 1
+                        close = to_decimal(item.value)
+                        print(f"official close {item.instrument}: {close}")
+                    elif isinstance(item, Reject):
+                        reason = reason_code_name(item.reason_code)
+                        print(f"subscription refused: {reason}")
+                        return 1
         except TimeoutError:
+            if not deadline.expired():
+                raise  # the first connection timed out
+            if connected and not calendar_shown:
+                show_calendar(None, now)
             if not seen_closed:
                 print("no market session state arrived")
             elif closes == 0:
@@ -231,10 +283,8 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosedError as error:
-        return fail(
-            f"the connection dropped with {describe_close(error)}. This example does not "
-            "reconnect: run it again"
-        )
+        # Not retried, such as a 1008 "credential revoked": the token no longer works.
+        return fail(f"the connection dropped with {describe_close(error)}")
     except KeyboardInterrupt:
         return 130
 

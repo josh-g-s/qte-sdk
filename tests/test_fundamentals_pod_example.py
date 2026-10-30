@@ -1,6 +1,7 @@
 """Tests of `examples/fundamentals_pod.py`, run as a student would start it, against a
 scripted local exchange that serves a Fundamentals pod under automatic execution."""
 
+import asyncio
 import json
 from typing import Any
 
@@ -437,8 +438,10 @@ async def test_a_dead_link_is_not_mistaken_for_the_watch_running_out():
     example = load_example("fundamentals_pod.py")
     args = example.parse_args(["--shares", "1", "--limit", "1"])
     pod = example.Pod(DeadLink(), args)
+    queue: asyncio.Queue = asyncio.Queue()
+    await queue.put(LivenessTimeout(5.0))  # as the reader passes on what ended the session
     with pytest.raises(LivenessTimeout):
-        await example.drive(DeadLink(), pod, lambda: False, 600)
+        await example.drive(queue, pod, lambda: False, 600)
 
 
 async def test_a_desk_route_sends_nothing_since_the_desk_does_not_trade_this_term():
@@ -538,3 +541,137 @@ def test_seconds_must_be_above_zero(seconds, capsys):
         example.parse_args(["--shares", "1", "--limit", "1", "--seconds", seconds])
     assert exit_.value.code == 2
     assert "--seconds must be above 0" in capsys.readouterr().err
+
+
+class RestartingPodExchange(PodExchange):
+    """A PodExchange whose first connection is closed with `close_code` and `reason`
+    once the ticket is answered (with `before_answer`, as soon as the ticket arrives,
+    before any answer). Each later connection is sent the route and then `on_reconnect`,
+    the pod's ticket states for the term, as the exchange sends them on every connection."""
+
+    def __init__(
+        self,
+        *,
+        close_code: int = 1012,
+        reason: str = "service restart",
+        before_answer: bool = False,
+        on_reconnect: list[tuple[str, dict[str, Any]]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.close_code = close_code
+        self.reason = reason
+        self.before_answer = before_answer
+        self.on_reconnect = on_reconnect or []
+        self.connections = 0
+
+    async def __call__(self, ws: ServerConnection) -> None:
+        self.connections += 1
+        self._seq = 0  # each connection numbers its messages from 1
+        await super().__call__(ws)
+
+    async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+        await super().send(ws, type_, payload)
+        if type_ == "execution_route" and self.connections > 1:
+            for frame_type, frame_ in self.on_reconnect:
+                await super().send(ws, frame_type, frame_)
+
+    async def answer_ticket(self, ws: ServerConnection, payload: dict[str, Any]) -> None:
+        if self.connections == 1 and self.before_answer:
+            await ws.close(self.close_code, self.reason)
+            return
+        await super().answer_ticket(ws, payload)
+        if self.connections == 1:
+            await ws.close(self.close_code, self.reason)
+
+
+WORKING = [("ticket_state", state(10, activity="TAKING", due_shares="100", filled_shares="0"))]
+COMPLETE = (
+    "ticket_state",
+    state(30, status="TICKET_COMPLETE", due_shares="500", filled_shares="500"),
+)
+
+
+@pytest.mark.parametrize(("close_code", "reason"), [(1012, "service restart"), (1001, "")])
+async def test_a_pod_survives_a_close_and_follows_its_ticket_from_the_states_sent_again(
+    close_code: int, reason: str
+):
+    # The ticket is accepted and working when the exchange restarts. It completes while
+    # the example is down; the new connection's ticket states say so.
+    exchange = RestartingPodExchange(
+        close_code=close_code,
+        reason=reason,
+        route=route_payload(),
+        accounts=[account(0), account(500)],
+        after=WORKING,
+        on_reconnect=[COMPLETE],
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert len(exchange.tickets()) == 1  # never sent again
+    assert "the connection dropped (" in out
+    assert "reconnected: the ticket states are sent again" in out
+    assert "ticket 17: TICKET_COMPLETE, filled 500 of 500" in out
+    assert "the ticket stopped: TICKET_COMPLETE" in out
+    assert (
+        out.splitlines()[-2] == f"position in {INSTRUMENT} after the stop, from account_state: 500"
+    )
+
+
+async def test_a_pod_whose_ticket_answer_is_lost_with_a_close_does_not_send_it_again():
+    # Ticket answers are never sent again, so the example cannot tell whether it works.
+    exchange = RestartingPodExchange(
+        before_answer=True, route=route_payload(), accounts=[account(0)], after=HAPPY
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert len(exchange.tickets()) == 1
+    assert "whether the ticket is working is not known. It is not sent again" in out
+
+
+async def test_a_pod_asks_for_the_account_again_after_a_close_drops_its_query():
+    # The session does not send account_query again: the example does, once reconnected.
+    class DropsFirstQuery(RestartingPodExchange):
+        async def __call__(self, ws: ServerConnection) -> None:
+            if self.connections == 0:
+                self.connections = 1
+                self._seq = 0
+                self.received.append(json.loads(await ws.recv()))
+                ack = {
+                    "session_id": "s-1",
+                    "team": "pod-a",
+                    "server_time": "1",
+                    "contract_version": CONTRACT_VERSION,
+                    "unscored": True,
+                }
+                await self.send(ws, "session_ack", ack)
+                self.received.append(json.loads(await ws.recv()))  # left unanswered
+                await ws.close(1012, "service restart")
+                return
+            await super().__call__(ws)
+
+    exchange = DropsFirstQuery(
+        route=route_payload(), accounts=[account(0), account(500)], after=HAPPY
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 0, out + err
+    assert "asking for the account again: the query sent was not answered" in out
+    assert exchange.types().count("account_query") == 3  # the lost one, again, after the stop
+    assert len(exchange.tickets()) == 1
+
+
+async def test_a_pod_ends_on_a_revoked_credential_and_names_the_close():
+    exchange = RestartingPodExchange(
+        close_code=1008,
+        reason="credential revoked",
+        route=route_payload(),
+        accounts=[account(0)],
+        after=WORKING,
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert exchange.connections == 1
+    assert 'close code 1008, reason "credential revoked": your token' in err
+    assert "A ticket sent may still be working: read its ticket_state" in err
+    assert "reconnecting in" not in out

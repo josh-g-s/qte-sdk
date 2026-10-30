@@ -108,6 +108,11 @@ or SIGHUP stops the wait once that cancel is out; a second Ctrl+C stops at once,
 it is, and the warning names the level. A signal that is already ignored when it starts (as
 under `nohup`) is left ignored. SIGKILL (`kill -9`)
 cannot be caught, so after one, check your team's orders yourself.
+
+One shot. It is a one-shot check: it exits on any close of the connection by the server,
+and is not a template for a long-running bot. A program that runs for a session connects
+with `qte_sdk.reconnect.ReconnectingSession`, which reconnects by itself, as
+examples/print_book.py and examples/take_liquidity.py do.
 """
 
 import argparse
@@ -344,6 +349,12 @@ def withhold_values(message: str, option_words: frozenset[str] = frozenset()) ->
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = Parser(
         description="Check a setup end to end. Sends no orders unless asked.",
+        epilog=(
+            "It is a one-shot check: it exits on any close of the connection by the server, "
+            "and is not a template for a long-running bot. A program that runs for a session "
+            "connects with qte_sdk.reconnect.ReconnectingSession, which reconnects by itself, "
+            "as examples/print_book.py and examples/take_liquidity.py do."
+        ),
         # Spelled out in full only: an abbreviation such as --pl must never place an order.
         allow_abbrev=False,
     )

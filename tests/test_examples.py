@@ -1160,9 +1160,8 @@ async def test_the_trading_examples_send_no_orders_outside_a_session(name: str, 
             name, url, synthetic_token(), "--instrument", INSTRUMENT, *args
         )
     assert code == 0, out + err
-    # quote_both_sides reconnects, so it resumes first; it still sends no order.
-    expected = ["auth", "resume", "subscribe"] if name == "quote_both_sides.py" else None
-    assert exchange.types() == (expected or ["auth", "subscribe"])
+    # Both reconnect, so each resumes first; neither sends an order.
+    assert exchange.types() == ["auth", "resume", "subscribe"]
 
 
 async def test_quote_both_sides_rests_amends_and_cancels_its_own_orders():
@@ -3003,21 +3002,11 @@ async def test_each_example_stops_in_time_on_a_connection_that_stalls(
         if name == "quote_both_sides.py":
             # Its own part, so this test process does not take over Ctrl+C.
             await example.quote_and_clean_up(session, args, asyncio.current_task())
-        elif name == "print_book.py":
-            # It reconnects: its ReconnectingSession is the stalled one, whose events stall.
+        else:
+            # Each reconnects: its ReconnectingSession is the stalled one, whose events stall.
             example.ReconnectingSession = lambda *args, **kwargs: session
             await example.run("ws://127.0.0.1:1/ws", args)
-        else:
-
-            async def stalled_open_session(url: str) -> StalledSession:
-                return session
-
-            example.open_session = stalled_open_session
-            await example.run("ws://127.0.0.1:1/ws", args)
     assert loop.time() - started < 3  # --seconds plus the close bound, not forever
-    if name == "take_liquidity.py":
-        # The others subscribe through their ReconnectingSession, which no event reached.
-        assert session.sent[0] == "subscribe"
     assert session.close_started
     assert "did not close in time" in capsys.readouterr().out
 
@@ -5043,8 +5032,18 @@ async def test_options_bot_acts_only_once_the_events_already_read_are_applied():
         ),
         ("options_bot.py", "--strat-id", "opt-test"),
         ("print_book.py", "--instrument", INSTRUMENT),
+        ("take_liquidity.py", "--instrument", INSTRUMENT, "--strat-id", "take-test"),
+        ("fundamentals_pod.py", "--shares", "100", "--limit", "200"),
+        ("out_of_hours.py", "--instrument", INSTRUMENT),
     ],
-    ids=["quote_both_sides", "options_bot", "print_book"],
+    ids=[
+        "quote_both_sides",
+        "options_bot",
+        "print_book",
+        "take_liquidity",
+        "fundamentals_pod",
+        "out_of_hours",
+    ],
 )
 async def test_each_reconnecting_example_stops_when_its_first_connection_fails(
     args: tuple[str, ...],
@@ -5231,28 +5230,30 @@ async def test_options_bot_does_not_subscribe_again_after_a_subscribe_cut_off_by
     assert bot.subscribe_to == []
 
 
+RECONNECTING_EXAMPLES = (
+    "print_book.py",
+    "quote_both_sides.py",
+    "options_bot.py",
+    "take_liquidity.py",
+    "fundamentals_pod.py",
+    "out_of_hours.py",
+)
+
+
 def test_the_reconnecting_examples_bound_each_close_of_the_connection():
     # ReconnectingSession finishes closing even when the wait for it is cut short, so
     # each connection's own close is bounded by CLOSE_SECONDS.
-    for name in ("print_book.py", "quote_both_sides.py", "options_bot.py"):
+    for name in RECONNECTING_EXAMPLES:
         source = (EXAMPLES_DIR / name).read_text()
         assert source.count("ReconnectingSession(") == 1, name
         assert source.count("close_timeout=CLOSE_SECONDS") == 1, name
 
 
-# The arguments each example that does not reconnect needs to run, and the line of its
-# output that reports a dropped connection.
+# The arguments each example that does not reconnect needs to run. Only the smoke test
+# is one-shot; the others reconnect.
 NO_RECONNECT_ARGS = {
-    "take_liquidity.py": (
-        "--instrument", INSTRUMENT, "--strat-id", "close-test", "--side", "buy", "--seconds", "5"
-    ),
-    "fundamentals_pod.py": (
-        "--instrument", "AAPL", "--side", "buy", "--shares", "500", "--limit", "201.50",
-        "--thesis-id", "t-aapl", "--thesis-version", "1",
-    ),
-    "out_of_hours.py": ("--instrument", INSTRUMENT, "--seconds", "5"),
     "smoke_test.py": ("--instruments", INSTRUMENT, "--seconds", "1"),
-}  # fmt: skip
+}
 
 
 @pytest.mark.parametrize("name", sorted(NO_RECONNECT_ARGS))
@@ -5304,3 +5305,167 @@ async def test_each_example_that_does_not_reconnect_names_the_close_code(
     assert token not in out + err
     if f'reason "{reason}"' not in expected:
         assert reason not in out + err  # a reason the SDK does not show is withheld
+
+
+def test_the_smoke_test_says_it_is_one_shot_and_names_a_reconnecting_example():
+    # Its docstring and its --help both say it exits on any server close and is not a
+    # template for a long-running bot, and point to ReconnectingSession and an example.
+    example = load_example(SMOKE_TEST)
+    parser_text = " ".join(example_help(SMOKE_TEST).split())
+    for text in (" ".join((example.__doc__ or "").split()), parser_text):
+        assert "it exits on any close of the connection by the server" in text
+        assert "not a template for a long-running bot" in text
+        assert "ReconnectingSession" in text
+        assert "examples/print_book.py" in text
+
+
+def example_help(name: str) -> str:
+    """The --help text of example `name`."""
+    import io
+    from contextlib import redirect_stdout
+
+    example = load_example(name)
+    out = io.StringIO()
+    with redirect_stdout(out), pytest.raises(SystemExit):
+        example.parse_args(["--help"])
+    return out.getvalue()
+
+
+class ClosingExchange(FakeExchange):
+    """A FakeExchange whose first connection is closed with `close_code` and `reason`
+    wherever it would drop, and, with `close_after_state`, once it has answered a
+    subscribe outside a session: as an exchange restart (1012) or a server going away
+    (1001) does. Later connections are served as usual."""
+
+    def __init__(
+        self, *, close_code: int, reason: str, close_after_state: bool = False, **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+        self.close_code = close_code
+        self.reason = reason
+        self.close_after_state = close_after_state
+
+    async def drop(self, ws: ServerConnection) -> None:
+        if self.connections > 1:
+            await super().drop(ws)
+            return
+        async with self._lock:
+            await ws.close(self.close_code, self.reason)
+
+    async def answer_closed(self, ws: ServerConnection, instruments: list[str]) -> None:
+        await super().answer_closed(ws, instruments)
+        if self.close_after_state and self.connections == 1:
+            await self.drop(ws)
+
+
+TAKE_ARGS = ("--instrument", INSTRUMENT, "--strat-id", "take-test", "--side", "buy")
+
+
+class ClosingWithEarlierReport(ClosingExchange):
+    """A ClosingExchange that, with `replay`, sends the first connection a report of
+    another strategy before anything else, so that connection's resume cursor is past 0
+    when it closes and the next connection's resume is answered with a replay. A resume
+    from 0 is always answered with a snapshot. Pass a `calendar`: a session resuming
+    from past 0 checks the term against it."""
+
+    async def send(
+        self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
+    ) -> None:
+        await super().send(ws, type_, payload, **envelope)
+        if type_ == "session_ack" and self.connections == 1:
+            other = {
+                "exec_id": "x-other",
+                "strat_id": "other",
+                "instrument": INSTRUMENT,
+                "side": "SELL",
+                "fill_price": str(BID),
+                "fill_size": "1",
+                "remaining_size": "0",
+            }
+            await super().send(ws, "execution", other)
+
+
+@pytest.mark.parametrize(("close_code", "reason"), [(1012, "service restart"), (1001, "")])
+async def test_take_liquidity_survives_a_close_and_takes_its_fills_from_the_replay(
+    close_code: int, reason: str
+):
+    # The order is taken but the connection closes while it is in flight. The new
+    # session resumes, the exchange replays the order's reports, and the run ends as if
+    # nothing had happened. The order is never sent again.
+    exchange = ClosingWithEarlierReport(
+        close_code=close_code, reason=reason, drop_on_new=1, replay=True, calendar=TERM
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "take_liquidity.py", url, synthetic_token(), *TAKE_ARGS, "--seconds", "5"
+        )
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert exchange.types().count("new") == 1
+    assert exchange.types().count("resume") == 2
+    assert "the connection dropped (" in out
+    assert "reconnected: sending nothing until the resume is complete" in out
+    assert out.splitlines()[-1].startswith("filled "), out
+
+
+async def test_take_liquidity_says_its_outcome_is_unknown_after_a_close_with_no_replay():
+    # With a snapshot instead of a replay, a market order's fills while disconnected are
+    # not recovered (it never rests): the example says so, sends nothing again, status 1.
+    exchange = ClosingExchange(close_code=1012, reason="service restart", drop_on_new=1)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "take_liquidity.py", url, synthetic_token(), *TAKE_ARGS, "--seconds", "5"
+        )
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert exchange.types().count("new") == 1
+    assert "how it filled is not known: check your fills" in out
+
+
+@pytest.mark.parametrize(("close_code", "reason"), [(1012, "service restart"), (1001, "")])
+async def test_out_of_hours_survives_a_close_and_shows_the_closed_market_again(
+    close_code: int, reason: str
+):
+    exchange = ClosingExchange(
+        close_code=close_code,
+        reason=reason,
+        close_after_state=True,
+        closed=True,
+        calendar=CALENDAR,
+        server_time=SERVER_TIME,
+    )
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(
+            "out_of_hours.py", url, synthetic_token(), "--instrument", INSTRUMENT, "--seconds", "3"
+        )
+    assert code == 0, out + err
+    assert exchange.connections == 2
+    assert exchange.types() == ["auth", "subscribe", "auth", "subscribe"]
+    assert "the connection dropped (" in out
+    assert f"reconnected: subscribed to {INSTRUMENT} again" in out
+    # The calendar, the clock and the state are printed again for the new session.
+    assert out.count("exchange time:") == 2
+    assert out.count("next session:") == 2
+    assert out.count("market session 2026-01-05: CLOSED") == 2
+    assert out.splitlines()[-1] == "stopped after 3 seconds"
+
+
+@pytest.mark.parametrize("name", ["take_liquidity.py", "out_of_hours.py"])
+async def test_each_moved_example_ends_on_a_revoked_credential_and_names_the_close(name: str):
+    # A 1008 "credential revoked" is not retried: the token no longer works.
+    exchange = ClosingExchange(
+        close_code=1008,
+        reason="credential revoked",
+        drop_on_new=1,
+        close_after_state=True,
+        closed=name == "out_of_hours.py",
+    )
+    token = synthetic_token()
+    args = TAKE_ARGS if name == "take_liquidity.py" else ("--instrument", INSTRUMENT)
+    async with serve_local(exchange) as url:
+        code, out, err = await run_example(name, url, token, *args, "--seconds", "5")
+    assert code == 1, out + err
+    assert exchange.connections == 1
+    assert 'close code 1008, reason "credential revoked": your token' in err
+    assert "reconnecting in" not in out
+    assert token not in out + err

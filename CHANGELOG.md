@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.108
+**Version:** 0.109
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- `examples/take_liquidity.py`, `examples/fundamentals_pod.py` and `examples/out_of_hours.py` now connect with `ReconnectingSession`, so a server close (1001 or 1012, say) no longer ends them. After a reconnect `take_liquidity.py` never sends its order again, and when the resume is a snapshot rather than a replay it says the order's fills are not known and exits with status 1; `fundamentals_pod.py` follows its ticket from the ticket states sent on the new connection, sends an unanswered `account_query` again, and exits with status 1 without resending if the drop lost the ticket's answer; `out_of_hours.py` prints the calendar and state again. A 1008 `credential revoked` still ends each with the close named. `examples/smoke_test.py` stays one-shot, and its docstring and `--help` now say it exits on any server close and is not a template for a long-running bot. The quickstart and both copies of AGENTS.md list the examples that reconnect (qte-platform#3162).
 - `examples/quote_both_sides.py` warns at start when run without `--size`: it still quotes 1 share per side by default, which is below the market maker minimum wherever a name's round lot is more than 1 share, so pass at least your name's round lot, shown in the console's obligations panel. A later release will make `--size` required. The README, the quickstart and both copies of AGENTS.md give the market maker minimum (one round lot, or 1 contract per obligated option side) from the 28 October 2026 term on, the 2 November term included, and `examples/options_bot.py` says its one contract does not meet an obligation (#369).
 - The contract is vendored at qte-platform 8deb128e (approved by the Head, 29 Oct 2026): `BreakRequestState` carries `pod`, the pod that sent the request, and the docs now say a pod's session is sent each of its break requests' `break_request_state` once on each connection, after its `ticket_state` messages, and not again after a resume (#362).
 - The contract is vendored at qte-platform 4b1a839b (approved by the Head, 29 Oct 2026): `common.proto` and `order_entry.proto` now say that in a term whose configuration's `term_end.agentic_ai` is on, an Agentic AI team's order messages are rejected `TRADING_CUTOFF` at the term-end trading cutoff and its outstanding orders cancelled `TERM_CUTOFF`, the same as Market Making, Market Taking, Options MM and Options Taking. The change is to comments only: no reason code is added or renamed, the generated code is unchanged, and the quickstart already said this (#371).

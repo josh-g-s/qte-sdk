@@ -26,6 +26,19 @@ budgets are set by the exchange and may change, so nothing here depends on their
 A fill of a market order carries no order price, so nothing on it says which market
 order it belongs to. With one market order in flight per strategy, instrument and side,
 as here, every such fill is this order's.
+
+On a drop. The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the
+connection drops, or the exchange restarts, it reconnects by itself, waiting longer between
+attempts (at most 30 seconds). While it is down it sends nothing. Each new session
+subscribes again and resumes the team's order reports, and the example sends nothing until
+that resume is complete. Market data sent while it was down is not replayed, so it forgets
+the book it held and decides from a book the new session sends. An order in flight at the
+drop is never sent again. If the exchange replays the reports missed, the order's
+`accepted`, fills and cancelled remainder arrive as if nothing had happened. If it sends a
+snapshot of the resting orders instead, or does not resume, the reports missed are not
+recovered, and a market order never rests, so nothing says how it filled: the example says
+so, tells you to check your fills, and exits with status 1. --seconds counts the time down
+too. Only the first connection is not retried: if it fails, the example says why and stops.
 """
 
 import argparse
@@ -35,16 +48,24 @@ import os
 import sys
 import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 
 from google.protobuf.message import Message
-from websockets.exceptions import ConnectionClosedError, InvalidHandshake
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError, InvalidHandshake
 
 import qte_sdk.logs
 from qte_sdk.books import LatestBooks
-from qte_sdk.connection import SessionRejected, describe_close
+from qte_sdk.connection import (
+    Connected,
+    Disconnected,
+    ReportGap,
+    ResumeComplete,
+    SessionRejected,
+    describe_close,
+)
 from qte_sdk.contract.v1.common_pb2 import BUY, MARKET, SELL, Liquidity
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, Reject
-from qte_sdk.market_data import Book, DecodeFailed, SeqGap, as_market_data, subscribe
+from qte_sdk.market_data import Book, DecodeFailed, SeqGap, as_market_data
 from qte_sdk.orders import (
     Sender,
     is_order_event,
@@ -53,12 +74,11 @@ from qte_sdk.orders import (
     request_ref_of,
     send_new,
 )
+from qte_sdk.reconnect import NotConnected, ReconnectingSession, Retrying
 from qte_sdk.session import (
     MissingToken,
     MissingURL,
-    Session,
     SessionNotAcknowledged,
-    open_session,
     resolve_url,
 )
 from qte_sdk.units import to_decimal
@@ -106,6 +126,11 @@ class Taker:
         self.missed = False  # whether any message from the exchange was missed
         # The latest book of each instrument: the exchange sends a book only when it changes.
         self.books = LatestBooks()
+        # Whether a session is up and its resume complete; nothing is sent until it is.
+        self.up = True
+        # Whether the order was in flight at a drop, until a resume says what became of it.
+        self.in_doubt = False
+        self.lost = False  # its reports while disconnected were not recovered
 
     async def on_book(self, book: Book) -> None:
         """Keep `book` if it is newer than the one held, and act on it if so."""
@@ -113,10 +138,10 @@ class Taker:
             await self.act()
 
     async def act(self) -> None:
-        """Send the order from the latest book held, unless one is already sent or that
-        book shows no wall on the side to trade against."""
+        """Send the order from the latest book held, unless one is already sent, no session
+        is up and resumed, or that book shows no wall on the side to trade against."""
         book = self.books.get(self.instrument)
-        if self.ref is not None or book is None:
+        if self.ref is not None or book is None or not self.up:
             return
         # A buy trades against the offer, a sell against the bid.
         levels = book.ask_levels if self.side == BUY else book.bid_levels
@@ -135,15 +160,56 @@ class Taker:
         # still match the exchange's reply to it.
         self.ref = new_request_ref()
         self.sent_at = time.monotonic()
-        await send_new(
-            self.session,
-            strat_id=self.strat_id,
-            instrument=self.instrument,
-            side=self.side,
-            order_type=MARKET,  # a market order carries no price
-            size=self.size,
-            request_ref=self.ref,
-        )
+        try:
+            await send_new(
+                self.session,
+                strat_id=self.strat_id,
+                instrument=self.instrument,
+                side=self.side,
+                order_type=MARKET,  # a market order carries no price
+                size=self.size,
+                request_ref=self.ref,
+            )
+        except NotConnected:
+            # Nothing was sent: the order goes out from a book of the next session.
+            print("not sent, the connection is down: sending once it is back")
+            self.ref = None
+        except ConnectionClosed as error:
+            # It may have reached the exchange: it stays recorded as sent, and is never
+            # sent again. The resume says what became of it.
+            print(f"the connection dropped as the order was sent: {error}")
+
+    def on_connected(self, connected: Connected) -> None:
+        self.up = False  # until its resume is complete
+        if connected.reconnected:
+            print("reconnected: sending nothing until the resume is complete")
+        if connected.resume is None:
+            self.resumed(replayed=False)  # the exchange did not resume this session
+
+    def on_disconnected(self, disconnected: Disconnected) -> None:
+        self.up = False
+        # Market data sent while down is not replayed: decide from a book sent after it.
+        self.books.update(disconnected)
+        why = disconnected.error or "the exchange closed it"
+        print(f"the connection dropped ({why}); sending nothing until it is back")
+        if self.ref is not None and not self.done:
+            self.in_doubt = True
+            print("the order sent may have filled meanwhile: the resume says what became of it")
+
+    def resumed(self, replayed: bool) -> None:
+        """A session's resume is complete, or the exchange did not resume it."""
+        self.up = True
+        if not self.in_doubt:
+            return
+        self.in_doubt = False
+        if not replayed:
+            # A snapshot lists only resting orders, and a market order never rests: its
+            # fills while disconnected are not recovered. It is never sent again.
+            print(
+                "the order's reports while disconnected were not recovered (no replay), so "
+                "how it filled is not known: check your fills before running this again"
+            )
+            self.missed = self.lost = self.done = True
 
     def ours(self, message: Execution | OrderCancelled) -> bool:
         """Whether a fill or cancellation belongs to this example's market order: same
@@ -202,7 +268,7 @@ CLOSE_SECONDS = 5.0
 
 
 @contextlib.asynccontextmanager
-async def closing(session: Session) -> AsyncIterator[Session]:
+async def closing(session: ReconnectingSession) -> AsyncIterator[ReconnectingSession]:
     """Like `async with session:`, but waits at most CLOSE_SECONDS for the close, so a
     connection that has stopped taking data cannot keep the example from exiting."""
     try:
@@ -216,31 +282,56 @@ async def closing(session: Session) -> AsyncIterator[Session]:
 
 
 async def run(url: str, args: argparse.Namespace) -> int:
-    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE.
-    session = await open_session(url)
+    # The token comes from QTE_TOKEN, or from the file named by QTE_TOKEN_FILE. It is read
+    # once, here, and kept to authenticate again on each reconnect. Every new session
+    # subscribes to the instrument again and resumes the team's order reports, so the
+    # order's fills sent while it was down can be replayed.
+    # `close_timeout` bounds the close of each connection, since a ReconnectingSession
+    # finishes closing even when the wait for it is cut short.
+    session = ReconnectingSession(url, instruments=[args.instrument], close_timeout=CLOSE_SECONDS)
     async with closing(session):
-        print(f"connected: team {session.info.team}, unscored session: {session.info.unscored}")
         taker = Taker(session, args)
+        taker.up = False  # until the first session is connected and resumed
+        connected = False
+        deadline = asyncio.timeout(args.seconds)
         try:
-            async with asyncio.timeout(args.seconds):
-                await subscribe(session, [args.instrument])
-                async for event in session:
+            async with deadline, aclosing(session.events()) as events:
+                async for event in events:
+                    if isinstance(event, Retrying):
+                        if not connected and event.error is not None:
+                            raise event.error  # the first connection failed: stop
+                        print(f"reconnecting in {event.delay:.1f} s (attempt {event.attempt})")
+                        continue
                     item = as_market_data(event)
-                    if isinstance(item, Book):
+                    if isinstance(event, Connected):
+                        if not connected:
+                            info = event.info
+                            print(f"connected: team {info.team}, unscored session: {info.unscored}")
+                        connected = True
+                        taker.on_connected(event)
+                    elif isinstance(event, ResumeComplete):
+                        taker.resumed(event.replayed)
+                    elif isinstance(item, Disconnected):
+                        taker.on_disconnected(item)
+                    elif isinstance(item, Book):
                         await taker.on_book(item)
                     elif isinstance(item, Reject):
                         print(f"subscription refused: {reason_code_name(item.reason_code)}")
                         return 1
-                    elif isinstance(item, SeqGap | DecodeFailed):
+                    elif isinstance(item, SeqGap | DecodeFailed) or isinstance(event, ReportGap):
                         print("warning: a message from the exchange was missed or unreadable")
                         taker.missed = True
-                        taker.books.update(item)  # it may have been a book: now stale
+                        if item is not None:
+                            taker.books.update(item)  # it may have been a book: now stale
                     elif is_order_event(event):
                         taker.on_order_event(event.message)
                     if taker.done:
                         print(taker.summary())
-                        return 0
+                        return 1 if taker.lost else 0
+                    await taker.act()  # a book held may be acted on once a resume completes
         except TimeoutError:
+            if not deadline.expired():
+                raise  # the first connection timed out
             # Once a request_ref is recorded the order may have reached the exchange, even
             # if its send did not finish.
             sent = "the order's outcome is not known yet" if taker.ref else "no order was sent"
@@ -277,11 +368,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, InvalidHandshake, SessionNotAcknowledged) as error:
         return fail(f"could not connect to QTE_URL: {error}")
     except ConnectionClosedError as error:
+        # Not retried, such as a 1008 "credential revoked": the token no longer works.
         return fail(
             f"the connection dropped with {describe_close(error)}. The order's outcome may "
-            "not be known, and this example does not reconnect (a long-running program "
-            "reconnects with ReconnectingSession: docs/quickstart.md step 9). Check your "
-            "fills before running this again"
+            "not be known. Check your fills before running this again"
         )
     except KeyboardInterrupt:
         return 130
