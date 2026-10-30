@@ -35,6 +35,16 @@ you can cancel it yourself, and exits with status 1. Press Ctrl+C twice to stop 
 if an order was sent, it then names the level where it may still rest and exits with
 status 1. A Ctrl+C before any order is sent stops the example with status 0.
 
+It never sends a cancel for its order without its own `accepted` for that order. A cancel
+names a price level, not an order, so before that `accepted` it could take another order
+of your team resting there: one an earlier run left, or another strategy's still in its
+order delay when this one was sent, which then has this one refused as a duplicate. So at
+time-up or Ctrl+C with no `accepted`, it waits out --drain-seconds for the reply. If the
+`accepted` comes, it cancels as usual; if none comes, or a resume lost it, it cancels
+nothing, warns that its order may still rest at the level it names (check with
+order_snapshot or the console, and cancel it yourself if it is this one) and exits with
+status 1. The one exception is below, on a drop: its order adopted from a snapshot.
+
 The price. Your orders rest only strictly inside the wall's best bid and ask: one at the
 wall's own price or beyond it is not left resting (`order_cancelled` with
 REMAINDER_OUTSIDE_BAND). So the price is one tick above the wall's best bid, the lowest at
@@ -66,7 +76,7 @@ strategy's buy orders in the contract while it runs (another program, or an amen
 fills at once), its reports may be misread, so use a strategy nothing else is using. If
 messages from the exchange are missed after its order is accepted, it still cancels, but
 then exits with status 1 and a warning to check your orders and fills; missed before its
-`accepted`, they are treated as below.
+`accepted`, it still sends no cancel without that `accepted`, as above.
 
 On a drop. The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the
 connection drops, or the exchange restarts, it reconnects by itself, waiting longer between
@@ -75,8 +85,16 @@ its order. Each new session subscribes to the contracts again and resumes the te
 reports: the exchange either replays every report missed, or sends a snapshot of the
 orders resting now. Once that is complete, the example takes its order from its view of
 resting orders (`qte_sdk.resting.RestingOrders`): if the order rests at its level, it
-cancels it as usual; if not, nothing of it rests and the example stops. After a snapshot,
-fills made while it was down are not reported, and the summary says so. An order or a
+cancels it as usual; if not, nothing of it rests and the example stops. An order of its
+strategy that a snapshot (not a replay) shows at its level, with no `accepted` yet, is
+adopted as its own and cancelled, but only where no order of the team rested, or may
+have rested unseen, there before its `accepted` (one there when it was sent, one of
+another strategy seen there, or one hidden by a view not complete when it was sent or
+gone incomplete since: a gap, an unreadable order report, or a resume that did not
+recover the reports). Otherwise, or if the resume shows another strategy's order there,
+it cannot tell whose order rests there: it cancels nothing, warns and exits with status
+1. After a snapshot, fills made while it was down are not reported, and the summary says
+so. An order or a
 cancel in flight at the drop is never sent again: the replay or the snapshot says what
 became of it, and a cancel is sent afresh only while the order rests. Market data sent
 while it was down is not replayed, so before it chooses a contract again it waits for a
@@ -86,18 +104,7 @@ meanwhile) after its order was sent, it treats them as missed, as above, and sen
 order from then on; a cancel in flight at the drop is then sent afresh. Before an order
 is sent, there is nothing of its own to miss, so it chooses and sends as usual. An
 `accepted` that comes through the resume is printed as answered after a reconnect, with
-no round trip. If its order went to a
-level where an order of the team already rested, of any strategy, as from an earlier run,
-or may have rested unseen because its view of resting orders was not complete when it
-was sent (as when the exchange does not resume even the first session) or went incomplete
-before its `accepted` came (a gap, an unreadable order report, or a resume that did not
-recover the reports; a drop alone, which a replay puts right, does not count), it never
-cancels there before its own `accepted` comes: the exchange refuses such a duplicate, and
-a cancel would clear the order already there. At the end it waits for the reply, through
-a message missed meanwhile; if a resume lost the reply, or none comes, it cannot tell
-whose order rests there: it cancels nothing, warns and exits with status 1. An order of
-another strategy that a complete view shows at its level at any time before its own
-`accepted` is treated the same way. If a cancel takes an order that is not its own (one
+no round trip. If a cancel takes an order that is not its own (one
 that came to the level its order left, or another strategy's at its own price), it cancels
 again where its order rests and, at the end, warns of it and exits with status 1.
 --seconds and --drain-seconds count the time down too.
@@ -300,8 +307,9 @@ class OptionsBot:
         # is handled; read after a resume.
         self.view = view
         # Whether an order of the team rested, or may have rested unseen, at the level when
-        # the order was sent (as from an earlier run) or before it was accepted: see
-        # `act_now` and `resumed`.
+        # the order was sent (as from an earlier run) or before it was accepted. If so, an
+        # order of this strategy that a snapshot shows there is not adopted as this one:
+        # see `resumed`.
         self.taken_before = False
         self.table = table
         self.underlying = underlying
@@ -482,12 +490,13 @@ class OptionsBot:
                 await self.send_order()
             return
         self.note_level()
-        if self.taken_before and not self.accepted:
-            # An order of the team rested, or may have rested unseen, at the level while
-            # this one was not yet accepted, and no `accepted` says the exchange took this
-            # one: a cancel there could remove that order. Cancel nothing. Once a resume
-            # has lost its reply for good, stop and warn; until then (a message missed
-            # on a live session, say), wait for it until the run ends.
+        if not self.accepted:
+            # A cancel names a level, not an order: until the exchange says it took this
+            # order, whatever rests at the level may be another order of the team (one
+            # still in its order delay when this one was sent, say, which had this one
+            # refused as a duplicate). Never cancel there without this order's own
+            # `accepted`. Once a resume has lost the reply for good, stop and warn; until
+            # then, wait for it until the run ends.
             if self.stopping and self.reply_lost:
                 self.owner_unknown()
             return
@@ -539,7 +548,7 @@ class OptionsBot:
         # The exchange refuses an order where the team already rests, and a cancel clears
         # every order of the team at the level, of any strategy. From a view that is not
         # complete, such an order may be one not seen: take it that one may rest there, so
-        # this example never cancels or adopts it without an `accepted` for its own order.
+        # this example never adopts it from a snapshot as its own.
         self.taken_before = earlier is not None or (self.view is not None and self.view.incomplete)
         self.ref = new_request_ref()
         self.sent_at = time.monotonic()
@@ -625,8 +634,8 @@ class OptionsBot:
             self.missed = True
             if not self.accepted:
                 # Another order of the team may have come to the level unseen meanwhile,
-                # and the exchange would refuse this one as a duplicate: never cancel
-                # there without an `accepted` for this one.
+                # and the exchange would refuse this one as a duplicate: never adopt one
+                # there from a snapshot as this one.
                 self.taken_before = True
             self.reply_lost = True  # a reply not yet come is never sent again
             self.cancel_ref = None
@@ -640,21 +649,20 @@ class OptionsBot:
             self.unreported_fills = True
         assert self.contract is not None
         order = self.view.get(self.contract, BUY, self.price)
-        if order is not None and order.strat_id == self.strat_id and self.taken_before:
-            if not self.accepted:
-                # Its order went to a level where an order of this strategy already rested,
-                # and its reply was lost: the exchange refuses such a duplicate, but whose
-                # order rests now is unknown, so it is not cancelled as this example's.
+        if order is not None and not self.accepted:
+            if order.strat_id != self.strat_id or self.taken_before or replayed:
+                # No `accepted` came for this one, and the order at the level is another
+                # strategy's, or this strategy's where an order of the team rested, or
+                # may have rested unseen, before, or one a replay shows, which would have
+                # brought this one's `accepted` had it been this one: the exchange refuses
+                # a duplicate, so whose order rests there is unknown. Cancel nothing,
+                # warn and exit 1.
                 self.owner_unknown()
                 return
-        if order is not None and order.strat_id != self.strat_id and not self.accepted:
-            # Another strategy's order holds the level and no `accepted` came for this
-            # one: the exchange refused this one, or it left before that order came, but
-            # its reply was lost. Cancel nothing there, warn and exit 1.
-            self.taken_before = True
-            self.owner_unknown()
-            return
         if order is not None and order.strat_id == self.strat_id:
+            # This strategy's order, from a snapshot where none of the team rested
+            # before, or from a replay that brought its `accepted`: this one, so it is
+            # cancelled as usual.
             if not self.resting:
                 print(f"resting: {order.remaining_size} at {self.where} (from the resume)")
             self.accepted = self.resting = True
@@ -683,7 +691,8 @@ class OptionsBot:
         print(
             f"an order of your team rested, or may have rested, at {self.where} while "
             "this one was not yet accepted, and its reply was lost, so whose order rests "
-            "there now is unknown: cancelling nothing, check it yourself"
+            "there now is unknown: cancelling nothing, check it with order_snapshot or the "
+            "console and cancel it yourself if it is this one"
         )
         self.missed = True
         self.gone = True
@@ -1112,7 +1121,7 @@ async def trade_from(
         return 1
     if not bot.finished and bot.ref is not None:
         reason = {"time": "time is up", "interrupted": "interrupted"}[why]
-        if bot.taken_before and not bot.accepted:
+        if not bot.accepted:
             print(f"{reason}: waiting for the reply to the order sent to {bot.where}")
         else:
             print(f"{reason}: cancelling {bot.where}")
@@ -1142,11 +1151,12 @@ async def trade_from(
             "cancel it yourself with a cancel at that contract, side and price"
         )
         return 1
-    if bot.ref is not None and bot.taken_before and not bot.accepted and not bot.finished:
+    if bot.ref is not None and not bot.accepted and not bot.finished:
         print(
-            f"WARNING: no reply came for the order sent to {bot.where}, where an order of "
-            "your team rested, or may have rested, so nothing was cancelled there: "
-            "check your orders"
+            f"WARNING: no accepted came for the order sent to {bot.where}, so nothing was "
+            "cancelled there: a cancel names the level, and could have removed another "
+            "order of your team. This example's order may still rest there: check with "
+            "order_snapshot or the console, and cancel it yourself if it is this one"
         )
         return 1
     if bot.ref is not None and bot.missed and not bot.rejected:
