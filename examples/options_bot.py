@@ -85,7 +85,13 @@ its order. Each new session subscribes to the contracts again and resumes the te
 reports: the exchange either replays every report missed, or sends a snapshot of the
 orders resting now. Once that is complete, the example takes its order from its view of
 resting orders (`qte_sdk.resting.RestingOrders`): if the order rests at its level, it
-cancels it as usual; if not, nothing of it rests and the example stops. An order of its
+cancels it as usual; if not, and its `accepted` came, nothing of it rests and the example
+stops. With no `accepted`, a resume that shows nothing at its level does not prove that:
+the order may still be in its order delay, so the example keeps waiting for the reply as
+above, cancels as usual once the `accepted` comes, and otherwise cancels nothing, warns
+that it may still rest and exits with status 1. If an order of its strategy rests at another
+price on the contract instead (perhaps its order, moved), it says so, cancels nothing and
+exits with status 1 at once, whether or not the `accepted` came. An order of its
 strategy that a snapshot (not a replay) shows at its level, with no `accepted` yet, is
 adopted as its own and cancelled, but only where no order of the team rested, or may
 have rested unseen, there before its `accepted` (one there when it was sent, one of
@@ -109,10 +115,9 @@ that came to the level its order left, or another strategy's at its own price), 
 again where its order rests and, at the end, warns of it and exits with status 1.
 --seconds and --drain-seconds count the time down too.
 Only the first connection is not retried: if it fails, the example says why and stops.
-The replay or the snapshot covers only what the exchange had applied when it answered: if
-the order was still waiting out its order delay at the drop, it can be applied just after
-that, and the example then reports that nothing of it rests and stops while it does. If
-the order was in flight at the drop, check your resting orders after it stops.
+The replay or the snapshot covers only what the exchange had applied when it answered: an
+order still waiting out its order delay at the drop can be applied just after that, which
+is why, with no `accepted`, an empty resume is not taken as the order gone.
 
 Watching only. With --watch-only (or QTE_WATCH_ONLY=1) it reads the table, subscribes, keeps
 the chain, Greeks and books, and chooses a contract exactly as above, printing the reason for
@@ -680,6 +685,15 @@ class OptionsBot:
             )
             self.missed = True
             self.gone = True
+        elif not self.accepted:
+            # The resume covers only what the exchange had applied: with no `accepted`,
+            # this order may still be in its order delay and come to rest later. Keep
+            # waiting for its reply, as for any order not yet answered.
+            print(
+                f"nothing rests at {self.where} yet (from the resume), but no accepted "
+                "came for the order: it may still be in its order delay, so waiting for "
+                "its reply"
+            )
         else:
             print(f"nothing of the order rests at {self.where} (from the resume)")
             self.gone = True

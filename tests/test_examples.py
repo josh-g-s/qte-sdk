@@ -6289,6 +6289,95 @@ async def test_options_bot_adopts_its_order_from_a_snapshot_after_a_drop(while_d
     assert [t for t, _ in sender.sent] == ["new", "cancel"]
 
 
+class NewStillDelayedAtDrop(FakeExchange):
+    """The first `new` is still in its order delay when the connection drops: nothing of
+    it rests when the resume answers, and no reply to it ever comes. With `replay`, the
+    first connection gets a report of another strategy first, so its resume cursor is
+    past 0 and the next resume is answered with a replay; `resumes` records each answer's
+    `replayed`."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.resumes: list[bool] = []
+
+    async def send(
+        self, ws: ServerConnection, type_: str, payload: dict[str, Any], **envelope: Any
+    ) -> None:
+        if type_ == "resume_ack":
+            self.resumes.append(payload["replayed"])
+        await super().send(ws, type_, payload, **envelope)
+        if type_ == "session_ack" and self.connections == 1 and self.replay:
+            other = {
+                "exec_id": "x-other",
+                "strat_id": "other",
+                "instrument": "SPY261120C00670000",
+                "side": "SELL",
+                "fill_price": "1000000",
+                "fill_size": "1",
+                "remaining_size": "0",
+            }
+            await super().send(ws, "execution", other)
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        if type_ == "new" and self.news == 0:
+            self.news += 1
+            self._withhold = True  # the connection drops, with nothing applied or sent
+            return
+        await super().on_order(ws, type_, p)
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["snapshot", "replay"])
+async def test_options_bot_takes_no_empty_resume_before_its_accepted_as_its_order_gone(
+    replay: bool,
+):
+    # The order is in flight at a drop and the resume shows nothing at its level, but no
+    # accepted came for it: it may still be in its order delay. The bot does not say
+    # nothing of it rests; it waits for the reply and, with none, warns and exits 1.
+    exchange = NewStillDelayedAtDrop(
+        instruments=options_table(),
+        options=options_market(),
+        replay=replay,
+        calendar=TERM if replay else None,
+    )
+    code, out, err = await run_options_bot(exchange, "--seconds", "3", "--drain-seconds", "1")
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert exchange.resumes[1:] == [replay]  # the resume after the drop
+    assert len(payloads(exchange, "new")) == 1
+    assert payloads(exchange, "cancel") == []
+    assert "nothing of the order rests at" not in out
+    assert "WARNING: no accepted came for the order sent to" in out
+    assert "order_snapshot" in out
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["snapshot", "replay"])
+async def test_options_bot_cancels_as_usual_once_its_accepted_follows_an_empty_resume(
+    replay: bool,
+):
+    # The resume shows nothing at the level and no accepted came: the bot keeps waiting.
+    # The order then comes to rest after its order delay: its accepted and order_state
+    # arrive, and it is cancelled as usual.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    bot.on_disconnected(Disconnected(error=None))
+    bot.resumed(replayed=replay)
+    assert not bot.gone and not bot.finished
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
 async def test_options_bot_adopts_no_order_of_its_strategy_from_a_replay():
     # The level was empty in a complete view when the order was sent; the link drops
     # before its accepted. The replay shows an order of this strategy resting there but
