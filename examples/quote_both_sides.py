@@ -26,15 +26,17 @@ press it twice to stop at once. An order is its own only once the exchange has a
 its new with `accepted`: it never cancels an order of its strategy it cannot tell is its
 own, nor sends a cancel where its view shows another strategy's order. If messages from
 the exchange are missed, it stops quoting, still sends one cancel to each of its own
-orders, and exits 1, since what filled may not all be known. A cancel names a level, not an
-order: if its order ended unseen in the gap, that cancel takes whatever order of its
-strategy rests there by then, and the last lines say so. It exits 0 only when every
+orders (one more where a cancel was in flight at a drop), and exits 1, since what filled
+may not all be known. A cancel names a level, not an order: if its order ended unseen in
+the gap, that cancel takes whatever order of its strategy rests there by then, and the
+last lines say so. It exits 0 only when every
 message it sent was answered, each of its own orders was seen to end, and no order of its
 strategy rests on the instrument; otherwise its last lines name each order, message and
 fill it is unsure of. So it exits 1, too, if no snapshot ever showed what of its strategy
 rests (time ran out before the first session, or the exchange refused the first resume),
 and it stops quoting, cancels its own orders and exits 1 on a risk notice of a kind it does
-not know.
+not know or cannot read, and on any other report of the team's it cannot read or of a type
+it does not know.
 
 Run it on prices your team is not otherwise trading. A cancel names a price level, not
 an order, and is applied only after the order delay, so it removes whichever of your
@@ -135,6 +137,7 @@ from qte_sdk.connection import (
     Received,
     ResumeComplete,
     SessionRejected,
+    Unknown,
     describe_close,
 )
 from qte_sdk.contract.v1.common_pb2 import (
@@ -163,6 +166,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
 from qte_sdk.errors import order_reject_step
 from qte_sdk.market_data import DecodeFailed, SeqGap, SessionState, as_market_data
 from qte_sdk.orders import (
+    ORDER_EVENT_TYPES,
     is_order_event,
     new_request_ref,
     reason_code_name,
@@ -306,8 +310,9 @@ class Quote:
     # Whether fills of the order may have gone unreported: messages were missed, or a
     # snapshot answered a resume.
     fills_unknown: bool = False
-    # One more cancel may go while one is unanswered: a complete resume still showed the
-    # order resting.
+    # One more cancel may go while one is unanswered: a resume after the drop still showed
+    # the order resting, or was cut short. Cleared once a cancel for the side is answered
+    # or sent, so at most two are ever open for a level.
     again: bool = False
     # The reason the last cancel of this order was rejected, to name at the end.
     last_reject: str | None = None
@@ -492,6 +497,10 @@ class Quoter:
                 # with the same size resting, which may be another run's order.
                 quote.fills_unknown = True
             if not complete:
+                if self.cancels_open(quote) == 1:
+                    # Its cancel may have been lost at the handover, and the order may
+                    # still rest: one more may go, as after a gap while up.
+                    quote.again = True
                 continue
             if order is None:
                 print(
@@ -500,7 +509,7 @@ class Quoter:
                 )
                 quote.fills_unknown = True
                 self.end(quote, by_this_run=False)
-            elif self.cancel_open(quote):
+            elif self.cancels_open(quote) == 1:
                 quote.again = True  # still resting, its cancel unanswered: one more may go
         unknown = self.unattributed() if complete else []
         for order in unknown:
@@ -590,6 +599,7 @@ class Quoter:
         self.open[ref] = Sent(kind, quote.side, quote.price, quote.sent_at)
         if kind == "cancel":
             self.cancels[ref] = (quote.side, quote.price)
+            quote.again = False  # this is the one more, if one was due
         self.last_ref = ref
         self.messages += 1
         self.last_side = quote.side
@@ -660,27 +670,28 @@ class Quoter:
             )
             self.sent(quote)
 
-    def cancel_open(self, quote: Quote) -> bool:
-        """Whether a cancel sent to the side's level is still unanswered."""
-        return any(
+    def cancels_open(self, quote: Quote) -> int:
+        """How many cancels sent to the side's level are still unanswered."""
+        return sum(
             sent.kind == "cancel" and sent.side == quote.side and sent.price == quote.price
             for sent in self.open.values()
         )
 
     async def cancel_own(self) -> None:
         """Send at most one cancel, to the level of an order of its own that may still
-        rest. Only one cancel per level is unanswered at a time, unless a complete resume
-        still showed the order resting; a rejected one goes again, paced. No cancel goes
-        where the view shows another strategy's order: with one order per level for the
-        team, this example's is not there, and the cancel would take the other. Nothing
-        goes while a budget reject's minute is running."""
+        rest. Only one cancel per level is unanswered at a time, unless a resume after the
+        drop still showed the order resting or was cut short, when one more may go; a
+        rejected one goes again, paced. No cancel goes where the view shows another
+        strategy's order: with one order per level for the team, this example's is not
+        there, and the cancel would take the other. Nothing goes while a budget reject's
+        minute is running."""
         if self.paused():
             return
         now = time.monotonic()
         for quote in self.in_turn():
             if not quote.own or quote.price is None:
                 continue  # never cancel an order it cannot tell is its own
-            if self.cancel_open(quote) and not quote.again:
+            if self.cancels_open(quote) and not quote.again:
                 continue
             if now - quote.sent_at < self.requote_seconds:
                 continue
@@ -693,7 +704,6 @@ class Quoter:
                     )
                 quote.named_blocked = quote.price
                 continue
-            quote.again = False
             await send_cancel(
                 self.session,
                 instrument=self.instrument,
@@ -791,9 +801,17 @@ class Quoter:
         if not by_this_run:
             self.ended_otherwise = True
         if quote.fills_unknown and quote.price is not None:
-            self.unreported.append(
-                f"{self.where(quote.side, quote.price)} (request_ref {quote.order_ref})"
+            line = (
+                f"{self.where(quote.side, quote.price)} (request_ref {quote.order_ref}) ended "
+                "with its fills not all reported: check your fills and position "
+                "(send_account_query)"
             )
+            if by_this_run:
+                line += (
+                    "; this run's cancel ended it, but what rested at that level was not "
+                    "seen throughout, so the order that cancel took may not have been this run's"
+                )
+            self.unreported.append(line)
         self.gone(quote)
 
     def gone(self, quote: Quote) -> None:
@@ -846,11 +864,7 @@ class Quoter:
             if q.fills_unknown:
                 line += "; its fills may not all be reported"
             lines.append(line)
-        for order in self.unreported:
-            lines.append(
-                f"{order} ended with its fills not all reported: check your fills and "
-                "position (send_account_query)"
-            )
+        lines.extend(self.unreported)
         own = {(q.side, q.price) for q in self.quotes.values() if q.own}
         for order in self.strategy_orders():
             if (order.key.side, order.key.price) not in own:
@@ -885,10 +899,13 @@ class Quoter:
                 "taken one not this run's"
             )
         elif self.view.incomplete:
-            lines.append(
+            line = (
                 "the view of resting orders is not complete, so an order may rest unseen: "
                 "check with order_snapshot or the console"
             )
+            if not self.up:
+                line += "; the session was not up at the end, so no resume showed it"
+            lines.append(line)
         if self.halt is not None:
             lines.append(f"quoting stopped on {self.halt}: check your account in the console")
         if closed and not lines:
@@ -924,8 +941,10 @@ class Quoter:
                     print(f"accepted {sent.kind} after a {elapsed_ms:.0f} ms round trip")
                 if sent.kind == "new" and quote.order_ref == ref:
                     quote.own = True  # applied, so the team's one order at its level
-                elif sent.kind == "cancel" and quote.own and quote.price == sent.price:
-                    quote.cancelling = True  # the order_cancelled that follows clears it
+                elif sent.kind == "cancel":
+                    quote.again = False  # applied: no more cancels for it are due
+                    if quote.own and quote.price == sent.price:
+                        quote.cancelling = True  # the order_cancelled that follows clears it
             case Reject():
                 detail = f" ({message.reason_detail})" if message.HasField("reason_detail") else ""
                 reason = reason_code_name(message.reason_code)
@@ -994,16 +1013,28 @@ class Quoter:
                     # The enum allows kinds newer than this example: what one means is not
                     # known, so it is taken as a stop. Its own orders are still cancelled.
                     print(f"risk notice: kind {message.kind}, not known to this example")
-                    self.halt = (
+                    self.stop(
                         f"a risk notice of a kind this example does not know ({message.kind})"
                     )
-                    self.stop_reason = self.halt
+
+    def stop(self, why: str) -> None:
+        """Something came that may change what is safe, and what it says is not known: stop
+        quoting, cancel its own orders and fail the run, naming `why`."""
+        if self.halt is None:
+            print(f"warning: {why}: stopping")
+            self.halt = why
+            self.stop_reason = why
 
     def settle(self, ref: str) -> None:
         """A message's own reply came: it is answered."""
         sent = self.open.pop(ref, None)
-        if sent is not None and self.quotes[sent.side].pending_ref == ref:
-            self.quotes[sent.side].pending_ref = None
+        if sent is None:
+            return
+        quote = self.quotes[sent.side]
+        if quote.pending_ref == ref:
+            quote.pending_ref = None
+        if sent.kind == "cancel":
+            quote.again = False  # answered: a further cancel goes only once none is open
 
     def on_cancel_reject(self, quote: Quote, message: Reject) -> None:
         reason = reason_code_name(message.reason_code)
@@ -1106,6 +1137,21 @@ def handle(quoter: Quoter, view: RestingOrders, event: Event) -> bool:
         quoter.on_missed(
             isinstance(item, SeqGap) or (isinstance(item, DecodeFailed) and item.type is None)
         )
+        if isinstance(item, DecodeFailed) and item.type == "risk_notice":
+            quoter.stop("a risk notice this example could not read")
+        elif (
+            isinstance(item, DecodeFailed)
+            and item.type is not None
+            and item.type not in ORDER_EVENT_TYPES
+            and item.report_seq is not None
+        ):
+            # One of the team's reports, not an order report the view marks incomplete for.
+            quoter.stop(f"a report this example could not read ({item.type})")
+    elif isinstance(event, Unknown):
+        if event.report_seq is not None:
+            # One of the team's reports, of a type newer than this SDK: what it says about
+            # the team's orders or account is not known.
+            quoter.stop(f"a report of a type this example does not know ({event.type})")
     elif isinstance(event, Received) and event.type == "resume_ack":
         quoter.resume_answered = True
     elif isinstance(event, Connected):
@@ -1262,6 +1308,9 @@ async def closing(session: ReconnectingSession) -> AsyncIterator[ReconnectingSes
                 await session.close()
         except TimeoutError:
             print("the connection did not close in time; it is dropped as the example exits")
+        except asyncio.CancelledError:
+            # Ctrl+C while closing: what the run printed and its exit status stand.
+            print("interrupted while closing; the connection is dropped as the example exits")
 
 
 class Progress:
