@@ -7066,6 +7066,21 @@ def test_options_bot_still_says_its_order_may_rest_on_a_second_ctrl_c_after_a_fa
     assert "is gone" not in err
 
 
+def test_options_bot_does_not_call_a_moved_order_gone_on_a_second_ctrl_c(capsys: Any):
+    # The resume showed this strategy's order at another price, perhaps this one moved,
+    # and a cancel is unread: a second Ctrl+C names that order, never that it is gone.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.gone = bot.unsure = bot.missed = True
+    bot.warnings.append("this strategy has orders on the contract (BUY 1 @ 4.910000)")
+    bot.unanswered_cancels["c"] = OPTION_PRICE
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    err = capsys.readouterr().err
+    assert "no reply came by the end" in err and "BUY 1 @ 4.910000" in err
+    assert "may still rest" in err and "is gone" not in err
+
+
 async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():
     # The resume shows the order resting, so the bot cancels it, and that cancel is in
     # flight when a message is missed live. That gap ends no resume: the cancel is not

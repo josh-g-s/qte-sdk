@@ -1177,8 +1177,13 @@ def stopped_at_once(progress: Progress) -> int:
     if bot is None or bot.ref is None:
         print("interrupted: no order was sent")
         return 0
+    for warning in bot.warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
     if bot.unanswered_cancels:
         print(cancel_unread_warning(bot), file=sys.stderr)
+    if bot.unsure:
+        # Gone from its level, but perhaps moved and still resting: the warnings say where.
+        return fail(f"interrupted: {bot.summary()}")
     if bot.gone and bot.cancel_unread:
         return fail("interrupted: this example's order is gone")
     return fail(
