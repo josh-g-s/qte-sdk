@@ -563,8 +563,8 @@ class OptionsBot:
             if self.stopping and self.reply_lost:
                 self.gave_up = True
             return
-        if self.gone:
-            return  # nothing of it rests: only replies to its cancels are still read
+        if self.gone or self.cancel_failed is not None:
+            return  # nothing of it rests, or its cancel failed: only replies are still read
         if (self.resting or self.stopping) and self.cancel_ref is None:
             if self.retry_at is not None and self.grid_points < self.retry_at:
                 return
@@ -1182,7 +1182,7 @@ def stopped_at_once(progress: Progress) -> int:
         return 0
     if bot.unanswered_cancels:
         print(cancel_unread_warning(bot), file=sys.stderr)
-    if bot.cancel_unread:
+    if bot.gone and bot.cancel_unread:
         return fail("interrupted: this example's order is gone")
     return fail(
         f"interrupted: this example's order may still rest at {bot.where}; check and cancel it"
@@ -1327,7 +1327,7 @@ async def trade_from(
         print("the exchange closed the connection")
         if bot.unanswered_cancels:
             print(cancel_unread_warning(bot))
-        if bot.ref is not None and not bot.finished and not bot.cancel_unread:
+        if bot.ref is not None and not bot.finished and not bot.gone:
             print(f"WARNING: the order may still rest at {bot.where}; check and cancel it")
         return 1
     if not bot.finished and bot.ref is not None:
@@ -1357,7 +1357,7 @@ async def trade_from(
         print(f"WARNING: {warning}")
     if bot.unanswered_cancels:
         print(cancel_unread_warning(bot))
-    if bot.cancel_unread:
+    if bot.gone and bot.cancel_unread:
         return 1
     if bot.cancel_failed is not None:
         print(
@@ -1448,7 +1448,7 @@ def ended_for_good(progress: Progress, why: str) -> int:
         print(f"WARNING: {warning}", file=sys.stderr)
     if bot.unanswered_cancels:
         print(cancel_unread_warning(bot), file=sys.stderr)
-    if bot.cancel_unread or (bot.gone and not bot.missed):
+    if bot.gone and (bot.cancel_unread or not bot.missed):
         return fail(why)
     return fail(
         f"{why}. WARNING: this example's order may still rest at {bot.where}: check with "

@@ -7037,6 +7037,38 @@ async def test_options_bot_does_not_wait_for_a_cancel_it_could_not_send():
     assert bot.gone and bot.finished and not bot.unanswered_cancels
 
 
+async def test_options_bot_sends_no_cancel_after_one_failed_while_another_is_unread():
+    # After a snapshot the first cancel stays unread; the second is rejected for good.
+    # The bot waits for the first one's reply but sends no further cancel meanwhile.
+    example = load_example("options_bot.py")
+    sender = RecordingSender()
+    bot = await options_bot_moved_with_first_cancel_out_then_snapshot(example, sender)
+    failed = Reject(
+        request_ref=sender.sent[-1][1].request_ref,
+        reason_code=ReasonCodes.MALFORMED_MESSAGE,
+    )
+    await bot.on_event(Received("reject", failed, None, report_seq=6))
+    await bot.act()
+    assert bot.cancel_failed is not None and not bot.finished
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+
+
+def test_options_bot_still_says_its_order_may_rest_on_a_second_ctrl_c_after_a_failed_cancel(
+    capsys: Any,
+):
+    # Its cancel was rejected for good, so the order may still rest, and an earlier
+    # cancel is unread: a second Ctrl+C names both, never that the order is gone.
+    example = load_example("options_bot.py")
+    bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+    bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, OPTION_PRICE, "o", True
+    bot.cancel_failed = "MALFORMED_MESSAGE"
+    bot.unanswered_cancels["c"] = OPTION_PRICE
+    assert example.stopped_at_once(example.Progress(bot=bot)) == 1
+    err = capsys.readouterr().err
+    assert "no reply came by the end" in err and "may still rest" in err
+    assert "is gone" not in err
+
+
 async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():
     # The resume shows the order resting, so the bot cancels it, and that cancel is in
     # flight when a message is missed live. That gap ends no resume: the cancel is not
