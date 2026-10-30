@@ -2975,6 +2975,24 @@ async def test_quote_both_sides_sends_one_more_cancel_when_a_complete_resume_sho
     assert quoter.session.sent == ["cancel", "cancel"]  # and only one more
 
 
+async def test_quote_both_sides_sends_no_third_cancel_after_a_second_complete_resume():
+    # Both cancels are unanswered across a second drop, and the next complete resume
+    # still shows the order resting: two are open already, so no third may go.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.resumed(replayed=True)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel", "cancel"]
+    assert quoter.resumed(replayed=True)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel", "cancel"]
+
+
 async def test_quote_both_sides_waits_about_a_minute_after_a_budget_reject_of_a_cancel(capsys):
     example = load_example("quote_both_sides.py")
     quoter, buy = own_buy(example)
