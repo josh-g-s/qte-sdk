@@ -135,6 +135,7 @@ from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 import qte_sdk
+from qte_sdk import _clock
 from qte_sdk import errors as _errors
 from qte_sdk import logs as _logs
 
@@ -280,7 +281,7 @@ def check_for_update(timeout: float = DEFAULT_TIMEOUT) -> UpdateCheck:
             install = _installed(version)
         except _Unplaced as unplaced:
             return _compare_unplaced(version, unplaced, timeout, deadline)
-        return _compare(version, install, _parse_refs(_fetch_refs(timeout)), deadline)
+        return _compare(version, install, _parse_refs(_fetch_refs(timeout)), timeout, deadline)
     except _CannotTell as reason:
         return _unknown(version, install, str(reason))
     except Exception as error:
@@ -735,14 +736,18 @@ def _applies_here(release: _Release) -> bool:
 
 
 def _recommendation(
-    version: str, releases: dict[str, tuple[tuple[int, int, int], str]], deadline: float
+    version: str,
+    releases: dict[str, tuple[tuple[int, int, int], str]],
+    timeout: float,
+    deadline: float,
 ) -> _Release | None:
     """The highest release above `version`, up to the latest release tag, that releases.json
     marks as a recommended update for this platform, read within what is left before
-    `deadline`; None for none, or when releases.json cannot be read. Only tagged releases
-    count, so the file can never make the check say more than the tags do."""
+    `deadline` and never for longer than the check's `timeout`; None for none, or when
+    releases.json cannot be read. Only tagged releases count, so the file can never make
+    the check say more than the tags do."""
     try:
-        remaining = deadline - time.monotonic()
+        remaining = _clock.remaining(deadline, timeout)
         if remaining <= 0:
             return None
         entries = _parse_releases(_fetch(_read_releases, remaining))
@@ -790,10 +795,11 @@ def _behind(
     latest: str,
     releases: dict[str, tuple[tuple[int, int, int], str]],
     command: str,
+    timeout: float,
     deadline: float,
 ) -> dict[str, Any]:
     """The fields of a result behind release `latest`, which `command` takes."""
-    recommendation = _recommendation(version, releases, deadline)
+    recommendation = _recommendation(version, releases, timeout, deadline)
     return {
         "status": Status.BEHIND,
         "command": command,
@@ -803,7 +809,9 @@ def _behind(
     }
 
 
-def _compare(version: str, install: _Install, refs: dict[str, str], deadline: float) -> UpdateCheck:
+def _compare(
+    version: str, install: _Install, refs: dict[str, str], timeout: float, deadline: float
+) -> UpdateCheck:
     installed = _number(version)
     commit, revision, archive = install
     releases = _releases(refs)
@@ -845,7 +853,7 @@ def _compare(version: str, install: _Install, refs: dict[str, str], deadline: fl
             command = update_command(latest, archive=True)
         else:
             command = update_command(latest if pinned else None)
-        behind = _behind(version, latest, releases, command, deadline)
+        behind = _behind(version, latest, releases, command, timeout, deadline)
         return replace(result(Status.BEHIND, command, ""), **behind)
     relation = "is" if installed == releases[latest][0] else "is newer than"
     text = f"qte-sdk {version} {relation} the latest release, {latest}"
@@ -871,7 +879,7 @@ def _compare_unplaced(
     if latest is None or _number(version) >= releases[latest][0]:
         return unknown
     command = update_command(latest, archive=True) if unplaced.archive else update_command()
-    return replace(unknown, **_behind(version, latest, releases, command, deadline))
+    return replace(unknown, **_behind(version, latest, releases, command, timeout, deadline))
 
 
 def _unknown(version: str, install: _Install, reason: str) -> UpdateCheck:
