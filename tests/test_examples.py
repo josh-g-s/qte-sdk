@@ -5858,6 +5858,41 @@ async def test_take_liquidity_counts_no_fill_of_another_market_order_as_its_own(
     assert sum(line.startswith("FILL ") for line in lines) == 1, lines
 
 
+async def test_take_liquidity_counts_no_fitting_fill_before_its_accepted_as_its_own(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A fill of another 1-lot market order of the strategy fits this order's size, but
+    # comes before this order's accepted: it is not this order's.
+    script = [
+        *first_session_then_order(),
+        foreign_fill(1, 2),
+        lambda s: Received("accepted", Accepted(request_ref=taken_order(s)), None, report_seq=3),
+    ]
+    outcome, _, _ = await run_taker(script)
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert "FILL" not in out and "filled 1 of 1" not in out, out
+
+
+async def test_take_liquidity_counts_no_cancellation_of_another_size_as_its_own(
+    capsys: pytest.CaptureFixture[str],
+):
+    # After its accepted, a cancellation of the strategy's other market order on the same
+    # side cancels 5, which does not fit what is left of this 1-lot order.
+    cancelled = OrderCancelled(
+        origin=TEAM, strat_id="take-test", instrument=INSTRUMENT, side=BUY, cancelled_size=5
+    )
+    script = [
+        *first_session_then_order(),
+        our_accepted,
+        Received("order_cancelled", cancelled, None, report_seq=3),
+    ]
+    outcome, _, _ = await run_taker(script)
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert "cancelled (" not in out, out
+
+
 @pytest.mark.parametrize("case", ["down", "accepted-only", "replay-running"])
 async def test_take_liquidity_takes_a_time_up_with_its_order_unfinished_as_unknown(
     case: str, capsys: pytest.CaptureFixture[str]
