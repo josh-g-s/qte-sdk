@@ -874,7 +874,7 @@ class Quoter:
             )
         return lines
 
-    def finish(self) -> int:
+    def finish(self, closed: bool = False) -> int:
         """Print the last lines and return the exit status: 0 only if nothing is unsure."""
         lines = self.outstanding()
         if self.missed:
@@ -891,6 +891,11 @@ class Quoter:
             )
         if self.halt is not None:
             lines.append(f"quoting stopped on {self.halt}: check your account in the console")
+        if closed and not lines:
+            lines.append(
+                "the connection closed before this example could confirm its orders' "
+                "last state: check your orders and fills (order_snapshot, send_account_query)"
+            )
         if not lines:
             if self.ended_otherwise:
                 print("all of this example's orders ended (filled or cancelled)")
@@ -1331,8 +1336,7 @@ async def quote_and_clean_up(
 
             if why == "closed":
                 print("the exchange closed the connection, so this example cannot cancel")
-                quoter.finish()
-                return 1
+                return quoter.finish(closed=True)
             reason = {
                 "time": "time is up",
                 "refused": "nothing to quote",
@@ -1353,8 +1357,7 @@ async def quote_and_clean_up(
                     )
             if outcome == "closed":
                 print("the exchange closed the connection before the cancels were confirmed")
-                quoter.finish()
-                return 1
+                return quoter.finish(closed=True)
             if outcome == "unconfirmed":
                 print(f"not all confirmed within --drain-seconds ({args.drain_seconds:g} s)")
             return quoter.finish()

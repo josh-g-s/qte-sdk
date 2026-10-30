@@ -2838,6 +2838,20 @@ def deliver(example: Any, quoter: Any, type_: str, message: Any) -> None:
     example.handle(quoter, quoter.view, Received(type_, message, None))
 
 
+def test_quote_both_sides_never_says_all_cancelled_when_the_connection_closed(capsys):
+    # A close leaves the last state unconfirmed, so even with nothing outstanding the
+    # run fails and says so, rather than printing that every order is cancelled.
+    example = load_example("quote_both_sides.py")
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
+    quoter = example.Quoter(RecordingSession(), RestingOrders(), args)
+    assert quoter.finish(closed=True) == 1
+    out = capsys.readouterr().out
+    assert "are cancelled" not in out
+    assert "the connection closed before this example could confirm" in out
+
+
 async def test_quote_both_sides_never_cancels_where_another_strategy_rests_and_names_it(capsys):
     # The team has one order per level. Where the view shows another strategy's order at
     # its own order's level, a cancel would take that one, so none is sent; the run then
