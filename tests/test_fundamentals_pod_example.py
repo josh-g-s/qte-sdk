@@ -229,6 +229,38 @@ async def test_a_pod_follows_its_service_ticket_to_complete_and_counts_no_fill()
     assert exchange.types()[-1] == "account_query"
 
 
+class RefusesSecondAccountQuery(PodExchange):
+    """Answers the first account_query, then refuses the next: the position after the
+    stop is not known."""
+
+    async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+        queries = self.types().count("account_query")
+        if type_ == "account_state" and queries == 2:
+            refusal = {
+                "request_ref": payload["request_ref"],
+                "request_type": "ACCOUNT_QUERY",
+                "reason_code": "MALFORMED_MESSAGE",
+                "receipt_time": "1",
+            }
+            await super().send(ws, "reject", refusal)
+            return
+        await super().send(ws, type_, payload)
+
+
+async def test_a_position_not_known_after_the_stop_exits_1():
+    # The ticket stops, but the account query after it gets no account_state: the engine's
+    # cure fills, if any, show only there, so the run says the position is not known.
+    exchange = RefusesSecondAccountQuery(
+        route=route_payload(), accounts=[account(None), account(500)], after=HAPPY
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert "the ticket stopped: TICKET_COMPLETE" in out
+    assert "position after the stop: unknown (no account_state)" in out
+    assert "WARNING: the position after the stop is not known" in out
+    assert exchange.types().count("account_query") == 2
+
+
 def point(time: int, due: int, filled: int) -> dict[str, str]:
     return {"time": str(time), "due_shares": str(due), "filled_shares": str(filled)}
 

@@ -53,7 +53,8 @@ The rules it follows, which a pod program should follow too:
   it. To keep a running position between queries, use `qte_sdk.account.AccountReports`,
   which applies each fill once against the reply. Under the service the engine's own
   cure ticket and its fills are sent to no one, so ask for `account_state` again after a
-  ticket stops, as this example does.
+  ticket stops, as this example does: if no `account_state` answers it, the example says
+  the position is not known and exits with status 1.
 - Off or paused: with `routing_in_force` `ROUTING_DESK` the service is off and a new
   ticket would go to the pod's Execution desk (`executor` `DESK`), which is paused and
   does not trade this term, so do not send one; from the Winter term (26 October) the
@@ -762,6 +763,15 @@ async def follow_pod(pod: Pod, queue: asyncio.Queue, args: argparse.Namespace) -
     await drive(queue, pod, lambda: pod.account_answered, ACCOUNT_SECONDS)
     pod.print_position("after the stop")
     pod.warn_if_missed()
+    if pod.account is None:
+        # No account_state by the end (refused, lost to a drop, or late): the engine's
+        # cure fills, if any, show only there, so the position is not known.
+        print(
+            "WARNING: the position after the stop is not known, and the engine's cure "
+            "fills, if any, show only in account_state: check it with send_account_query "
+            "or the console"
+        )
+        return 1
     return 0
 
 
