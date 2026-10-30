@@ -159,6 +159,7 @@ from datetime import date, datetime
 from typing import Any, TypeVar, cast
 from urllib.parse import quote, unquote, urlsplit
 
+from qte_sdk import _clock
 from qte_sdk import errors as _errors
 from qte_sdk.connection import DecodeFailed, Unknown, _decode_error
 from qte_sdk.contract import codec
@@ -1288,7 +1289,10 @@ class _WakeableSocket:
     def _wait(
         self, sock: socket.socket, wake: socket.socket, write: bool, deadline: float | None
     ) -> None:
-        remaining = None if deadline is None else deadline - time.monotonic()
+        # Within the timeout: a deadline read back can round to a little above it.
+        remaining = None
+        if deadline is not None and self._timeout is not None:
+            remaining = _clock.remaining(deadline, self._timeout)
         if remaining is not None and remaining <= 0:
             raise TimeoutError("timed out")
         if hasattr(select, "poll"):
