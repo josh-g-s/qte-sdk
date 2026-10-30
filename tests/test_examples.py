@@ -48,6 +48,7 @@ from qte_sdk.contract.v1.common_pb2 import (
     LIMIT,
     NEW,
     RESTING,
+    SELL,
     TEAM,
     MarketSessionPhase,
     OrderLifecycleState,
@@ -62,6 +63,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     OrderCancelled,
     OrderState,
     Reject,
+    RiskNotice,
 )
 from qte_sdk.history import HistoryClient
 from qte_sdk.orders import reason_code_name, send_amend, send_new
@@ -1252,7 +1254,8 @@ async def test_quote_both_sides_prints_a_reject_s_next_step_once_however_often_i
 
 async def test_quote_both_sides_retries_a_reject_with_no_further_book():
     # One book and then none: the exchange publishes a book only when it changes.
-    exchange = FakeExchange(reject_new="MESSAGE_BUDGET_EXCEEDED", book_once=True)
+    # A reject other than a budget one, which pauses all sending for a minute instead.
+    exchange = FakeExchange(reject_new="MIN_REST_VIOLATION", book_once=True)
     async with serve_local(exchange) as url:
         code, out, err = await run_example(
             "quote_both_sides.py",
@@ -1263,7 +1266,7 @@ async def test_quote_both_sides_retries_a_reject_with_no_further_book():
         )
     assert code == 0, out + err
     assert exchange.books_sent == 1
-    assert "REJECTED new: MESSAGE_BUDGET_EXCEEDED" in out
+    assert "REJECTED new: MIN_REST_VIOLATION" in out
     sides = [m["payload"]["side"] for m in exchange.received if m["type"] == "new"]
     # Each side retried at least twice after its first reject, and no faster than
     # --requote-seconds allows: at most one new per side per 0.2 s of the 1.5 s.
@@ -2969,8 +2972,8 @@ async def test_quote_both_sides_waits_about_a_minute_after_a_budget_reject_of_a_
     buy.sent_at = float("-inf")
     await quoter.cancel_own()
     assert quoter.session.sent == ["cancel"]  # not yet
-    assert buy.retry_after - time.monotonic() > example.BUDGET_WAIT_SECONDS - 5
-    buy.retry_after = float("-inf")  # the minute is up
+    assert quoter.pause_until - time.monotonic() > example.BUDGET_WAIT_SECONDS - 5
+    quoter.pause_until = float("-inf")  # the minute is up
     await quoter.cancel_own()
     assert quoter.session.sent == ["cancel", "cancel"]
     # Were time up before it is answered, the last reject is named.
@@ -3045,7 +3048,7 @@ async def test_quote_both_sides_waits_about_a_minute_after_a_budget_reject_while
     deliver(example, quoter, "reject", reject)
     buy.sent_at = float("-inf")
     assert not quoter.ready(buy)
-    buy.retry_after = float("-inf")  # the minute is up
+    quoter.pause_until = float("-inf")  # the minute is up
     assert quoter.ready(buy)
 
 
@@ -3093,6 +3096,158 @@ async def test_quote_both_sides_fails_when_the_first_resume_never_completes(caps
     quoter = example.Quoter(RecordingSession(), view, args)
     assert quoter.finish() == 1
     assert "the view of resting orders is not complete" in capsys.readouterr().out
+
+
+async def run_quote_and_clean_up(script: list[Any]) -> tuple[int, Any, Any]:
+    """Run quote_both_sides's own part against a ScriptedSession, briefly; its status, the
+    session and the module."""
+    example = load_example("quote_both_sides.py")
+    session = ScriptedSession(script)
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+        + ["--seconds", "0.2", "--drain-seconds", "0.2"]
+    )
+    async with asyncio.timeout(RUN_LIMIT):
+        code = await example.quote_and_clean_up(session, args, asyncio.current_task())
+    return code, session, example
+
+
+async def test_quote_both_sides_fails_when_time_is_up_before_it_connects(capsys):
+    # No session came up, so no snapshot showed what of its strategy rests: an earlier
+    # run's order may. Not an exit 0.
+    code, session, _ = await run_quote_and_clean_up([])
+    assert code == 1
+    assert session.sent == []
+    assert "the view of resting orders is not complete" in capsys.readouterr().out
+
+
+async def test_quote_both_sides_fails_when_the_first_resume_is_refused(capsys):
+    # The first session connects with no resume: no snapshot loaded the view, so an
+    # earlier run's order may still rest. It sends nothing and exits 1.
+    code, session, _ = await run_quote_and_clean_up([connected_event(reconnected=False)])
+    assert code == 1
+    assert session.sent == []
+    out = capsys.readouterr().out
+    assert "the exchange did not resume the session" in out
+    assert "all of this example's orders" not in out
+
+
+async def test_quote_both_sides_cancels_its_order_once_it_moves_off_a_blocked_level(capsys):
+    # Another strategy's order at its level holds the final cancel back. A later report
+    # moves its own order to a level the view shows free: the cancel can go now, so the
+    # cleanup is not settled until it has.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    resting_at(quoter, "teammate", BID + TICK)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == [] and quoter.settled()
+    moved = OrderState(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        old_price=BID + TICK,
+        price=BID + 2 * TICK,
+        state=RESTING,
+        remaining_size=1,
+    )
+    deliver(example, quoter, "order_state", moved)
+    assert buy.price == BID + 2 * TICK
+    assert not quoter.settled()
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]
+
+
+async def test_quote_both_sides_stops_and_cancels_on_a_risk_notice_of_an_unknown_kind(capsys):
+    # The enum allows kinds newer than this example: one it does not know is named by its
+    # number and taken as a stop. It cancels its own orders and exits 1.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    notice = Received("risk_notice", RiskNotice(kind=99), None)
+    assert example.apply_received(quoter, quoter.view, notice) == "unreliable"
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]
+    quoter.open.clear()
+    buy.own = False
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert "risk notice: kind 99" in out
+    assert "a risk notice of a kind this example does not know (99)" in out
+
+
+def own_both(example: Any) -> tuple[Any, Any, Any]:
+    """own_buy, with its sell its own order too, accepted and reported resting."""
+    quoter, buy = own_buy(example)
+    sell = quoter.quotes[example.SELL]
+    sell.price, sell.own, sell.order_ref = ASK - TICK, True, "r-sell"
+    state = OrderState(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=SELL,
+        price=ASK - TICK,
+        state=RESTING,
+        remaining_size=1,
+    )
+    deliver(example, quoter, "order_state", state)
+    return quoter, buy, sell
+
+
+@pytest.mark.parametrize("kind", ["new", "cancel", "amend"])
+@pytest.mark.parametrize(
+    "code",
+    [
+        ReasonCodes.MESSAGE_BUDGET_EXCEEDED,
+        ReasonCodes.BURST_CAP_EXCEEDED,
+        ReasonCodes.NEW_ORDER_CAP_EXCEEDED,
+    ],
+)
+async def test_quote_both_sides_pauses_all_sending_after_any_budget_reject(kind: str, code: int):
+    # After a budget reject (1500 to 1502) of any message, nothing more goes, new, cancel
+    # or amend, on either side, for the full minute: cleanup cancels included.
+    example = load_example("quote_both_sides.py")
+    quoter, buy, sell = own_both(example)
+    quoter.quoting = True
+    ref = quoter.record(buy, kind)
+    deliver(example, quoter, "reject", Reject(request_ref=ref, reason_code=code))
+    buy.sent_at = sell.sent_at = float("-inf")
+    assert not quoter.ready(buy) and not quoter.ready(sell)
+    quoter.quoting = False
+    await quoter.cancel_own()
+    assert quoter.session.sent == []
+    assert quoter.pause_until - time.monotonic() > example.BUDGET_WAIT_SECONDS - 5
+    quoter.pause_until = float("-inf")  # the minute is up
+    assert quoter.ready(sell)
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]
+
+
+async def test_quote_both_sides_names_its_orders_when_a_budget_pause_outlasts_the_drain(capsys):
+    example = load_example("quote_both_sides.py")
+    quoter, buy, sell = own_both(example)
+    ref = quoter.record(sell, "amend")
+    reject = Reject(request_ref=ref, reason_code=ReasonCodes.MESSAGE_BUDGET_EXCEEDED)
+    deliver(example, quoter, "reject", reject)
+    buy.sent_at = sell.sent_at = float("-inf")
+    queue: asyncio.Queue = asyncio.Queue()
+    deadline = asyncio.get_running_loop().time() + 0.2
+    outcome = await example.cancel_own_orders(quoter, quoter.view, queue, deadline)
+    assert outcome == "unconfirmed"
+    assert quoter.session.sent == []
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert "this example's order BUY TEST @ 99.960000 (request_ref r-buy) may still rest" in out
+    assert "(request_ref r-sell) may still rest" in out
+    assert "a message budget reject paused all sending" in out
+
+
+def test_quote_both_sides_says_its_cleanup_cancels_an_accepted_order_not_yet_resting():
+    # The final cancels go on `accepted` alone; the docstring must not claim more.
+    example = load_example("quote_both_sides.py")
+    doc = " ".join(example.__doc__.split())
+    assert "reports: it only cancels or amends an order once the exchange has reported" not in doc
+    assert "while quoting, it only cancels or amends an order once" in doc
+    assert "at the end it cancels each of its own orders, reported resting or not" in doc
 
 
 class NotConnectedSession:

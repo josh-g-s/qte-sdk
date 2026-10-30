@@ -31,7 +31,10 @@ order: if its order ended unseen in the gap, that cancel takes whatever order of
 strategy rests there by then, and the last lines say so. It exits 0 only when every
 message it sent was answered, each of its own orders was seen to end, and no order of its
 strategy rests on the instrument; otherwise its last lines name each order, message and
-fill it is unsure of.
+fill it is unsure of. So it exits 1, too, if no snapshot ever showed what of its strategy
+rests (time ran out before the first session, or the exchange refused the first resume),
+and it stops quoting, cancels its own orders and exits 1 on a risk notice of a kind it does
+not know.
 
 Run it on prices your team is not otherwise trading. A cancel names a price level, not
 an order, and is applied only after the order delay, so it removes whichever of your
@@ -57,13 +60,16 @@ its order delay before applying it, currently 150 ms, so an `accepted` arrives a
 that long after the send; the example prints each round trip it measures. The delay, the
 minimum time an order must rest before it may be cancelled or amended, the price collar
 and the message budgets are all set by the exchange and may change, so nothing here
-depends on their values. Instead the example reacts to what the exchange reports: it only
-cancels or amends an order once the exchange has reported it resting. It also paces
-itself, sending at most one message per side per --requote-seconds; that is local
-pacing, not a promise to stay within your team's budgets, which count every message your
-team sends. If a message is rejected (for example MIN_REST_VIOLATION or
-MESSAGE_BUDGET_EXCEEDED), the reject is printed and the example tries again later; a
-cancel refused for a message budget goes again about a minute later.
+depends on their values. Instead the example reacts to what the exchange reports: while
+quoting, it only cancels or amends an order once the exchange has reported it resting;
+at the end it cancels each of its own orders, reported resting or not, since an order is
+its own from its new's `accepted`. It also paces itself, sending at most one message per
+side per --requote-seconds; that is local pacing, not a promise to stay within your
+team's budgets, which count every message your team sends. If a message is rejected (for
+example MIN_REST_VIOLATION), the reject is printed and the example tries again later.
+After a budget reject (codes 1500 to 1502) of any message, it sends no new, cancel or
+amend on either side for a full minute, its final cancels included: if the minute
+outlasts --drain-seconds, it names its orders and exits 1.
 
 When it acts. The exchange publishes a book only when it changes, so in a quiet market
 the next book may be a long time coming. The example keeps the latest book it has
@@ -177,9 +183,15 @@ from qte_sdk.units import to_decimal, to_micros
 
 SIDE_NAMES = {BUY: "BUY", SELL: "SELL"}
 
-# Cancel rejects that wait out a message budget, and how long a final cancel waits after
-# one before it is sent again: about a minute, a local choice.
-BUDGET_REJECTS = frozenset({ReasonCodes.MESSAGE_BUDGET_EXCEEDED, ReasonCodes.BURST_CAP_EXCEEDED})
+# The budget rejects (codes 1500 to 1502), and how long nothing is sent after one: the full
+# minute AGENTS.md states.
+BUDGET_REJECTS = frozenset(
+    {
+        ReasonCodes.MESSAGE_BUDGET_EXCEEDED,
+        ReasonCodes.BURST_CAP_EXCEEDED,
+        ReasonCodes.NEW_ORDER_CAP_EXCEEDED,
+    }
+)
 BUDGET_WAIT_SECONDS = 60.0
 
 
@@ -297,13 +309,12 @@ class Quote:
     # One more cancel may go while one is unanswered: a complete resume still showed the
     # order resting.
     again: bool = False
-    # No cancel is sent again before this time, on the time.monotonic() clock.
-    retry_after: float = float("-inf")
     # The reason the last cancel of this order was rejected, to name at the end.
     last_reject: str | None = None
-    # Whether a final cancel was held back because the view shows another strategy's
-    # order at the level.
-    skipped: bool = False
+    # The level at which a final cancel held back by another strategy's order was last
+    # named, so it is printed once per level. Whether a cancel is held back is worked out
+    # afresh from the view each time (`blocked`), never kept.
+    named_blocked: int | None = None
 
 
 class Quoter:
@@ -357,6 +368,11 @@ class Quoter:
         self.ended_otherwise = False
         # What went wrong that the last lines must name.
         self.warnings: list[str] = []
+        # After a budget reject, no new, cancel or amend is sent on either side before
+        # this time, on the time.monotonic() clock.
+        self.pause_until = float("-inf")
+        # Why quoting must stop for a reason other than missed messages, or None.
+        self.halt: str | None = None
 
     def where(self, side: int, price: int) -> str:
         return f"{SIDE_NAMES.get(side, '?')} {self.instrument} @ {price_text(price)}"
@@ -437,7 +453,15 @@ class Quoter:
         right: a reconnect the exchange did not resume."""
         if not self.view.incomplete:
             return self.resumed(replayed=True)  # nothing to recover
-        print("the exchange did not resume the session, so reports missed while down are lost")
+        if self.earlier is None:
+            # The first session: no snapshot showed what of its strategy rests already.
+            print(
+                "the exchange did not resume the session, so the orders of this strategy "
+                "resting already are not known"
+            )
+            self.stop_reason = "the orders of this strategy resting already are not known"
+        else:
+            print("the exchange did not resume the session, so reports missed while down are lost")
         self.lost()
         return self.resumed(replayed=False)
 
@@ -520,16 +544,16 @@ class Quoter:
 
     # Sending
 
+    def paused(self) -> bool:
+        """Whether a budget reject's minute is still running: nothing may be sent."""
+        return time.monotonic() < self.pause_until
+
     def ready(self, quote: Quote) -> bool:
         """Whether this side may send now: nothing unanswered, not sent too recently, and
-        not waiting out a budget reject of its cancel."""
+        no budget reject's minute running."""
         now = time.monotonic()
         waited = now - quote.sent_at
-        return (
-            quote.pending_ref is None
-            and waited >= self.requote_seconds
-            and now >= quote.retry_after
-        )
+        return quote.pending_ref is None and waited >= self.requote_seconds and not self.paused()
 
     def next_ready(self) -> float:
         """Seconds until a side that is waiting out --requote-seconds may send again, or
@@ -644,25 +668,28 @@ class Quoter:
         rest. Only one cancel per level is unanswered at a time, unless a complete resume
         still showed the order resting; a rejected one goes again, paced. No cancel goes
         where the view shows another strategy's order: with one order per level for the
-        team, this example's is not there, and the cancel would take the other."""
+        team, this example's is not there, and the cancel would take the other. Nothing
+        goes while a budget reject's minute is running."""
+        if self.paused():
+            return
         now = time.monotonic()
         for quote in self.in_turn():
             if not quote.own or quote.price is None:
                 continue  # never cancel an order it cannot tell is its own
             if self.cancel_open(quote) and not quote.again:
                 continue
-            if now < quote.retry_after or now - quote.sent_at < self.requote_seconds:
+            if now - quote.sent_at < self.requote_seconds:
                 continue
-            order = self.view.get(self.instrument, quote.side, quote.price)
-            if order is not None and order.strat_id != self.strat_id:
-                if not quote.skipped:
+            other = self.blocked(quote)
+            if other is not None:
+                if quote.named_blocked != quote.price:
                     print(
                         f"not cancelling at {self.where(quote.side, quote.price)}: an order of "
-                        f"strategy {order.strat_id} rests there"
+                        f"strategy {other} rests there"
                     )
-                quote.skipped = True
+                quote.named_blocked = quote.price
                 continue
-            quote.skipped = quote.again = False
+            quote.again = False
             await send_cancel(
                 self.session,
                 instrument=self.instrument,
@@ -675,11 +702,22 @@ class Quoter:
             # which may change what is safe to send, before the next.
             return
 
+    def blocked(self, quote: Quote) -> str | None:
+        """The strategy of another strategy's order the view shows now at the level of
+        this side's own order, or None: a cancel there would take that order."""
+        if quote.price is None:
+            return None
+        order = self.view.get(self.instrument, quote.side, quote.price)
+        if order is not None and order.strat_id != self.strat_id:
+            return order.strat_id
+        return None
+
     def settled(self) -> bool:
         """Whether every message is answered and each order of its own has ended, or has
-        a cancel held back by another strategy's order at its level."""
+        a cancel held back by another strategy's order the view shows at its level now."""
         return not self.open and all(
-            not q.own or q.price is None or q.skipped for q in self.quotes.values()
+            not q.own or q.price is None or self.blocked(q) is not None
+            for q in self.quotes.values()
         )
 
     # Receiving
@@ -758,9 +796,7 @@ class Quoter:
         """This side has no order now: it may enter a new one."""
         quote.price = None
         quote.cancelling = quote.own = quote.fills_unknown = quote.again = False
-        quote.skipped = False
-        quote.order_ref = quote.last_reject = None
-        quote.retry_after = float("-inf")
+        quote.order_ref = quote.last_reject = quote.named_blocked = None
 
     def believed_resting(self, refs: bool = False) -> str:
         """The orders this example believes it may have, for a message to the user. With
@@ -795,7 +831,7 @@ class Quoter:
                 continue
             where = self.where(q.side, q.price)
             line = f"this example's order {where} (request_ref {q.order_ref}) may still rest"
-            if q.skipped:
+            if self.blocked(q) is not None:
                 line = (
                     f"no cancel was sent to {where}, since the view shows another strategy's "
                     f"order there: this run's order (request_ref {q.order_ref}) may still rest "
@@ -820,6 +856,12 @@ class Quoter:
                     f"({order.remaining_size} resting): not cancelled: whose it is cannot be told"
                 )
         lines.extend(self.warnings)
+        if lines and self.paused():
+            lines.append(
+                "a message budget reject paused all sending (new, cancel and amend) for "
+                f"{BUDGET_WAIT_SECONDS:g} s, {self.pause_until - time.monotonic():.0f} s of it "
+                "still to run, so the cancels above may not have been sent"
+            )
         return lines
 
     def finish(self) -> int:
@@ -837,6 +879,8 @@ class Quoter:
                 "the view of resting orders is not complete, so an order may rest unseen: "
                 "check with order_snapshot or the console"
             )
+        if self.halt is not None:
+            lines.append(f"quoting stopped on {self.halt}: check your account in the console")
         if not lines:
             if self.ended_otherwise:
                 print("all of this example's orders ended (filled or cancelled)")
@@ -876,6 +920,14 @@ class Quoter:
                 if step is not None and reason not in self.steps_shown:
                     self.steps_shown.add(reason)
                     print(f"next step for {reason}: {step}")
+                if message.reason_code in BUDGET_REJECTS:
+                    # Whichever message it was: nothing more goes, on either side, for the
+                    # full minute.
+                    self.pause_until = time.monotonic() + BUDGET_WAIT_SECONDS
+                    print(
+                        f"a message budget reject: sending no new, cancel or amend for "
+                        f"{BUDGET_WAIT_SECONDS:g} s"
+                    )
                 if sent is not None and ref is not None:
                     self.settle(ref)
                     quote = self.quotes[sent.side]
@@ -920,7 +972,16 @@ class Quoter:
                 print(f"cancelled {side} {message.cancelled_size} @ {price} ({reason})")
                 self.on_cancelled(message, ref)
             case RiskNotice():
-                print(f"risk notice: {RiskNoticeKind.Name(message.kind)}")
+                if message.kind in RiskNoticeKind.values():
+                    print(f"risk notice: {RiskNoticeKind.Name(message.kind)}")
+                else:
+                    # The enum allows kinds newer than this example: what one means is not
+                    # known, so it is taken as a stop. Its own orders are still cancelled.
+                    print(f"risk notice: kind {message.kind}, not known to this example")
+                    self.halt = (
+                        f"a risk notice of a kind this example does not know ({message.kind})"
+                    )
+                    self.stop_reason = self.halt
 
     def settle(self, ref: str) -> None:
         """A message's own reply came: it is answered."""
@@ -939,9 +1000,6 @@ class Quoter:
             self.end(quote, by_this_run=False)
             return
         quote.last_reject = reason
-        if message.reason_code in BUDGET_REJECTS:
-            print(f"cancel rejected ({reason}); sending it again in {BUDGET_WAIT_SECONDS:g} s")
-            quote.retry_after = time.monotonic() + BUDGET_WAIT_SECONDS
 
     def on_cancelled(self, message: OrderCancelled, ref: str | None) -> None:
         if ref is not None:
@@ -1061,7 +1119,7 @@ def apply_received(quoter: Quoter, view: RestingOrders, item: object) -> str | N
             return "unreliable"
     elif quoter.up and view.incomplete:
         quoter.lost()  # messages were missed while connected
-    if quoter.missed:
+    if quoter.missed or quoter.halt is not None:
         return "unreliable"
     return None
 
@@ -1232,6 +1290,9 @@ async def quote_and_clean_up(
     loop = asyncio.get_running_loop()
     async with closing(session):
         view = RestingOrders()
+        # Incomplete until the first session's resume loads it from a snapshot: until then
+        # an earlier run's order of the strategy may rest unseen.
+        view.mark_incomplete()
         quoter = Quoter(session, view, args)
         if progress is not None:
             progress.quoter = quoter
