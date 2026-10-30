@@ -6495,6 +6495,34 @@ async def test_options_bot_cancels_as_usual_once_its_accepted_follows_an_empty_r
     assert [t for t, _ in sender.sent] == ["new", "cancel"]
 
 
+class FillsWhileDown(FakeExchange):
+    """The first new is accepted, then the connection drops and the order fills while
+    down: nothing more is sent for it, and nothing of it rests."""
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        if type_ == "new" and self.news == 0:
+            self.news += 1
+            ref = p.get("request_ref")
+            accepted = {"request_ref": ref, "request_type": "NEW", "receipt_time": "1"}
+            await self.send(ws, "accepted", accepted)
+            self._withhold = True  # it fills while down: no order_state, nothing rests
+            return
+        await super().on_order(ws, type_, p)
+
+
+async def test_options_bot_fails_when_an_empty_snapshot_leaves_its_fills_unknown():
+    # Accepted, then the connection drops and the resume is an empty snapshot: the order
+    # is gone, but a snapshot reports no fills made while down. The run says to check
+    # the fills and exits 1, as take_liquidity does.
+    exchange = FillsWhileDown(instruments=options_table(), options=options_market())
+    code, out, err = await run_options_bot(exchange, "--seconds", "4")
+    assert code == 1, out + err
+    assert exchange.connections == 2
+    assert "nothing of the order rests at SPY261120P00665000 BUY @ 4.900000" in out
+    assert "fills while disconnected are not reported: check your fills" in out
+    assert payloads(exchange, "cancel") == []
+
+
 OPTION_CONTRACT, OPTION_PRICE = "SPY261120P00665000", 4_900_000
 
 

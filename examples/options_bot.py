@@ -33,8 +33,9 @@ choosing and cancels the order's level, waiting at most --drain-seconds for the 
 to confirm. If it cannot confirm, it names the level where the order may still rest, so
 you can cancel it yourself, and exits with status 1. A Ctrl+C during that wait does not
 start --drain-seconds again. Press Ctrl+C twice to stop at once;
-if an order was sent, it then names the level where it may still rest and exits with
-status 1. A Ctrl+C before any order is sent stops the example with status 0.
+if an order was sent, it then names the level where it may still rest, or, once nothing
+of it rests and no message was missed, says "this example's order is gone", and exits
+with status 1. A Ctrl+C before any order is sent stops the example with status 0.
 
 It never sends a cancel for its order without its own `accepted` for that order. A cancel
 names a price level, not an order, so before that `accepted` it could take another order
@@ -100,7 +101,8 @@ warns naming each order seen and how to check (order_snapshot or the console) an
 with status 1 at once. With none seen, the order may still be in its order delay, so it
 keeps waiting for the reply as above, cancels as usual once the `accepted` comes, and
 otherwise cancels nothing, warns that it may still rest and exits with status 1. After a
-snapshot, fills made while it was down are not reported, and the summary says so. An
+snapshot, fills made while it was down are not reported: the summary says so, tells you to
+check your fills, and the run exits with status 1. An
 order or a cancel in flight at the drop is never sent again: the replay or the snapshot says what
 became of it, and a cancel is sent afresh only while the order rests. Market data sent
 while it was down is not replayed, so before it chooses a contract again it waits for a
@@ -1417,7 +1419,8 @@ async def trade_from(
     elif why == "time" and bot.ref is None:
         print(f"stopped after {args.seconds:g} seconds: no contract could take the order")
     print(bot.summary())
-    return 1 if bot.warnings or bot.unanswered_cancels else 0
+    # After a snapshot, fills made while it was down are not known: check them, status 1.
+    return 1 if bot.warnings or bot.unanswered_cancels or bot.unreported_fills else 0
 
 
 def cancel_unread_warning(bot: OptionsBot) -> str:
