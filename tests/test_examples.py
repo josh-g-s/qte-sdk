@@ -3309,6 +3309,29 @@ def test_quote_both_sides_ignores_an_unknown_message_that_is_no_report():
     assert quoter.halt is None
 
 
+@pytest.mark.parametrize("when", ["resuming", "up"])
+def test_quote_both_sides_fails_after_a_report_gap_even_once_a_snapshot_puts_the_view_right(
+    when: str,
+):
+    # A ReportGap says an order report, perhaps a fill, was skipped. Missed during a
+    # resume, a later snapshot puts the view right but reports no fills: the run still
+    # fails (Codex, round 1).
+    from qte_sdk.connection import Disconnected, ReportGap
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    if when == "resuming":
+        quoter.on_disconnected(Disconnected(error=None))
+        quoter.resuming = True
+    assert example.apply_received(quoter, quoter.view, ReportGap(3, 5)) == "unreliable"
+    quoter.end(buy, by_this_run=False)  # its order_cancelled, after the skipped report
+    quoter.on_disconnected(Disconnected(error=None))
+    quoter.view = RestingOrders()  # an empty snapshot: the view is complete again
+    quoter.resumed(replayed=False)
+    assert quoter.finish() == 1
+
+
 def test_quote_both_sides_stops_when_a_resume_leaves_the_view_incomplete():
     # A replay that cannot put the view right (the first resume needed a snapshot, say)
     # ends with the view still incomplete: that is no resume to quote on (review M26).

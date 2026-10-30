@@ -135,6 +135,7 @@ from qte_sdk.connection import (
     Disconnected,
     Event,
     Received,
+    ReportGap,
     ResumeComplete,
     SessionRejected,
     Unknown,
@@ -1129,8 +1130,12 @@ def handle(quoter: Quoter, view: RestingOrders, event: Event) -> bool:
         return False
     elif isinstance(item, Disconnected):
         quoter.on_disconnected(item)
-    elif isinstance(item, SeqGap | DecodeFailed):
+    elif isinstance(item, SeqGap | DecodeFailed) or isinstance(event, ReportGap):
         print("warning: a message from the exchange was missed or could not be read")
+        if isinstance(event, ReportGap):
+            # An order report, perhaps a fill, was skipped. A resume that goes on, or a
+            # later snapshot, may put the view right, but not what the report said.
+            quoter.lost()
         if isinstance(item, DecodeFailed) and item.type in (None, "session_state"):
             # It may have said the market closed: quote again only after the next OPEN.
             quoter.market_open = False
