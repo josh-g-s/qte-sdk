@@ -26,7 +26,9 @@ press it twice to stop at once. An order is its own only once the exchange has a
 its new with `accepted`: it never cancels an order of its strategy it cannot tell is its
 own, nor sends a cancel where its view shows another strategy's order. If messages from
 the exchange are missed, it stops quoting, still sends one cancel to each of its own
-orders, and exits 1, since what filled may not all be known. It exits 0 only when every
+orders, and exits 1, since what filled may not all be known. A cancel names a level, not an
+order: if its order ended unseen in the gap, that cancel takes whatever order of its
+strategy rests there by then, and the last lines say so. It exits 0 only when every
 message it sent was answered, each of its own orders was seen to end, and no order of its
 strategy rests on the instrument; otherwise its last lines name each order, message and
 fill it is unsure of.
@@ -291,7 +293,11 @@ class Quote:
     # snapshot answered a resume.
     fills_unknown: bool = False
     # Its remaining size at a drop, as the view showed it, to compare with a snapshot.
+    # None when an amend left it unknown: one unanswered, or one applied whose order state
+    # has not come.
     remaining: int | None = None
+    # True from an amend's `accepted` until an order state of the order is seen.
+    amend_unseen: bool = False
     # One more cancel may go while one is unanswered: a complete resume still showed the
     # order resting.
     again: bool = False
@@ -391,7 +397,11 @@ class Quoter:
             sent.dropped = True
         for quote in self.quotes.values():
             order = self.resting(quote) if quote.own else None
-            quote.remaining = order.remaining_size if order is not None else None
+            amending = quote.amend_unseen or any(
+                sent.kind == "amend" and sent.side == quote.side for sent in self.open.values()
+            )
+            known = order is not None and not amending
+            quote.remaining = order.remaining_size if known else None
         error = disconnected.error
         why = error or "the exchange closed it"
         if error is not None and not is_retryable(error):
@@ -521,9 +531,15 @@ class Quoter:
     # Sending
 
     def ready(self, quote: Quote) -> bool:
-        """Whether this side may send now: nothing unanswered, and not sent too recently."""
-        waited = time.monotonic() - quote.sent_at
-        return quote.pending_ref is None and waited >= self.requote_seconds
+        """Whether this side may send now: nothing unanswered, not sent too recently, and
+        not waiting out a budget reject of its cancel."""
+        now = time.monotonic()
+        waited = now - quote.sent_at
+        return (
+            quote.pending_ref is None
+            and waited >= self.requote_seconds
+            and now >= quote.retry_after
+        )
 
     def next_ready(self) -> float:
         """Seconds until a side that is waiting out --requote-seconds may send again, or
@@ -752,7 +768,7 @@ class Quoter:
         """This side has no order now: it may enter a new one."""
         quote.price = None
         quote.cancelling = quote.own = quote.fills_unknown = quote.again = False
-        quote.skipped = False
+        quote.skipped = quote.amend_unseen = False
         quote.order_ref = quote.remaining = quote.last_reject = None
         quote.retry_after = float("-inf")
 
@@ -822,7 +838,9 @@ class Quoter:
         if self.missed:
             lines.append(
                 "messages were missed, so this example may not know every fill or order: "
-                "check your fills and position (send_account_query)"
+                "check your fills and position (send_account_query); a cancel sent since "
+                "takes whatever order of its strategy rests at its level, so it may have "
+                "taken one not this run's"
             )
         elif self.messages and self.view.incomplete:
             lines.append(
@@ -845,7 +863,10 @@ class Quoter:
         sent = self.open.get(ref) if ref is not None else None
         match message:
             case Accepted() if sent is not None and ref is not None:
-                self.settle(ref)
+                if sent.kind != "cancel":
+                    # A cancel stays open: its `order_cancelled`, echoing its ref, comes
+                    # next and says what it took, and only that or a reject settles it.
+                    self.settle(ref)
                 quote = self.quotes[sent.side]
                 if sent.dropped:
                     print(f"accepted {sent.kind} (answered after a reconnect)")
@@ -856,6 +877,11 @@ class Quoter:
                     quote.own = True  # applied, so the team's one order at its level
                 elif sent.kind == "cancel" and quote.own and quote.price == sent.price:
                     quote.cancelling = True  # the order_cancelled that follows clears it
+                elif sent.kind == "amend" and quote.own and quote.price == sent.price:
+                    order = self.resting(quote)
+                    # Its order state may come before or after this: until it is seen, the
+                    # size the view shows is not the size the amend set.
+                    quote.amend_unseen = order is None or order.remaining_size != self.size
             case Reject():
                 detail = f" ({message.reason_detail})" if message.HasField("reason_detail") else ""
                 reason = reason_code_name(message.reason_code)
@@ -881,6 +907,7 @@ class Quoter:
                 print(f"{status} @ {price_text(message.price)} (strategy {message.strat_id})")
                 quote = self.ours(message)
                 if quote is not None:
+                    quote.amend_unseen = False
                     if message.price != quote.price:
                         # Moved by an amend from elsewhere: follow it, so the cancel names
                         # the level where it rests now.

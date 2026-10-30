@@ -2590,9 +2590,10 @@ async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short()
     finally:
         cleanup.cancel()
     assert len(sent) == 1
-    # The exchange's reply to that cancel is still matched to it.
+    # The exchange's reply to that cancel is still matched to it. It stays open until its
+    # order_cancelled says what it took.
     quoter.on_order_event(Accepted(request_ref=sent[0]))
-    assert buy.pending_ref is None and buy.cancelling
+    assert buy.cancelling and sent[0] in quoter.open
 
 
 async def test_quote_both_sides_keeps_to_drain_seconds_when_a_cancel_send_stalls():
@@ -2976,6 +2977,76 @@ async def test_quote_both_sides_waits_about_a_minute_after_a_budget_reject_of_a_
     quoter.open.clear()
     assert quoter.finish() == 1
     assert "its last cancel was rejected (MESSAGE_BUDGET_EXCEEDED)" in capsys.readouterr().out
+
+
+async def test_quote_both_sides_waits_for_what_an_accepted_cancel_took(capsys):
+    # A cancel's `accepted` comes once it is applied, before the `order_cancelled` that
+    # says what it took. Its own buy fills first, so the cancel takes whatever of the team
+    # rests there by then: the `accepted` alone must not end the run with status 0.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    [ref] = quoter.open
+    fill = Execution(
+        exec_id="e1",
+        origin=TEAM,
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        order_price=BID + TICK,
+        fill_price=BID + TICK,
+        fill_size=1,
+        remaining_size=0,
+    )
+    deliver(example, quoter, "execution", fill)
+    deliver(example, quoter, "accepted", Accepted(request_ref=ref))
+    assert not quoter.settled()
+    taken = OrderCancelled(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=BID + TICK,
+        cancelled_size=1,
+        request_ref=ref,
+    )
+    deliver(example, quoter, "order_cancelled", taken)
+    assert quoter.settled()
+    assert quoter.finish() == 1
+    assert "cancelled an order that was not this run's" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("answered", [True, False])
+async def test_quote_both_sides_takes_a_snapshot_after_an_amend_as_fills_unknown(answered):
+    # An amend sets the remaining size. Applied just before a drop, its order state not
+    # yet seen (or not answered at all), the size the view showed at the drop says nothing:
+    # a snapshot showing that same size may hide a fill made while down.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    quoter.size = 2  # the amend tops its 1 share back up to 2
+    ref = quoter.record(buy, "amend")
+    if answered:
+        deliver(example, quoter, "accepted", Accepted(request_ref=ref))
+    quoter.on_disconnected(Disconnected(error=None))
+    quoter.resumed(replayed=False)
+    assert buy.fills_unknown
+
+
+async def test_quote_both_sides_waits_about_a_minute_after_a_budget_reject_while_quoting():
+    # While quoting too, a budget reject of a cancel holds the side for about a minute.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.quoting = True
+    ref = quoter.record(buy, "cancel")
+    reject = Reject(request_ref=ref, reason_code=ReasonCodes.MESSAGE_BUDGET_EXCEEDED)
+    deliver(example, quoter, "reject", reject)
+    buy.sent_at = float("-inf")
+    assert not quoter.ready(buy)
+    buy.retry_after = float("-inf")  # the minute is up
+    assert quoter.ready(buy)
 
 
 class NotConnectedSession:
