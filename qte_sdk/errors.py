@@ -383,8 +383,8 @@ CODES: dict[str, Entry] = {
         "the session ended, {close}{unanswered}",
         "Messages sent while disconnected may be missed: market data is not recovered, and "
         "your order reports only by a resume",
-        "Treat your resting orders and positions as uncertain until the next "
-        "ResumeComplete; if the close says to get a new token, get one first",
+        "Wait for ResumeComplete, then check positions with send_account_query; after a "
+        "credential revoked close, get a new token",
         "A ReconnectingSession's session ended: the exchange closed it, the connection "
         "dropped with no close frame, or the link failed; the same drop is delivered as a "
         "Disconnected event",

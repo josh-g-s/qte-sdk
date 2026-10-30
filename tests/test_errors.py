@@ -121,7 +121,7 @@ FIELD_VALUES: dict[str, object] = {
     "step": "Ask the Head of Technology about your team's access",
     "strerror": "Permission denied",
     "type": "new_order",
-    "unanswered": "; 2 unanswered requests, listed by QTE-SESSION-UNANSWERED",
+    "unanswered": "; 2 requests were unanswered (QTE-SESSION-UNANSWERED)",
     "underlying": "SPY",
     "version": "1.1.1",
     "what": "the connection closed before session_ack (close code 1011)",

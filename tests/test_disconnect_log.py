@@ -14,10 +14,13 @@ from test_reconnect import EMPTY, Clock
 from test_session import ack, synthetic_token
 from test_unanswered import Exchange, accepted, two_news_and_a_cancel
 from websockets.asyncio.server import ServerConnection
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
-from qte_sdk import errors, logs
-from qte_sdk.connection import Connected, Disconnected, ResumeComplete
+from qte_sdk import errors, logs, pacing
+from qte_sdk.connection import _CLOSE_CAUSES, Connected, Disconnected, ResumeComplete
 from qte_sdk.reconnect import ReconnectingSession, Retrying
+from qte_sdk.session import ResumeNotAcknowledged
 
 LOG = "00000000000000aa"
 NO_CLOSE_FRAME = "close code 1006: the connection dropped with no close frame from the exchange"
@@ -92,8 +95,8 @@ async def test_a_1012_and_a_dropped_connection_are_each_logged_once(caplog):
     assert records[0].getMessage() == (
         "QTE-SESSION-DISCONNECTED: the session ended, close code 1012. Messages sent while "
         "disconnected may be missed: market data is not recovered, and your order reports "
-        "only by a resume. Treat your resting orders and positions as uncertain until the "
-        "next ResumeComplete; if the close says to get a new token, get one first."
+        "only by a resume. Wait for ResumeComplete, then check positions with "
+        "send_account_query; after a credential revoked close, get a new token."
     )
     dropped = records[1].getMessage()
     assert dropped.startswith(f"QTE-SESSION-DISCONNECTED: the session ended, {NO_CLOSE_FRAME}. ")
@@ -138,7 +141,7 @@ async def test_unanswered_requests_are_counted_not_listed(caplog):
     assert seen[0].unanswered == (("new", "n1"), ("cancel", "c1"))
     assert record.fields == {
         "close": NO_CLOSE_FRAME,
-        "unanswered": "; 2 unanswered requests, listed by QTE-SESSION-UNANSWERED",
+        "unanswered": "; 2 requests were unanswered (QTE-SESSION-UNANSWERED)",
     }
     # The refs are QTE-SESSION-UNANSWERED's to name, not this line's.
     assert "n1" not in record.getMessage() and "c1" not in record.getMessage()
@@ -182,3 +185,60 @@ async def test_a_json_line_carries_the_close_as_a_field(caplog):
     assert line["code"] == "QTE-SESSION-DISCONNECTED"
     assert line["message"].startswith("the session ended, close code 1012. Messages sent ")
     assert line["fields"] == {"close": "close code 1012", "unanswered": ""}
+
+
+def emitted(monkeypatch: pytest.MonkeyPatch, disconnected: Disconnected) -> dict:
+    """What `_log_disconnected` hands the warning thread, caught before it starts."""
+    caught: list[dict] = []
+    monkeypatch.setattr(
+        pacing, "_emit", lambda message, code, **rest: caught.append(dict(rest, message=message))
+    )
+    ReconnectingSession("wss://example.invalid", synthetic_token())._log_disconnected(
+        disconnected, None
+    )
+    [one] = caught
+    return one
+
+
+def test_a_close_while_resuming_keeps_its_code_and_a_revoked_token(monkeypatch):
+    failure = ResumeNotAcknowledged("closed", close_code=1008, credential_revoked=True)
+    warning = emitted(monkeypatch, Disconnected(failure))
+    assert warning["fields"]["close"] == (
+        "ResumeNotAcknowledged (QTE-SESSION-RESUME-NOT-ACKNOWLEDGED), close code 1008, "
+        'reason "credential revoked": your token was revoked or rotated; get a new token, '
+        "and do not connect again with this one"
+    )
+    failure = ResumeNotAcknowledged("closed", close_code=1012)
+    warning = emitted(monkeypatch, Disconnected(failure))
+    assert warning["fields"]["close"] == (
+        "ResumeNotAcknowledged (QTE-SESSION-RESUME-NOT-ACKNOWLEDGED), close code 1012"
+    )
+
+
+def test_the_short_line_keeps_the_close_and_count_and_fits_512_bytes(monkeypatch):
+    longest = 0
+    for code, causes in _CLOSE_CAUSES.items():
+        for reason in causes:
+            error = ConnectionClosedError(Close(code, reason or ""), None)
+            unanswered = tuple(("new", f"r{n}") for n in range(999_999_999 // 10**8))
+            warning = emitted(monkeypatch, Disconnected(error, unanswered))
+            head = warning["fields"]["close"].split(": ", 1)[0]
+            assert warning["short_fields"] == {
+                "close": head,
+                "unanswered": warning["fields"]["unanswered"],
+            }
+            assert warning["short"].startswith(
+                f"QTE-SESSION-DISCONNECTED: the session ended, {head}. "
+            )
+            record = logging.LogRecord(
+                "qte_sdk.reconnect", logging.WARNING, "", 0, warning["short"], (), None
+            )
+            record.code = errors.SESSION_DISCONNECTED
+            record.next_step = warning["next_step"]
+            record.fields = dict(
+                warning["short_fields"],
+                unanswered="; 999999999 requests were unanswered (QTE-SESSION-UNANSWERED)",
+            )
+            line = logs.JsonFormatter().format(record).encode()
+            longest = max(longest, len(line) + 1, len(warning["short"].encode()) + 1)
+    assert longest <= 512
