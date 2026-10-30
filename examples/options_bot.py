@@ -131,9 +131,10 @@ reply to a cancel of its own in flight before it ends: applied late (a resume ca
 the order resting while a cancel sent before the drop is still in its order delay, so it
 cancels again), a cancel takes whatever of the team rests at the level by then. If it took
 another order, or no reply came by the end, it names it and exits with status 1. A cancel
-is settled only by its own reply, by a send that raised `NotConnected` (nothing sent), or
-by a complete replay with no reply to it while the order still rests (it was not applied);
-any other cancel unsettled at the end has its level named, and the run exits 1. When one
+is settled only by its own reply or by a send that raised `NotConnected` (nothing sent).
+A resume never settles one, replay or snapshot: it covers only what was applied, and a
+cancel still in its order delay is in neither. Any other cancel unsettled at the end has
+its level named, and the run exits 1. When one
 warning already names the orders that may be this one, no generic warning of missed
 messages follows it.
 --seconds and --drain-seconds count the time down too.
@@ -371,7 +372,7 @@ class OptionsBot:
         # still this example's cancel, so it is matched by these.
         self.earlier_cancel_refs: set[str] = set()
         # Every cancel sent and not yet settled, by request_ref, with the price it was
-        # sent to: see `answered` and `cancel_unread`.
+        # sent to: see `cancel_unread`.
         self.unanswered_cancels: dict[str, int] = {}
         self.cancel_price = 0
         self.grid_points = 0
@@ -732,10 +733,6 @@ class OptionsBot:
             if not self.resting:
                 print(f"resting: {order.remaining_size} at {self.where} (from the resume)")
             self.resting = True
-            if replayed:
-                # A complete replay holds the reply to every cancel the exchange applied:
-                # one not in it, with the order still resting, was not applied. Settled.
-                self.unanswered_cancels.clear()
             self.forget_cancel()
         elif seen:
             # Not at its level, but orders of this strategy rest on the contract: perhaps

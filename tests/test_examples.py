@@ -5137,19 +5137,13 @@ class LostFirstCancel(FakeExchange):
 async def test_options_bot_sends_its_cancel_again_when_one_in_flight_at_a_drop_was_lost(
     replay: bool,
 ):
-    # The resume shows the order still resting: the bot does not wait for the lost
-    # cancel's reply, but cancels afresh on the new connection. A complete replay with
-    # no reply to the lost cancel proves it was not applied; a snapshot does not, so
-    # that run names the cancel's level and exits 1.
+    # The resume shows the order still resting: the bot cancels afresh on the new
+    # connection. Neither a replay nor a snapshot proves the lost cancel was not applied
+    # (it may still be in its order delay), so the run names its level and exits 1.
     exchange = LostFirstCancel(replay=True, calendar=TERM) if replay else LostFirstCancel()
     code, out, err = await run_options_bot(exchange, "--seconds", "4")
-    if replay:
-        assert code == 0, out + err
-    else:
-        assert code == 1, out + err
-        assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY" in (
-            out + err
-        )
+    assert code == 1, out + err
+    assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY" in (out + err)
     assert exchange.connections == 2
     assert len(payloads(exchange, "new")) == 1
     assert len(orders_on(exchange, 1, "cancel")) == 1
@@ -6876,11 +6870,12 @@ def options_bot_filled(seq: int) -> Any:
     return Received("execution", fill, None, report_seq=seq)
 
 
-async def test_options_bot_settles_a_cancel_a_complete_replay_shows_not_applied():
+async def test_options_bot_keeps_a_cancel_a_complete_replay_does_not_answer_unread():
     # A complete replay shows the order resting with no reply to the cancel in flight at
-    # the drop: that cancel was not applied, so it is settled, and the bot cancels
-    # afresh. The fresh cancel is refused on its budget and the order then fills: the
-    # run ends, and a late reply to the first cancel is still matched as its own.
+    # the drop. The replay covers only what the exchange had applied: that cancel may
+    # still be in its order delay. The bot cancels afresh, that cancel is refused on its
+    # budget and the order then fills: the first cancel is still unread, so the run does
+    # not end on its own and the warning names the first cancel's level.
     from qte_sdk.connection import Disconnected
 
     example = load_example("options_bot.py")
@@ -6894,13 +6889,15 @@ async def test_options_bot_settles_a_cancel_a_complete_replay_shows_not_applied(
         resume_complete(True),
     ]:
         await bot.on_event(event)
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
     budget = ReasonCodes.MESSAGE_BUDGET_EXCEEDED
     refused = Reject(request_ref=bot.cancel_ref, reason_code=budget)
     await bot.on_event(Received("reject", refused, None, report_seq=6))
     await bot.on_event(options_bot_filled(7))
-    assert bot.gone and bot.finished and not bot.unanswered_cancels
-    await bot.on_event(options_bot_cancelled(first, strat_id="other-strat", seq=8))
-    assert bot.finished and "another order of your team" in bot.warnings[0]
+    assert bot.gone and not bot.finished and list(bot.unanswered_cancels) == [first]
+    assert await example.drive(bot, asyncio.Queue(), 0.1) == "time"
+    warning = example.cancel_unread_warning(bot)
+    assert f"the cancel sent to {OPTION_CONTRACT} BUY @ 4.900000" in warning
 
 
 async def test_options_bot_reads_its_cancel_after_a_resume_cut_short_once_its_order_went():
