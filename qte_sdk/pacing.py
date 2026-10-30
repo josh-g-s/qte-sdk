@@ -891,6 +891,7 @@ def _warn(
     code: str,
     *,
     short_what: str | None = None,
+    short_fields: tuple[str, ...] = _SHORT_FIELDS,
     target: logging.Logger | None = None,
     **fields: Any,
 ) -> None:
@@ -903,7 +904,8 @@ def _warn(
     It carries a short form too, for a line over 512 bytes, which a stderr pipe, socket or
     terminal would not get (see `qte_sdk.update._log_without_waiting`): `short_what`, or
     else the first part of the message, what happened, then the next step, with only the
-    fields in `_SHORT_FIELDS`. Each pacing warning's short line is at most 512 bytes, as
+    fields named in `short_fields` (by default `_SHORT_FIELDS`).
+    Each pacing warning's short line is at most 512 bytes, as
     JSON or text, with the largest counts a `Budget` takes (9 digits, `_MAX_COUNT`) and the
     longest numbers of seconds."""
     # Imported here: qte_sdk.dotenv is not needed until a warning is logged.
@@ -920,7 +922,7 @@ def _warn(
         next_step=step,
         fields=shown,
         short=f"{code}: {what}. {step}.",
-        short_fields={name: shown[name] for name in _SHORT_FIELDS if name in shown},
+        short_fields={name: shown[name] for name in short_fields if name in shown},
         target=target,
     )
 

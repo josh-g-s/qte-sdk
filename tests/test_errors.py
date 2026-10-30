@@ -95,7 +95,9 @@ RELEASED: frozenset[str] = frozenset()
 # A realistic value for every field a template may take. None is the token.
 FIELD_VALUES: dict[str, object] = {
     "action": "write",
+    "cause": ": an error on the exchange",
     "characters": "characters",
+    "close": "close code 1011",
     "command": "`git rm --cached .env` in /home/student/algo",
     "count": 2,
     "cursor": 3,
@@ -120,6 +122,7 @@ FIELD_VALUES: dict[str, object] = {
     "step": "Ask the Head of Technology about your team's access",
     "strerror": "Permission denied",
     "type": "new_order",
+    "unanswered": "; 2 unanswered requests (QTE-SESSION-UNANSWERED)",
     "underlying": "SPY",
     "version": "1.1.1",
     "what": "the connection closed before session_ack (close code 1011)",
@@ -1158,6 +1161,23 @@ def session_unanswered(token: str, ctx: Context) -> str:
     return caught[0]
 
 
+def session_disconnected(token: str, ctx: Context) -> str:
+    from websockets.exceptions import ConnectionClosedError
+    from websockets.frames import Close
+
+    from qte_sdk.connection import Disconnected
+    from qte_sdk.reconnect import ReconnectingSession
+
+    caught = caught_warnings(ctx)
+    ctx.monkeypatch.setenv(TOKEN_ENV_VAR, token)
+    session = ReconnectingSession(URL, token)
+    # A close the exchange sent for a restart, with a new left unanswered.
+    dropped = ConnectionClosedError(Close(1012, ""), None)
+    session._log_disconnected(Disconnected(dropped, (("new", "r1"),)), None)
+    assert len(caught) == 1
+    return caught[0]
+
+
 SPY_CALL = "SPY261120C00450000"
 
 
@@ -1192,6 +1212,7 @@ CASES: dict[str, Case] = {
     errors.SESSION_RESUME_TIMEOUT: session_resume_timeout,
     errors.SESSION_LOG_CHANGED: session_log_changed,
     errors.SESSION_UNANSWERED: session_unanswered,
+    errors.SESSION_DISCONNECTED: session_disconnected,
     errors.CONNECT_HANDSHAKE_FAILED: connect_handshake_failed,
     errors.CONNECT_LIVENESS_TIMEOUT: connect_liveness_timeout,
     errors.CONNECT_NO_SESSION: connect_no_session,
