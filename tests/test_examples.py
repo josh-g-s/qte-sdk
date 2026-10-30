@@ -6434,6 +6434,126 @@ async def test_options_bot_stops_when_its_first_subscribe_stalls(capsys: Any):
     assert "the subscribe was not sent within --seconds" in out
 
 
+async def test_options_bot_matches_a_late_reply_to_a_cancel_sent_before_a_drop():
+    # A cancel is in flight at a drop. The resume shows the order still resting, so the
+    # bot cancels afresh. The first cancel's reply then comes late: it took another
+    # strategy's order at the level. That reply is still this example's cancel, so the
+    # run warns of it and exits with status 1.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (OPTION_CONTRACT, OPTION_PRICE, 1, greeks)
+    await bot.act_now()
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    first = bot.cancel_ref
+    assert first is not None
+    bot.on_disconnected(Disconnected(error=None))
+    level = (OPTION_CONTRACT, BUY, OPTION_PRICE)
+    view.orders[level] = SimpleNamespace(strat_id="opt-test", remaining_size=1)
+    bot.resumed(replayed=False)
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
+    assert bot.cancel_ref not in (None, first)
+    late = OrderCancelled(
+        strat_id="other",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=OPTION_PRICE,
+        cancelled_size=7,
+        request_ref=first,
+    )
+    bot.on_order_event(late)
+    assert bot.warnings and "that was not this example's" in bot.warnings[0]
+    ours = OrderCancelled(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=OPTION_PRICE,
+        cancelled_size=1,
+        request_ref=bot.cancel_ref,
+    )
+    bot.on_order_event(ours)
+    assert bot.gone and bot.warnings
+
+
+@pytest.mark.parametrize("missing", ["cut-short", "unreadable"])
+async def test_options_bot_stops_on_a_snapshot_frame_of_its_strategy_when_another_is_missing(
+    missing: str,
+):
+    # The order is in flight at a drop. The snapshot that resumes the next session shows
+    # an order of its strategy at another price, but the rest of it is lost (the
+    # connection drops again before it completes) or a frame is unreadable, so the view
+    # never completes. With no accepted, the frame seen is enough: it stops at once,
+    # cancels nothing and names that order.
+    from qte_sdk.connection import Disconnected
+    from qte_sdk.contract.v1.session_pb2 import OrderSnapshot
+
+    example = load_example("options_bot.py")
+    view = RestingOrders()
+    bot, sender = await options_bot_unaccepted_at_a_drop(example, view)
+    view.apply(Disconnected(error=None))
+    other_price = 4_950_000
+    frame = OrderSnapshot(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=other_price,
+        remaining_size=1,
+    )
+    if missing == "cut-short":
+        rest = [Disconnected(error=None)]
+    else:
+        rest = [DecodeFailed("order_snapshot", ValueError("x"), 7), resume_complete(False)]
+    for event in [
+        connected_event(reconnected=True, resume=replay_ack(False)),
+        resume_ack_event(False),
+        Received("order_snapshot", frame, 6),
+        *rest,
+    ]:
+        await bot.on_event(event)
+    assert bot.finished and bot.missed and not bot.accepted
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    [warning] = bot.warnings
+    assert f"{OPTION_CONTRACT} BUY @ {other_price / 1_000_000:.6f}" in warning
+
+
+@SENDS_SIGINT
+async def test_options_bot_keeps_one_drain_deadline_across_a_ctrl_c():
+    # The cancel is never confirmed. A Ctrl+C partway through the drain does not start
+    # --drain-seconds again: the run ends when the first drain deadline passes.
+    exchange = options_exchange(confirm_cancels=asyncio.Event())
+    args = ("--seconds", "1", "--drain-seconds", "3")
+    loop = asyncio.get_running_loop()
+    async with serve_local(exchange) as url:
+        process = await start_options_bot(url, *args)
+        seen = bytearray()
+        try:
+            async with asyncio.timeout(RUN_LIMIT):
+                await read_until(process, b"time is up: cancelling", seen)
+                drain_began = loop.time()
+                await asyncio.sleep(2)
+                process.send_signal(signal.SIGINT)
+                await read_until(process, b"still cancelling", seen)
+                out, err = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    drained = loop.time() - drain_began
+    output = (seen + out).decode() + err.decode()
+    assert process.returncode == 1, output
+    assert drained < 4.3, f"drained for {drained:.2f} s: {output}"
+
+
 async def test_options_bot_takes_a_cancel_of_another_strategys_order_at_its_price_as_not_its_own():
     # The bot's cancel at its own price is answered by an order_cancelled for another
     # strategy's order there: that was not this example's order. It warns, and cancels

@@ -31,7 +31,8 @@ yourself, and exits with status 1.
 It never means to leave the order resting. When --seconds are up, or on Ctrl+C, it stops
 choosing and cancels the order's level, waiting at most --drain-seconds for the exchange
 to confirm. If it cannot confirm, it names the level where the order may still rest, so
-you can cancel it yourself, and exits with status 1. Press Ctrl+C twice to stop at once;
+you can cancel it yourself, and exits with status 1. A Ctrl+C during that wait does not
+start --drain-seconds again. Press Ctrl+C twice to stop at once;
 if an order was sent, it then names the level where it may still rest and exits with
 status 1. A Ctrl+C before any order is sent stops the example with status 0.
 
@@ -44,6 +45,9 @@ time-up or Ctrl+C with no `accepted`, it waits out --drain-seconds for the reply
 nothing, warns that its order may still rest at the level it names (check with
 order_snapshot or the console, and cancel it yourself if it is this one) and exits with
 status 1. There is no exception: it never infers which order is its own (see On a drop).
+Its own `accepted` is the one whose request_ref is that of the order it sent: the protocol
+has no order id, and a cancel names a contract, side and price. It trades one contract,
+so only orders of its strategy on that contract are looked at.
 
 The price. Your orders rest only strictly inside the wall's best bid and ask: one at the
 wall's own price or beyond it is not left resting (`order_cancelled` with
@@ -89,7 +93,8 @@ the order rests at its level, it cancels it as usual; if nothing of its strategy
 the contract, nothing of it rests and the example stops; if orders of its strategy rest at
 other prices there (one perhaps its order, moved), it names them, cancels nothing and exits
 with status 1. If no `accepted` came, it never infers which order is its own: any order of
-its strategy seen on the contract after the drop, at any price, in the resume or in a live
+its strategy seen on the contract after the drop, at any price, in the resume (each
+snapshot entry as it comes, so a snapshot cut short or damaged still counts) or in a live
 order report before the `accepted`, may or may not be its order, so it cancels nothing,
 warns naming each order seen and how to check (order_snapshot or the console) and exits
 with status 1 at once. With none seen, the order may still be in its order delay, so it
@@ -106,7 +111,8 @@ order from then on; a cancel in flight at the drop is then sent afresh, and a re
 yet come counts as lost until a later resume completes. Before an order
 is sent, there is nothing of its own to miss, so it chooses and sends as usual. An
 `accepted` that comes through the resume is printed as answered after a reconnect, with
-no round trip. If a cancel takes an order that is not its own (one
+no round trip. If a cancel, one sent before a drop included, takes an order that is not
+its own (one
 that came to the level its order left, or another strategy's at its own price), it cancels
 again where its order rests and, at the end, warns of it and exits with status 1.
 --seconds and --drain-seconds count the time down too.
@@ -150,6 +156,7 @@ from qte_sdk.books import LatestBooks
 from qte_sdk.connection import (
     Connected,
     Disconnected,
+    Received,
     ReportGap,
     ResumeComplete,
     SessionRejected,
@@ -170,7 +177,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     OrderState,
     Reject,
 )
-from qte_sdk.contract.v1.session_pb2 import Instruments
+from qte_sdk.contract.v1.session_pb2 import Instruments, OrderSnapshot
 from qte_sdk.instruments import can_trade, instrument_info
 from qte_sdk.market_data import (
     Book,
@@ -334,6 +341,9 @@ class OptionsBot:
         # The cancel: its request_ref and price while one is in flight, and the grid point
         # to wait for before sending it again after a reject that may pass later.
         self.cancel_ref: str | None = None
+        # Cancels sent before a drop and forgotten at the resume: a late reply to one is
+        # still this example's cancel, so it is matched by these.
+        self.earlier_cancel_refs: set[str] = set()
         self.cancel_price = 0
         self.grid_points = 0
         self.retry_at: int | None = None
@@ -612,7 +622,7 @@ class OptionsBot:
             print("warning: the order reports missed while disconnected were not recovered")
             self.missed = True
             self.reply_lost = True
-            self.cancel_ref = None
+            self.forget_cancel()
             return
         # This resume recovered the reports: a reply not yet come may still come, even if
         # an earlier resume failed.
@@ -621,7 +631,7 @@ class OptionsBot:
             return  # no order was sent, so there is nothing to take from the view
         # An order or a cancel in flight at the drop is never sent again: the view, from
         # the replay or the snapshot, says what became of it.
-        self.cancel_ref = None
+        self.forget_cancel()
         if not replayed:
             self.unreported_fills = True
         assert self.contract is not None
@@ -664,6 +674,17 @@ class OptionsBot:
         else:
             print(f"nothing of the order rests at {self.where} (from the resume)")
             self.gone = True
+
+    def forget_cancel(self) -> None:
+        """Forget the cancel in flight, so the order is cancelled afresh, but keep its
+        request_ref: a reply to it may still come."""
+        if self.cancel_ref is not None:
+            self.earlier_cancel_refs.add(self.cancel_ref)
+        self.cancel_ref = None
+
+    def own_cancel(self, ref: str | None) -> bool:
+        """Whether `ref` is a cancel this example sent, the one in flight or an earlier."""
+        return ref is not None and (ref == self.cancel_ref or ref in self.earlier_cancel_refs)
 
     def level_text(self, side: int, price: int) -> str:
         return f"{self.contract} {'BUY' if side == BUY else 'SELL'} @ {price_text(price)}"
@@ -713,6 +734,12 @@ class OptionsBot:
         queued (a drop, say) would have changed."""
         if self.view is not None:
             self.view.apply(event)  # in the order the bot handles events
+        if isinstance(event, Received) and isinstance(event.message, OrderSnapshot):
+            # Each frame as it comes, so a snapshot cut short or damaged still counts.
+            frame = event.message
+            if frame.strat_id == self.strat_id and frame.instrument == self.contract:
+                level = self.level_text(frame.side, frame.price)
+                self.owner_unknown_if_seen([f"{level} ({frame.remaining_size} resting)"])
         if isinstance(event, Retrying):
             print(f"reconnecting in {event.delay:.1f} s (attempt {event.attempt})")
             return
@@ -786,7 +813,7 @@ class OptionsBot:
                     elapsed_ms = (time.monotonic() - self.sent_at) * 1000
                     print(f"accepted after a {elapsed_ms:.0f} ms round trip")
                 self.accepted = True
-            case Accepted() if ref is not None and ref == self.cancel_ref:
+            case Accepted() if self.own_cancel(ref):
                 print("cancel accepted")
             case Reject() if ref is not None and ref == self.ref:
                 # A reject stops the example: it never retries. Halts are being named in
@@ -797,6 +824,8 @@ class OptionsBot:
                 self.duplicate = message.reason_code == ReasonCodes.DUPLICATE_ORDER_AT_LEVEL
             case Reject() if ref is not None and ref == self.cancel_ref:
                 self.on_cancel_reject(message)
+            case Reject() if self.own_cancel(ref):
+                pass  # an earlier cancel's: the order was cancelled afresh since
             case OrderState() if self.ours(message):
                 if message.price != self.price:
                     # Moved by an amend from elsewhere: follow it, so the cancel names
@@ -821,8 +850,7 @@ class OptionsBot:
                 # This example's own cancel, at the level where its order rests, and of
                 # an order of its strategy: a cancel clears the team's order at the
                 # level, whichever strategy's it is.
-                ref is not None
-                and ref == self.cancel_ref
+                self.own_cancel(ref)
                 and message.price == self.price
                 and message.strat_id == self.strat_id
             ):
@@ -830,16 +858,18 @@ class OptionsBot:
                 rested = "cancelled" if self.resting else "not left resting"
                 print(f"{rested}: {message.cancelled_size} at {self.where} ({reason})")
                 self.gone = True
-            case OrderCancelled() if ref is not None and ref == self.cancel_ref:
-                # The cancel took someone else's order: one at the level this example's
-                # order has left, or another strategy's at its own price. Cancel again
-                # where the order rests now; a NO_ORDER_AT_LEVEL then says none does.
+            case OrderCancelled() if self.own_cancel(ref):
+                # The cancel, this one or one sent before a drop, took someone else's
+                # order: one at the level this example's order has left, or another
+                # strategy's at its own price. Cancel again where the order rests now; a
+                # NO_ORDER_AT_LEVEL then says none does.
                 print(f"the cancel took an order at {price_text(message.price)}, not this one")
                 self.warnings.append(
                     f"a cancel took an order of your team at {price_text(message.price)} "
                     "that was not this example's: check your orders"
                 )
-                self.cancel_ref = None
+                if ref == self.cancel_ref:
+                    self.cancel_ref = None
 
     def on_cancel_reject(self, message: Reject) -> None:
         reason = reason_code_name(message.reason_code)
@@ -1147,9 +1177,11 @@ async def trade_from(
         else:
             print(f"{reason}: cancelling {bot.where}")
         bot.stopping = True
+        # One deadline for the drain: a Ctrl+C during it does not start it again.
+        drain_deadline = loop.time() + args.drain_seconds
         while True:
             try:
-                why = await drive(bot, queue, args.drain_seconds)
+                why = await drive(bot, queue, max(0.0, drain_deadline - loop.time()))
                 break
             except asyncio.CancelledError:
                 if not absorb_first_interrupt():
