@@ -4820,19 +4820,21 @@ async def test_quote_both_sides_sends_nothing_more_when_the_resume_is_refused():
     assert "it believes it may have: BUY TEST @ 99.960000" in out
 
 
-async def test_options_bot_takes_its_order_from_the_resume_after_a_drop():
-    # Its order is in flight when the connection drops; the snapshot shows it resting, so
-    # it is not sent again and is cancelled on the new session.
+async def test_options_bot_takes_no_order_from_a_snapshot_after_a_drop_before_its_accepted():
+    # Its order is in flight when the connection drops, and the snapshot shows an order of
+    # its strategy resting at its level, with no accepted for this one: it is not sent
+    # again, and it is not taken as this one either. Nothing is cancelled; the run names
+    # the order seen and exits 1.
     exchange = options_exchange(drop_on_new=1)
     code, out, err = await run_options_bot(exchange, "--seconds", "4")
-    assert code == 0, out + err
+    assert code == 1, out + err
     assert exchange.connections == 2
     assert len(payloads(exchange, "new")) == 1
     assert "the order sent may still rest at SPY261120P00665000 BUY @ 4.900000" in out
-    assert "resting: 1 at SPY261120P00665000 BUY @ 4.900000 (from the resume)" in out
-    assert orders_on(exchange, 2, "cancel")
-    assert exchange.resting == {}
-    assert "fills while disconnected are not reported" in out
+    assert "seen on the contract: SPY261120P00665000 BUY @ 4.900000 (1 resting)" in out
+    assert "order_snapshot or the console" in out
+    assert payloads(exchange, "cancel") == []
+    assert exchange.resting == {("SPY261120P00665000", "BUY", 4_900_000): ("opt-test", 1)}
 
 
 async def test_options_bot_warns_and_fails_when_the_resume_is_refused():
@@ -4841,7 +4843,8 @@ async def test_options_bot_warns_and_fails_when_the_resume_is_refused():
     assert code == 1, out + err
     assert len(payloads(exchange, "new")) == 1  # nothing sent again
     assert "warning: the order reports missed while disconnected were not recovered" in out
-    assert "WARNING: messages from the exchange were missed" in out
+    assert "WARNING: no accepted came for the order sent to" in out
+    assert payloads(exchange, "cancel") == []
 
 
 async def test_options_bot_waits_for_fresh_books_and_greeks_after_a_drop():
@@ -4898,7 +4901,7 @@ async def test_options_bot_claims_no_earlier_order_at_its_level_after_a_drop():
     code, out, err = await run_options_bot(exchange, "--seconds", "4")
     assert code == 1, out + err
     assert exchange.connections == 2
-    assert "whose order rests there now is unknown" in out
+    assert "seen on the contract: SPY261120P00665000 BUY @ 4.900000 (7 resting)" in out
     assert payloads(exchange, "cancel") == []
     assert exchange.resting[earlier] == ("opt-test", 7)
 
@@ -4998,7 +5001,7 @@ async def test_options_bot_does_not_call_its_order_gone_when_one_rests_elsewhere
     exchange = MovedDuringDrop(instruments=options_table(), options=options_market(), drop_on_new=1)
     code, out, err = await run_options_bot(exchange, "--seconds", "3")
     assert code == 1, out + err
-    assert "perhaps this one moved: check it yourself" in out
+    assert "SPY261120P00665000 BUY @ 4.950000" in out
     assert "nothing of the order rests at" not in out
     assert payloads(exchange, "cancel") == []
     assert exchange.resting == {("SPY261120P00665000", "BUY", 4_950_000): ("opt-test", 1)}
@@ -5957,34 +5960,12 @@ class StubView:
         return self.orders.get((instrument, side, price))
 
     def __iter__(self) -> Any:
-        return iter(self.orders.values())
+        for (instrument, side, price), order in self.orders.items():
+            key = SimpleNamespace(instrument=instrument, side=side, price=price)
+            yield SimpleNamespace(key=key, **vars(order))
 
     def apply(self, event: object) -> None:
         pass  # a test sets the orders and completeness itself
-
-
-async def test_options_bot_adopts_no_order_unseen_by_the_incomplete_view_it_sent_from():
-    # The first snapshot is cut short, so the view misses an earlier run's order at the
-    # level; the bot sends anyway and the duplicate's refusal is lost in a drop. The next,
-    # complete, view shows that order: with no accepted, it is not this run's to cancel.
-    from types import SimpleNamespace
-
-    from qte_sdk.connection import Disconnected
-
-    example = load_example("options_bot.py")
-    contract, price = "SPY261120P00665000", 4_900_000
-    view = StubView(incomplete=True)
-    sender = RecordingSender()
-    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
-    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
-    bot.choose = lambda: (contract, price, 1, greeks)
-    await bot.send_order()
-    assert bot.ref is not None and bot.taken_before
-    bot.on_disconnected(Disconnected(error=None))
-    view.incomplete = False
-    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="opt-test", remaining_size=7)
-    bot.resumed(replayed=False)
-    assert bot.gone and bot.missed and not bot.resting
 
 
 async def test_options_bot_cancels_no_earlier_order_at_time_up_after_two_refused_resumes():
@@ -6005,7 +5986,7 @@ async def test_options_bot_cancels_no_earlier_order_at_time_up_after_two_refused
     bot.resumed(replayed=False)  # refused, with nothing sent yet: the bot still sends
     assert not bot.missed
     await bot.act_now()
-    assert [t for t, _ in sender.sent] == ["new"] and bot.taken_before
+    assert [t for t, _ in sender.sent] == ["new"]
     bot.on_disconnected(Disconnected(error=None))  # the duplicate reject is lost
     bot.resumed(replayed=False)  # refused again
     await bot.act()  # before time-up it waits: a reply may yet come
@@ -6033,7 +6014,6 @@ async def test_options_bot_waits_for_its_accepted_before_cancelling_where_the_te
     greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
     bot.choose = lambda: (contract, price, 1, greeks)
     await bot.act_now()
-    assert bot.taken_before
     bot.stopping = True
     await bot.act()
     assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
@@ -6055,7 +6035,7 @@ async def test_options_bot_cancels_no_other_strategys_order_after_a_refused_resu
     assert len(payloads(exchange, "new")) == 1
     assert payloads(exchange, "cancel") == []
     assert exchange.resting[earlier] == ("other-strat", 7)
-    assert "whose order rests there now is unknown: cancelling nothing" in out
+    assert "WARNING: no accepted came for the order sent to" in out
 
 
 class SilentOnDuplicate(FakeExchange):
@@ -6147,7 +6127,6 @@ async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest(t
     greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
     bot.choose = lambda: (contract, price, 1, greeks)
     await bot.act_now()
-    assert not bot.taken_before
     view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
     bot.stopping = True
     await bot.act()
@@ -6166,33 +6145,6 @@ async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest(t
         assert [t for t, _ in sender.sent] == ["new", "cancel"]
 
 
-@pytest.mark.parametrize("then", ["gap", "departure"])
-async def test_options_bot_counts_another_strategys_order_seen_on_a_queued_event(then: str):
-    # Events already queued are applied without acting. Another strategy's order seen on
-    # one of them counts even if a later one (a gap, or its departure) hides it by the
-    # time the bot acts: no cancel goes out before its own accepted.
-    example = load_example("options_bot.py")
-    contract, price = "SPY261120P00665000", 4_900_000
-    view = StubView(incomplete=False)
-    sender = RecordingSender()
-    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
-    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
-    bot.choose = lambda: (contract, price, 1, greeks)
-    await bot.act_now()
-    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
-    await bot.on_event(Received("book", None, 2), act=False)
-    del view.orders[(contract, BUY, price)]
-    if then == "gap":
-        view.incomplete = True
-        await bot.on_event(SeqGap(2, 4), act=False)
-    else:
-        await bot.on_event(Received("book", None, 3), act=False)
-    bot.stopping = True
-    await bot.act()
-    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
-    assert bot.taken_before
-
-
 async def test_options_bot_cancels_nothing_after_a_refused_resume_where_the_level_was_empty():
     # The level was empty in a complete view when the order was sent. The order is in
     # flight at a drop and the resume is refused, so the view stays incomplete: another
@@ -6208,11 +6160,10 @@ async def test_options_bot_cancels_nothing_after_a_refused_resume_where_the_leve
     greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
     bot.choose = lambda: (contract, price, 1, greeks)
     await bot.act_now()
-    assert not bot.taken_before
     bot.on_disconnected(Disconnected(error=None))
     view.incomplete = True
     bot.resumed(replayed=False)  # refused
-    assert bot.taken_before
+    assert bot.reply_lost
     bot.stopping = True
     await bot.act()
     assert [t for t, _ in sender.sent] == ["new"]
@@ -6244,47 +6195,12 @@ async def test_options_bot_waits_for_its_accepted_after_a_live_gap_before_it(gap
     greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
     bot.choose = lambda: (contract, price, 1, greeks)
     await bot.act_now()
-    assert not bot.taken_before
     await bot.on_event(ReportGap(3, 5) if gap == "report gap" else gap)
-    assert view.incomplete and bot.missed and bot.taken_before
+    assert view.incomplete and bot.missed
     bot.stopping = True
     await bot.act()
     assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
     bot.on_order_event(Accepted(request_ref=bot.ref))
-    await bot.act()
-    assert [t for t, _ in sender.sent] == ["new", "cancel"]
-
-
-@pytest.mark.parametrize("while_down", ["stale entry", "unreadable book"])
-async def test_options_bot_adopts_its_order_from_a_snapshot_after_a_drop(while_down: str):
-    # The level was empty in a complete view when the order was sent; the link drops
-    # before its accepted. While the view waits for the resume it is incomplete, and what
-    # it shows then (a stale entry of another strategy at the level) or an unreadable
-    # book frame says nothing of the level. The snapshot shows this strategy's order
-    # there: the bot takes it as its own and cancels it.
-    from qte_sdk.connection import Disconnected
-
-    example = load_example("options_bot.py")
-    contract, price = "SPY261120P00665000", 4_900_000
-    view = StubView(incomplete=False)
-    sender = RecordingSender()
-    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
-    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
-    bot.choose = lambda: (contract, price, 1, greeks)
-    await bot.act_now()
-    bot.on_disconnected(Disconnected(error=None))
-    view.incomplete = True
-    if while_down == "stale entry":
-        view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
-        await bot.on_event(Received("book", None, 2), act=False)
-    else:
-        await bot.on_event(DecodeFailed("book", ValueError("unreadable"), 2), act=False)
-    assert not bot.taken_before
-    view.incomplete = False
-    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="opt-test", remaining_size=1)
-    bot.resumed(replayed=False)
-    assert bot.accepted and bot.resting and not bot.gone
-    bot.stopping = True
     await bot.act()
     assert [t for t, _ in sender.sent] == ["new", "cancel"]
 
@@ -6378,27 +6294,144 @@ async def test_options_bot_cancels_as_usual_once_its_accepted_follows_an_empty_r
     assert [t for t, _ in sender.sent] == ["new", "cancel"]
 
 
-async def test_options_bot_adopts_no_order_of_its_strategy_from_a_replay():
-    # The level was empty in a complete view when the order was sent; the link drops
-    # before its accepted. The replay shows an order of this strategy resting there but
-    # brings no accepted for this one, so it is another program's: no cancel is sent.
+OPTION_CONTRACT, OPTION_PRICE = "SPY261120P00665000", 4_900_000
+
+
+async def options_bot_unaccepted_at_a_drop(example: Any, view: Any) -> tuple[Any, Any]:
+    """The bot with its order sent, no accepted yet, and the connection just dropped."""
     from qte_sdk.connection import Disconnected
 
-    example = load_example("options_bot.py")
-    contract, price = "SPY261120P00665000", 4_900_000
-    view = StubView(incomplete=False)
     sender = RecordingSender()
     bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
     greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
-    bot.choose = lambda: (contract, price, 1, greeks)
+    bot.choose = lambda: (OPTION_CONTRACT, OPTION_PRICE, 1, greeks)
     await bot.act_now()
+    assert [t for t, _ in sender.sent] == ["new"]
     bot.on_disconnected(Disconnected(error=None))
-    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="opt-test", remaining_size=7)
-    bot.resumed(replayed=True)
-    assert bot.gone and bot.missed and not bot.accepted
+    return bot, sender
+
+
+@pytest.mark.parametrize(
+    "prices",
+    [[4_900_000], [4_950_000], [4_900_000, 4_950_000]],
+    ids=["its-level", "another-price", "both"],
+)
+@pytest.mark.parametrize("replay", [False, True], ids=["snapshot", "replay"])
+async def test_options_bot_takes_no_order_of_its_strategy_as_its_own_before_its_accepted(
+    prices: list[int], replay: bool
+):
+    # The order is in flight at a drop. The resume shows orders of its strategy on the
+    # contract, at its level, at another price, or both, and no accepted came: whose they
+    # are is unknown. It cancels nothing, even once an accepted comes, and warns naming
+    # each one and how to check.
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    bot, sender = await options_bot_unaccepted_at_a_drop(example, view)
+    for price in prices:
+        level = (OPTION_CONTRACT, BUY, price)
+        view.orders[level] = SimpleNamespace(strat_id="opt-test", remaining_size=1)
+    bot.resumed(replayed=replay)
+    assert bot.finished and bot.missed and not bot.accepted and not bot.resting
+    bot.on_order_event(Accepted(request_ref=bot.ref))
     bot.stopping = True
     await bot.act()
     assert [t for t, _ in sender.sent] == ["new"]
+    [warning] = bot.warnings
+    for price in prices:
+        assert f"{OPTION_CONTRACT} BUY @ {price / 1_000_000:.6f}" in warning
+    assert "order_snapshot or the console" in warning
+
+
+@pytest.mark.parametrize("price", [4_900_000, 4_950_000], ids=["its-level", "another-price"])
+async def test_options_bot_stops_on_an_order_of_its_strategy_reported_live_before_its_accepted(
+    price: int,
+):
+    # The resume after the drop shows nothing of the strategy, so the bot waits for its
+    # reply. A live order_state then reports an order of its strategy on the contract,
+    # with no accepted yet: whose it is is unknown. It stops at once, cancels nothing,
+    # even once an accepted comes, and names that order.
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    bot, sender = await options_bot_unaccepted_at_a_drop(example, view)
+    bot.resumed(replayed=False)
+    assert not bot.finished
+    state = OrderState(
+        strat_id="opt-test",
+        instrument=OPTION_CONTRACT,
+        side=BUY,
+        price=price,
+        state=RESTING,
+        remaining_size=1,
+    )
+    await bot.on_event(Received("order_state", state, 5))
+    assert bot.finished and bot.missed
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+    [warning] = bot.warnings
+    assert f"{OPTION_CONTRACT} BUY @ {price / 1_000_000:.6f}" in warning
+
+
+async def test_options_bot_waits_out_the_drain_after_a_refused_resume_then_a_complete_one():
+    # A first resume is refused, so the reply looks lost. Another drop follows, and its
+    # resume completes, showing nothing of the strategy. That resume may yet bring the
+    # reply: at time-up the bot waits for it rather than giving up at once, and cancels
+    # as usual once its accepted comes.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    bot, sender = await options_bot_unaccepted_at_a_drop(example, view)
+    view.incomplete = True
+    bot.resumed(replayed=False)  # refused
+    assert bot.reply_lost
+    bot.on_disconnected(Disconnected(error=None))
+    view.incomplete = False
+    bot.resumed(replayed=True)
+    assert not bot.reply_lost
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    bot.on_order_event(Accepted(request_ref=bot.ref))
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+
+
+async def test_options_bot_stops_when_its_first_subscribe_stalls(capsys: Any):
+    # The first session is up and the table read, but the subscribe's send never
+    # completes. --seconds bounds it: the run says so and exits 1, with nothing sent.
+    from google.protobuf import json_format
+
+    from qte_sdk.contract.v1.session_pb2 import Instruments
+
+    example = load_example("options_bot.py")
+    table = json_format.ParseDict(options_table(), Instruments())
+
+    class StalledSession:
+        instrument_table = table
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, type_: str, payload: Any) -> None:
+            self.sent.append(type_)
+            await asyncio.Event().wait()  # the send never completes
+
+    session = StalledSession()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(connected_event(reconnected=False))
+    args = SimpleNamespace(
+        watch_only=False, underlying=None, strat_id="opt-test", seconds=0.5, drain_seconds=0.5
+    )
+    task = asyncio.current_task()
+    progress = example.Progress()
+    async with asyncio.timeout(5):
+        code = await example.trade_from(session, queue, args, task, progress)
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert session.sent == ["subscribe"]
+    assert "the subscribe was not sent within --seconds" in out
 
 
 async def test_options_bot_takes_a_cancel_of_another_strategys_order_at_its_price_as_not_its_own():
@@ -6432,10 +6465,11 @@ async def test_options_bot_takes_a_cancel_of_another_strategys_order_at_its_pric
     assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
 
 
-async def test_options_bot_warns_when_a_snapshot_shows_another_strategy_at_its_level():
+async def test_options_bot_cancels_nothing_when_a_snapshot_shows_another_strategy_at_its_level():
     # The level was empty in a complete view when the order was sent. Another strategy's
     # order comes to rest there and this one's reply is lost in a drop; the snapshot
-    # shows that order. With no accepted, the bot cancels nothing, warns and exits 1.
+    # shows that order. With no accepted, the bot cancels nothing: it waits for the reply,
+    # which then ends the run with the warning that none came.
     from qte_sdk.connection import Disconnected
 
     example = load_example("options_bot.py")
@@ -6449,10 +6483,10 @@ async def test_options_bot_warns_when_a_snapshot_shows_another_strategy_at_its_l
     bot.on_disconnected(Disconnected(error=None))
     view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
     bot.resumed(replayed=False)
-    assert bot.gone and bot.missed and not bot.accepted
+    assert not bot.finished and not bot.accepted and not bot.warnings
     bot.stopping = True
     await bot.act()
-    assert [t for t, _ in sender.sent] == ["new"]
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
 
 
 class RefusesEveryResume(FakeExchange):
