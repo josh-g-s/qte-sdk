@@ -92,8 +92,8 @@ the exchange does not resume even the first session), it never cancels there bef
 own `accepted` comes: the exchange refuses such a duplicate, and a cancel would clear the
 order already there. At the end it waits for the reply; if the reply was lost, or none
 comes, it cannot tell whose order rests there: it cancels nothing, warns and exits with
-status 1. So it does, too, if with no `accepted` for its order a complete view shows an
-order of another strategy at its level. If a cancel takes an order that is not its own (one
+status 1. An order of another strategy that a complete view shows at its level before its
+own `accepted` is treated the same way. If a cancel takes an order that is not its own (one
 that came to the level its order left), it cancels again where its order rests and, at the
 end, warns of it and exits with status 1.
 --seconds and --drain-seconds count the time down too.
@@ -295,7 +295,8 @@ class OptionsBot:
         # is handled; read after a resume.
         self.view = view
         # Whether an order of the team rested, or may have rested unseen, at the level when
-        # the order was sent, as from an earlier run: see `act_now` and `resumed`.
+        # the order was sent (as from an earlier run) or before it was accepted: see
+        # `act_now` and `resumed`.
         self.taken_before = False
         self.table = table
         self.underlying = underlying
@@ -474,26 +475,17 @@ class OptionsBot:
             if not self.stopping and not self.missed and self.would_send is None:
                 await self.send_order()
             return
+        if not self.accepted and self.other_strategy_rests():
+            # An order of another strategy came to the level before this one was
+            # accepted: the level is shared, as if it had rested there at the send.
+            self.taken_before = True
         if self.taken_before and not self.accepted:
-            # An order of the team rested, or may have rested unseen, at the level
-            # when this one was sent, and no `accepted` says the exchange took this one: a
-            # cancel there could remove the earlier order. Cancel nothing. Once its reply
+            # An order of the team rested, or may have rested unseen, at the level while
+            # this one was not yet accepted, and no `accepted` says the exchange took this
+            # one: a cancel there could remove that order. Cancel nothing. Once its reply
             # can no longer be counted on, stop and warn; until then, wait for it.
             if self.stopping and self.missed:
                 self.owner_unknown()
-            return
-        if not self.accepted and self.other_strategy_rests():
-            # The level holds an order of another strategy of the team, and no `accepted`
-            # says this one ever rested: a cancel would clear that order. Cancel nothing.
-            print(
-                f"an order of another strategy of your team rests at {self.where}, and no "
-                "accepted came for this one: cancelling nothing there"
-            )
-            self.warnings.append(
-                f"an order of another strategy rests at {self.where} and this example's "
-                "order was never seen accepted, so nothing was cancelled: check your orders"
-            )
-            self.gone = True
             return
         if (self.resting or self.stopping) and self.cancel_ref is None:
             if self.retry_at is not None and self.grid_points < self.retry_at:
@@ -662,12 +654,12 @@ class OptionsBot:
 
     def owner_unknown(self) -> None:
         """Stop without cancelling: an order of the team rested, or may have rested,
-        at the level when this one was sent, and its reply was lost, so whose order rests
-        there now is unknown. The run ends with status 1."""
+        at the level while this one was not yet accepted, and its reply was lost, so
+        whose order rests there now is unknown. The run ends with status 1."""
         print(
-            f"an order of your team rested, or may have rested, at {self.where} when "
-            "this one was sent, and its reply was lost, so whose order rests there now is "
-            "unknown: cancelling nothing, check it yourself"
+            f"an order of your team rested, or may have rested, at {self.where} while "
+            "this one was not yet accepted, and its reply was lost, so whose order rests "
+            "there now is unknown: cancelling nothing, check it yourself"
         )
         self.missed = True
         self.gone = True

@@ -6077,9 +6077,12 @@ async def test_options_bot_warns_when_no_reply_comes_where_the_team_rested():
     assert "WARNING: no reply came for the order sent to" in out
 
 
-async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest():
+@pytest.mark.parametrize("then", ["accepted", "missed"])
+async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest(then: str):
     # The level was empty when the order was sent, but by time-up, with no accepted for
-    # it, a complete view shows another strategy's order there: no cancel is sent.
+    # it, a complete view shows another strategy's order there: no cancel is sent, and
+    # the bot waits for its reply. If the other order leaves and its own accepted comes,
+    # it cancels as usual; if a message is missed instead, it stops and cancels nothing.
     example = load_example("options_bot.py")
     contract, price = "SPY261120P00665000", 4_900_000
     view = StubView(incomplete=False)
@@ -6092,8 +6095,16 @@ async def test_options_bot_cancels_nothing_where_another_strategy_came_to_rest()
     view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
     bot.stopping = True
     await bot.act()
-    assert [t for t, _ in sender.sent] == ["new"]
-    assert bot.finished and bot.warnings
+    assert [t for t, _ in sender.sent] == ["new"] and not bot.finished
+    if then == "accepted":
+        del view.orders[(contract, BUY, price)]
+        bot.on_order_event(Accepted(request_ref=bot.ref))
+        await bot.act()
+        assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    else:
+        bot.missed = True
+        await bot.act()
+        assert [t for t, _ in sender.sent] == ["new"] and bot.finished
 
 
 class RefusesEveryResume(FakeExchange):
