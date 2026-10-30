@@ -6798,6 +6798,57 @@ async def test_options_bot_does_not_end_with_its_own_cancel_unread():
     assert bot.finished and not bot.warnings and bot.cancel_failed is None
 
 
+async def test_options_bot_reads_a_cancel_in_flight_at_a_drop_after_a_resume_shows_it_gone():
+    # A cancel is in flight at a drop, and the resume shows nothing at the order's level:
+    # the order is gone, but that cancel may still be in its order delay, to take what
+    # comes to rest there. The bot keeps reading for its reply and names what it took.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = await options_bot_resting_with_cancel_out(example, view, sender)
+    first = bot.cancel_ref
+    for event in [
+        Disconnected(error=None),
+        connected_event(reconnected=True, resume=replay_ack()),
+        resume_ack_event(True),
+        resume_complete(True),
+    ]:
+        await bot.on_event(event)
+    assert bot.gone and bot.cancel_ref == first and not bot.finished
+    assert [t for t, _ in sender.sent] == ["new", "cancel"]
+    await bot.on_event(options_bot_cancelled(first, strat_id="other-strat"))
+    assert bot.finished and len(bot.warnings) == 1
+    assert "another order of your team" in bot.warnings[0]
+
+
+def test_options_bot_names_its_unanswered_cancel_when_a_reconnect_fails_for_good(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+):
+    # Its order filled while its cancel, sent at 4.90 before an amend moved the order to
+    # 4.91, was in flight; then a reconnect fails for good. The run names the unanswered
+    # cancel at the level it was sent to, and exits 1.
+    from qte_sdk.connection import SessionRejected
+
+    example = load_example("options_bot.py")
+    monkeypatch.setenv("QTE_URL", "ws://127.0.0.1:1/ws")
+
+    async def run(url: str, args: Any, progress: Any) -> int:
+        bot = example.OptionsBot(RecordingSender(), None, "SPY", "opt-test", False)
+        bot.contract, bot.price, bot.ref, bot.accepted = OPTION_CONTRACT, 4_910_000, "o", True
+        bot.cancel_ref, bot.cancel_price, bot.gone = "c", OPTION_PRICE, True
+        progress.bot = bot
+        raise SessionRejected(1, None)
+
+    monkeypatch.setattr(example, "run", run)
+    assert example.main(["--strat-id", "opt-test"]) == 1
+    err = capsys.readouterr().err
+    assert f"no reply came by the end for the cancel sent to {OPTION_CONTRACT} BUY @ 4.900000" in (
+        err
+    )
+
+
 async def test_options_bot_sends_no_second_cancel_on_a_live_gap_after_a_resume():
     # The resume shows the order resting, so the bot cancels it, and that cancel is in
     # flight when a message is missed live. That gap ends no resume: the cancel is not

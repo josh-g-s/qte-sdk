@@ -418,6 +418,12 @@ class OptionsBot:
     def where(self) -> str:
         return f"{self.contract} BUY @ {price_text(self.price)}"
 
+    @property
+    def cancel_where(self) -> str:
+        """The level the cancel in flight names, which an amend may have moved the order
+        from since."""
+        return f"{self.contract} BUY @ {price_text(self.cancel_price)}"
+
     # Choosing a contract
 
     def market_open(self) -> bool:
@@ -682,8 +688,9 @@ class OptionsBot:
         if self.gone:
             return  # the order is gone: its cancel in flight keeps its ref, so is still read
         # An order or a cancel in flight at the drop is never sent again: the view, from
-        # the replay or the snapshot, says what became of it.
-        self.forget_cancel()
+        # the replay or the snapshot, says what became of it. A cancel in flight is
+        # forgotten, to be sent afresh, only if the order still rests: otherwise it may
+        # still be in its order delay, so its reply is still read before the end.
         if not replayed:
             self.unreported_fills = True
         assert self.contract is not None
@@ -707,6 +714,7 @@ class OptionsBot:
             if not self.resting:
                 print(f"resting: {order.remaining_size} at {self.where} (from the resume)")
             self.resting = True
+            self.forget_cancel()
         elif seen:
             # Not at its level, but orders of this strategy rest on the contract: perhaps
             # this one, moved by an amend while disconnected. Cancel none of them.
@@ -1294,7 +1302,7 @@ async def trade_from(
         if not bot.accepted:
             print(f"{reason}: waiting for the reply to the order sent to {bot.where}")
         elif bot.cancel_unread:
-            print(f"{reason}: waiting for the reply to the cancel sent to {bot.where}")
+            print(f"{reason}: waiting for the reply to the cancel sent to {bot.cancel_where}")
         else:
             print(f"{reason}: cancelling {bot.where}")
         bot.stopping = True
@@ -1377,7 +1385,7 @@ async def trade_from(
 def cancel_unread_warning(bot: OptionsBot) -> str:
     return (
         f"WARNING: the order is gone, but no reply came by the end for the cancel sent to "
-        f"{bot.where}: applied late, it may take another order of your team there. "
+        f"{bot.cancel_where}: applied late, it may take another order of your team there. "
         "Check with order_snapshot or the console"
     )
 
@@ -1399,10 +1407,14 @@ def ended_for_good(progress: Progress, why: str) -> int:
             return watch_only_outcome(bot)
         print("watch-only: NO CONTRACT CHOSEN: the connection ended before the chain was read")
         return 1
-    if bot is None or bot.ref is None or bot.rejected or (bot.gone and not bot.missed):
+    if bot is None or bot.ref is None or bot.rejected:
         return fail(why)
     for warning in bot.warnings:
         print(f"WARNING: {warning}", file=sys.stderr)
+    if bot.cancel_unread:
+        return fail(f"{why}. {cancel_unread_warning(bot)}")
+    if bot.gone and not bot.missed:
+        return fail(why)
     return fail(
         f"{why}. WARNING: this example's order may still rest at {bot.where}: check with "
         "order_snapshot or the console, and cancel it yourself if it is this one, before "
