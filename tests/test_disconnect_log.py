@@ -32,9 +32,12 @@ from qte_sdk.session import ResumeNotAcknowledged, SessionNotAcknowledged, open_
 
 LOG = "00000000000000aa"
 NO_CLOSE_FRAME = "close code 1006: the connection dropped with no close frame from the exchange"
-WAIT = "Wait for ResumeComplete, then check positions with send_account_query"
+WAIT = (
+    "Wait for Connected, and ResumeComplete if it resumes, then check positions with "
+    "send_account_query"
+)
 NEW_TOKEN = "Get a new token from the console; this session does not reconnect"
-NO_RECONNECT = "Check positions with send_account_query; this session does not reconnect: "
+NO_RECONNECT = "Open a new session, then check positions; this session does not reconnect: "
 
 
 def close_of(fields: dict) -> str:
@@ -113,8 +116,8 @@ async def test_a_1012_and_a_dropped_connection_are_each_logged_once(caplog):
     assert records[0].getMessage() == (
         "QTE-SESSION-DISCONNECTED: the session ended, close code 1012. Messages sent while "
         "disconnected may be missed: market data is not recovered, and your order reports "
-        "only by a resume. Wait for ResumeComplete, then check positions with "
-        "send_account_query."
+        "only by a resume. Wait for Connected, and ResumeComplete if it resumes, then check "
+        "positions with send_account_query."
     )
     dropped = records[1].getMessage()
     assert dropped.startswith(f"QTE-SESSION-DISCONNECTED: the session ended, {NO_CLOSE_FRAME}. ")
@@ -314,7 +317,7 @@ def every_ending() -> list[tuple[Exception, ConnectionClosedError | None]]:
 
 
 # What follows each ending: a reconnect, a revoked token, or the longest other reason.
-GAVE_UP = "it gave up after 999999999 failed attempts (Backoff.max_attempts)"
+GAVE_UP = "it gave up after 999999999 attempts (Backoff.max_attempts)"
 AFTERWARDS = [(None, WAIT), (reconnect._REVOKED, NEW_TOKEN), (GAVE_UP, NO_RECONNECT + GAVE_UP)]
 
 
@@ -446,7 +449,7 @@ async def test_giving_up_says_no_reconnect_follows(caplog):
     # The first attempt's failure is followed by a retry; the second gives up.
     assert step_of(records) == [
         WAIT,
-        NO_RECONNECT + "it gave up after 2 failed attempts (Backoff.max_attempts)",
+        NO_RECONNECT + "it gave up after 2 attempts (Backoff.max_attempts)",
     ]
 
 
@@ -458,11 +461,10 @@ def test_a_failure_that_is_not_retryable_says_no_reconnect_follows(monkeypatch):
     assert warning["next_step"] == NO_RECONNECT + "the failure is not retryable"
 
 
-def test_with_resuming_off_the_step_waits_for_connected(monkeypatch):
+def test_with_resuming_off_the_step_still_waits_for_connected(monkeypatch):
+    # No ResumeComplete comes without a resume: the step says so.
     warning = emitted(monkeypatch, Disconnected(None), resume=False)
-    assert warning["next_step"] == (
-        "Wait for Connected, then check positions with send_account_query"
-    )
+    assert warning["next_step"] == WAIT
 
 
 @pytest.mark.parametrize("ending", [drop_connection, closing(1012)])

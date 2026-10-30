@@ -1134,7 +1134,7 @@ class ReconnectingSession:
             return "reconnecting is off (backoff=None)"
         if failure is not None and not is_retryable(failure):
             return "the failure is not retryable"
-        return f"it gave up after {failures} failed attempts (Backoff.max_attempts)"
+        return f"it gave up after {failures} attempts (Backoff.max_attempts)"
 
     def _log_disconnected(
         self,
@@ -1147,7 +1147,7 @@ class ReconnectingSession:
         `describe_close` of the close, or the failure's type and code when the session
         ended another way, and the number of unanswered requests when there are any (their
         refs are in `QTE-SESSION-UNANSWERED`). Its next step depends on what follows: the
-        resume (or with resuming off, the new session); or, when no reconnect follows
+        new session (and its resume, if it resumes); or, when no reconnect follows
         (`no_reconnect` says why), a new token after a revoked close, and otherwise a check
         of positions. Written from a thread of its own, as every SDK warning is (see
         `qte_sdk.pacing._warn`), never on the event loop."""
@@ -1155,13 +1155,12 @@ class ReconnectingSession:
             step = "Get a new token from the console; this session does not reconnect"
         elif no_reconnect is not None:
             step = (
-                "Check positions with send_account_query; this session does not "
-                f"reconnect: {no_reconnect}"
+                "Open a new session, then check positions; this session does not reconnect: "
+                f"{no_reconnect}"
             )
-        elif self._resume:
-            step = "Wait for ResumeComplete, then check positions with send_account_query"
         else:
-            step = "Wait for Connected, then check positions with send_account_query"
+            # A refused resume, and resuming off, give a Connected with no ResumeComplete.
+            step = _WAIT_STEP
         close, found, cause = _ended_by(disconnected.error, closed).partition(": ")
         count = len(disconnected.unanswered)
         unanswered = (
@@ -1239,6 +1238,12 @@ def _revoked(failure: Exception | None) -> bool:
         isinstance(failure, SessionNotAcknowledged) and failure.credential_revoked is True
     )
 
+
+# The next step of QTE-SESSION-DISCONNECTED while the session reconnects.
+_WAIT_STEP = (
+    "Wait for Connected, and ResumeComplete if it resumes, then check positions with "
+    "send_account_query"
+)
 
 # What `_why_no_reconnect` gives for a revoked token, which has a next step of its own.
 _REVOKED = "credential revoked"
