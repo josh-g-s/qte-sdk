@@ -630,6 +630,30 @@ async def test_a_pod_whose_ticket_answer_is_lost_with_a_close_does_not_send_it_a
     assert "whether the ticket is working is not known. It is not sent again" in out
 
 
+async def test_a_pod_whose_exchange_starts_a_new_log_says_its_ticket_is_not_known():
+    # A new event log (a new term, say) holds none of the old tickets: the example must
+    # not claim the ticket is still working.
+    class NewLogOnReconnect(RestartingPodExchange):
+        async def send(self, ws: ServerConnection, type_: str, payload: dict[str, Any]) -> None:
+            if type_ == "session_ack":
+                payload = {**payload, "log_id": f"{self.connections:016x}"}
+            await super().send(ws, type_, payload)
+
+    exchange = NewLogOnReconnect(
+        close_code=4001,
+        reason="term change",
+        route=route_payload(),
+        accounts=[account(0)],
+        after=WORKING,
+    )
+    code, out, err = await run_pod(exchange)
+    assert code == 1, out + err
+    assert len(exchange.tickets()) == 1
+    assert "reconnected to a new event log" in out
+    assert "what became of the ticket is not known here. It is not sent again" in out
+    assert "is still working on the exchange" not in out
+
+
 async def test_a_pod_asks_for_the_account_again_after_a_close_drops_its_query():
     # The session does not send account_query again: the example does, once reconnected.
     class DropsFirstQuery(RestartingPodExchange):

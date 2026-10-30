@@ -5422,6 +5422,31 @@ async def test_take_liquidity_says_its_outcome_is_unknown_after_a_close_with_no_
     assert "how it filled is not known: check your fills" in out
 
 
+async def test_take_liquidity_does_not_trade_from_a_book_held_from_before_a_drop():
+    # A book that came while a resume was unfinished is stale after a drop: the next
+    # session must send nothing until a book sent since then arrives.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("take_liquidity.py")
+    sent: list[str] = []
+
+    class Recording:
+        async def send(self, type_: str, payload: Any) -> None:
+            sent.append(type_)
+
+    taker = example.Taker(Recording(), example.parse_args([*TAKE_ARGS]))
+    taker.up = False  # a session is up but its resume is not complete
+    await taker.on_book(book_event().message)
+    taker.on_disconnected(Disconnected(error=None))
+    taker.resumed(replayed=True)
+    await taker.act()
+    assert sent == []
+    fresh = book_event().message
+    fresh.grid_time = 2
+    await taker.on_book(fresh)
+    assert sent == ["new"]
+
+
 @pytest.mark.parametrize(("close_code", "reason"), [(1012, "service restart"), (1001, "")])
 async def test_out_of_hours_survives_a_close_and_shows_the_closed_market_again(
     close_code: int, reason: str

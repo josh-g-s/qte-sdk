@@ -139,10 +139,13 @@ class Taker:
 
     async def act(self) -> None:
         """Send the order from the latest book held, unless one is already sent, no session
-        is up and resumed, or that book shows no wall on the side to trade against."""
+        is up and resumed, the book predates a drop (no newer one has come since), or
+        that book shows no wall on the side to trade against."""
         book = self.books.get(self.instrument)
         if self.ref is not None or book is None or not self.up:
             return
+        if self.instrument in self.books.stale:
+            return  # held from before a drop: wait for a book sent since
         # A buy trades against the offer, a sell against the bid.
         levels = book.ask_levels if self.side == BUY else book.bid_levels
         if not levels:

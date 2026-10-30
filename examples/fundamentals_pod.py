@@ -84,7 +84,9 @@ after the ticket is sent and before its `ticket_accepted` or `ticket_reject`, th
 cannot tell whether it is working: it says so, never sends it again, and exits with status
 1; read its `ticket_state` (from `LatestTickets`) before sending another. The session
 does not send an `account_query` again by itself, so a query still unanswered at the drop
-is sent again on the next connection. A fill of a child sent while the example was down is
+is sent again on the next connection. If the exchange comes back on a new event log (a
+new term, say), the ticket is not in its states: the example says what became of it is not
+known and exits with status 1. A fill of a child sent while the example was down is
 not replayed; it is already in the ticket's `filled_shares`. --seconds counts the time
 down too. Only the first connection is not retried: if it fails, the example says why and
 stops.
@@ -259,6 +261,8 @@ class Pod:
         # Whether the ticket was sent and its answer lost with a drop, or not sent at all.
         self.lost = False
         self.unsent = False
+        self.log_id: str | None = None  # the event log of the first connection
+        self.log_changed = False
         # The event of each ticket's newest state, kept for the names this SDK does not
         # know (`unknown_enum_names()`), which the message alone does not carry.
         self.state_events: dict[str, Received] = {}
@@ -396,6 +400,12 @@ class Pod:
         info = connected.info
         if not self.connected:
             print(f"connected: team {info.team}, unscored session: {info.unscored}")
+            self.log_id = info.log_id
+        elif info.log_id != self.log_id:
+            # A new log (a new term, say): a ticket sent on the old one is not in it.
+            print("reconnected to a new event log: the tickets of the old one are not in it")
+            if self.ticket_ref is not None and not self.stopped and not self.rejected:
+                self.log_changed = True
         else:
             print("reconnected: the ticket states are sent again")
         self.connected = self.up = True
@@ -606,12 +616,23 @@ async def follow(
 
     await pod.send()
     why = await drive(
-        queue, pod, lambda: pod.rejected or pod.stopped or pod.lost or pod.unsent, args.seconds
+        queue,
+        pod,
+        lambda: pod.rejected or pod.stopped or pod.lost or pod.unsent or pod.log_changed,
+        args.seconds,
     )
     if pod.rejected:
         return 0
     if pod.unsent:
         print("no ticket was sent; run it again")
+        return 1
+    if pod.log_changed:
+        print(
+            "WARNING: the exchange started a new event log while the ticket was followed, "
+            "so what became of the ticket is not known here. It is not sent again: read "
+            "the team's account and tickets before sending another"
+        )
+        pod.warn_if_missed()
         return 1
     if pod.lost:
         print(
