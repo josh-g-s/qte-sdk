@@ -5748,9 +5748,8 @@ async def test_take_liquidity_names_a_gap_before_the_resume_was_answered(
     session: str, capsys: pytest.CaptureFixture[str]
 ):
     # A SeqGap among what the session read before the resume_ack does not end the
-    # session's resume. The example still errs safe and takes the resume as cut short,
-    # but does not say the resume was cut short by it, even after an earlier session's
-    # resume_ack.
+    # session's resume: the example waits for its ResumeComplete, and does not say the
+    # resume was cut short by it, even after an earlier session's resume_ack.
     from qte_sdk.connection import Disconnected, ResumeComplete
 
     earlier = [
@@ -5764,6 +5763,7 @@ async def test_take_liquidity_names_a_gap_before_the_resume_was_answered(
         connected_event(reconnected=session == "reconnect", resume=replay_ack(False)),
         SeqGap(1, 3),
         resume_ack_event(),
+        ResumeComplete(False, 5, 0),
         book_event(),
         our_accepted,
         our_fill,
@@ -5773,7 +5773,83 @@ async def test_take_liquidity_names_a_gap_before_the_resume_was_answered(
     assert outcome == 0, out
     assert len(session.refs("new")) == 1
     assert "the resume was cut short" not in out
-    assert "before the resume was answered: taking the resume as cut short" in out
+    assert "before the resume was answered: still waiting for the resume to complete" in out
+
+
+def foreign_fill(size: int = 7, report_seq: int = 3) -> Received:
+    """A fill of another market order of the same strategy, instrument and side."""
+    fill = Execution(
+        strat_id="take-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        fill_price=ASK,
+        fill_size=size,
+        remaining_size=0,
+    )
+    return Received("execution", fill, None, report_seq=report_seq)
+
+
+@pytest.mark.parametrize("session", ["first", "reconnect"])
+async def test_take_liquidity_sends_nothing_until_a_resume_a_gap_came_before_ends(
+    session: str, capsys: pytest.CaptureFixture[str]
+):
+    # A SeqGap read before the resume_ack does not end the session's resume: a live book
+    # comes through while the replay goes on, and a replayed fill of another market order
+    # of the same strategy follows. Nothing is sent until the ResumeComplete, and that
+    # fill is never counted as this order's.
+    from qte_sdk.connection import Disconnected, ResumeComplete
+
+    earlier = [
+        connected_event(reconnected=False, resume=replay_ack(False)),
+        resume_ack_event(),
+        ResumeComplete(False, 5, 0),
+        Disconnected(error=None),
+    ]
+    sent_before_end: list[int] = []
+
+    def resume_ends(s: ScriptedSession) -> Any:
+        sent_before_end.append(len(s.sent))
+        return ResumeComplete(True, 5, 0)
+
+    script = [
+        *(earlier if session == "reconnect" else []),
+        connected_event(reconnected=session == "reconnect", resume=replay_ack(True)),
+        SeqGap(1, 3),
+        book_event(),
+        resume_ack_event(True),
+        foreign_fill(),
+        resume_ends,
+        lambda s: Received("accepted", Accepted(request_ref=taken_order(s)), None, report_seq=6),
+        lambda s: Received("execution", our_fill(s).message, None, report_seq=7),
+    ]
+    outcome, sent, _ = await run_taker(script, seconds="5")
+    out = capsys.readouterr().out
+    assert sent_before_end == [0], out
+    assert outcome == 0, out
+    assert len(sent.refs("new")) == 1
+    assert "filled 7" not in out and "filled 8" not in out
+    assert "filled 1 of 1" in out
+    assert "still waiting for the resume to complete" in out
+
+
+async def test_take_liquidity_counts_no_fill_of_another_market_order_as_its_own(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A fill of another market order of the same strategy before this order's accepted,
+    # or one that does not fit what is left of this order, is not this order's.
+    script = [
+        *first_session_then_order(),
+        foreign_fill(7, 2),
+        lambda s: Received("accepted", Accepted(request_ref=taken_order(s)), None, report_seq=3),
+        foreign_fill(7, 4),
+        lambda s: Received("execution", our_fill(s).message, None, report_seq=5),
+    ]
+    outcome, session, _ = await run_taker(script, seconds="5")
+    lines = capsys.readouterr().out.splitlines()
+    assert outcome == 0, lines
+    assert len(session.refs("new")) == 1
+    assert lines[-1].startswith("filled 1 of 1 at an average"), lines
+    assert sum(line.startswith("FILL ") for line in lines) == 1, lines
 
 
 @pytest.mark.parametrize("sent", [True, False], ids=["order-out", "nothing-sent"])

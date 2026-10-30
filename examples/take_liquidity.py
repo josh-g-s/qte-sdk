@@ -23,9 +23,12 @@ reaches it and the price you get can differ from the one you saw. The example pr
 round trip it measures to the `accepted`. The delay, the price collar and the message
 budgets are set by the exchange and may change, so nothing here depends on their values.
 
-A fill of a market order carries no order price, so nothing on it says which market
-order it belongs to. With one market order in flight per strategy, instrument and side,
-as here, every such fill is this order's.
+A fill of a market order carries no order price or request_ref, so nothing on it says
+which market order it belongs to. The example counts a fill or cancelled remainder of the
+strategy, instrument and side only after its order's `accepted`, which the exchange
+reports first, and only if its size fits what is left of the order: anything else is
+another market order's, such as one of the same strategy replayed after a drop, and so
+is never counted.
 
 On a drop. The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the
 connection drops, or the exchange restarts, it reconnects by itself, waiting longer between
@@ -39,9 +42,11 @@ snapshot of the resting orders instead, or does not resume, the reports missed a
 recovered, and a market order never rests, so nothing says how it filled: the example says
 so, tells you to check your fills, and exits with status 1. So it does, too, if a message is
 missed or unreadable during the resume (a `SeqGap` or `DecodeFailed`), since the report lost
-may be one of its fills; a gap can also end the resume with no `ResumeComplete`. An
-`accepted` that comes through the resume is printed as answered after a reconnect, with no
-round trip. --seconds counts the time down too. Only the first connection is not retried:
+may be one of its fills; a gap can also end the resume with no `ResumeComplete`. One
+read before the `resume_ack` does not end the resume: books come through while the
+replay goes on, so with no order out the example still sends nothing until the resume
+ends. An `accepted` that comes through the resume is printed as answered after a
+reconnect, with no round trip. --seconds counts the time down too. Only the first connection is not retried:
 if it fails, the example says why and stops; a later one that fails for good (a revoked
 credential, say) says why and, with the order out, that it may have filled.
 """
@@ -124,6 +129,9 @@ class Taker:
         self.side = BUY if args.side == "buy" else SELL
         self.size: int = args.size
         self.ref: str | None = None
+        # Whether this order's `accepted` has come: a fill or cancellation before it is of
+        # an earlier order, since the exchange reports an order's accepted first.
+        self.accepted = False
         self.sent_at = 0.0
         self.waiting_for_wall = False
         self.filled = 0
@@ -213,17 +221,19 @@ class Taker:
         self.missed = True
         if not self.resuming:
             return
-        if ends_resume:
-            if self.resume_answered:
-                print("the resume was cut short by a message missed or unreadable")
-            else:
-                # Delivered before the resume_ack, from what the session read ahead: the
-                # session's resume goes on, but the example errs safe and ends it here.
-                print(
-                    "a message was missed or unreadable before the resume was answered: "
-                    "taking the resume as cut short"
-                )
+        if ends_resume and self.resume_answered:
+            print("the resume was cut short by a message missed or unreadable")
             self.resumed(replayed=False)
+        elif ends_resume:
+            # Delivered before the resume_ack, from what the session read ahead: the
+            # session's resume goes on, and books come through while it does. Send nothing
+            # until it ends, but an order in flight at the drop may have lost a report.
+            print(
+                "a message was missed or unreadable before the resume was answered: "
+                "still waiting for the resume to complete"
+            )
+            if self.in_doubt:
+                self.fills_unknown()
         elif self.in_doubt:
             # The replay goes on, but its last fill may end the order before the
             # ResumeComplete: decide now, so the run cannot end as if nothing were lost.
@@ -270,15 +280,22 @@ class Taker:
 
     def ours(self, message: Execution | OrderCancelled) -> bool:
         """Whether a fill or cancellation belongs to this example's market order: same
-        strategy, instrument and side, and no order price, which only a market order lacks."""
+        strategy, instrument and side, and no order price, which only a market order lacks;
+        after this order's `accepted`; and of a size that fits what is left of the order. A
+        fill carries no request_ref, so one that does not fit is another order's."""
         price_field = "order_price" if isinstance(message, Execution) else "price"
-        return (
-            self.ref is not None
+        if not (
+            self.accepted
             and message.strat_id == self.strat_id
             and message.instrument == self.instrument
             and message.side == self.side
             and not message.HasField(price_field)
-        )
+        ):
+            return False
+        left = self.size - self.filled
+        if isinstance(message, Execution):
+            return message.fill_size + message.remaining_size == left
+        return message.cancelled_size == left
 
     def on_order_event(self, message: Message) -> None:
         # A reject the exchange could not tie to a message carries no request_ref.
@@ -286,6 +303,7 @@ class Taker:
         answers_ours = ref is not None and ref == self.ref
         match message:
             case Accepted() if answers_ours:
+                self.accepted = True
                 if self.dropped_since_send:
                     print("accepted (answered after a reconnect)")
                 else:
