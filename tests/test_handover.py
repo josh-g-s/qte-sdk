@@ -974,14 +974,15 @@ async def test_an_order_sent_in_the_hold_is_answered_late_with_no_reject(kind, h
     assert gateway.held[0]["payload"]["price"] == str(HELD_PRICE)
     assert seen.gateway_released_at_answer
     assert gateway.hold_started is not None and gateway.released_at is not None
-    assert gateway.released_at - gateway.hold_started >= hold
+    # Against the same sum the fake held to: a difference of two readings can round under it.
+    assert gateway.released_at >= gateway.hold_started + hold
     assert seen.sent_at is not None and seen.answered_at is not None
     assert seen.answered_at >= gateway.released_at
     if FAKE:
         # The fake's hold starts when the order reaches it.
         assert seen.sent_at <= gateway.hold_started
         # Answered late, by the hold, and within it, give or take a slow machine.
-        assert hold <= seen.answered_at - seen.sent_at < hold + 3
+        assert seen.sent_at + hold <= seen.answered_at < seen.sent_at + hold + 3
         # The heartbeats that came due in the hold waited, and reached the client late, at
         # the release. No count is asserted: a slow runner owes fewer.
         assert gateway.link is not None and gateway.link.owed_at_release >= 1
@@ -1102,7 +1103,8 @@ async def test_an_aborted_handover_changes_nothing(kind, hold, outcome):
     seen = await run(aborted, kind)
     plain = await run(make_gateway(handover=False), kind)
     assert aborted.released_at is not None and aborted.hold_started is not None
-    assert aborted.released_at - aborted.hold_started >= hold
+    # Against the same sum the fake held to: a difference of two readings can round under it.
+    assert aborted.released_at >= aborted.hold_started + hold
     # The order was held: sent before the old live resumed, answered only after.
     assert seen.sent_at is not None and seen.answered_at is not None
     assert seen.sent_at < aborted.released_at <= seen.answered_at
@@ -1162,7 +1164,7 @@ async def test_no_exchange_confirmed_live_closes_the_held_client_then_refuses_un
         # The close frame the fake really sent on the held connection.
         assert gateway.links[0].close_sent is not None
         assert gateway.links[0].close_sent[0] == 1001
-        assert gateway.released_at - gateway.hold_started >= MAX_HOLD
+        assert gateway.released_at >= gateway.hold_started + MAX_HOLD
         assert len(refusals) == gateway.refused == 3
         served = gateway.links[-1]
     else:

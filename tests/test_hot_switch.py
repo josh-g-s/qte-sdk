@@ -800,7 +800,8 @@ async def test_quote_both_sides_keeps_quoting_across_a_held_switch_and_cleans_up
     code, out, err = process.returncode, out_bytes.decode(), err_bytes.decode()
     assert code == 0, out + err
     assert exchange.hold_started is not None and exchange.released_at is not None
-    assert exchange.released_at - exchange.hold_started >= exchange.hold
+    # Against the same sum the fake held to: a difference of two readings can round under it.
+    assert exchange.released_at >= exchange.hold_started + exchange.hold
     assert exchange.connections == 1
     # No drop, no missed message and no stop as unreliable.
     for text in ("dropped", "missed", "reconnect", "warning", "WARNING"):
