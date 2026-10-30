@@ -84,10 +84,12 @@ orders rests there when it is applied, so run this on an instrument your team is
 otherwise trading at that price, with a strategy nothing else is using: if anything else
 acts on that strategy's buy orders on the instrument during the test (an amend of the test
 order, a fill at another price, a cancel of it), the test order can no longer be told
-apart from them, and the check fails with a warning. If the script cannot confirm that
-the order is gone, the check fails and names the level where it may still rest, so you
-can cancel it yourself. If it is interrupted (Ctrl+C) while the order may rest, it first
-tries, for a few seconds, to cancel that level.
+apart from them, and the check fails with a warning and cancels nothing, since a cancel
+at the level could then take one of those orders rather than the test order. If the
+script cannot confirm that the order is gone, the check fails and names the level where
+it may still rest, so you can cancel it yourself. If it is interrupted (Ctrl+C) while the
+order may rest, it first tries, for a few seconds, to cancel that level, unless something
+else acted on those orders, as above: then it cancels nothing and warns.
 
 Timing. The exchange holds every order message for its order delay before applying it. The
 delay, the minimum time an order must rest before it may be cancelled, the price collar
@@ -102,7 +104,8 @@ resolves to several addresses, none reachable, can hold the exit for longer.
 
 Stopping. Ctrl+C, SIGTERM (a `kill`, an editor's stop button, a time limit) and SIGHUP (a
 closed terminal) all stop the run the same way: if the test order may rest, the script
-first tries for a few seconds to cancel its level, and warns if it cannot confirm that. It
+first tries for a few seconds to cancel its level (not once something else acted on this
+strategy's buy orders there, as above), and warns if it cannot confirm that. It
 does so even when the terminal is gone and nothing it writes can be seen. A further SIGTERM
 or SIGHUP stops the wait once that cancel is out; a second Ctrl+C stops at once, even before
 it is, and the warning names the level. A signal that is already ignored when it starts (as
