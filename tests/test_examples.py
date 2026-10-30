@@ -40,11 +40,13 @@ from qte_sdk import replay as qte_replay
 from qte_sdk import update as qte_update
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
 from qte_sdk.contract.v1.common_pb2 import (
+    AUTO_FLATTEN,
     BUY,
     FILLED,
     LIMIT,
     NEW,
     RESTING,
+    TEAM,
     MarketSessionPhase,
     OrderLifecycleState,
     ReasonCodes,
@@ -2944,6 +2946,7 @@ async def test_take_liquidity_knows_it_may_have_sent_an_order_whose_send_stalled
     # A reply to the order still counts as this example's.
     taker.on_order_event(Accepted(request_ref=sent[0]))
     fill = Execution(
+        origin=TEAM,
         strat_id="take-test",
         instrument=INSTRUMENT,
         side=example.BUY,
@@ -5580,6 +5583,7 @@ def our_accepted(session: ScriptedSession) -> Received:
 
 def our_fill(session: ScriptedSession) -> Received:
     fill = Execution(
+        origin=TEAM,
         strat_id="take-test",
         instrument=INSTRUMENT,
         side=BUY,
@@ -5674,7 +5678,7 @@ async def test_take_liquidity_names_a_message_missed_while_its_order_was_out(
     assert len(session.refs("new")) == 1
     assert "how it filled is not known: check your fills" in lines[-2], lines
     assert lines[-1] == (
-        "nothing filled (messages were missed, so this may be incomplete: check your fills)"
+        "no fill seen (messages were missed, so this may be incomplete: check your fills)"
     )
 
 
@@ -5780,6 +5784,7 @@ async def test_take_liquidity_names_a_gap_before_the_resume_was_answered(
 def foreign_fill(size: int = 7, report_seq: int = 3) -> Received:
     """A fill of another market order of the same strategy, instrument and side."""
     fill = Execution(
+        origin=TEAM,
         strat_id="take-test",
         instrument=INSTRUMENT,
         side=BUY,
@@ -5853,6 +5858,88 @@ async def test_take_liquidity_counts_no_fill_of_another_market_order_as_its_own(
     assert sum(line.startswith("FILL ") for line in lines) == 1, lines
 
 
+@pytest.mark.parametrize("case", ["down", "accepted-only", "replay-running"])
+async def test_take_liquidity_takes_a_time_up_with_its_order_unfinished_as_unknown(
+    case: str, capsys: pytest.CaptureFixture[str]
+):
+    # --seconds run out with the order sent and not finished: down with no reconnect,
+    # accepted with no fill or cancel yet, or its replay still running. How it filled is
+    # not known: exit 1, and never say "nothing filled" as if it were.
+    from qte_sdk.connection import Disconnected
+
+    after_send: list[Any] = {
+        "down": [Disconnected(error=None)],
+        "accepted-only": [our_accepted],
+        "replay-running": [
+            Disconnected(error=None),
+            connected_event(reconnected=True, resume=replay_ack()),
+            our_accepted,
+        ],
+    }[case]
+    script = [*first_session_then_order(), *after_send]
+    outcome, session, _ = await run_taker(script)
+    lines = capsys.readouterr().out.splitlines()
+    assert outcome == 1, lines
+    assert len(session.refs("new")) == 1
+    assert "stopped after 0.5 seconds with the order's outcome not known" in lines[-1], lines
+    assert "Check your fills" in lines[-1], lines
+    assert not any("nothing filled" in line for line in lines), lines
+
+
+@pytest.mark.parametrize("kind", ["fill", "cancelled"])
+async def test_take_liquidity_counts_no_engine_orders_report_as_its_own(
+    kind: str, capsys: pytest.CaptureFixture[str]
+):
+    # An AUTO_FLATTEN fill or cancellation after its accepted fits the order's size and
+    # side, but its origin says it is the engine's order, not the team's.
+    report: Any
+    if kind == "fill":
+        report = Execution(
+            origin=AUTO_FLATTEN,
+            strat_id="take-test",
+            instrument=INSTRUMENT,
+            side=BUY,
+            fill_price=ASK,
+            fill_size=1,
+            remaining_size=0,
+        )
+    else:
+        report = OrderCancelled(
+            origin=AUTO_FLATTEN,
+            strat_id="take-test",
+            instrument=INSTRUMENT,
+            side=BUY,
+            cancelled_size=1,
+        )
+    script = [
+        *first_session_then_order(),
+        our_accepted,
+        Received(type(report).__name__.lower(), report, None, report_seq=3),
+    ]
+    outcome, _, _ = await run_taker(script)
+    out = capsys.readouterr().out
+    assert outcome == 1, out
+    assert "FILL" not in out and "cancelled (" not in out and "filled 1 of 1" not in out
+
+
+async def test_take_liquidity_goes_on_after_an_unreadable_book_while_its_order_is_out(
+    capsys: pytest.CaptureFixture[str],
+):
+    # A book cannot have been one of the order's reports: the run goes on and counts the
+    # order's fill, naming the message missed.
+    script = [
+        *first_session_then_order(),
+        our_accepted,
+        DecodeFailed("book", ValueError("x")),
+        our_fill,
+    ]
+    outcome, _, _ = await run_taker(script, seconds="5")
+    lines = capsys.readouterr().out.splitlines()
+    assert outcome == 0, lines
+    assert lines[-1].startswith("filled 1 of 1 at an average"), lines
+    assert "(messages were missed" in lines[-1], lines
+
+
 @pytest.mark.parametrize("foreign", ["fill", "cancelled"])
 async def test_take_liquidity_takes_no_outcome_as_known_after_a_report_lost_while_out(
     foreign: str, capsys: pytest.CaptureFixture[str]
@@ -5864,7 +5951,7 @@ async def test_take_liquidity_takes_no_outcome_as_known_after_a_report_lost_whil
         other: Any = foreign_fill(1, 4)
     else:
         cancelled = OrderCancelled(
-            strat_id="take-test", instrument=INSTRUMENT, side=BUY, cancelled_size=1
+            origin=TEAM, strat_id="take-test", instrument=INSTRUMENT, side=BUY, cancelled_size=1
         )
         other = Received("order_cancelled", cancelled, None, report_seq=4)
     script = [
@@ -6037,6 +6124,7 @@ async def test_take_liquidity_takes_a_damaged_replay_as_unknown_even_if_its_orde
 
     def last_fill(session: ScriptedSession) -> Received:
         fill = Execution(
+            origin=TEAM,
             strat_id="take-test",
             instrument=INSTRUMENT,
             side=BUY,

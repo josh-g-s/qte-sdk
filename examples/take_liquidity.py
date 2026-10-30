@@ -8,9 +8,11 @@ then:
 The example waits for a book that shows the wall on the side it will trade against, sends
 one MARKET order of --size shares, prints the `accepted` or `reject`, every fill and any
 unfilled remainder the exchange cancels, and stops once the order is finished or after
---seconds, whichever comes first. It sends at most one order, and none if no such book
-comes within --seconds. It never retries: a rejected order is printed and the example
-stops.
+--seconds, whichever comes first. If --seconds run out with the order sent and not
+finished (unanswered, not yet filled, or with the connection down or its replay still
+running), how it filled is not known: it says so, tells you to check your fills, and exits
+with status 1. It sends at most one order, and none if no such book comes within
+--seconds. It never retries: a rejected order is printed and the example stops.
 
 The exchange publishes a book only when it changes, so the example keeps the latest book
 it has received with `qte_sdk.books.LatestBooks` and decides from that. Subscribing
@@ -24,11 +26,13 @@ round trip it measures to the `accepted`. The delay, the price collar and the me
 budgets are set by the exchange and may change, so nothing here depends on their values.
 
 A fill of a market order carries no order price or request_ref, so nothing on it says
-which market order it belongs to. The example counts a fill or cancelled remainder of the
-strategy, instrument and side only after its order's `accepted`, which the exchange
-reports first, and only if its size fits what is left of the order: anything else is
-another market order's, such as one of the same strategy replayed after a drop, and so
-is never counted.
+which market order it belongs to. The example counts a fill or cancelled remainder of
+origin TEAM (not an engine order, such as AUTO_FLATTEN) and of the strategy, instrument
+and side only after its order's `accepted`, which the exchange reports first, and only if
+its size fits what is left of the order: anything else is another order's, such as one of
+the same strategy replayed after a drop, and is never counted. The limit: another market
+order of the same strategy and side, accepted just before this one, whose fill also fits
+cannot be told apart from it, so run one copy of the example per strategy at a time.
 
 On a drop. The example connects with `qte_sdk.reconnect.ReconnectingSession`, so if the
 connection drops, or the exchange restarts, it reconnects by itself, waiting longer between
@@ -42,7 +46,8 @@ snapshot of the resting orders instead, or does not resume, the reports missed a
 recovered, and a market order never rests, so nothing says how it filled: the example says
 so, tells you to check your fills, and exits with status 1. So it does, too, if a message is
 missed or unreadable during the resume (a `SeqGap` or `DecodeFailed`), or while its order
-is out, since the report lost may be one of its fills; a gap can also end the resume with
+is out, since the report lost may be one of its fills (an unreadable message whose type is
+known to be no order report, a book say, is not); a gap can also end the resume with
 no `ResumeComplete`. One read before the `resume_ack` does not end the resume: books come
 through while the replay goes on, so with no order out the example still sends nothing
 until the resume ends. An `accepted` that comes through the resume is printed as answered after a
@@ -75,10 +80,11 @@ from qte_sdk.connection import (
     SessionRejected,
     describe_close,
 )
-from qte_sdk.contract.v1.common_pb2 import BUY, MARKET, SELL, Liquidity
+from qte_sdk.contract.v1.common_pb2 import BUY, MARKET, SELL, TEAM, Liquidity
 from qte_sdk.contract.v1.order_events_pb2 import Accepted, Execution, OrderCancelled, Reject
 from qte_sdk.market_data import Book, DecodeFailed, SeqGap, as_market_data
 from qte_sdk.orders import (
+    ORDER_EVENT_TYPES,
     Sender,
     is_order_event,
     new_request_ref,
@@ -215,14 +221,15 @@ class Taker:
         if connected.resume is None:
             self.resumed(replayed=False)  # the exchange did not resume this session
 
-    def on_missed(self, ends_resume: bool) -> None:
+    def on_missed(self, ends_resume: bool, maybe_report: bool = True) -> None:
         """A message was missed or unreadable. During a resume, a report the replay was to
         bring may be the one lost. A `SeqGap`, or a `DecodeFailed` whose type is unknown,
         also ends the resume with no `ResumeComplete` (the session stops waiting for it),
-        so it counts as a resume that did not recover the reports missed."""
+        so it counts as a resume that did not recover the reports missed. `maybe_report`
+        is false for a `DecodeFailed` known to be of no order report (a book, say)."""
         self.missed = True
         if not self.resuming:
-            if self.order_out():
+            if self.order_out() and maybe_report:
                 # The report lost may be one of this order's, and a fill carries no
                 # request_ref: what follows cannot be told from another order's, so
                 # nothing more is counted and the run ends with status 1.
@@ -291,13 +298,17 @@ class Taker:
         return self.ref is not None and not self.done
 
     def ours(self, message: Execution | OrderCancelled) -> bool:
-        """Whether a fill or cancellation belongs to this example's market order: same
-        strategy, instrument and side, and no order price, which only a market order lacks;
-        after this order's `accepted`; and of a size that fits what is left of the order. A
-        fill carries no request_ref, so one that does not fit is another order's."""
+        """Whether a fill or cancellation may belong to this example's market order: origin
+        TEAM (not an engine order such as AUTO_FLATTEN), same strategy, instrument and
+        side, and no order price, which only a market order lacks; after this order's
+        `accepted`; and of a size that fits what is left of the order. A fill carries no
+        request_ref, so one that does not fit is another order's. One that fits may still
+        be another market order's of the same strategy, size and side, accepted just before
+        this one: nothing on it tells the two apart."""
         price_field = "order_price" if isinstance(message, Execution) else "price"
         if not (
             self.accepted
+            and message.origin == TEAM
             and message.strat_id == self.strat_id
             and message.instrument == self.instrument
             and message.side == self.side
@@ -340,12 +351,20 @@ class Taker:
                 print(f"the unfilled {message.cancelled_size} was cancelled ({reason})")
                 self.done = True
 
+    def outcome_known(self) -> bool:
+        """Whether no order was sent, or the order sent is finished with every report of it
+        seen."""
+        return self.ref is None or (self.done and not self.lost and not self.unsure)
+
     def summary(self) -> str:
+        known = self.outcome_known()
         if self.filled == 0:
-            text = "nothing filled"
+            # With the outcome not known, a fill may have come that was not seen.
+            text = "nothing filled" if known else "no fill seen"
         else:
             average = to_decimal(self.cost // self.filled)
-            text = f"filled {self.filled} of {self.size} at an average of about {average}"
+            seen = "" if known else " seen"
+            text = f"filled {self.filled} of {self.size}{seen} at an average of about {average}"
         if self.missed:
             text += " (messages were missed, so this may be incomplete: check your fills)"
         return text
@@ -423,7 +442,13 @@ async def run(url: str, args: argparse.Namespace) -> int:
                         # As the session does: these end a resume with no ResumeComplete.
                         taker.on_missed(
                             isinstance(item, SeqGap)
-                            or (isinstance(item, DecodeFailed) and item.type is None)
+                            or (isinstance(item, DecodeFailed) and item.type is None),
+                            # A DecodeFailed of a known type that is no order report (a
+                            # book, say) cannot have been one of the order's reports.
+                            maybe_report=not isinstance(item, DecodeFailed)
+                            or item.type is None
+                            or item.type in ORDER_EVENT_TYPES
+                            or item.report_seq is not None,
                         )
                     elif is_order_event(event):
                         taker.on_order_event(event.message)
@@ -435,10 +460,16 @@ async def run(url: str, args: argparse.Namespace) -> int:
             if not deadline.expired():
                 raise  # the first connection timed out
             # Once a request_ref is recorded the order may have reached the exchange, even
-            # if its send did not finish.
-            sent = "the order's outcome is not known yet" if taker.ref else "no order was sent"
-            print(f"stopped after {args.seconds:g} seconds: {sent}; {taker.summary()}")
-            return 0
+            # if its send did not finish. Unfinished at the deadline (unanswered, not yet
+            # filled, down, or its replay still running), its outcome is not known.
+            if taker.ref is None:
+                print(f"stopped after {args.seconds:g} seconds: no order was sent")
+                return 0
+            print(
+                f"stopped after {args.seconds:g} seconds with the order's outcome not known; "
+                f"{taker.summary()}. Check your fills before running this again"
+            )
+            return 1
         # After TimeoutError, an OSError too, so a deadline is not taken for one.
         except (SessionRejected, OSError, InvalidHandshake, SessionNotAcknowledged):
             if taker.order_out():
