@@ -647,6 +647,13 @@ class OptionsBot:
                 # order rests now is unknown, so it is not cancelled as this example's.
                 self.owner_unknown()
                 return
+        if order is not None and order.strat_id != self.strat_id and not self.accepted:
+            # Another strategy's order holds the level and no `accepted` came for this
+            # one: the exchange refused this one, or it left before that order came, but
+            # its reply was lost. Cancel nothing there, warn and exit 1.
+            self.taken_before = True
+            self.owner_unknown()
+            return
         if order is not None and order.strat_id == self.strat_id:
             if not self.resting:
                 print(f"resting: {order.remaining_size} at {self.where} (from the resume)")

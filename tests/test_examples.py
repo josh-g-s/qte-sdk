@@ -6272,6 +6272,29 @@ async def test_options_bot_takes_a_cancel_of_another_strategys_order_at_its_pric
     assert [t for t, _ in sender.sent] == ["new", "cancel", "cancel"]
 
 
+async def test_options_bot_warns_when_a_snapshot_shows_another_strategy_at_its_level():
+    # The level was empty in a complete view when the order was sent. Another strategy's
+    # order comes to rest there and this one's reply is lost in a drop; the snapshot
+    # shows that order. With no accepted, the bot cancels nothing, warns and exits 1.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("options_bot.py")
+    contract, price = "SPY261120P00665000", 4_900_000
+    view = StubView(incomplete=False)
+    sender = RecordingSender()
+    bot = example.OptionsBot(sender, None, "SPY", "opt-test", False, view)
+    greeks = SimpleNamespace(forward=665_000_000, instrument="SPY")
+    bot.choose = lambda: (contract, price, 1, greeks)
+    await bot.act_now()
+    bot.on_disconnected(Disconnected(error=None))
+    view.orders[(contract, BUY, price)] = SimpleNamespace(strat_id="other", remaining_size=7)
+    bot.resumed(replayed=False)
+    assert bot.gone and bot.missed and bot.taken_before and not bot.accepted
+    bot.stopping = True
+    await bot.act()
+    assert [t for t, _ in sender.sent] == ["new"]
+
+
 class RefusesEveryResume(FakeExchange):
     """Refuses `resume` on every connection, the first included."""
 
