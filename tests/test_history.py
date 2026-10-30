@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import secrets
+import select
 import shutil
 import socket
 import socketserver
@@ -2097,6 +2098,78 @@ def test_a_wake_while_sending_lets_nothing_more_out_and_nothing_in_the_clear(
         assert wire and token.encode() not in wire
     else:
         assert wire in (b"", a_request(token))
+
+
+class Poller:
+    """A `select.poll` that records each wait it is asked for, and finds nothing ready."""
+
+    def __init__(self, waits: list[float | None]) -> None:
+        self.waits = waits
+
+    def register(self, *args: Any) -> None:
+        pass
+
+    def poll(self, ms: int | None = None) -> list[tuple[int, int]]:
+        self.waits.append(ms)
+        return []
+
+
+# Each way a wait is made: `select.poll`, where the system has it, and `select.select`,
+# which Windows uses.
+WAYS = [
+    pytest.param(
+        "poll", marks=pytest.mark.skipif(not hasattr(select, "poll"), reason="no select.poll")
+    ),
+    "select",
+]
+
+
+def waits_seen(monkeypatch: pytest.MonkeyPatch, way: str) -> list[float | None]:
+    """The waits the socket asks for, made the `way` given, each finding nothing ready."""
+    waits: list[float | None] = []
+    if way == "poll":
+        monkeypatch.setattr(history.select, "poll", lambda: Poller(waits))
+    else:
+        monkeypatch.delattr(history.select, "poll", raising=False)
+
+        def selected(rlist: Any, wlist: Any, xlist: Any, timeout: float | None = None) -> Any:
+            waits.append(timeout)
+            return [], [], []
+
+        monkeypatch.setattr(history.select, "select", selected)
+    return waits
+
+
+@pytest.mark.parametrize("way", WAYS)
+def test_a_wait_on_the_socket_is_never_longer_than_its_timeout(monkeypatch, way):
+    # A clock that has not moved since the read began (as Windows' coarse one may not)
+    # reads back `(3.05 + 5) - 3.05` a little above 5 s, which poll would round up to
+    # 5001 ms.
+    plain_client, plain_server = socket.socketpair()
+    with plain_server:
+        stream = history._WakeableSocket(plain_client, timeout=5.0)
+        monkeypatch.setattr(history.time, "monotonic", lambda: 3.05)
+        waits = waits_seen(monkeypatch, way)
+        with pytest.raises(TimeoutError):
+            stream.recv_into(bytearray(1))
+        monkeypatch.undo()
+        stream.close()
+    assert waits == [5000 if way == "poll" else 5.0]
+
+
+@pytest.mark.parametrize("way", WAYS)
+def test_a_wait_on_the_socket_past_its_deadline_times_out_without_waiting(monkeypatch, way):
+    plain_client, plain_server = socket.socketpair()
+    with plain_server:
+        stream = history._WakeableSocket(plain_client, timeout=5.0)
+        clock = iter([3.05, 9.05])  # the deadline is set, then read once it has passed
+        monkeypatch.setattr(history.time, "monotonic", lambda: next(clock))
+        waits = waits_seen(monkeypatch, way)
+        with pytest.raises(TimeoutError):
+            stream.recv_into(bytearray(1))
+        monkeypatch.undo()
+        stream.close()
+    assert waits == []
 
 
 def test_sending_is_bounded_as_a_whole_even_if_each_send_succeeds(monkeypatch):

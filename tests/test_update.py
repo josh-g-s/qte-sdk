@@ -1558,7 +1558,7 @@ def test_releases_json_is_not_read_once_the_check_s_time_is_up(monkeypatch: pyte
     fetched: list[Any] = []
     monkeypatch.setattr(update, "_fetch", lambda *args: fetched.append(args) or b"[]")
     tagged = {tag_for(bumped(VERSION, 2)): (update._number(bumped(VERSION, 2)), INSTALLED)}
-    assert update._recommendation(VERSION, tagged, time.monotonic() - 1) is None
+    assert update._recommendation(VERSION, tagged, 5.0, time.monotonic() - 1) is None
     assert fetched == []
 
 
@@ -1657,6 +1657,25 @@ def test_releases_json_is_asked_for_saying_only_the_sdks_version_within_the_time
     assert request.data is None
     # What is left of the check's own timeout.
     assert 0 < timeout <= update.DEFAULT_TIMEOUT
+
+
+@pytest.mark.parametrize("timeout, now", [(5.0, 3.05), (30.0, 2.45)])
+def test_releases_json_is_given_no_more_than_the_check_s_own_timeout(
+    monkeypatch: pytest.MonkeyPatch, timeout: float, now: float
+):
+    # A clock that has not moved since the check began (as Windows' coarse one may not)
+    # reads back `(now + timeout) - now` a little above `timeout`: the wait is kept to the
+    # caller's timeout, a longer one than the default included, and not cut to the default.
+    monkeypatch.setattr(update.time, "monotonic", lambda: now)
+    newer = bumped(VERSION, 2)
+    monkeypatch.setattr(sys, "platform", "linux")
+    installed(monkeypatch, git_install())
+    refs = refs_with((tag_for(VERSION), INSTALLED), (tag_for(newer), MAIN))
+    repository = answer(monkeypatch, refs, releases=releases_json(entry(newer)))
+    result = check_for_update(timeout)
+    assert result.status is Status.BEHIND
+    [(_, given)] = repository.release_requests
+    assert given == timeout
 
 
 def test_a_releases_json_that_never_comes_is_not_waited_for_beyond_the_timeout(
