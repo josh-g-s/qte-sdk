@@ -520,6 +520,8 @@ class FakeHistory:
             return
         drop = self.drop_after.pop(handler.path, None)
         size = self.gzip_chunk
+        # Holding from before the first byte, so a resume sent at once always sees it.
+        self.gzip_holding = self.gzip_hold_until_resume
         for at in range(0, len(data), size):
             piece = data[at : at + size]
             if drop is not None and at + len(piece) > drop:
@@ -532,7 +534,6 @@ class FakeHistory:
             handler.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
         if self.gzip_hold_until_resume:
             handler.wfile.flush()
-            self.gzip_holding = True
             self.resumed.wait(30)
             self.gzip_holding = False
             handler.close_connection = True
@@ -3310,8 +3311,6 @@ def no_trailer(data: bytes) -> bytes:
 
 GZIP_DROPS = {
     "truncated-mid-body": {"gzip_mangle": cut_mid_body},
-    "bad-crc": {"gzip_mangle": bad_crc},
-    "bad-isize": {"gzip_mangle": bad_isize},
     "chunked-framing": {"drop_after": {GZIP_PATH: 700}},
 }
 
@@ -3346,13 +3345,43 @@ async def test_a_dropped_gzip_download_resumes_once_with_identity_and_verifies(o
     compressed = gzip.compress(body, mtime=0)
     if "drop_after" in options:
         assert offset == inflated(compressed[:700])
-    elif options["gzip_mangle"] is cut_mid_body:
-        assert offset == inflated(cut_mid_body(compressed))
     else:
-        # The read holding the trailer fails its check, so all it decompressed is thrown
-        # away: everything before that last 512-byte chunk is delivered, and only that.
-        assert offset == inflated(compressed[: (len(compressed) - 1) // 512 * 512])
-        assert offset < len(body)
+        assert offset == inflated(cut_mid_body(compressed))
+
+
+@pytest.mark.parametrize("max_resumes", [0, 3])
+@pytest.mark.parametrize("mangle", [bad_crc, bad_isize], ids=["bad-crc", "bad-isize"])
+async def test_a_gzip_trailer_that_fails_its_check_resumes_unless_all_verifies(mangle, max_resumes):
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    compressed = gzip.compress(body, mtime=0)
+    fake = gzip_fake(token, body, gzip_mangle=mangle)
+    items: list[Any] = []
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token, max_resumes=max_resumes)
+        try:
+            async for item in client.fetch(DAY, "TEST", "book"):
+                items.append(item)
+        except HistoryInterrupted as error:
+            interrupted: HistoryInterrupted | None = error
+        else:
+            interrupted = None
+    # The read holding the trailer fails its check, and what it decompressed is thrown
+    # away. That read starts in the last 512-byte chunk, where depends on how the socket
+    # split it: if it held only trailer bytes, everything arrived and verifies, and the
+    # download finishes with no resume.
+    last = (len(compressed) - 1) // 512 * 512
+    starts = {inflated(compressed[:k]) for k in range(last, len(compressed) - 7)}
+    if len(fake.requests) == 1 and interrupted is None:
+        assert len(items) == 700
+        return
+    if max_resumes == 0:
+        assert interrupted is not None and len(fake.requests) == 1
+        assert interrupted.bytes_received in starts - {len(body)}
+        return
+    assert [item.grid_time for item in items] == [1000 * seq for seq in range(1, 701)]
+    offset = resumed_at(fake)
+    assert offset in starts - {len(body)}
 
 
 @pytest.mark.parametrize("options", GZIP_DROPS.values(), ids=GZIP_DROPS.keys())

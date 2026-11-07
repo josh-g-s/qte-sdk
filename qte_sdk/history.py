@@ -109,9 +109,9 @@ stream, without a gzip `ETag`'s `-gzip` suffix, and the manifest's `sha256` of e
 entry) and raises `HistoryCorrupt` on a mismatch, after the messages have been yielded.
 A response in another encoding than gzip or none, or without the `ETag` the service sends
 for its encoding, is refused before any message, since it could be neither checked nor
-resumed. A line longer than 64 MiB is refused, uncompressed or gzip, so a body that
-decompresses without end never takes more memory than that; the error can come part way
-through a download, after messages have been yielded.
+resumed. A line longer than 64 MiB is refused, uncompressed or gzip, which bounds the
+memory a body that decompresses without end can take to a small multiple of that limit;
+the error can come part way through a download, after messages have been yielded.
 
 Every error this module raises has a code, such as `QTE-HISTORY-PENDING`, in its `code`
 attribute and at the start of its message: docs/errors.md says what each means and how to
