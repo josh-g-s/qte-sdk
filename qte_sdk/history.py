@@ -92,16 +92,26 @@ and the service's own word is kept in `HistoryError.status`; a manifest entry wi
 status this SDK does not know is passed on in the `Manifest` as it is, and its data is not
 included.
 
-Downloads are uncompressed so that a dropped connection can be resumed: the client asks
-for the rest of the same data with an HTTP `Range` request, up to `max_resumes` times.
-The service may answer with the whole data again instead of the rest. If its `ETag` shows
-the data is unchanged, the bytes already delivered are read and discarded, so nothing is
+Each download asks for gzip, which the service sends 5 to 10 times smaller, and the
+client decompresses it as it arrives; the session listing is always uncompressed. Every
+count, offset and digest is of the uncompressed bytes. A dropped connection is resumed:
+the client asks for the rest of the same data with an HTTP `Range` request, uncompressed
+and from the number of uncompressed bytes it already has, up to `max_resumes` times. A
+gzip body that ends early, fails its trailer's CRC or length check, or has a broken
+chunked framing before the gzip end counts as a drop; data after the gzip end is
+corrupt. A drop once every byte has arrived and matches the stated digests (one in the
+gzip trailer, say) needs no resume, and the download finishes. The service may
+answer a resume with the whole data again instead of the rest. If its `ETag` shows the
+data is unchanged, the bytes already delivered are read and discarded, so nothing is
 yielded twice; if the data changed, `HistoryChanged` is raised. The client checks what
 it received against the SHA-256 digest the service states for it (the `ETag` of a single
-stream, the manifest's `sha256` of each range entry) and raises
-`HistoryCorrupt` on a mismatch, after the messages have been yielded. A response without
-the identity `ETag` the service sends is refused before any message, since it could be
-neither checked nor resumed.
+stream, without a gzip `ETag`'s `-gzip` suffix, and the manifest's `sha256` of each range
+entry) and raises `HistoryCorrupt` on a mismatch, after the messages have been yielded.
+A response in another encoding than gzip or none, or without the `ETag` the service sends
+for its encoding, is refused before any message, since it could be neither checked nor
+resumed. A line longer than 64 MiB is refused, uncompressed or gzip, which bounds the
+memory a body that decompresses without end can take to a small multiple of that limit;
+the error can come part way through a download, after messages have been yielded.
 
 Every error this module raises has a code, such as `QTE-HISTORY-PENDING`, in its `code`
 attribute and at the start of its message: docs/errors.md says what each means and how to
@@ -152,7 +162,8 @@ import socket
 import ssl
 import threading
 import time
-from collections.abc import AsyncGenerator, Iterable
+import zlib
+from collections.abc import AsyncGenerator, Iterable, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -219,6 +230,12 @@ DEFAULT_MAX_RESUMES = 3
 _CHUNK = 64 * 1024
 _ERROR_BODY_LIMIT = 64 * 1024
 _LISTING_LIMIT = 16 * 1024 * 1024  # far above a listing of many terms' sessions
+# The longest line of a download the client holds while waiting for its newline, and a
+# bound on the memory a gzip body that expands without end can take. The longest lines
+# the service sends are a range manifest (about 15.9 MB at its default cap of 70000
+# triples, growing with that cap) and a whole term in one line (about 14.2 MB): 64 MiB
+# leaves room for a cap four times the default.
+_LINE_LIMIT = 64 * 1024 * 1024
 _NDJSON = "application/x-ndjson"
 _HEX_DIGEST = re.compile(r"[0-9a-fA-F]{64}")  # the shape; compared exactly, as sent
 # An ETag: the lowercase hex SHA-256 digest, quoted, with "-gzip" inside the quotes on the
@@ -379,7 +396,8 @@ class HistoryRequestRejected(HistoryError):
 class HistoryInterrupted(HistoryError):
     """The connection dropped during a download and could not be resumed. The messages
     yielded before it are incomplete, and were not checked against the stated digest.
-    `bytes_received` counts what arrived. Code `QTE-HISTORY-INTERRUPTED`."""
+    `bytes_received` counts what arrived, in uncompressed bytes, also for a download that
+    came gzip-compressed. Code `QTE-HISTORY-INTERRUPTED`."""
 
     code = _errors.HISTORY_INTERRUPTED
 
@@ -850,8 +868,14 @@ class HistoryClient:
         first, as a `Manifest`, or a `ReportsManifest` with `reports`."""
         reply = await self._first_reply(target)
         try:
-            etag = cast(_Validator, reply.etag)
-            total = reply.length
+            # A gzip body is decompressed as it arrives; every count, offset and digest
+            # below is of the decompressed (identity) bytes, as the contract states them.
+            decoder = zlib.decompressobj(wbits=31) if reply.ndjson_gzip else None
+            # The identity ETag: a gzip ETag with its "-gzip" suffix set aside.
+            etag = cast(_Validator, reply.etag if decoder is None else reply.gzip_etag)
+            # A gzip body's Content-Length, if any, is its compressed length: no bound on
+            # the identity bytes.
+            total = reply.length if decoder is None else None
             if framed:
                 progress: _Progress = _FramedProgress(reply.retry_after, reports)
             else:
@@ -867,15 +891,40 @@ class HistoryClient:
                     chunk = await asyncio.to_thread(reply.response.read1, _CHUNK)
                 except (OSError, http.client.HTTPException) as error:
                     chunk, dropped = b"", type(error).__name__
+                if decoder is not None:
+                    if decoder.eof:
+                        if chunk:
+                            raise HistoryCorrupt("the response has data after its gzip end")
+                        # Complete and checked by its trailer, whatever follows it.
+                        break
+                    for piece in _inflate(decoder, chunk):
+                        if isinstance(piece, str):
+                            dropped = piece
+                            break
+                        for item in self._take(progress, piece, total, reply.status):
+                            yield item
+                        # A read may expand to many pieces: let other tasks, and a
+                        # cancel, run between them.
+                        await asyncio.sleep(0)
+                    if dropped is None and (chunk or decoder.eof):
+                        continue
+                    if dropped is None:
+                        dropped = f"gzip data ended after {progress.received} bytes"
+                    if progress.verified():
+                        # Every byte arrived and matches the stated digests (the drop was
+                        # in the gzip trailer, say). A resume from the end would only
+                        # fetch the whole object again.
+                        _log.debug("history download dropped (%s) once complete", dropped)
+                        break
+                    decoder = None  # a resume asks for, and checks, the identity bytes
+                    chunk = b""
                 if chunk and skip:
                     discarded = min(skip, len(chunk))
                     chunk, skip = chunk[discarded:], skip - discarded
                     if not chunk:
                         continue
                 if chunk:
-                    if total is not None and progress.received + len(chunk) > total:
-                        raise HistoryCorrupt("the response is longer than the service stated")
-                    for item in progress.feed(chunk):
+                    for item in self._take(progress, chunk, total, reply.status):
                         yield item
                     continue
                 # Ending while bytes already delivered are still being discarded is a
@@ -904,13 +953,23 @@ class HistoryClient:
         finally:
             reply.close()
 
+    @staticmethod
+    def _take(progress: "_Progress", chunk: bytes, total: int | None, status: int) -> list[Any]:
+        """The items `chunk` completes, after checking it stays within the stated length
+        (`total`; `feed` checks a range manifest's own) and the longest line the client
+        holds. `status` is the HTTP status of the response `chunk` came in."""
+        if total is not None and progress.received + len(chunk) > total:
+            raise HistoryCorrupt("the response is longer than the service stated")
+        return progress.feed(chunk, status)
+
     async def _first_reply(self, target: str, *, listing: bool = False) -> "_Reply":
         """The first answer that is not one to wait on, checked to be a download (or, with
         `listing`, a JSON listing) the service sends; an error answer is raised."""
         waited = 0.0
         retries = 0
         while True:
-            reply = await self._call(target, None)
+            # A download asks for gzip; the listing is always identity.
+            reply = await self._call(target, None, gzip=not listing)
             if reply.status == 200 and listing:
                 if not reply.json_identity:
                     reply.close()
@@ -921,15 +980,23 @@ class HistoryClient:
                     )
                 return reply
             if reply.status == 200:
-                if not reply.ndjson_identity:
+                if not (reply.ndjson_identity or reply.ndjson_gzip):
                     reply.close()
                     raise HistoryError(
-                        "the response is not uncompressed NDJSON as the history service sends",
+                        "the response is not NDJSON, uncompressed or gzip, as the history "
+                        "service sends",
                         http_status=200,
                         code=_errors.HISTORY_BAD_RESPONSE,
                     )
-                if reply.etag is None:
+                if reply.ndjson_gzip and reply.gzip_etag is None:
                     # Without it the data can be neither checked nor resumed.
+                    reply.close()
+                    raise HistoryError(
+                        "the gzip response carries no gzip ETag as the history service sends",
+                        http_status=200,
+                        code=_errors.HISTORY_BAD_RESPONSE,
+                    )
+                if reply.ndjson_identity and reply.etag is None:
                     reply.close()
                     raise HistoryError(
                         "the response carries no identity ETag as the history service sends",
@@ -1019,10 +1086,12 @@ class HistoryClient:
             )
         return reply, 0
 
-    async def _call(self, target: str, resume: "tuple[int, _Validator] | None") -> "_Reply":
+    async def _call(
+        self, target: str, resume: "tuple[int, _Validator] | None", *, gzip: bool = False
+    ) -> "_Reply":
         handoff = _Handoff()
         try:
-            return await asyncio.to_thread(self._request_safely, target, resume, handoff)
+            return await asyncio.to_thread(self._request_safely, target, resume, handoff, gzip)
         except BaseException:
             # Cancelled, most likely: wake the worker thread at once, and leave it to
             # close the connection, and any response that arrives after this, on its way
@@ -1031,13 +1100,17 @@ class HistoryClient:
             raise
 
     def _request_safely(
-        self, target: str, resume: "tuple[int, _Validator] | None", handoff: "_Handoff"
+        self,
+        target: str,
+        resume: "tuple[int, _Validator] | None",
+        handoff: "_Handoff",
+        gzip: bool = False,
     ) -> "_Reply":
         """`_request`, with any error made safe here in the worker thread, before anything
         (such as the awaiting task) can keep a reference to the original."""
         failure: BaseException
         try:
-            return handoff.deliver(self._request(target, resume, handoff))
+            return handoff.deliver(self._request(target, resume, handoff, gzip))
         except BaseException as error:
             failure = _sanitised(error, self._secret)
         # Raised outside the handler, so the original error, whose traceback holds the
@@ -1078,14 +1151,22 @@ class HistoryClient:
             raise
 
     def _request(
-        self, target: str, resume: "tuple[int, _Validator] | None", handoff: "_Handoff"
+        self,
+        target: str,
+        resume: "tuple[int, _Validator] | None",
+        handoff: "_Handoff",
+        gzip: bool = False,
     ) -> "_Reply":
-        """Send one GET and read the response status and headers. Runs in a worker thread."""
+        """Send one GET and read the response status and headers. Runs in a worker thread.
+
+        With `gzip`, the GET asks for gzip. A resume never passes it: its `Range` offset
+        counts identity bytes, and the service answers a `Range` request with identity
+        only."""
         conn = self._connect(handoff)
         try:
             conn.putrequest("GET", target, skip_accept_encoding=True)
-            # Uncompressed, so byte offsets are valid for a resume.
-            conn.putheader("Accept-Encoding", "identity")
+            accept = "gzip" if gzip else "identity"
+            conn.putheader("Accept-Encoding", accept)
             conn.putheader("Authorization", "Bearer " + self._secret.value)
             if resume is not None:
                 conn.putheader("Range", f"bytes={resume[0]}-")
@@ -1362,12 +1443,14 @@ class _Reply:
         # only as a `_Validator`.
         self.etag = _identity_etag(etag)
         self.etag_digest = _etag_digest(etag)
+        self.gzip_etag = _gzip_etag(etag)
         del etag
         self.length = _count(_header(response, "Content-Length", secret))
         self.retry_after = _seconds(_header(response, "Retry-After", secret))
         encoding = _header(response, "Content-Encoding", secret)
         content_type = _header(response, "Content-Type", secret)
         self.ndjson_identity = _is_identity(encoding, content_type, _NDJSON)
+        self.ndjson_gzip = _is_gzip(encoding, content_type, _NDJSON)
         self.json_identity = _is_identity(encoding, content_type, "application/json")
         del encoding, content_type
         # For a 206: where the slice starts, and the length of the whole data. Both are
@@ -1425,6 +1508,16 @@ def _etag_digest(value: str | None) -> _Validator | None:
     return None if match is None else _Validator(f'"{match.group(1)}"')
 
 
+def _gzip_etag(value: str | None) -> _Validator | None:
+    """The identity form, `"<hex sha256>"`, of a gzip ETag, `"<hex sha256>-gzip"`, else
+    None. The hex is the identity bytes' digest, and the identity form is the validator
+    a resume names in `If-Range`."""
+    match = _ETAG.fullmatch(value or "")
+    if match is None or not match.group(2):
+        return None
+    return _Validator(f'"{match.group(1)}"')
+
+
 def _count(value: str | None) -> int | None:
     return int(value) if value is not None and value.isascii() and value.isdigit() else None
 
@@ -1435,8 +1528,39 @@ def _seconds(value: str | None) -> float | None:
 
 
 def _is_identity(encoding: str | None, content_type: str | None, media: str) -> bool:
+    return _coded(encoding, content_type, media) == "identity"
+
+
+def _is_gzip(encoding: str | None, content_type: str | None, media: str) -> bool:
+    return _coded(encoding, content_type, media) == "gzip"
+
+
+def _coded(encoding: str | None, content_type: str | None, media: str) -> str | None:
+    """The response's content coding, `identity` when none is stated, if its media type
+    is `media`, else None."""
     media_type = (content_type or "").split(";", 1)[0].strip().lower()
-    return (encoding or "identity").strip().lower() == "identity" and media_type == media
+    return (encoding or "identity").strip().lower() if media_type == media else None
+
+
+def _inflate(decoder: "zlib._Decompress", data: bytes) -> Iterator[bytes | str]:
+    """The decompressed bytes of `data`, in pieces of at most `_CHUNK` bytes, so a body
+    that expands without end never takes more memory than one piece. Yields a reason, as
+    a `str`, and stops if the gzip data fails a check (a bad block, or the trailer's CRC
+    or length), which ends the response as a drop; data after the gzip end is corrupt."""
+    pending = bool(data)
+    while pending:
+        try:
+            piece = decoder.decompress(data, _CHUNK)
+        except zlib.error:
+            yield "gzip data failed its check"
+            return
+        data = decoder.unconsumed_tail
+        if decoder.eof and (data or decoder.unused_data):
+            raise HistoryCorrupt("the response has data after its gzip end")
+        if piece:
+            yield piece
+        # A full piece may leave output held in the decoder with no input left.
+        pending = not decoder.eof and (bool(data) or len(piece) == _CHUNK)
 
 
 def _slice_to_end(value: str | None, length: int | None) -> tuple[int | None, int | None]:
@@ -1456,13 +1580,26 @@ class _Progress:
         self.received = 0
         self._buffer = bytearray()
 
-    def feed(self, chunk: bytes) -> list[Any]:
+    def feed(self, chunk: bytes, status: int = 200) -> list[Any]:
         position = self.received
         self.received += len(chunk)
         self._buffer += chunk
-        *lines, rest = self._buffer.split(b"\n")
-        self._buffer = bytearray(rest)
+        lines: list[bytearray] = []
+        if b"\n" in chunk:
+            *lines, rest = self._buffer.split(b"\n")
+            self._buffer = bytearray(rest)
+        if any(len(line) > _LINE_LIMIT for line in (*lines, self._buffer)):
+            raise HistoryError(
+                "a line of the response is longer than the client accepts",
+                http_status=status,
+                code=_errors.HISTORY_BAD_RESPONSE,
+            )
         items = [item for line in lines for item in self._line(bytes(line))]
+        # A range manifest parsed from this chunk bounds the rest of it too, before any of
+        # its lines is yielded.
+        stated = self.stated_length()
+        if stated is not None and self.received > stated:
+            raise HistoryCorrupt("the response is longer than the service stated")
         # After the lines, so a range response's manifest is known before its entries' bytes.
         self._digest(position, chunk)
         return items
@@ -1481,6 +1618,14 @@ class _Progress:
     def _line(self, line: bytes) -> list[Any]:
         return [line]
 
+    def stated_length(self) -> int | None:
+        """The length the data itself states, if any (a range manifest's layout)."""
+        return None
+
+    def verified(self) -> bool:
+        """Whether every byte stated has arrived and matches its stated digest."""
+        raise NotImplementedError
+
     def _digest(self, position: int, chunk: bytes) -> None:
         raise NotImplementedError
 
@@ -1498,6 +1643,9 @@ class _StreamProgress(_Progress):
 
     def _digest(self, position: int, chunk: bytes) -> None:
         self._hash.update(chunk)
+
+    def verified(self) -> bool:
+        return self._expected is not None and self._hash.hexdigest() == self._expected
 
     def _verify(self) -> None:
         if self._expected is not None and self._hash.hexdigest() != self._expected:
@@ -1547,6 +1695,20 @@ class _FramedProgress(_Progress):
                 break
             index += 1
         self._next = index
+
+    def stated_length(self) -> int | None:
+        if self._manifest is None:
+            return None
+        return max((stop for _, stop, _, _ in self._slices), default=self._start)
+
+    def verified(self) -> bool:
+        # No more than the manifest states ever arrives (`feed` refuses it), and an entry
+        # cut short does not match its digest.
+        if self._manifest is None:
+            return False
+        return all(
+            digest.hexdigest().lower() == expected for _, _, expected, digest in self._slices
+        )
 
     def finish(self, total: int | None) -> list[Any]:
         items = super().finish(total)
