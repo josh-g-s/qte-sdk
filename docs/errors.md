@@ -1,6 +1,6 @@
 # Warning and error codes
 
-**Version:** 0.29
+**Version:** 0.30
 
 Every warning and error the SDK raises or logs at WARNING has a code, such as `QTE-TOKEN-MISSING`: about the token, the exchange address, the `.env`, the session, the connection, the history service, replays, updates, the log format, the message budgets and halted options chains. This page lists each code with its cause and fix, and the exit codes of the SDK's commands. Errors raised for a wrong argument, such as a `TypeError` for a string where a list belongs, and network errors such as `TimeoutError`, have no code: their message and the line of your code in the traceback say what to change.
 
@@ -354,7 +354,7 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 
 ### QTE-HISTORY-INTERRUPTED
 
-- Raised as: `qte_sdk.history.HistoryInterrupted`, a `HistoryError`, with `bytes_received`.
+- Raised as: `qte_sdk.history.HistoryInterrupted`, a `HistoryError`, with `bytes_received`, the uncompressed bytes that arrived, also for a download that came gzip-compressed.
 - Cause: The connection dropped during a download more often than `max_resumes` allows. The messages already yielded are incomplete, and were not checked against the digest the service stated.
 - Fix: Discard them and fetch again, or raise `max_resumes`.
 
@@ -372,8 +372,8 @@ These are raised by `qte_sdk.history.HistoryClient`, its `fetch`, `fetch_session
 
 ### QTE-HISTORY-BAD-RESPONSE
 
-- Raised as: `qte_sdk.history.HistoryError`, before any message or when resuming.
-- Cause: The response is not one the history service sends: not NDJSON, uncompressed or gzip, without the `ETag` the service sends for its encoding (the identity `ETag`, or the gzip `ETag` ending `-gzip`), with a line longer than 16 MiB, a range response with no manifest or one that cannot be read, or an answer to a resume that is not the rest of the same data. The client can neither check nor resume it.
+- Raised as: `qte_sdk.history.HistoryError`, before any message or when resuming; for a line that is too long, part way through the download, after messages have been yielded.
+- Cause: The response is not one the history service sends: not NDJSON, uncompressed or gzip, without the `ETag` the service sends for its encoding (the identity `ETag`, or the gzip `ETag` ending `-gzip`), with a line longer than 64 MiB, a range response with no manifest or one that cannot be read, or an answer to a resume that is not the rest of the same data. The client can neither check nor resume it.
 - Fix: Check that `QTE_HISTORY_URL` is the history service's address. If it is, tell the course team.
 
 ### QTE-HISTORY-UNEXPECTED-STATUS

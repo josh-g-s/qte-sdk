@@ -215,12 +215,26 @@ class FakeHistory:
     gzip_after: bytes = b""
     # Send the gzip body with its compressed Content-Length instead of chunked.
     gzip_length: bool = False
+    # The size of each chunk of a chunked gzip body; 1 lets a drop fall on any byte.
+    gzip_chunk: int = 512
+    # Hold the chunked gzip body's end until a resume (a request with a Range) arrives,
+    # and record whether the body was still held when it did.
+    gzip_hold_until_resume: bool = False
+    gzip_holding: bool = False
+    gzip_held_at_resume: bool | None = None
+    resumed: threading.Event = field(default_factory=threading.Event)
+    # Spaces added inside a range response's manifest line, before its closing brace.
+    manifest_pad: int = 0
     gzip_served: int = 0
     requests: list[tuple[str, dict[str, str]]] = field(default_factory=list)
 
     def respond(self, handler: BaseHTTPRequestHandler) -> None:
         headers = {name.lower(): value for name, value in handler.headers.items()}
         self.requests.append((handler.path, headers))
+        if "range" in headers:
+            if self.gzip_held_at_resume is None:
+                self.gzip_held_at_resume = self.gzip_holding
+            self.resumed.set()
         if self.answer is not None:
             self.answer.wait(HOLD_LIMIT)
         if self.answer_resume is not None and "range" in headers:
@@ -310,6 +324,8 @@ class FakeHistory:
                         offset += len(blob)
                     entries.append(entry)
         manifest = json.dumps({"manifest": entries}, separators=(",", ":")).encode() + b"\n"
+        if self.manifest_pad:
+            manifest = manifest[:-2] + b" " * self.manifest_pad + manifest[-2:]
         if self.raw_manifest is not None:
             manifest = self.raw_manifest
         digest_input = [
@@ -412,6 +428,8 @@ class FakeHistory:
                 offset += len(blob)
             entries.append(entry)
         manifest = json.dumps({"manifest": entries}, separators=(",", ":")).encode() + b"\n"
+        if self.manifest_pad:
+            manifest = manifest[:-2] + b" " * self.manifest_pad + manifest[-2:]
         if self.raw_manifest is not None:
             manifest = self.raw_manifest
         digest_input = [{k: e[k] for k in ("session_date", "status", "sha256")} for e in entries]
@@ -501,7 +519,7 @@ class FakeHistory:
             handler.close_connection = True
             return
         drop = self.drop_after.pop(handler.path, None)
-        size = 512
+        size = self.gzip_chunk
         for at in range(0, len(data), size):
             piece = data[at : at + size]
             if drop is not None and at + len(piece) > drop:
@@ -512,6 +530,13 @@ class FakeHistory:
                 handler.close_connection = True
                 return
             handler.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+        if self.gzip_hold_until_resume:
+            handler.wfile.flush()
+            self.gzip_holding = True
+            self.resumed.wait(30)
+            self.gzip_holding = False
+            handler.close_connection = True
+            return
         if self.gzip_after:
             handler.wfile.write(f"{len(self.gzip_after):x}\r\n".encode())
             handler.wfile.write(self.gzip_after + b"\r\n")
@@ -1063,6 +1088,7 @@ def dropped_once(token: str, **options: Any) -> FakeHistory:
     ("resume_headers", "error"),
     [
         ({"Content-Range": "bytes 99-{last}/{total}"}, HistoryError),
+        ({"Content-Range": "bytes 99-{last}/{total}", "Content-Length": "{from_99}"}, HistoryError),
         ({"Content-Range": "bytes 100-50/{total}"}, HistoryError),
         ({"Content-Range": "bytes 100-{last}/*"}, HistoryError),
         ({"Content-Range": None}, HistoryError),
@@ -1073,12 +1099,22 @@ def dropped_once(token: str, **options: Any) -> FakeHistory:
         ),
         ({"ETag": etag_of(b"other data")}, HistoryChanged),
     ],
-    ids=["wrong-start", "backwards", "unknown-length", "no-range", "gzip", "longer", "new-etag"],
+    ids=[
+        "wrong-start",
+        "wrong-start-consistent",
+        "backwards",
+        "unknown-length",
+        "no-range",
+        "gzip",
+        "longer",
+        "new-etag",
+    ],
 )
 async def test_a_resume_that_is_not_the_rest_of_the_same_data_is_refused(resume_headers, error):
     token = synthetic_token()
     total = len(many_books(10))
     sizes = {"last": total - 1, "total": total, "bigger_total": total + 1, "longer": total - 99}
+    sizes["from_99"] = total - 99
     headers = {
         name: None if value is None else value.format(**sizes)
         for name, value in resume_headers.items()
@@ -3276,7 +3312,6 @@ GZIP_DROPS = {
     "truncated-mid-body": {"gzip_mangle": cut_mid_body},
     "bad-crc": {"gzip_mangle": bad_crc},
     "bad-isize": {"gzip_mangle": bad_isize},
-    "missing-trailer": {"gzip_mangle": no_trailer},
     "chunked-framing": {"drop_after": {GZIP_PATH: 700}},
 }
 
@@ -3314,8 +3349,10 @@ async def test_a_dropped_gzip_download_resumes_once_with_identity_and_verifies(o
     elif options["gzip_mangle"] is cut_mid_body:
         assert offset == inflated(cut_mid_body(compressed))
     else:
-        # Everything the trailer's check did not throw away is delivered, and only that.
-        assert 0 < offset <= len(body)
+        # The read holding the trailer fails its check, so all it decompressed is thrown
+        # away: everything before that last 512-byte chunk is delivered, and only that.
+        assert offset == inflated(compressed[: (len(compressed) - 1) // 512 * 512])
+        assert offset < len(body)
 
 
 @pytest.mark.parametrize("options", GZIP_DROPS.values(), ids=GZIP_DROPS.keys())
@@ -3437,7 +3474,8 @@ async def test_a_second_gzip_member_after_the_end_is_corrupt():
 
 async def test_a_gzip_bomb_with_no_newline_stops_at_the_line_limit_in_bounded_memory():
     token = synthetic_token()
-    bomb = gzip.compress(b"x" * (64 * 1024 * 1024), mtime=0)  # about 64 KiB
+    # Twice the line limit, with no newline; about 128 KiB compressed.
+    bomb = gzip.compress(b"x" * (2 * history._LINE_LIMIT), mtime=0)
     fake = gzip_fake(token, book(1), gzip_mangle=lambda data: bomb)
     tracemalloc.start()
     try:
@@ -3449,8 +3487,8 @@ async def test_a_gzip_bomb_with_no_newline_stops_at_the_line_limit_in_bounded_me
         tracemalloc.stop()
     assert caught.value.code == errors.HISTORY_BAD_RESPONSE
     assert "longer than the client accepts" in str(caught.value)
-    # The 64 MiB body is never held: the line limit (16 MiB) and a piece or two at most.
-    assert peak < 32 * 1024 * 1024
+    # The whole body is never held: the line limit (64 MiB) and a few pieces at most.
+    assert peak < history._LINE_LIMIT + 16 * 1024 * 1024
 
 
 async def test_a_gzip_bomb_in_a_range_stops_at_the_length_its_manifest_states():
@@ -3475,6 +3513,17 @@ async def test_a_whole_gzip_body_whose_chunked_end_is_missing_needs_no_resume():
         items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
     # The gzip trailer and the digest both checked out: nothing is missing.
     assert len(items) == 700
+    assert len(fake.requests) == 1
+
+
+async def test_a_whole_gzip_body_whose_chunked_end_is_missing_and_digest_wrong_is_corrupt():
+    token = synthetic_token()
+    fake = gzip_fake(token, book(1) + book(2), gzip_unterminated=True)
+    fake.etag_override = {GZIP_PATH: etag_of(b"something else")}
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="digest"):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    # Ended after the gzip end, whose trailer checked out: no resume is asked for.
     assert len(fake.requests) == 1
 
 
@@ -3572,3 +3621,204 @@ async def test_a_gzip_read_that_expands_to_many_pieces_lets_other_tasks_run_betw
     many = [marks for marks in by_call.values() if len(marks) > 1]
     assert many, "no read expanded to more than one piece"
     assert all(len(set(marks)) == len(marks) for marks in many)
+
+
+def one_byte_drop(token: str, body: bytes, at: int, **options: Any) -> FakeHistory:
+    """A fake sending the gzip body one byte per chunk, cut after `at` compressed bytes."""
+    return gzip_fake(token, body, gzip_chunk=1, drop_after={GZIP_PATH: at}, **options)
+
+
+def resumed_at(fake: FakeHistory) -> int:
+    assert len(fake.requests) == 2
+    assert fake.requests[1][1]["accept-encoding"] == "identity"
+    return int(fake.requests[1][1]["range"].removeprefix("bytes=").removesuffix("-"))
+
+
+async def test_a_drop_inside_the_gzip_header_resumes_from_byte_0():
+    token = synthetic_token()
+    body = many_books(20)
+    fake = one_byte_drop(token, body, 5)  # the header is 10 bytes
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert len(items) == 20
+    assert resumed_at(fake) == 0
+
+
+async def test_a_drop_in_the_last_gzip_block_resumes_from_what_it_delivered():
+    token = synthetic_token()
+    body = many_books(20)
+    data = gzip.compress(body, mtime=0)
+    # The last cut before the trailer that leaves bytes undelivered.
+    at = max(k for k in range(len(data) - 8) if inflated(data[:k]) < len(body))
+    fake = one_byte_drop(token, body, at)
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert len(items) == 20
+    assert resumed_at(fake) == inflated(data[:at])
+
+
+@pytest.mark.parametrize("max_resumes", [0, 3])
+async def test_a_drop_in_the_gzip_trailer_once_the_digest_verifies_sends_no_resume(max_resumes):
+    token = synthetic_token()
+    body = many_books(20)
+    data = gzip.compress(body, mtime=0)
+    assert inflated(data[:-4]) == len(body)
+    fake = one_byte_drop(token, body, len(data) - 4)
+    with serve_history(fake) as url:
+        client = HistoryClient(url, token, max_resumes=max_resumes)
+        items = await collect(client.fetch(DAY, "TEST", "book"))
+    assert [item.grid_time for item in items] == [1000 * seq for seq in range(1, 21)]
+    assert len(fake.requests) == 1
+
+
+async def test_a_gzip_body_missing_its_trailer_that_verifies_needs_no_resume():
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    fake = gzip_fake(token, body, gzip_mangle=no_trailer)
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token, max_resumes=0).fetch(DAY, "TEST", "book"))
+    assert len(items) == 700
+    assert len(fake.requests) == 1
+
+
+async def test_a_gzip_range_missing_its_trailer_that_verifies_needs_no_resume():
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): many_books(30), (DAY, "AAA", "trades"): trades(1, "AAA")}
+    fake = FakeHistory(token, objects, gzip=True, gzip_mangle=no_trailer)
+    with serve_history(fake) as url:
+        items = await collect(
+            HistoryClient(url, token, max_resumes=0).fetch_range(
+                DAY, DAY, ["AAA"], ["book", "trades"]
+            )
+        )
+    assert [type(item) for item in items] == [Manifest] + [Book] * 30 + [Trades]
+    assert len(fake.requests) == 1
+
+
+async def test_a_gzip_range_drop_with_an_entry_not_matching_its_digest_still_resumes():
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): book(1, "AAA")}
+    fake = FakeHistory(token, objects, gzip=True, gzip_mangle=no_trailer)
+    # Every byte the manifest states arrives, but one entry does not match its digest.
+    fake.gzip_body = lambda body: body.replace(b'"99950000"', b'"99950001"')
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="entry"):
+            await collect(HistoryClient(url, token).fetch_range(DAY, DAY, ["AAA"], ["book"]))
+    assert len(fake.requests) == 2
+    assert "range" in fake.requests[1][1]
+
+
+async def test_a_gzip_stream_drop_not_matching_its_digest_still_resumes():
+    token = synthetic_token()
+    wrong = etag_of(b"something else")
+    fake = gzip_fake(token, book(1) + book(2), gzip_mangle=no_trailer)
+    fake.etag_override = {GZIP_PATH: wrong}
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="digest"):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert len(fake.requests) == 2
+
+
+async def test_a_gzip_whole_answer_to_a_resume_is_refused():
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    gzip_tag = etag_of(body)[:-1] + '-gzip"'
+    fake = gzip_fake(
+        token,
+        body,
+        gzip_mangle=cut_mid_body,
+        whole_on_resume=True,
+        whole_resume_headers={"Content-Encoding": "gzip", "ETag": gzip_tag},
+    )
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError) as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert type(caught.value) is HistoryError
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+    assert "not uncompressed NDJSON" in str(caught.value)
+    assert len(fake.requests) == 2
+
+
+async def test_a_bad_gzip_block_mid_body_is_a_drop_resumed_at_once(caplog):
+    caplog.set_level(logging.DEBUG, logger="qte_sdk.history")
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    first = body[: len(body) // 2]
+    coder = zlib.compressobj(wbits=31)
+    head = coder.compress(first) + coder.flush(zlib.Z_FULL_FLUSH)
+    # Byte-aligned after the full flush: 0xff starts a block of the reserved type 3.
+    sent = head + b"\xff" * 64
+    fake = gzip_fake(
+        token,
+        body,
+        gzip_mangle=lambda data: sent,
+        gzip_chunk=len(head),
+        gzip_hold_until_resume=True,
+    )
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert [item.grid_time for item in items] == [1000 * seq for seq in range(1, 701)]
+    assert resumed_at(fake) == len(first)
+    # Resumed while the bad body was still open, not after reading to its end.
+    assert fake.gzip_held_at_resume is True
+    logged = [record.getMessage() for record in caplog.records]
+    assert (
+        f"history download dropped (gzip data failed its check); resuming at byte {len(first)}"
+        in logged
+    )
+
+
+async def test_an_upper_case_gzip_content_encoding_is_gzip():
+    token = synthetic_token()
+    body = many_books(20)
+    fake = gzip_fake(token, body, first_headers={"Content-Encoding": "GZIP"})
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert len(items) == 20
+    assert len(fake.requests) == 1 and fake.gzip_served == 1
+
+
+@pytest.mark.parametrize("coded", [True, False], ids=["gzip", "identity"])
+async def test_surplus_lines_in_the_piece_holding_the_manifest_are_never_yielded(coded):
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): book(1, "AAA")}
+    fake = FakeHistory(token, objects, gzip=coded)
+    surplus = book(2, "AAA") + book(3, "AAA")
+    if coded:
+        fake.gzip_body = lambda body: body + surplus
+    else:
+        original = fake.serve
+
+        def serve(handler: Any, body: bytes, *args: Any, **kwargs: Any) -> None:
+            original(handler, body + surplus, *args, **kwargs)
+
+        fake.serve = serve  # type: ignore[method-assign]
+    items: list[Any] = []
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="longer than the service stated"):
+            async for item in HistoryClient(url, token).fetch_range(DAY, DAY, ["AAA"], ["book"]):
+                items.append(item)
+    assert not [item for item in items if isinstance(item, Book) and item.grid_time > 1000]
+
+
+async def test_an_identity_manifest_line_over_16_mib_is_read():
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): book(1, "AAA")}
+    # Longer than a manifest of 70000 triples (about 15.9 MB), as a higher cap sends.
+    fake = FakeHistory(token, objects, manifest_pad=20 * 1024 * 1024)
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch_range(DAY, DAY, ["AAA"], ["book"]))
+    assert [type(item) for item in items] == [Manifest, Book]
+
+
+async def test_a_line_over_the_limit_in_a_resume_reports_the_206_status(monkeypatch):
+    monkeypatch.setattr(history, "_LINE_LIMIT", 1000)
+    token = synthetic_token()
+    body = book(1) + b" " * 2000 + book(2)
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body}, drop_after={GZIP_PATH: 50})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError, match="longer than the client accepts") as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+    assert caught.value.http_status == 206
+    assert len(fake.requests) == 2

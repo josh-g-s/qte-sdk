@@ -525,7 +525,7 @@ CODES: dict[str, Entry] = {
         "Check that QTE_HISTORY_URL is the history service's address; if it is, tell the "
         "course team",
         "The response is not one the history service sends: not NDJSON, uncompressed or "
-        "gzip, no ETag for its encoding, a line over 16 MiB, no readable manifest, or a "
+        "gzip, no ETag for its encoding, a line over 64 MiB, no readable manifest, or a "
         "resume that is not the rest of the data",
         "Check QTE_HISTORY_URL",
     ),

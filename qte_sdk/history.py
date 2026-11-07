@@ -98,7 +98,9 @@ count, offset and digest is of the uncompressed bytes. A dropped connection is r
 the client asks for the rest of the same data with an HTTP `Range` request, uncompressed
 and from the number of uncompressed bytes it already has, up to `max_resumes` times. A
 gzip body that ends early, fails its trailer's CRC or length check, or has a broken
-chunked framing counts as a drop; data after the gzip end is corrupt. The service may
+chunked framing before the gzip end counts as a drop; data after the gzip end is
+corrupt. A drop once every byte has arrived and matches the stated digests (one in the
+gzip trailer, say) needs no resume, and the download finishes. The service may
 answer a resume with the whole data again instead of the rest. If its `ETag` shows the
 data is unchanged, the bytes already delivered are read and discarded, so nothing is
 yielded twice; if the data changed, `HistoryChanged` is raised. The client checks what
@@ -107,8 +109,9 @@ stream, without a gzip `ETag`'s `-gzip` suffix, and the manifest's `sha256` of e
 entry) and raises `HistoryCorrupt` on a mismatch, after the messages have been yielded.
 A response in another encoding than gzip or none, or without the `ETag` the service sends
 for its encoding, is refused before any message, since it could be neither checked nor
-resumed. A line longer than 16 MiB is refused, so a body that decompresses without end
-never takes more memory than that.
+resumed. A line longer than 64 MiB is refused, uncompressed or gzip, so a body that
+decompresses without end never takes more memory than that; the error can come part way
+through a download, after messages have been yielded.
 
 Every error this module raises has a code, such as `QTE-HISTORY-PENDING`, in its `code`
 attribute and at the start of its message: docs/errors.md says what each means and how to
@@ -227,10 +230,12 @@ DEFAULT_MAX_RESUMES = 3
 _CHUNK = 64 * 1024
 _ERROR_BODY_LIMIT = 64 * 1024
 _LISTING_LIMIT = 16 * 1024 * 1024  # far above a listing of many terms' sessions
-# The longest line of a download the client holds while waiting for its newline: far
-# above any line the service sends (an option chain is one line), and a bound on the
-# memory a gzip body that expands without end can take.
-_LINE_LIMIT = 16 * 1024 * 1024
+# The longest line of a download the client holds while waiting for its newline, and a
+# bound on the memory a gzip body that expands without end can take. The longest lines
+# the service sends are a range manifest (about 15.9 MB at its default cap of 70000
+# triples, growing with that cap) and a whole term in one line (about 14.2 MB): 64 MiB
+# leaves room for a cap four times the default.
+_LINE_LIMIT = 64 * 1024 * 1024
 _NDJSON = "application/x-ndjson"
 _HEX_DIGEST = re.compile(r"[0-9a-fA-F]{64}")  # the shape; compared exactly, as sent
 # An ETag: the lowercase hex SHA-256 digest, quoted, with "-gzip" inside the quotes on the
@@ -391,7 +396,8 @@ class HistoryRequestRejected(HistoryError):
 class HistoryInterrupted(HistoryError):
     """The connection dropped during a download and could not be resumed. The messages
     yielded before it are incomplete, and were not checked against the stated digest.
-    `bytes_received` counts what arrived. Code `QTE-HISTORY-INTERRUPTED`."""
+    `bytes_received` counts what arrived, in uncompressed bytes, also for a download that
+    came gzip-compressed. Code `QTE-HISTORY-INTERRUPTED`."""
 
     code = _errors.HISTORY_INTERRUPTED
 
@@ -895,7 +901,7 @@ class HistoryClient:
                         if isinstance(piece, str):
                             dropped = piece
                             break
-                        for item in self._take(progress, piece, total):
+                        for item in self._take(progress, piece, total, reply.status):
                             yield item
                         # A read may expand to many pieces: let other tasks, and a
                         # cancel, run between them.
@@ -904,6 +910,12 @@ class HistoryClient:
                         continue
                     if dropped is None:
                         dropped = f"gzip data ended after {progress.received} bytes"
+                    if progress.verified():
+                        # Every byte arrived and matches the stated digests (the drop was
+                        # in the gzip trailer, say). A resume from the end would only
+                        # fetch the whole object again.
+                        _log.debug("history download dropped (%s) once complete", dropped)
+                        break
                     decoder = None  # a resume asks for, and checks, the identity bytes
                     chunk = b""
                 if chunk and skip:
@@ -912,7 +924,7 @@ class HistoryClient:
                     if not chunk:
                         continue
                 if chunk:
-                    for item in self._take(progress, chunk, total):
+                    for item in self._take(progress, chunk, total, reply.status):
                         yield item
                     continue
                 # Ending while bytes already delivered are still being discarded is a
@@ -942,13 +954,13 @@ class HistoryClient:
             reply.close()
 
     @staticmethod
-    def _take(progress: "_Progress", chunk: bytes, total: int | None) -> list[Any]:
+    def _take(progress: "_Progress", chunk: bytes, total: int | None, status: int) -> list[Any]:
         """The items `chunk` completes, after checking it stays within the stated length
-        (`total`, or a range manifest's own) and the longest line the client holds."""
-        stated = total if total is not None else progress.stated_length()
-        if stated is not None and progress.received + len(chunk) > stated:
+        (`total`; `feed` checks a range manifest's own) and the longest line the client
+        holds. `status` is the HTTP status of the response `chunk` came in."""
+        if total is not None and progress.received + len(chunk) > total:
             raise HistoryCorrupt("the response is longer than the service stated")
-        return progress.feed(chunk)
+        return progress.feed(chunk, status)
 
     async def _first_reply(self, target: str, *, listing: bool = False) -> "_Reply":
         """The first answer that is not one to wait on, checked to be a download (or, with
@@ -1568,7 +1580,7 @@ class _Progress:
         self.received = 0
         self._buffer = bytearray()
 
-    def feed(self, chunk: bytes) -> list[Any]:
+    def feed(self, chunk: bytes, status: int = 200) -> list[Any]:
         position = self.received
         self.received += len(chunk)
         self._buffer += chunk
@@ -1579,10 +1591,15 @@ class _Progress:
         if any(len(line) > _LINE_LIMIT for line in (*lines, self._buffer)):
             raise HistoryError(
                 "a line of the response is longer than the client accepts",
-                http_status=200,
+                http_status=status,
                 code=_errors.HISTORY_BAD_RESPONSE,
             )
         items = [item for line in lines for item in self._line(bytes(line))]
+        # A range manifest parsed from this chunk bounds the rest of it too, before any of
+        # its lines is yielded.
+        stated = self.stated_length()
+        if stated is not None and self.received > stated:
+            raise HistoryCorrupt("the response is longer than the service stated")
         # After the lines, so a range response's manifest is known before its entries' bytes.
         self._digest(position, chunk)
         return items
@@ -1605,6 +1622,10 @@ class _Progress:
         """The length the data itself states, if any (a range manifest's layout)."""
         return None
 
+    def verified(self) -> bool:
+        """Whether every byte stated has arrived and matches its stated digest."""
+        raise NotImplementedError
+
     def _digest(self, position: int, chunk: bytes) -> None:
         raise NotImplementedError
 
@@ -1622,6 +1643,9 @@ class _StreamProgress(_Progress):
 
     def _digest(self, position: int, chunk: bytes) -> None:
         self._hash.update(chunk)
+
+    def verified(self) -> bool:
+        return self._expected is not None and self._hash.hexdigest() == self._expected
 
     def _verify(self) -> None:
         if self._expected is not None and self._hash.hexdigest() != self._expected:
@@ -1676,6 +1700,15 @@ class _FramedProgress(_Progress):
         if self._manifest is None:
             return None
         return max((stop for _, stop, _, _ in self._slices), default=self._start)
+
+    def verified(self) -> bool:
+        # No more than the manifest states ever arrives (`feed` refuses it), and an entry
+        # cut short does not match its digest.
+        if self._manifest is None:
+            return False
+        return all(
+            digest.hexdigest().lower() == expected for _, _, expected, digest in self._slices
+        )
 
     def finish(self, total: int | None) -> list[Any]:
         items = super().finish(total)
