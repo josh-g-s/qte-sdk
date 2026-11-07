@@ -1,7 +1,9 @@
 """The history client against a local fake history service on 127.0.0.1."""
 
 import asyncio
+import gzip
 import hashlib
+import http.client
 import json
 import logging
 import secrets
@@ -15,7 +17,9 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Iterator
+import tracemalloc
+import zlib
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -197,6 +201,21 @@ class FakeHistory:
     # Paths answered 501, as an endpoint not built yet is.
     unbuilt: set[str] = field(default_factory=set)
     credential_term: bool = True  # False: the service's own credential term is missing
+    # Answer a request with no Range whose Accept-Encoding names gzip with gzip, chunked
+    # and with no Content-Length, under the gzip ETag, as the service does; a request with
+    # a Range is answered identity, with "Content-Encoding: identity". `drop_after` then
+    # cuts the compressed body mid-chunk, a chunked-framing error. `gzip_body` replaces
+    # the identity bytes compressed, and `gzip_mangle` the compressed bytes sent.
+    gzip: bool = False
+    gzip_body: Callable[[bytes], bytes] | None = None
+    gzip_mangle: Callable[[bytes], bytes] | None = None
+    # Close after the whole gzip body without the chunked body's last chunk.
+    gzip_unterminated: bool = False
+    # Bytes sent as a chunk of their own after the gzip body.
+    gzip_after: bytes = b""
+    # Send the gzip body with its compressed Content-Length instead of chunked.
+    gzip_length: bool = False
+    gzip_served: int = 0
     requests: list[tuple[str, dict[str, str]]] = field(default_factory=list)
 
     def respond(self, handler: BaseHTTPRequestHandler) -> None:
@@ -411,8 +430,15 @@ class FakeHistory:
         start = 0
         out: dict[str, str | None] = {"Content-Type": "application/x-ndjson", "ETag": etag}
         requested = headers.get("range", "")
+        if self.gzip and not requested and "gzip" in headers.get("accept-encoding", ""):
+            return self.serve_gzip(handler, body, etag, extra)
+        if self.gzip and requested:
+            out["Content-Encoding"] = "identity"
         matches = etag and headers.get("if-range") == etag
-        if requested.startswith("bytes=") and matches and not self.whole_on_resume:
+        # A Range starting at or past the end is answered whole (200), as the service
+        # answers a Range it does not slice, never 416.
+        sliceable = requested.startswith("bytes=") and int(requested[6:-1]) < len(body)
+        if sliceable and matches and not self.whole_on_resume:
             start = int(requested[len("bytes=") : -1])
             code = 206
             out["Content-Range"] = f"bytes {start}-{len(body) - 1}/{len(body)}"
@@ -443,6 +469,56 @@ class FakeHistory:
         handler.wfile.flush()
         if drop is not None or out.get("Content-Length") is None:
             handler.close_connection = True  # the end of an unstated length is the close
+
+    def serve_gzip(
+        self,
+        handler: BaseHTTPRequestHandler,
+        body: bytes,
+        etag: str | None,
+        extra: dict[str, str] | None,
+    ) -> None:
+        self.gzip_served += 1
+        if self.gzip_body is not None:
+            body = self.gzip_body(body)
+        data = gzip.compress(body, mtime=0)
+        if self.gzip_mangle is not None:
+            data = self.gzip_mangle(data)
+        tagged = None if etag is None else etag[:-1] + '-gzip"'
+        out: dict[str, str | None] = {"Content-Type": "application/x-ndjson", "ETag": tagged}
+        out |= {"Content-Encoding": "gzip", "Transfer-Encoding": "chunked"}
+        if self.gzip_length:
+            out |= {"Transfer-Encoding": None, "Content-Length": str(len(data))}
+        out |= {"Vary": "Accept-Encoding", **self.first_headers, **(extra or {})}
+        handler.send_response(200)
+        for name, value in out.items():
+            if value is not None:
+                handler.send_header(name, value)
+        handler.end_headers()
+        if self.gzip_length:
+            handler.wfile.write(data)
+            handler.wfile.flush()
+            # A body cut short of its stated length is then ended by the close.
+            handler.close_connection = True
+            return
+        drop = self.drop_after.pop(handler.path, None)
+        size = 512
+        for at in range(0, len(data), size):
+            piece = data[at : at + size]
+            if drop is not None and at + len(piece) > drop:
+                # The chunk's size line promises more than is sent: the chunked body is
+                # never terminated, as when the service aborts a gzip response.
+                handler.wfile.write(f"{len(piece):x}\r\n".encode() + piece[: drop - at])
+                handler.wfile.flush()
+                handler.close_connection = True
+                return
+            handler.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+        if self.gzip_after:
+            handler.wfile.write(f"{len(self.gzip_after):x}\r\n".encode())
+            handler.wfile.write(self.gzip_after + b"\r\n")
+        if not self.gzip_unterminated:
+            handler.wfile.write(b"0\r\n\r\n")
+        handler.wfile.flush()
+        handler.close_connection = self.gzip_unterminated
 
     def json(
         self,
@@ -556,7 +632,7 @@ async def test_a_multi_line_stream_arrives_as_the_live_message_types():
     path, headers = fake.requests[0]
     assert path == f"/v1/history/{DAY}/TEST/book"
     assert headers["authorization"] == f"Bearer {token}"
-    assert headers["accept-encoding"] == "identity"
+    assert headers["accept-encoding"] == "gzip"
     assert "range" not in headers
 
 
@@ -3069,3 +3145,430 @@ async def test_a_ready_reports_range_entry_without_a_length_is_a_bad_response():
             await collect(HistoryClient(url, token).fetch_reports_range(DAY, DAY, "team-a"))
     assert caught.value.code == errors.HISTORY_BAD_RESPONSE
     assert "manifest could not be read (ValueError)" in str(caught.value)
+
+
+# Gzip (#385): a first GET asks for gzip, and a dropped gzip download resumes with identity.
+
+GZIP_PATH = f"/v1/history/{DAY}/TEST/book"
+
+
+def gzip_fake(token: str, body: bytes, **options: Any) -> FakeHistory:
+    return FakeHistory(token, {(DAY, "TEST", "book"): body}, gzip=True, **options)
+
+
+def inflated(data: bytes) -> int:
+    """How many identity bytes the compressed prefix `data` yields."""
+    return len(zlib.decompressobj(wbits=31).decompress(data))
+
+
+def gzip_endpoints() -> list[tuple[str, Any]]:
+    later = "2026-01-06"
+    objects = {
+        (DAY, "TEST", "book"): many_books(40),
+        (DAY, None, "session_state"): line("session_state", 1, {"state": "OPEN"}),
+        (DAY, None, "option_chain"): chain(),
+        (DAY, "AAA", "book"): many_books(30),
+        (DAY, "AAA", "trades"): trades(1, "AAA"),
+        (later, "BBB", "book"): book(1, "BBB"),
+    }
+    reports = {DAY: accepted(1) + rejected(2), later: accepted(1, "r-9")}
+    return [
+        ("stream", lambda c: c.fetch(DAY, "TEST", "book"), objects, reports),
+        ("session_state", lambda c: c.fetch_session_state(DAY), objects, reports),
+        ("option_chain", lambda c: c.fetch_option_chain(DAY), objects, reports),
+        ("reports", lambda c: c.fetch_reports(DAY, "team-a"), objects, reports),
+        ("reports_range", lambda c: c.fetch_reports_range(DAY, later, "team-a"), objects, reports),
+        (
+            "range",
+            lambda c: c.fetch_range(DAY, later, ["AAA", "BBB"], ["book", "trades"]),
+            objects,
+            reports,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fetch", "objects", "reports"),
+    [case[1:] for case in gzip_endpoints()],
+    ids=[case[0] for case in gzip_endpoints()],
+)
+async def test_gzip_and_identity_yield_the_same_messages_and_both_verify(fetch, objects, reports):
+    token = synthetic_token()
+    results = []
+    for coded in (False, True):
+        fake = FakeHistory(token, dict(objects), reports=dict(reports), gzip=coded)
+        with serve_history(fake) as url:
+            results.append(await collect(fetch(HistoryClient(url, token))))
+        assert fake.gzip_served == (1 if coded else 0)
+        assert fake.requests[0][1]["accept-encoding"] == "gzip"
+        assert len(fake.requests) == 1
+    assert results[0] == results[1]
+    assert results[1] and not any(isinstance(i, DecodeFailed | Unknown) for i in results[1])
+
+
+async def test_a_range_over_gzip_keeps_the_manifest_offsets_of_the_identity_bytes():
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): many_books(30), (DAY, "AAA", "trades"): trades(1, "AAA")}
+    fake = FakeHistory(token, objects, gzip=True)
+    with serve_history(fake) as url:
+        items = await collect(
+            HistoryClient(url, token).fetch_range(DAY, DAY, ["AAA"], ["book", "trades"])
+        )
+    manifest = items[0]
+    assert isinstance(manifest, Manifest)
+    assert [(e.byte_offset, e.length) for e in manifest.entries] == [
+        (0, len(many_books(30))),
+        (len(many_books(30)), len(trades(1, "AAA"))),
+    ]
+    assert [type(item) for item in items[1:]] == [Book] * 30 + [Trades]
+    assert fake.gzip_served == 1
+
+
+async def test_the_session_listing_still_asks_for_identity():
+    token = synthetic_token()
+    fake = FakeHistory(token, gzip=True)
+    with serve_history(fake) as url:
+        await HistoryClient(url, token).list_sessions()
+    assert fake.requests[0][1]["accept-encoding"] == "identity"
+
+
+def test_the_fixture_serves_gzip_chunked_and_answers_a_range_as_identity():
+    token = synthetic_token()
+    body = many_books(20)
+    fake = gzip_fake(token, body)
+    with serve_history(fake) as url:
+        port = int(url.rsplit(":", 1)[1])
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        auth = {"Authorization": f"Bearer {token}"}
+        conn.request("GET", GZIP_PATH, headers={"Accept-Encoding": "gzip", **auth})
+        whole = conn.getresponse()
+        assert whole.getheader("Content-Length") is None
+        assert whole.getheader("Transfer-Encoding") == "chunked"
+        assert whole.getheader("Content-Encoding") == "gzip"
+        assert whole.getheader("ETag") == etag_of(body)[:-1] + '-gzip"'
+        assert gzip.decompress(whole.read()) == body
+        ranged = {"Range": "bytes=10-", "If-Range": etag_of(body), "Accept-Encoding": "gzip"}
+        conn.request("GET", GZIP_PATH, headers={**ranged, **auth})
+        rest = conn.getresponse()
+        assert rest.status == 206
+        assert rest.getheader("Content-Encoding") == "identity"
+        assert rest.read() == body[10:]
+        conn.close()
+
+
+def cut_mid_body(data: bytes) -> bytes:
+    return data[: len(data) // 2]
+
+
+def bad_crc(data: bytes) -> bytes:
+    return data[:-8] + bytes([data[-8] ^ 0xFF]) + data[-7:]
+
+
+def bad_isize(data: bytes) -> bytes:
+    return data[:-4] + bytes([data[-4] ^ 0x01]) + data[-3:]
+
+
+def no_trailer(data: bytes) -> bytes:
+    return data[:-8]
+
+
+GZIP_DROPS = {
+    "truncated-mid-body": {"gzip_mangle": cut_mid_body},
+    "bad-crc": {"gzip_mangle": bad_crc},
+    "bad-isize": {"gzip_mangle": bad_isize},
+    "missing-trailer": {"gzip_mangle": no_trailer},
+    "chunked-framing": {"drop_after": {GZIP_PATH: 700}},
+}
+
+
+def fresh(options: dict[str, Any]) -> dict[str, Any]:
+    """`options` with its own `drop_after`, which the fake pops."""
+    return {
+        name: dict(value) if isinstance(value, dict) else value for name, value in options.items()
+    }
+
+
+def gzip_bomb_free_body() -> bytes:
+    # Over two of the client's 64 KiB pieces, so some are delivered before a trailer error.
+    return many_books(700)
+
+
+@pytest.mark.parametrize("options", GZIP_DROPS.values(), ids=GZIP_DROPS.keys())
+async def test_a_dropped_gzip_download_resumes_once_with_identity_and_verifies(options):
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    fake = gzip_fake(token, body, **fresh(options))
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert [item.grid_time for item in items] == [1000 * seq for seq in range(1, 701)]
+    assert len(fake.requests) == 2
+    first, resumed = fake.requests[0][1], fake.requests[1][1]
+    assert first["accept-encoding"] == "gzip" and "range" not in first
+    assert resumed["accept-encoding"] == "identity"
+    assert resumed["if-range"] == etag_of(body)  # the identity ETag, "-gzip" set aside
+    offset = int(resumed["range"].removeprefix("bytes=").removesuffix("-"))
+    assert resumed["range"] == f"bytes={offset}-"
+    compressed = gzip.compress(body, mtime=0)
+    if "drop_after" in options:
+        assert offset == inflated(compressed[:700])
+    elif options["gzip_mangle"] is cut_mid_body:
+        assert offset == inflated(cut_mid_body(compressed))
+    else:
+        # Everything the trailer's check did not throw away is delivered, and only that.
+        assert 0 < offset <= len(body)
+
+
+@pytest.mark.parametrize("options", GZIP_DROPS.values(), ids=GZIP_DROPS.keys())
+async def test_a_dropped_gzip_download_with_no_resumes_left_is_interrupted(options):
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    fake = gzip_fake(token, body, **fresh(options))
+    items: list[Any] = []
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryInterrupted) as caught:
+            async for item in HistoryClient(url, token, max_resumes=0).fetch(DAY, "TEST", "book"):
+                items.append(item)
+    assert len(fake.requests) == 1
+    # Only whole lines were yielded, each a complete message, in order.
+    assert [item.grid_time for item in items] == [1000 * seq for seq in range(1, len(items) + 1)]
+    assert sum(len(book(seq)) for seq in range(1, len(items) + 1)) <= caught.value.bytes_received
+
+
+async def test_a_whole_identity_answer_to_a_gzip_resume_skips_what_was_delivered():
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    fake = gzip_fake(token, body, gzip_mangle=cut_mid_body, whole_on_resume=True)
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert [item.grid_time for item in items] == [1000 * seq for seq in range(1, 701)]
+    assert len(fake.requests) == 2
+    assert fake.requests[1][1]["if-range"] == etag_of(body)
+
+
+async def test_a_whole_answer_to_a_gzip_resume_cut_short_resumes_again():
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    fake = gzip_fake(
+        token, body, gzip_mangle=cut_mid_body, whole_on_resume=True, drop_whole_resume_after=10
+    )
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert [item.grid_time for item in items] == [1000 * seq for seq in range(1, 701)]
+    assert len(fake.requests) == 3
+
+
+async def test_a_gzip_body_that_does_not_match_its_digest_is_reported_corrupt():
+    token = synthetic_token()
+    wrong = etag_of(b"something else")
+    fake = gzip_fake(token, book(1) + book(2), etag_override={GZIP_PATH: wrong})
+    items: list[Any] = []
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt):
+            async for item in HistoryClient(url, token).fetch(DAY, "TEST", "book"):
+                items.append(item)
+    assert [type(item) for item in items] == [Book, Book]
+    assert fake.gzip_served == 1
+
+
+async def test_a_gzip_range_entry_that_does_not_match_its_digest_is_reported_corrupt():
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): book(1, "AAA")}
+    fake = FakeHistory(token, objects, gzip=True)
+    fake.gzip_body = lambda body: body.replace(b'"99950000"', b'"99950001"')
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="entry"):
+            await collect(HistoryClient(url, token).fetch_range(DAY, DAY, ["AAA"], ["book"]))
+
+
+@pytest.mark.parametrize("encoding", ["br", "deflate", "gzip, br", "x-gzip", "compress"])
+async def test_any_other_content_encoding_is_refused_before_any_message(encoding):
+    token = synthetic_token()
+    # A gzip body under the gzip ETag: only the stated encoding is wrong.
+    fake = gzip_fake(token, book(1), first_headers={"Content-Encoding": encoding})
+    items: list[Any] = []
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError) as caught:
+            async for item in HistoryClient(url, token).fetch(DAY, "TEST", "book"):
+                items.append(item)
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+    assert "not NDJSON, uncompressed or gzip" in str(caught.value)
+    assert items == []
+
+
+@pytest.mark.parametrize(
+    "etag",
+    [None, "identity", "W/gzip", "malformed"],
+)
+async def test_a_gzip_response_without_its_gzip_etag_is_refused_before_any_message(etag):
+    token = synthetic_token()
+    body = book(1)
+    sent = {
+        None: None,
+        "identity": etag_of(body),
+        "W/gzip": "W/" + etag_of(body)[:-1] + '-gzip"',
+        "malformed": '"not-a-digest-gzip"',
+    }[etag]
+    fake = gzip_fake(token, body, first_headers={"ETag": sent})
+    items: list[Any] = []
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError, match="gzip ETag") as caught:
+            async for item in HistoryClient(url, token).fetch(DAY, "TEST", "book"):
+                items.append(item)
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+    assert items == []
+
+
+async def test_data_after_the_gzip_end_is_corrupt():
+    token = synthetic_token()
+    fake = gzip_fake(token, book(1), gzip_mangle=lambda data: data + b"junk")
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="after its gzip end"):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert len(fake.requests) == 1
+
+
+async def test_a_second_gzip_member_after_the_end_is_corrupt():
+    token = synthetic_token()
+    fake = gzip_fake(token, book(1), gzip_mangle=lambda data: data + gzip.compress(book(2)))
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="after its gzip end"):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+
+
+async def test_a_gzip_bomb_with_no_newline_stops_at_the_line_limit_in_bounded_memory():
+    token = synthetic_token()
+    bomb = gzip.compress(b"x" * (64 * 1024 * 1024), mtime=0)  # about 64 KiB
+    fake = gzip_fake(token, book(1), gzip_mangle=lambda data: bomb)
+    tracemalloc.start()
+    try:
+        with serve_history(fake) as url:
+            with pytest.raises(HistoryError) as caught:
+                await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+    assert "longer than the client accepts" in str(caught.value)
+    # The 64 MiB body is never held: the line limit (16 MiB) and a piece or two at most.
+    assert peak < 32 * 1024 * 1024
+
+
+async def test_a_gzip_bomb_in_a_range_stops_at_the_length_its_manifest_states():
+    token = synthetic_token()
+    objects = {(DAY, "AAA", "book"): book(1, "AAA")}
+    fake = FakeHistory(token, objects, gzip=True)
+    fake.gzip_body = lambda body: body + b"\n" * (64 * 1024 * 1024)
+    items: list[Any] = []
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="longer than the service stated"):
+            async for item in HistoryClient(url, token).fetch_range(DAY, DAY, ["AAA"], ["book"]):
+                items.append(item)
+    # Stopped within a piece of the stated end, not after 64 MiB of empty lines.
+    assert len(items) < 2 * history._CHUNK
+
+
+async def test_a_whole_gzip_body_whose_chunked_end_is_missing_needs_no_resume():
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    fake = gzip_fake(token, body, gzip_unterminated=True)
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    # The gzip trailer and the digest both checked out: nothing is missing.
+    assert len(items) == 700
+    assert len(fake.requests) == 1
+
+
+async def test_a_chunk_after_the_gzip_end_is_corrupt():
+    token = synthetic_token()
+    fake = gzip_fake(token, book(1), gzip_after=b"junk")
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryCorrupt, match="after its gzip end"):
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+
+
+async def test_a_gzip_content_length_is_the_compressed_length_and_no_bound_on_the_messages():
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    fake = gzip_fake(token, body, gzip_length=True)
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert len(items) == 700
+    assert len(fake.requests) == 1 and fake.gzip_served == 1
+
+
+async def test_a_gzip_body_cut_short_of_its_content_length_resumes_with_identity():
+    token = synthetic_token()
+    body = gzip_bomb_free_body()
+    fake = gzip_fake(token, body, gzip_length=True, gzip_mangle=cut_mid_body)
+    fake.first_headers = {"Content-Length": str(len(gzip.compress(body, mtime=0)))}
+    with serve_history(fake) as url:
+        items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert len(items) == 700
+    assert fake.requests[1][1]["accept-encoding"] == "identity"
+
+
+def test_a_body_that_expands_far_is_decompressed_in_bounded_pieces_and_whole():
+    body = b"a" * (50 * history._CHUNK + 123)
+    data = gzip.compress(body, mtime=0)
+    decoder = zlib.decompressobj(wbits=31)
+    pieces: list[bytes] = []
+    for at in range(0, len(data), 64):
+        new = list(history._inflate(decoder, data[at : at + 64]))
+        assert all(isinstance(piece, bytes) and len(piece) <= history._CHUNK for piece in new)
+        pieces += new
+        # Each read's input is decompressed in full, even when a piece fills up just as
+        # the input runs out, leaving output held in the decoder.
+        assert len(b"".join(pieces)) == inflated(data[: at + 64])
+    assert b"".join(pieces) == body
+    assert decoder.eof
+
+
+async def test_a_line_over_the_limit_completed_by_a_read_is_refused():
+    token = synthetic_token()
+    # The line ends inside the last read, so the buffer before it is under the limit.
+    body = b" " * (history._LINE_LIMIT + 10) + book(1)
+    fake = FakeHistory(token, {(DAY, "TEST", "book"): body})
+    with serve_history(fake) as url:
+        with pytest.raises(HistoryError, match="longer than the client accepts") as caught:
+            await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    assert caught.value.code == errors.HISTORY_BAD_RESPONSE
+
+
+async def test_a_gzip_read_that_expands_to_many_pieces_lets_other_tasks_run_between_them(
+    monkeypatch,
+):
+    token = synthetic_token()
+    body = book(1) * 20000
+    fake = gzip_fake(token, body)
+    ticks = 0
+    seen: list[tuple[int, int]] = []
+    calls = 0
+    original = history._inflate
+
+    def counted(decoder: Any, data: bytes) -> Iterator[bytes | str]:
+        nonlocal calls
+        calls += 1
+        for piece in original(decoder, data):
+            seen.append((calls, ticks))
+            yield piece
+
+    async def tick() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(history, "_inflate", counted)
+    ticker = asyncio.create_task(tick())
+    try:
+        with serve_history(fake) as url:
+            items = await collect(HistoryClient(url, token).fetch(DAY, "TEST", "book"))
+    finally:
+        ticker.cancel()
+    assert len(items) == 20000
+    by_call: dict[int, list[int]] = {}
+    for call, at in seen:
+        by_call.setdefault(call, []).append(at)
+    many = [marks for marks in by_call.values() if len(marks) > 1]
+    assert many, "no read expanded to more than one piece"
+    assert all(len(set(marks)) == len(marks) for marks in many)

@@ -524,8 +524,9 @@ CODES: dict[str, Entry] = {
         "The client cannot check or resume such a response, so it stopped",
         "Check that QTE_HISTORY_URL is the history service's address; if it is, tell the "
         "course team",
-        "The response is not one the history service sends: not uncompressed NDJSON, no "
-        "identity ETag, no readable manifest, or a resume that is not the rest of the data",
+        "The response is not one the history service sends: not NDJSON, uncompressed or "
+        "gzip, no ETag for its encoding, a line over 16 MiB, no readable manifest, or a "
+        "resume that is not the rest of the data",
         "Check QTE_HISTORY_URL",
     ),
     HISTORY_UNEXPECTED_STATUS: Entry(
