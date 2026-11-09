@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** 0.99
+**Version:** 0.100
 
 This guide takes you from a fresh install to a program that connects to the exchange, reads market data, places an order and cancels it. It then points you at the worked examples in `examples/` that you can run and adapt.
 
@@ -663,7 +663,7 @@ An exchange that does not offer resume yet answers `resume` with a `reject`. `se
 
 The exchange's history service serves the market data of sessions that have closed, going back to the first session held, at any hour. It serves exactly what the live feed published to everyone, message for message, so you get the same `Book`, `Trades`, `Mark` and `SessionState` classes as from `market_data` and the same handling code works on both. Besides that, it lists the sessions it holds and serves your own team's past private reports (below). It holds nothing else: no raw feed, and nothing private about other teams.
 
-It is a separate service with its own address, `https://history.trading.queenstowerexchange.com`. Set it as `QTE_HISTORY_URL`; the SDK has no default. Your token comes from `QTE_TOKEN` as before. No session is needed: this runs in any `async` function.
+It is a separate service with its own address, `https://history.trading.queenstowerexchange.com`. Set it as `QTE_HISTORY_URL`; the SDK has no default. To call the service directly over HTTP, with `curl` or from another language, see [history.md](history.md). Your token comes from `QTE_TOKEN` as before. No session is needed: this runs in any `async` function.
 
 ```python
 from qte_sdk.connection import DecodeFailed, Unknown
