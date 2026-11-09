@@ -10,11 +10,11 @@ The source of truth is the exchange's History API contract. If this page and the
 
 - The address is `https://history.trading.queenstowerexchange.com`. It is a separate service from the exchange's own address (`wss://api.trading.queenstowerexchange.com/ws`). The SDK reads it from the `QTE_HISTORY_URL` environment variable and has no default, so set it yourself. It is never read from `.env`.
 - Every call is a plain HTTPS `GET`. There is no handshake, no session to open and nothing kept between calls, and it works at any hour.
-- Send your team token in the `Authorization` header, as `Authorization: Bearer <token>`. It is the same token the SDK uses for the exchange, from `QTE_TOKEN`. The recommended setup keeps the token in `.env` and nothing in your environment, so `$QTE_TOKEN` is empty in a new shell and every `curl` below would send an empty token and get `401`. Put it in the environment for this shell only, with a prompt that does not show what you paste and does not go into your history:
+- Send your team token in the `Authorization` header, as `Authorization: Bearer <token>`. It is the same token the SDK uses for the exchange, from `QTE_TOKEN`. The recommended setup keeps the token in `.env` and nothing in your environment, so `$QTE_TOKEN` is empty in a new shell and every `curl` below would send an empty token and get `401`. Put it in the environment for this shell only, with a prompt that does not show what you paste and does not go into your history. The `read` line waits: paste the token, then press Enter, and nothing is shown:
 
 ```sh
 export QTE_HISTORY_URL=https://history.trading.queenstowerexchange.com
-read -rs QTE_TOKEN && export QTE_TOKEN   # paste the token, press Enter; nothing is shown
+read -rs QTE_TOKEN && export QTE_TOKEN
 curl -sS -H "Authorization: Bearer $QTE_TOKEN" "$QTE_HISTORY_URL/v1/history/sessions"
 ```
 
@@ -80,7 +80,7 @@ A `200` from a range call is one **manifest** line first, then the data of every
 | `304` | | Not modified: you sent `If-None-Match` with the `ETag` you already hold, so there is no body. |
 | `202` | `pending` | The session has closed but the data is not built yet. Wait the `Retry-After` seconds and ask again. |
 | `400` | `malformed_request` | The request is wrong on its face: a date that does not parse, an empty element in a list, `to` before `from`, or a span over the limits. Change the request; do not retry it as it is. |
-| `401` | `unauthenticated` | The token is missing or not recognised Check the token. |
+| `401` | `unauthenticated` | The token is missing or not recognised. Check the token. |
 | `403` | `forbidden` | A private report for a team that is not yours, or for a date outside the current term (an earlier term, or after it). Not retryable. |
 | `404` | `unavailable` | It will never exist: a weekend or holiday, a date before the service began, or an instrument or channel it does not know. |
 | `409` | `not_closed` | The session has not closed yet. Ask again after its close. There is no `Retry-After`. |
@@ -134,10 +134,10 @@ curl -sS --compressed -H "Authorization: Bearer $QTE_TOKEN" \
   "$QTE_HISTORY_URL/v1/history/range?from=2026-09-28&to=2026-09-30&instruments=AAPL,MSFT&channels=book,trades"
 ```
 
-Your team's own reports for one session. Put your team's name in `TEAM` first, exactly as the exchange knows it, with the same capitals, and percent-encode any space (`Buenos%20Aires`, `Rio%20de%20Janeiro`), since a raw space breaks the URL. Quote the value in the shell as well:
+Your team's own reports for one session. Put your team's name in `TEAM` first, exactly as the exchange knows it, with the same capitals, and percent-encode any space (`Buenos%20Aires`, `Rio%20de%20Janeiro`), since a raw space breaks the URL. Quote the value in the shell as well, as in the line below, which uses `Buenos%20Aires` as an example: write your own team's name there.
 
 ```sh
-TEAM='Buenos%20Aires'   # your own team's name, spaces written as %20
+TEAM='Buenos%20Aires'
 curl -sS --compressed -H "Authorization: Bearer $QTE_TOKEN" \
   "$QTE_HISTORY_URL/v1/history/2026-09-29/$TEAM/reports"
 ```
@@ -149,11 +149,11 @@ curl -sS --compressed -H "Authorization: Bearer $QTE_TOKEN" \
   "$QTE_HISTORY_URL/v1/history/range/$TEAM/reports?from=2026-09-28&to=2026-09-30"
 ```
 
-To see the status code and the `Retry-After` header as well as the body, add `-i`. 
+To see the status code and the `Retry-After` header as well as the body, add `-i`.
 
 ### Resuming a download
 
-Every response carries an `ETag`. A `Range` request gets `206` only when it also sends `If-Range` naming the current identity `ETag` (the one without a `-gzip` suffix); the bytes are then a slice of the whole response, always uncompressed, and may start in the middle of a line, or in the middle of the manifest. If the `ETag` no longer matches, or `If-Range` is missing, the service sends a fresh `200` with the whole response, so appending it to what you already have duplicates data. Check the status before you append, and keep the manifest from your first response. Sending `If-None-Match` with an `ETag` you already hold gets `304`. `HistoryClient` does all of this for you.
+Every `200` and `206` carries an `ETag`. A `Range` request gets `206` only when it also sends `If-Range` naming the current identity `ETag` (the one without a `-gzip` suffix); the bytes are then a slice of the whole response, always uncompressed, and may start in the middle of a line, or in the middle of the manifest. If the `ETag` no longer matches, or `If-Range` is missing, the service sends a fresh `200` with the whole response, so appending it to what you already have duplicates data. Check the status before you append, and keep the manifest from your first response. Sending `If-None-Match` with an `ETag` you already hold gets `304`. `HistoryClient` does all of this for you.
 
 ## Rate limits and being polite
 
