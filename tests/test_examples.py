@@ -5933,7 +5933,7 @@ async def test_quote_both_sides_quotes_after_a_drop_only_once_a_new_session_stat
     # sent, so it goes out on the new connection. The market may have closed meanwhile,
     # so it waits for that connection's session state, though fresh books come first.
     exchange = LateStateOnReconnect(drop_after_books=1)
-    code, out, err = await run_quoter(exchange)
+    code, out, err = await run_quoter(exchange, seconds="4")
     # The buy's new may have been sent, and no reply comes for it: the run names it.
     assert code == 1, out + err
     assert "no reply came for the new sent to BUY TEST @ 99.960000" in out
