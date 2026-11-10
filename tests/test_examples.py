@@ -19,6 +19,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,12 +41,14 @@ from qte_sdk import replay as qte_replay
 from qte_sdk import update as qte_update
 from qte_sdk.connection import DecodeFailed, Received, SeqGap
 from qte_sdk.contract.v1.common_pb2 import (
+    AUTO_EXECUTION,
     AUTO_FLATTEN,
     BUY,
     FILLED,
     LIMIT,
     NEW,
     RESTING,
+    SELL,
     TEAM,
     MarketSessionPhase,
     OrderLifecycleState,
@@ -60,6 +63,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     OrderCancelled,
     OrderState,
     Reject,
+    RiskNotice,
 )
 from qte_sdk.history import HistoryClient
 from qte_sdk.orders import reason_code_name, send_amend, send_new
@@ -1250,7 +1254,8 @@ async def test_quote_both_sides_prints_a_reject_s_next_step_once_however_often_i
 
 async def test_quote_both_sides_retries_a_reject_with_no_further_book():
     # One book and then none: the exchange publishes a book only when it changes.
-    exchange = FakeExchange(reject_new="MESSAGE_BUDGET_EXCEEDED", book_once=True)
+    # A reject other than a budget one, which pauses all sending for a minute instead.
+    exchange = FakeExchange(reject_new="MIN_REST_VIOLATION", book_once=True)
     async with serve_local(exchange) as url:
         code, out, err = await run_example(
             "quote_both_sides.py",
@@ -1261,7 +1266,7 @@ async def test_quote_both_sides_retries_a_reject_with_no_further_book():
         )
     assert code == 0, out + err
     assert exchange.books_sent == 1
-    assert "REJECTED new: MESSAGE_BUDGET_EXCEEDED" in out
+    assert "REJECTED new: MIN_REST_VIOLATION" in out
     sides = [m["payload"]["side"] for m in exchange.received if m["type"] == "new"]
     # Each side retried at least twice after its first reject, and no faster than
     # --requote-seconds allows: at most one new per side per 0.2 s of the 1.5 s.
@@ -1290,7 +1295,8 @@ async def test_quote_both_sides_re_enters_after_a_full_fill_with_no_further_book
     # Filled completely, entered again from the book held, then cancelled at the end.
     assert buys == [("new", BID + TICK), ("new", BID + TICK), ("cancel", BID + TICK)]
     assert exchange.resting == {}
-    assert "all of this example's orders are cancelled" in out
+    # One order filled rather than being cancelled, so it does not say "cancelled".
+    assert "all of this example's orders ended (filled or cancelled)" in out
 
 
 async def test_quote_both_sides_ignores_a_teammates_fill_at_its_level():
@@ -1326,10 +1332,11 @@ async def test_quote_both_sides_stops_sending_when_messages_are_missed():
             *("--seconds", "5", "--requote-seconds", "0.1"),
         )
     assert code == 1, out + err
-    assert "can no longer tell which orders are its own" in out
+    assert "messages were missed" in out
     assert f"BUY {INSTRUMENT} @ 99.960000" in out
     assert exchange.types().count("new") == 2
-    assert "cancel" not in exchange.types()  # it sends nothing more
+    # It quotes no more, but still cancels each order of its own, once.
+    assert exchange.types().count("cancel") == 2
 
 
 async def test_quote_both_sides_sends_no_retry_after_missing_messages_while_cancelling():
@@ -1346,9 +1353,9 @@ async def test_quote_both_sides_sends_no_retry_after_missing_messages_while_canc
         )
     assert code == 1, out + err
     assert "REJECTED cancel: MIN_REST_VIOLATION" in out
-    assert "can no longer tell which orders are its own" in out
-    # The two cancels sent before the gap, and no retry of the rejected one after it.
-    assert exchange.types().count("cancel") == 2
+    assert "messages were missed" in out
+    # The gap stops nothing: the rejected cancel is retried, paced, and the run fails.
+    assert exchange.types().count("cancel") == 3
 
 
 async def test_the_fake_rejects_a_duplicate_without_accepting_it():
@@ -1562,6 +1569,7 @@ async def test_quote_both_sides_stops_at_once_on_a_second_ctrl_c_during_cleanup(
                 await process.wait()
     assert process.returncode == 1, (seen + out + err).decode()
     assert "interrupted: this example's orders may still rest" in err.decode()
+    assert "WARNING: this example's order BUY TEST @ 99.960000 (request_ref" in err.decode()
     assert stopped_after < 5, stopped_after  # well inside the 20 s drain
     assert "all of this example's orders are cancelled" not in (seen + out).decode()
     assert exchange.types().count("cancel") == 2
@@ -2566,10 +2574,9 @@ async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short()
     args = example.parse_args(
         ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
     )
-    quoter = example.Quoter(StalledConnection(sent), None, args)
-    quoter.resting = lambda quote: quote.price is not None  # reported resting
+    quoter = example.Quoter(StalledConnection(sent), RestingOrders(), args)
     buy = quoter.quotes[example.BUY]
-    buy.price = BID + TICK
+    buy.price, buy.own = BID + TICK, True  # accepted
 
     cleanup = asyncio.create_task(quoter.cancel_own())
     try:
@@ -2581,14 +2588,15 @@ async def test_quote_both_sides_does_not_resend_a_cancel_that_ctrl_c_cut_short()
 
             assert buy.pending_ref == sent[0]  # recorded before it was sent
             buy.sent_at = float("-inf")  # however long cleanup waits, no second send
-            quoter.view = []  # no order is reported gone yet
-            assert await quoter.cancel_own() is False
+            await quoter.cancel_own()  # no order is reported gone yet
+            assert not quoter.settled()
     finally:
         cleanup.cancel()
     assert len(sent) == 1
-    # The exchange's reply to that cancel is still matched to it.
+    # The exchange's reply to that cancel is still matched to it. It stays open until its
+    # order_cancelled says what it took.
     quoter.on_order_event(Accepted(request_ref=sent[0]))
-    assert buy.pending_ref is None and buy.cancelling
+    assert buy.cancelling and sent[0] in quoter.open
 
 
 async def test_quote_both_sides_keeps_to_drain_seconds_when_a_cancel_send_stalls():
@@ -2599,8 +2607,8 @@ async def test_quote_both_sides_keeps_to_drain_seconds_when_a_cancel_send_stalls
     )
     view = RestingOrders()
     quoter = example.Quoter(StalledConnection(sent), view, args)
-    quoter.resting = lambda quote: quote.price is not None  # reported resting
-    quoter.quotes[example.BUY].price = BID + TICK
+    buy = quoter.quotes[example.BUY]
+    buy.price, buy.own = BID + TICK, True  # accepted
     loop = asyncio.get_running_loop()
     started = loop.time()
     async with asyncio.timeout(RUN_LIMIT):
@@ -2736,7 +2744,9 @@ async def test_quote_both_sides_applies_events_that_arrive_between_two_sends(
     assert session.sent == [example.BUY]
 
 
-async def test_quote_both_sides_sends_no_second_cancel_after_a_gap_during_the_first():
+async def test_quote_both_sides_still_cancels_each_level_after_a_gap_during_the_first():
+    # A gap during the cleanup ends nothing: each order of its own is still cancelled,
+    # once, and the run fails since what filled may not all be known.
     example = load_example("quote_both_sides.py")
     queue: asyncio.Queue = asyncio.Queue()
     session = YieldingSession(queue, SeqGap(expected=2, received=3))
@@ -2745,14 +2755,17 @@ async def test_quote_both_sides_sends_no_second_cancel_after_a_gap_during_the_fi
     )
     view = RestingOrders()
     quoter = example.Quoter(session, view, args)
-    quoter.resting = lambda quote: quote.price is not None  # reported resting
-    quoter.quotes[example.BUY].price = BID + TICK
-    quoter.quotes[example.SELL].price = ASK - TICK
+    for quote, price in (
+        (quoter.quotes[example.BUY], BID + TICK),
+        (quoter.quotes[example.SELL], ASK - TICK),
+    ):
+        quote.price, quote.own = price, True  # accepted
     loop = asyncio.get_running_loop()
     async with asyncio.timeout(RUN_LIMIT):
-        outcome = await example.cancel_own_orders(quoter, view, queue, loop.time() + 1)
-    assert outcome == "unreliable"
-    assert session.sent == [example.BUY]
+        outcome = await example.cancel_own_orders(quoter, view, queue, loop.time() + 0.5)
+    assert outcome == "unconfirmed"  # no reply comes in this test
+    assert session.sent == [example.BUY, example.SELL]  # one cancel per level, no more
+    assert quoter.missed
 
 
 async def test_quote_both_sides_takes_the_two_sides_in_turn():
@@ -2783,12 +2796,827 @@ async def test_quote_both_sides_takes_the_two_sides_in_turn():
     quoter.quoting = False
     for quote in quoter.quotes.values():
         quote.pending_ref, quote.price, quote.sent_at = None, 1, float("-inf")
+        quote.own = True
+    quoter.open.clear()
     quoter.last_side = example.SELL
     await quoter.cancel_own()
-    buy.pending_ref, buy.sent_at = None, float("-inf")  # rejected, and ready again
+    quoter.settle(buy.pending_ref)  # rejected, and ready again
+    buy.sent_at = float("-inf")
     await quoter.cancel_own()
     assert session.sent == ["cancel", "cancel"]
     assert quoter.quotes[example.SELL].pending_ref is not None
+
+
+def own_buy(example: Any, session: Any | None = None) -> tuple[Any, Any]:
+    """A Quoter whose buy is its own order, accepted and reported resting at BID + TICK."""
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
+    quoter = example.Quoter(session or RecordingSession(), RestingOrders(), args)
+    quoter.quoting = False
+    buy = quoter.quotes[example.BUY]
+    buy.price, buy.own, buy.order_ref, buy.remaining = BID + TICK, True, "r-buy", 1
+    resting_at(quoter, "quote-test", BID + TICK)
+    return quoter, buy
+
+
+def resting_at(quoter: Any, strat_id: str, price: int) -> None:
+    state = OrderState(
+        strat_id=strat_id,
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=price,
+        state=RESTING,
+        remaining_size=1,
+    )
+    load_example("quote_both_sides.py").handle(
+        quoter, quoter.view, Received("order_state", state, None)
+    )
+
+
+def deliver(example: Any, quoter: Any, type_: str, message: Any) -> None:
+    example.handle(quoter, quoter.view, Received(type_, message, None))
+
+
+def test_quote_both_sides_never_says_all_cancelled_when_the_connection_closed(capsys):
+    # A close leaves the last state unconfirmed, so even with nothing outstanding the
+    # run fails and says so, rather than printing that every order is cancelled.
+    example = load_example("quote_both_sides.py")
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
+    quoter = example.Quoter(RecordingSession(), RestingOrders(), args)
+    assert quoter.finish(closed=True) == 1
+    out = capsys.readouterr().out
+    assert "are cancelled" not in out
+    assert "the connection closed before this example could confirm" in out
+
+
+async def test_quote_both_sides_never_cancels_where_another_strategy_rests_and_names_it(capsys):
+    # The team has one order per level. Where the view shows another strategy's order at
+    # its own order's level, a cancel would take that one, so none is sent; the run then
+    # fails, naming the level and saying its own order may still rest there.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    resting_at(quoter, "teammate", BID + TICK)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == []
+    assert quoter.settled()  # nothing more it may do, so cleanup does not wait on it
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert "not cancelling at BUY TEST @ 99.960000: an order of strategy teammate" in out
+    assert (
+        "WARNING: no cancel was sent to BUY TEST @ 99.960000, since the view shows another "
+        "strategy's order there: this run's order (request_ref r-buy) may still rest there"
+    ) in out
+
+
+async def test_quote_both_sides_takes_a_no_order_at_level_cancel_reject_as_fills_unknown(capsys):
+    # Nothing rests at its own order's level, and no report said the order ended: what
+    # filled is not known, so the run fails and says to check fills.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    [ref] = quoter.open
+    deliver(
+        example,
+        quoter,
+        "reject",
+        Reject(request_ref=ref, reason_code=ReasonCodes.NO_ORDER_AT_LEVEL),
+    )
+    assert not buy.own and quoter.settled()
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert (
+        "WARNING: BUY TEST @ 99.960000 (request_ref r-buy) ended with its fills not all "
+        "reported: check your fills and position (send_account_query)"
+    ) in out
+    assert "all of this example's orders" not in out
+
+
+async def test_quote_both_sides_names_a_cancel_that_took_an_order_not_its_own(capsys):
+    # Its own buy fills while its cancel is in flight; the cancel, applied next, takes the
+    # team's order then resting at that level. It names that and fails.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    [ref] = quoter.open
+    fill = Execution(
+        exec_id="e1",
+        origin=TEAM,
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        order_price=BID + TICK,
+        fill_price=BID + TICK,
+        fill_size=1,
+        remaining_size=0,
+    )
+    deliver(example, quoter, "execution", fill)
+    assert not buy.own
+    taken = OrderCancelled(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=BID + TICK,
+        cancelled_size=1,
+        request_ref=ref,
+    )
+    deliver(example, quoter, "order_cancelled", taken)
+    assert quoter.settled()
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert "the cancel cancelled an order at BUY TEST @ 99.960000 that was not this run's" in out
+    assert (
+        "WARNING: a cancel at BUY TEST @ 99.960000 cancelled an order that was not this run's"
+        in out
+    )
+
+
+async def test_quote_both_sides_takes_only_a_team_fill_as_its_own():
+    # A fill of another origin at its level (an auto-execution, say) is not its order's:
+    # its own order still rests, so it is still to be cancelled.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    auto = Execution(
+        exec_id="e-auto",
+        origin=AUTO_EXECUTION,
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        order_price=BID + TICK,
+        fill_price=BID + TICK,
+        fill_size=1,
+        remaining_size=0,
+    )
+    assert quoter.ours(auto) is None
+    deliver(example, quoter, "execution", auto)
+    assert buy.own and buy.price == BID + TICK
+
+
+async def test_quote_both_sides_sends_one_more_cancel_when_a_complete_resume_shows_it_resting():
+    # Its cancel is unanswered across a drop, and the complete resume still shows the order
+    # resting: one more cancel may go, or its own order would be left when one was possible.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]  # one cancel per level is open at a time
+    assert quoter.resumed(replayed=True)
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel", "cancel"]
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel", "cancel"]  # and only one more
+
+
+async def test_quote_both_sides_sends_no_third_cancel_after_a_second_complete_resume():
+    # Both cancels are unanswered across a second drop, and the next complete resume
+    # still shows the order resting: two are open already, so no third may go.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.resumed(replayed=True)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel", "cancel"]
+    assert quoter.resumed(replayed=True)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel", "cancel"]
+
+
+async def test_quote_both_sides_waits_about_a_minute_after_a_budget_reject_of_a_cancel(capsys):
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    [ref] = quoter.open
+    reject = Reject(request_ref=ref, reason_code=ReasonCodes.MESSAGE_BUDGET_EXCEEDED)
+    deliver(example, quoter, "reject", reject)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]  # not yet
+    assert quoter.pause_until - time.monotonic() > example.BUDGET_WAIT_SECONDS - 5
+    quoter.pause_until = float("-inf")  # the minute is up
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel", "cancel"]
+    # Were time up before it is answered, the last reject is named.
+    quoter.open.clear()
+    assert quoter.finish() == 1
+    assert "its last cancel was rejected (MESSAGE_BUDGET_EXCEEDED)" in capsys.readouterr().out
+
+
+async def test_quote_both_sides_waits_for_what_an_accepted_cancel_took(capsys):
+    # A cancel's `accepted` comes once it is applied, before the `order_cancelled` that
+    # says what it took. Its own buy fills first, so the cancel takes whatever of the team
+    # rests there by then: the `accepted` alone must not end the run with status 0.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    [ref] = quoter.open
+    fill = Execution(
+        exec_id="e1",
+        origin=TEAM,
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        order_price=BID + TICK,
+        fill_price=BID + TICK,
+        fill_size=1,
+        remaining_size=0,
+    )
+    deliver(example, quoter, "execution", fill)
+    deliver(example, quoter, "accepted", Accepted(request_ref=ref))
+    assert not quoter.settled()
+    taken = OrderCancelled(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=BID + TICK,
+        cancelled_size=1,
+        request_ref=ref,
+    )
+    deliver(example, quoter, "order_cancelled", taken)
+    assert quoter.settled()
+    assert quoter.finish() == 1
+    assert "cancelled an order that was not this run's" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("answered", [True, False])
+async def test_quote_both_sides_takes_a_snapshot_after_an_amend_as_fills_unknown(answered):
+    # An amend sets the remaining size. Applied just before a drop, its order state not
+    # yet seen (or not answered at all), the size the view showed at the drop says nothing:
+    # a snapshot showing that same size may hide a fill made while down.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    quoter.size = 2  # the amend tops its 1 share back up to 2
+    ref = quoter.record(buy, "amend")
+    if answered:
+        deliver(example, quoter, "accepted", Accepted(request_ref=ref))
+    quoter.on_disconnected(Disconnected(error=None))
+    quoter.resumed(replayed=False)
+    assert buy.fills_unknown
+
+
+async def test_quote_both_sides_waits_about_a_minute_after_a_budget_reject_while_quoting():
+    # While quoting too, a budget reject of a cancel holds the side for about a minute.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.quoting = True
+    ref = quoter.record(buy, "cancel")
+    reject = Reject(request_ref=ref, reason_code=ReasonCodes.MESSAGE_BUDGET_EXCEEDED)
+    deliver(example, quoter, "reject", reject)
+    buy.sent_at = float("-inf")
+    assert not quoter.ready(buy)
+    quoter.pause_until = float("-inf")  # the minute is up
+    assert quoter.ready(buy)
+
+
+async def test_quote_both_sides_takes_any_snapshot_with_its_order_out_as_fills_unknown():
+    # A snapshot reports no fills. Its order may have filled while down and another run of
+    # the strategy rested the same size at the same price: the same size in the snapshot
+    # does not show its fills are known.
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    quoter.on_disconnected(Disconnected(error=None))
+    quoter.resumed(replayed=False)
+    assert buy.fills_unknown
+    assert quoter.finish() == 1
+
+
+async def test_quote_both_sides_keeps_its_order_through_an_unknown_order_state():
+    # Only FILLED and CANCELLED end its order. A state this example does not know (from a
+    # newer exchange, say) leaves it unsure: it still cancels, and the run fails.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    state = OrderState(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=BID + TICK,
+        state=99,
+        remaining_size=1,
+    )
+    deliver(example, quoter, "order_state", state)
+    assert buy.own and buy.fills_unknown
+
+
+async def test_quote_both_sides_fails_when_the_first_resume_never_completes(capsys):
+    # With nothing sent, a view never made complete still hides any earlier run's order on
+    # the instrument: no exit 0.
+    example = load_example("quote_both_sides.py")
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
+    view = RestingOrders()
+    view.mark_incomplete()
+    quoter = example.Quoter(RecordingSession(), view, args)
+    assert quoter.finish() == 1
+    assert "the view of resting orders is not complete" in capsys.readouterr().out
+
+
+async def run_quote_and_clean_up(script: list[Any]) -> tuple[int, Any, Any]:
+    """Run quote_both_sides's own part against a ScriptedSession, briefly; its status, the
+    session and the module."""
+    example = load_example("quote_both_sides.py")
+    session = ScriptedSession(script)
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+        + ["--seconds", "0.2", "--drain-seconds", "0.2"]
+    )
+    async with asyncio.timeout(RUN_LIMIT):
+        code = await example.quote_and_clean_up(session, args, asyncio.current_task())
+    return code, session, example
+
+
+async def test_quote_both_sides_fails_when_time_is_up_before_it_connects(capsys):
+    # No session came up, so no snapshot showed what of its strategy rests: an earlier
+    # run's order may. Not an exit 0.
+    code, session, _ = await run_quote_and_clean_up([])
+    assert code == 1
+    assert session.sent == []
+    assert "the view of resting orders is not complete" in capsys.readouterr().out
+
+
+async def test_quote_both_sides_fails_when_the_first_resume_is_refused(capsys):
+    # The first session connects with no resume: no snapshot loaded the view, so an
+    # earlier run's order may still rest. It sends nothing and exits 1.
+    code, session, _ = await run_quote_and_clean_up([connected_event(reconnected=False)])
+    assert code == 1
+    assert session.sent == []
+    out = capsys.readouterr().out
+    assert "the exchange did not resume the session" in out
+    assert "all of this example's orders" not in out
+
+
+async def test_quote_both_sides_cancels_its_order_once_it_moves_off_a_blocked_level(capsys):
+    # Another strategy's order at its level holds the final cancel back. A later report
+    # moves its own order to a level the view shows free: the cancel can go now, so the
+    # cleanup is not settled until it has.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    resting_at(quoter, "teammate", BID + TICK)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == [] and quoter.settled()
+    moved = OrderState(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        old_price=BID + TICK,
+        price=BID + 2 * TICK,
+        state=RESTING,
+        remaining_size=1,
+    )
+    deliver(example, quoter, "order_state", moved)
+    assert buy.price == BID + 2 * TICK
+    assert not quoter.settled()
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]
+
+
+async def test_quote_both_sides_stops_and_cancels_on_a_risk_notice_of_an_unknown_kind(capsys):
+    # The enum allows kinds newer than this example: one it does not know is named by its
+    # number and taken as a stop. It cancels its own orders and exits 1.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    notice = Received("risk_notice", RiskNotice(kind=99), None)
+    assert example.apply_received(quoter, quoter.view, notice) == "unreliable"
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]
+    quoter.open.clear()
+    buy.own = False
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert "risk notice: kind 99" in out
+    assert "a risk notice of a kind this example does not know (99)" in out
+
+
+async def test_quote_both_sides_takes_an_unspecified_risk_notice_kind_as_unknown(capsys):
+    # A kind name newer than this SDK decodes as 0, UNSPECIFIED: it too is not known, so
+    # it stops the run like an unknown number.
+    example = load_example("quote_both_sides.py")
+    quoter, _ = own_buy(example)
+    notice = Received("risk_notice", RiskNotice(kind=0), None)
+    assert example.apply_received(quoter, quoter.view, notice) == "unreliable"
+    assert quoter.halt is not None
+    assert "not known to this example" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("answer", ["reject", "accepted"])
+async def test_quote_both_sides_sends_no_cancel_while_one_is_open_once_the_first_is_answered(
+    answer: str,
+):
+    # A complete resume still shows its order resting with cancel A unanswered, so one more
+    # may go. A is then answered: that one more is no longer due, and no cancel goes while
+    # another for the level is open (review m1).
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    [first] = quoter.open
+    quoter.on_disconnected(Disconnected(error=None))
+    assert quoter.resumed(replayed=True)
+    assert buy.again
+    if answer == "reject":
+        rejected = Reject(request_ref=first, reason_code=ReasonCodes.MIN_REST_VIOLATION)
+        deliver(example, quoter, "reject", rejected)
+        assert not quoter.open
+        assert not buy.again
+        quoter.record(buy, "cancel")  # cancel B, as manage() sends it
+    else:
+        deliver(example, quoter, "accepted", Accepted(request_ref=first))
+        assert first in quoter.open  # open until its order_cancelled
+    buy.sent_at = float("-inf")
+    sent = len(quoter.session.sent)
+    await quoter.cancel_own()
+    assert len(quoter.session.sent) == sent
+    assert not buy.again
+
+
+async def test_quote_both_sides_sends_one_more_cancel_after_a_resume_cut_short():
+    # A cancel in flight at the drop may never reach the exchange if the gateway lost it at
+    # the handover. After a resume cut short, one cleanup cancel goes to its level all the
+    # same, and only one: a second cut-short resume sends no third (review m2).
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    for _ in range(2):
+        quoter.on_disconnected(Disconnected(error=None))
+        quoter.view.mark_incomplete()
+        assert not quoter.resumed(replayed=False)
+        buy.sent_at = float("-inf")
+        await quoter.cancel_own()
+        buy.sent_at = float("-inf")
+        await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel", "cancel"]
+
+
+@pytest.mark.parametrize(
+    "event, named",
+    [
+        (
+            DecodeFailed("risk_notice", ValueError("bad")),
+            "a risk notice this example could not read",
+        ),
+        (
+            DecodeFailed("term_close_fill", ValueError("bad"), 7),
+            "a report this example could not read (term_close_fill)",
+        ),
+        ("unknown", "a report of a type this example does not know (order_fate)"),
+    ],
+    ids=["unreadable-risk-notice", "unreadable-report", "unknown-report"],
+)
+async def test_quote_both_sides_stops_and_cancels_on_a_report_it_cannot_read(
+    event: Any, named: str, capsys
+):
+    # Each may have said something about its account or its orders it cannot see: as with
+    # a risk notice of an unknown kind, it stops, still cancels its own orders, names it and
+    # exits 1 (review m3).
+    from qte_sdk.connection import Unknown
+
+    if event == "unknown":
+        event = Unknown("order_fate", {}, 12, 7)
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    quoter.up = True
+    assert example.apply_received(quoter, quoter.view, event) == "unreliable"
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]
+    quoter.open.clear()
+    buy.own = False
+    assert quoter.finish() == 1
+    assert f"quoting stopped on {named}" in capsys.readouterr().out
+
+
+def test_quote_both_sides_ignores_an_unknown_message_that_is_no_report():
+    # A message of a type this SDK does not know that carries no report_seq (market data
+    # from a newer contract, say) says nothing about its orders.
+    from qte_sdk.connection import Unknown
+
+    example = load_example("quote_both_sides.py")
+    quoter, _ = own_buy(example)
+    quoter.earlier = set()
+    quoter.up = True
+    assert example.apply_received(quoter, quoter.view, Unknown("tape", {}, 12)) is None
+    assert quoter.halt is None
+
+
+@pytest.mark.parametrize("when", ["resuming", "up"])
+def test_quote_both_sides_fails_after_a_report_gap_even_once_a_snapshot_puts_the_view_right(
+    when: str,
+):
+    # A ReportGap says an order report, perhaps a fill, was skipped. Missed during a
+    # resume, a later snapshot puts the view right but reports no fills: the run still
+    # fails (Codex, round 1).
+    from qte_sdk.connection import Disconnected, ReportGap
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    if when == "resuming":
+        quoter.on_disconnected(Disconnected(error=None))
+        quoter.resuming = True
+    assert example.apply_received(quoter, quoter.view, ReportGap(3, 5)) == "unreliable"
+    quoter.end(buy, by_this_run=False)  # its order_cancelled, after the skipped report
+    quoter.on_disconnected(Disconnected(error=None))
+    quoter.view = RestingOrders()  # an empty snapshot: the view is complete again
+    quoter.resumed(replayed=False)
+    assert quoter.finish() == 1
+
+
+def test_quote_both_sides_stops_when_a_resume_leaves_the_view_incomplete():
+    # A replay that cannot put the view right (the first resume needed a snapshot, say)
+    # ends with the view still incomplete: that is no resume to quote on (review M26).
+    example = load_example("quote_both_sides.py")
+    quoter, _ = own_buy(example)
+    quoter.earlier = set()
+    quoter.view.mark_incomplete()
+    assert not quoter.resumed(replayed=True)
+    assert quoter.missed
+
+
+@pytest.mark.parametrize("case", ["not-resting", "not-own"])
+async def test_quote_both_sides_moves_an_order_only_once_own_and_resting(case: str):
+    # While quoting, it cancels or amends an order only once its new is accepted and the
+    # order is reported resting (review M25).
+    example = load_example("quote_both_sides.py")
+    session = RecordingSession()
+    quoter, buy = own_buy(example, session)
+    quoter.quoting = True
+    if case == "not-resting":
+        quoter.view = RestingOrders()
+    else:
+        buy.own = False
+    quoter.size = 2  # more than rests, so an amend would be due at its own price
+    buy.sent_at = float("-inf")
+    await quoter.manage(buy, BID + 2 * TICK)  # the best price moved: a cancel would be due
+    await quoter.manage(buy, BID + TICK)
+    assert session.sent == []
+
+
+async def test_quote_both_sides_names_a_cancel_that_took_another_strategys_order_at_its_level(
+    capsys,
+):
+    # Its cancel's order_cancelled names another strategy of the team at its own order's
+    # level: its own order is not there, and may rest elsewhere (review M31).
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    [ref] = quoter.open
+    taken = OrderCancelled(
+        strat_id="other-strategy",
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=BID + TICK,
+        cancelled_size=1,
+        request_ref=ref,
+    )
+    deliver(example, quoter, "order_cancelled", taken)
+    assert not buy.own
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert "the cancel took another strategy's order at BUY TEST @ 99.960000" in out
+    assert (
+        "WARNING: a cancel at BUY TEST @ 99.960000 took an order of your team there that was "
+        "not this example's, so this example's order (request_ref r-buy) is not there" in out
+    )
+
+
+async def test_quote_both_sides_keeps_its_outcome_on_ctrl_c_while_closing(capsys):
+    # Once the run has decided its exit status, a Ctrl+C during the final close stops the
+    # wait for the close and leaves that status as it is (review n3).
+    example = load_example("quote_both_sides.py")
+    closing = asyncio.Event()
+
+    class SlowToClose:
+        async def close(self) -> None:
+            closing.set()
+            await asyncio.Event().wait()
+
+    async def finished_run() -> int:
+        async with example.closing(SlowToClose()):
+            return 0
+
+    task = asyncio.create_task(finished_run())
+    async with asyncio.timeout(RUN_LIMIT):
+        await closing.wait()
+        task.cancel()  # Ctrl+C
+        assert await task == 0
+    assert "interrupted while closing" in capsys.readouterr().out
+
+
+async def test_quote_both_sides_says_its_cancel_may_have_taken_another_order_after_a_snapshot(
+    capsys,
+):
+    # A snapshot showed an order of its strategy at its level, perhaps another run's after
+    # a fill while down; the cleanup cancel then takes it. The last lines say that the
+    # cancel may have taken an order not this run's, not only "check your fills" (review n4).
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    quoter.on_disconnected(Disconnected(error=None))
+    assert quoter.resumed(replayed=False)
+    buy.sent_at = float("-inf")
+    await quoter.cancel_own()
+    [ref] = quoter.open
+    taken = OrderCancelled(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=BID + TICK,
+        cancelled_size=1,
+        request_ref=ref,
+    )
+    deliver(example, quoter, "order_cancelled", taken)
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert "ended with its fills not all reported" in out
+    assert "the order that cancel took may not have been this run's" in out
+
+
+def test_quote_both_sides_says_why_the_view_is_incomplete_when_not_up_at_the_end(capsys):
+    # Time ran out while down with nothing of its own left: it exits 1 on the incomplete
+    # view, and says the session was not up to show it (review n5).
+    from qte_sdk.connection import Disconnected
+
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    quoter.gone(buy)
+    quoter.view.apply(Disconnected(error=None))
+    quoter.on_disconnected(Disconnected(error=None))
+    assert quoter.settled()
+    assert quoter.finish() == 1
+    assert "the session was not up at the end, so no resume showed it" in capsys.readouterr().out
+
+
+def cancelled_at(price: int, strat_id: str = "quote-test") -> OrderCancelled:
+    return OrderCancelled(
+        strat_id=strat_id,
+        instrument=INSTRUMENT,
+        side=BUY,
+        price=price,
+        cancelled_size=1,
+        reason_code=ReasonCodes.PURGE_STALE,
+    )
+
+
+async def test_quote_both_sides_still_fails_once_an_unattributed_order_has_gone(capsys):
+    # A resume shows an order of its strategy it cannot tell is its own. It stops, and
+    # that order then leaves the view (purged, say): the run must still exit 1 and name it.
+    example = load_example("quote_both_sides.py")
+    quoter, buy = own_buy(example)
+    quoter.earlier = set()
+    deliver(example, quoter, "order_cancelled", cancelled_at(BID + TICK))
+    assert not buy.own
+    resting_at(quoter, "quote-test", BID + 2 * TICK)
+    assert not quoter.resumed(replayed=True)
+    deliver(example, quoter, "order_cancelled", cancelled_at(BID + 2 * TICK))
+    assert quoter.strategy_orders() == []
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert (
+        "WARNING: an order of this strategy was seen at BUY TEST @ 99.970000, which this "
+        "example could not tell was its own: it was not cancelled, and it has gone since"
+    ) in out
+
+
+def own_both(example: Any) -> tuple[Any, Any, Any]:
+    """own_buy, with its sell its own order too, accepted and reported resting."""
+    quoter, buy = own_buy(example)
+    sell = quoter.quotes[example.SELL]
+    sell.price, sell.own, sell.order_ref = ASK - TICK, True, "r-sell"
+    state = OrderState(
+        strat_id="quote-test",
+        instrument=INSTRUMENT,
+        side=SELL,
+        price=ASK - TICK,
+        state=RESTING,
+        remaining_size=1,
+    )
+    deliver(example, quoter, "order_state", state)
+    return quoter, buy, sell
+
+
+@pytest.mark.parametrize("kind", ["new", "cancel", "amend"])
+@pytest.mark.parametrize(
+    "code",
+    [
+        ReasonCodes.MESSAGE_BUDGET_EXCEEDED,
+        ReasonCodes.BURST_CAP_EXCEEDED,
+        ReasonCodes.NEW_ORDER_CAP_EXCEEDED,
+    ],
+)
+async def test_quote_both_sides_pauses_all_sending_after_any_budget_reject(kind: str, code: int):
+    # After a budget reject (1500 to 1502) of any message, nothing more goes, new, cancel
+    # or amend, on either side, for the full minute: cleanup cancels included.
+    example = load_example("quote_both_sides.py")
+    quoter, buy, sell = own_both(example)
+    quoter.quoting = True
+    ref = quoter.record(buy, kind)
+    deliver(example, quoter, "reject", Reject(request_ref=ref, reason_code=code))
+    buy.sent_at = sell.sent_at = float("-inf")
+    assert not quoter.ready(buy) and not quoter.ready(sell)
+    quoter.quoting = False
+    await quoter.cancel_own()
+    assert quoter.session.sent == []
+    assert quoter.pause_until - time.monotonic() > example.BUDGET_WAIT_SECONDS - 5
+    quoter.pause_until = float("-inf")  # the minute is up
+    assert quoter.ready(sell)
+    await quoter.cancel_own()
+    assert quoter.session.sent == ["cancel"]
+
+
+async def test_quote_both_sides_names_its_orders_when_a_budget_pause_outlasts_the_drain(capsys):
+    example = load_example("quote_both_sides.py")
+    quoter, buy, sell = own_both(example)
+    ref = quoter.record(sell, "amend")
+    reject = Reject(request_ref=ref, reason_code=ReasonCodes.MESSAGE_BUDGET_EXCEEDED)
+    deliver(example, quoter, "reject", reject)
+    buy.sent_at = sell.sent_at = float("-inf")
+    queue: asyncio.Queue = asyncio.Queue()
+    deadline = asyncio.get_running_loop().time() + 0.2
+    outcome = await example.cancel_own_orders(quoter, quoter.view, queue, deadline)
+    assert outcome == "unconfirmed"
+    assert quoter.session.sent == []
+    assert quoter.finish() == 1
+    out = capsys.readouterr().out
+    assert "this example's order BUY TEST @ 99.960000 (request_ref r-buy) may still rest" in out
+    assert "(request_ref r-sell) may still rest" in out
+    assert "a message budget reject paused all sending" in out
+
+
+def test_quote_both_sides_says_its_cleanup_cancels_an_accepted_order_not_yet_resting():
+    # The final cancels go on `accepted` alone; the docstring must not claim more.
+    example = load_example("quote_both_sides.py")
+    doc = " ".join(example.__doc__.split())
+    assert "reports: it only cancels or amends an order once the exchange has reported" not in doc
+    assert "while quoting, it only cancels or amends an order once" in doc
+    assert "at the end it cancels each of its own orders, reported resting or not" in doc
+
+
+class NotConnectedSession:
+    """A session that is down: every send raises NotConnected, as the message never left."""
+
+    def __init__(self, error: type[Exception]) -> None:
+        self.error = error
+
+    async def send(self, type_: str, payload: Any) -> None:
+        raise self.error("no session is up")
+
+
+async def test_quote_both_sides_names_a_message_raised_not_connected_as_never_sent(capsys):
+    example = load_example("quote_both_sides.py")
+    args = example.parse_args(
+        ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "1"]
+    )
+    quoter = example.Quoter(NotConnectedSession(example.NotConnected), RestingOrders(), args)
+    buy = quoter.quotes[example.BUY]
+    with pytest.raises(example.NotConnected) as raised:
+        await quoter.manage(buy, BID + TICK)
+    quoter.not_sent(raised.value)
+    out = capsys.readouterr().out
+    assert f"the new to BUY TEST @ 99.960000 (request_ref {quoter.last_ref}) was never sent" in out
+    assert not quoter.open and buy.price is None  # not unanswered: that side may send again
+
+
+def test_quote_both_sides_relies_on_a_reconnect_waiting_longer_than_the_order_delay():
+    # A new in flight at a drop may still be applied after its exchange order delay
+    # (150 ms). The first reconnect waits at least 0.25 s, so a new applied late is in the
+    # resume, or answered after it, rather than racing it.
+    from qte_sdk.reconnect import DEFAULT_BACKOFF
+
+    floor = DEFAULT_BACKOFF.delay(1, 0.999999)  # the largest jitter draw short of 1
+    assert 0.25 <= floor < 0.2501
 
 
 async def test_quote_both_sides_stops_quoting_after_an_unreadable_session_state():
@@ -4768,25 +5596,26 @@ def news(exchange: FakeExchange) -> list[tuple[str, str]]:
     return [(p["side"], p["price"]) for p in payloads(exchange, "new")]
 
 
-async def test_quote_both_sides_takes_its_orders_from_a_snapshot_after_a_drop():
+async def test_quote_both_sides_never_claims_an_order_a_snapshot_shows_after_a_drop():
     # Its buy is in flight when the connection drops: it rests, but the example hears
-    # nothing of it. The resume's snapshot shows it resting, so it is never sent again,
-    # and the books start late on each connection, so the sell waits for a fresh one.
+    # no `accepted` for it. A snapshot cannot say whose order rests there, so it is not
+    # this run's to cancel: the new is never sent again, nothing is cancelled, and the
+    # run names the unanswered new and the order and fails.
     exchange = FakeExchange(drop_on_new=1, first_book_after=3)
     code, out, err = await run_quoter(exchange)
-    assert code == 0, out + err
+    assert code == 1, out + err
     assert exchange.connections == 2
     assert "the connection dropped" in out and "reconnected: team team-a" in out
-    assert "resumed: the orders this example has now: BUY TEST @ 99.960000" in out
+    assert "resume ended: the orders this example may have now: BUY TEST @ 99.960000" in out
     assert [p["last_report_seq"] for p in payloads(exchange, "resume")] == ["0", "0"]
-    buy, sell = ("BUY", str(BID + TICK)), ("SELL", str(ASK - TICK))
+    buy = ("BUY", str(BID + TICK))
     assert news(exchange).count(buy) == 1  # in flight at the drop, never sent again
-    assert news(exchange).count(sell) >= 1
-    assert_waited_to_resume_and_for_a_book(exchange, 2)
-    # The buy is cancelled from the view: the example never saw it rest.
-    assert [(p["side"], p["price"]) for p in payloads(exchange, "cancel")].count(buy) == 1
-    assert exchange.resting == {}
-    assert "all of this example's orders are cancelled" in out
+    assert orders_on(exchange, 2, "new", "amend") == []
+    assert payloads(exchange, "cancel") == []
+    assert (INSTRUMENT, "BUY", BID + TICK) in exchange.resting
+    assert "no reply came for the new sent to BUY TEST @ 99.960000" in out
+    assert "not cancelled: whose it is cannot be told" in out
+    assert "all of this example's orders" not in out
 
 
 async def test_quote_both_sides_takes_its_orders_from_a_replay_after_a_drop():
@@ -4802,7 +5631,8 @@ async def test_quote_both_sides_takes_its_orders_from_a_replay_after_a_drop():
     replayed = log.index(("sent", "resume_ack")) + 1
     assert log[replayed : replayed + 2] == [("sent", "accepted"), ("sent", "order_state")]
     assert (
-        "resumed: the orders this example has now: BUY TEST @ 99.960000, SELL TEST @ 100.040000"
+        "resume ended: the orders this example may have now: "
+        "BUY TEST @ 99.960000, SELL TEST @ 100.040000"
     ) in out
     assert sorted(news(exchange)) == [("BUY", str(BID + TICK)), ("SELL", str(ASK - TICK))]
     assert orders_on(exchange, 2, "new", "amend") == []
@@ -4818,9 +5648,11 @@ async def test_quote_both_sides_sends_nothing_more_when_the_resume_is_refused():
     code, out, err = await run_quoter(exchange)
     assert code == 1, out + err
     assert exchange.connections == 2
+    # Both news are unanswered, so neither is its own: there is nothing it may cancel.
     assert orders_on(exchange, 2, "new", "amend", "cancel") == []
-    assert "can no longer tell which orders are its own and sends nothing more" in out
-    assert "it believes it may have: BUY TEST @ 99.960000" in out
+    assert "the exchange did not resume the session" in out
+    assert "messages were missed: cancelling this example's orders" in out
+    assert "no reply came for the new sent to BUY TEST @ 99.960000" in out
 
 
 async def test_options_bot_takes_no_order_from_a_snapshot_after_a_drop_before_its_accepted():
@@ -4895,7 +5727,8 @@ async def test_quote_both_sides_claims_no_earlier_order_at_its_level_after_a_dro
     code, out, err = await run_quoter(exchange)
     assert code == 1, out + err
     assert exchange.connections == 2
-    assert "already rested where this example's new was sent" in out
+    assert "no reply came for the new sent to BUY TEST @ 99.960000" in out
+    assert "rests at BUY TEST @ 99.960000 (7 resting): not cancelled" in out
     assert payloads(exchange, "cancel") == []
     assert exchange.resting[earlier] == ("quote-test", 7)
 
@@ -4939,15 +5772,18 @@ async def test_options_bot_applies_its_view_as_it_handles_each_event():
     assert view.get("SPY261120P00665000", BUY, 4_900_000) is not None
 
 
-async def test_quote_both_sides_does_not_wait_on_an_earlier_order_at_another_level():
+async def test_quote_both_sides_names_an_earlier_order_at_another_level_and_fails():
     # The first resume's snapshot shows an earlier run's order of the strategy at a level
-    # this run never quotes: it is not this run's to cancel, so cleanup does not wait on it.
+    # this run never quotes: it is not this run's to cancel, so cleanup cancels its own and
+    # does not wait on it, but an order of the strategy still rests, so the run fails.
     exchange = FakeExchange()
     earlier = (INSTRUMENT, "BUY", BID - 5 * TICK)
     exchange.resting[earlier] = ("quote-test", 7)
     code, out, err = await run_quoter(exchange, seconds="0.5")
-    assert code == 0, out + err
-    assert "all of this example's orders are cancelled" in out
+    assert code == 1, out + err
+    assert len(payloads(exchange, "cancel")) == 2
+    assert "not all confirmed" not in out
+    assert "rests at BUY TEST @ 99.900000 (7 resting): not cancelled" in out
     assert exchange.resting == {earlier: ("quote-test", 7)}
 
 
@@ -4971,8 +5807,9 @@ async def test_quote_both_sides_stops_when_one_of_its_orders_moved_during_a_drop
     exchange = MovedDuringDrop(drop_on_new=1)
     code, out, err = await run_quoter(exchange)
     assert code == 1, out + err
-    assert "where this example has no order now" in out
-    assert "all of this example's orders are cancelled" not in out
+    assert "rests at BUY TEST @ 100.010000, which this example cannot tell is its own" in out
+    assert payloads(exchange, "cancel") == []
+    assert "all of this example's orders" not in out
     assert exchange.resting == {(INSTRUMENT, "BUY", BID + TICK + 50_000): ("quote-test", 1)}
 
 
@@ -4996,10 +5833,11 @@ async def test_quote_both_sides_takes_earlier_orders_from_the_first_resume_to_co
     earlier = (INSTRUMENT, "BUY", BID - 5 * TICK)
     exchange.resting[earlier] = ("quote-test", 7)
     code, out, err = await run_quoter(exchange)
-    assert code == 0, out + err
+    assert code == 1, out + err  # an order of the strategy still rests
     assert exchange.connections == 2
-    assert "where this example has no order now" not in out
-    assert "all of this example's orders are cancelled" in out
+    assert "which this example cannot tell is its own" not in out
+    assert len(payloads(exchange, "cancel")) == 2  # its own two, not the earlier one
+    assert "rests at BUY TEST @ 99.900000 (7 resting): not cancelled" in out
     assert exchange.resting == {earlier: ("quote-test", 7)}
 
 
@@ -5091,33 +5929,270 @@ class LateStateOnReconnect(FakeExchange):
 
 
 async def test_quote_both_sides_quotes_after_a_drop_only_once_a_new_session_state_says_open():
-    # Its buy is in flight at the drop and rests; its sell goes out on the new connection.
-    # The market may have closed meanwhile, so it waits for that connection's session
-    # state, though fresh books come first.
-    exchange = LateStateOnReconnect(drop_on_new=1)
+    # The connection drops after its first book, as the buy goes out; the sell is never
+    # sent, so it goes out on the new connection. The market may have closed meanwhile,
+    # so it waits for that connection's session state, though fresh books come first.
+    exchange = LateStateOnReconnect(drop_after_books=1)
     code, out, err = await run_quoter(exchange)
-    assert code == 0, out + err
+    # The buy's new may have been sent, and no reply comes for it: the run names it.
+    assert code == 1, out + err
+    assert "no reply came for the new sent to BUY TEST @ 99.960000" in out
     assert exchange.connections == 2
     sends = orders_on(exchange, 2, "new", "amend")
     assert sends, out
     assert first_sent(exchange, 2, "book") < first_sent(exchange, 2, "session_state") < sends[0]
-    # The drop message names the order by the request_ref of its new.
-    [buy] = payloads(exchange, "new")[:1]
-    assert (
-        f"believes it has: BUY TEST @ 99.960000 (request_ref {buy['request_ref']}, new in flight)"
-    ) in out
 
 
 async def test_quote_both_sides_names_each_order_by_the_request_ref_of_its_new_at_a_drop():
     # Its buy rests and is reported, so nothing of it is in flight; its sell is in flight.
     exchange = FakeExchange(drop_on_new=2, first_book_after=3)
     code, out, err = await run_quoter(exchange)
-    assert code == 0, out + err
+    assert code == 1, out + err  # the sell's new is never answered
     buy, sell = (p["request_ref"] for p in payloads(exchange, "new"))
+    assert f"no reply came for the new sent to SELL TEST @ 100.040000 (request_ref {sell})" in out
     assert (
         f"believes it has: BUY TEST @ 99.960000 (request_ref {buy}), "
         f"SELL TEST @ 100.040000 (request_ref {sell}, new in flight)"
     ) in out
+
+
+class LateNew(FakeExchange):
+    """The first new is received but still in its order delay when the connection drops:
+    nothing about it is sent, and it is not in the reconnect's resume. It is applied
+    `late` seconds after that resume is answered, and its reports go to the new session."""
+
+    def __init__(self, *, late: float, resume_wait: float = 0.0, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.late = late
+        self.resume_wait = resume_wait
+        self.held: dict[str, Any] | None = None
+        self.late_tasks: set[asyncio.Task] = set()
+        self.late_applied = False
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        if type_ == "new" and self.held is None:
+            self.news += 1
+            self.held = p
+            self._withhold = True  # drop now, nothing applied or answered
+            return
+        await super().on_order(ws, type_, p)
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        if self.connections > 1 and self.resume_wait:
+            await asyncio.sleep(self.resume_wait)
+        await super().answer_resume(ws, last_report_seq)
+        if self.connections > 1 and self.held is not None and not self.late_applied:
+            self.late_tasks.add(asyncio.create_task(self.apply_late(ws)))
+
+    async def apply_late(self, ws: ServerConnection) -> None:
+        await asyncio.sleep(self.late)
+        p = self.held
+        assert p is not None
+        key = (p["instrument"], p["side"], int(p["price"]))
+        self.late_applied = True
+        self.resting[key] = (p["strat_id"], int(p["size"]))
+        accepted = {"request_ref": p["request_ref"], "request_type": "NEW", "receipt_time": "1"}
+        with contextlib.suppress(ConnectionClosed):
+            await self.send(ws, "accepted", accepted)
+            await self.send(ws, "order_state", self.order_state(key))
+
+
+async def test_quote_both_sides_cancels_a_new_applied_after_an_empty_resume():
+    # Time is up while the connection is down. The reconnect's empty snapshot does not
+    # settle the unanswered new: cleanup waits for it, and once its late `accepted` comes
+    # the order is its own and is cancelled.
+    exchange = LateNew(late=0.15, resume_wait=1.0)
+    code, out, err = await run_quoter(exchange, seconds="0.6")
+    await asyncio.sleep(0.4)
+    assert exchange.late_applied, out + err
+    assert exchange.resting == {}, out + err
+    assert [p["side"] for p in payloads(exchange, "cancel")] == ["BUY"]
+    # The sell went out on the dying connection and no reply came: it is named.
+    assert code == 1, out + err
+    assert "no reply came for the new sent to SELL TEST @ 100.040000" in out
+
+
+async def test_quote_both_sides_sends_no_second_new_while_its_first_is_unanswered():
+    # The late new rests while it quotes: it never sent a second new to that side, so no
+    # duplicate is refused, and the late order is cancelled at the end.
+    exchange = LateNew(late=0.1, first_book_after=5)
+    code, out, err = await run_quoter(exchange, seconds="2")
+    assert "DUPLICATE_ORDER_AT_LEVEL" not in out, out + err
+    assert [p["side"] for p in payloads(exchange, "new")].count("BUY") == 1
+    assert exchange.resting == {}, out + err
+    assert code == 1, out + err  # the sell's new, sent as the connection dropped, is named
+    assert "no reply came for the new sent to SELL TEST @ 100.040000" in out
+
+
+class CutResume(FakeExchange):
+    """On a reconnect, one message after the resume_ack is lost, so the resume is cut
+    short: the Session ends it with no ResumeComplete."""
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        if self.connections == 1:
+            await super().answer_resume(ws, last_report_seq)
+            return
+        ack = {"replayed": False, "as_of_report_seq": "0", "snapshot_count": len(self.resting)}
+        await self.send(ws, "resume_ack", ack)
+        self._seq += 1  # a lost message
+        for (instrument, side, price), (strat_id, size) in list(self.resting.items()):
+            snapshot = {
+                "strat_id": strat_id,
+                "instrument": instrument,
+                "side": side,
+                "price": str(price),
+                "remaining_size": str(size),
+                "timestamp": "1",
+            }
+            await self.send(ws, "order_snapshot", snapshot)
+
+
+async def test_quote_both_sides_cancels_each_own_order_after_a_resume_cut_short():
+    exchange = CutResume(drop_after_books=8)
+    code, out, err = await run_quoter(exchange, seconds="2")
+    assert code == 1, out + err
+    assert "the resume was cut short" in out
+    assert "messages were missed" in out
+    assert orders_on(exchange, 2, "new", "amend") == []
+    assert len(orders_on(exchange, 2, "cancel")) == 2  # one per own level
+    assert exchange.resting == {}
+
+
+class GapBeforeAck(FakeExchange):
+    """On a reconnect, one message before the resume_ack is lost: the resume goes on, but
+    the stream is broken."""
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        if self.connections > 1:
+            self._seq += 1  # a lost message
+        await super().answer_resume(ws, last_report_seq)
+
+
+async def test_quote_both_sides_waits_for_the_resume_after_a_gap_before_its_ack():
+    exchange = GapBeforeAck(drop_after_books=8)
+    code, out, err = await run_quoter(exchange, seconds="2")
+    assert code == 1, out + err
+    assert "still waiting for the resume to complete" in out
+    log = exchange.on_connection(2)
+    cancels = orders_on(exchange, 2, "cancel")
+    snapshots = [i for i, entry in enumerate(log) if entry == ("sent", "order_snapshot")]
+    assert len(cancels) == 2 and snapshots and max(snapshots) < cancels[0]
+    assert orders_on(exchange, 2, "new", "amend") == []
+    assert exchange.resting == {}
+
+
+class FilledWhileDown(FakeExchange):
+    """Both quotes fill while the client is disconnected; the reconnect's snapshot is
+    empty and no fill is ever reported."""
+
+    async def answer_resume(self, ws: ServerConnection, last_report_seq: int) -> None:
+        if self.connections > 1:
+            self.resting.clear()
+        await super().answer_resume(ws, last_report_seq)
+
+
+async def test_quote_both_sides_says_check_your_fills_after_its_orders_vanish_while_down():
+    exchange = FilledWhileDown(drop_after_books=8)
+    code, out, err = await run_quoter(exchange, seconds="1.5")
+    assert code == 1, out + err
+    assert "ended while disconnected, filled or cancelled" in out
+    assert "check your fills and position (send_account_query)" in out
+    assert "cancelled" not in out.splitlines()[-1]
+    assert "all of this example's orders" not in out
+
+
+class RevokedAfterOrders(FakeExchange):
+    """Once both quotes rest, the exchange closes with 1008 credential revoked: the
+    ReconnectingSession does not reconnect and raises ConnectionClosedError."""
+
+    async def drop(self, ws: ServerConnection) -> None:
+        if self.connections == 1:
+            await ws.close(1008, "credential revoked")
+            return
+        await super().drop(ws)
+
+
+async def test_quote_both_sides_names_its_orders_when_the_connection_ends_for_good():
+    exchange = RevokedAfterOrders(drop_after_books=8)
+    code, out, err = await run_quoter(exchange, seconds="2")
+    assert code == 1, out + err
+    assert exchange.connections == 1
+    assert "before the session was up" not in err
+    assert "it will not reconnect, so it cannot cancel them" in out
+    assert "sending nothing until it is back" not in out
+    assert "it will not reconnect, so cleanup was not possible" in err
+    assert "this example's order BUY TEST @ 99.960000 (request_ref" in err
+    assert "this example's order SELL TEST @ 100.040000 (request_ref" in err
+    assert payloads(exchange, "cancel") == []
+
+
+class AutoExecAtLevel(FakeExchange):
+    """Once the first buy rests, an AUTO_EXECUTION fill of the same strategy arrives at
+    that order's price with remaining_size 0. It is not the order's own fill."""
+
+    sent_auto = False
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        await super().on_order(ws, type_, p)
+        if type_ == "new" and p["side"] == "BUY" and not self.sent_auto:
+            self.sent_auto = True
+            auto = {
+                "exec_id": "e-auto",
+                "origin": "AUTO_EXECUTION",
+                "strat_id": p["strat_id"],
+                "instrument": p["instrument"],
+                "side": p["side"],
+                "order_price": p["price"],
+                "fill_price": p["price"],
+                "fill_size": "1",
+                "remaining_size": "0",
+                "fill_kind": "STUDENT_TO_STUDENT",
+                "liquidity": "MAKER",
+                "fee": "0",
+            }
+            await self.send(ws, "execution", auto)
+
+
+async def test_quote_both_sides_keeps_its_order_through_a_fill_of_another_origin():
+    exchange = AutoExecAtLevel()
+    code, out, err = await run_quoter(exchange, seconds="1.5")
+    assert "DUPLICATE_ORDER_AT_LEVEL" not in out, out + err
+    assert ("BUY", str(BID + TICK)) in [
+        (p["side"], p["price"]) for p in payloads(exchange, "cancel")
+    ]
+    assert exchange.resting == {}
+    assert code == 0, out + err
+
+
+async def test_quote_both_sides_cancels_its_order_after_a_fill_at_its_level_before_its_accepted():
+    # A fill of the strategy at its level comes after its new and before its accepted: its
+    # order is still the team's one order at that level once accepted, so it is its own.
+    exchange = FakeExchange(teammate_fill_first="quote-test")
+    code, out, err = await run_quoter(exchange, seconds="1")
+    cancels = [(p["side"], int(p["price"])) for p in payloads(exchange, "cancel")]
+    assert ("BUY", BID + TICK) in cancels, out + err
+    assert (INSTRUMENT, "BUY", BID + TICK) not in exchange.resting
+    assert "DUPLICATE_ORDER_AT_LEVEL" not in out
+
+
+async def test_quote_both_sides_follows_its_order_when_an_amend_from_elsewhere_moves_it():
+    away = BID + TICK - 5 * TICK
+    exchange = FakeExchange(move_resting_to=(away,))
+    code, out, err = await run_quoter(exchange, seconds="1")
+    assert f"moved by an amend to {to_decimal(away):.6f}" in out, out + err
+    assert ("BUY", away) in [(p["side"], int(p["price"])) for p in payloads(exchange, "cancel")]
+    assert (INSTRUMENT, "BUY", away) not in exchange.resting
+
+
+async def test_quote_both_sides_names_what_is_left_when_drain_seconds_run_out():
+    # The cancels are accepted but never confirmed: at --drain-seconds it names each order
+    # that may still rest and fails.
+    exchange = FakeExchange(confirm_cancels=asyncio.Event())
+    code, out, err = await run_quoter(exchange, seconds="0.5")
+    assert code == 1, out + err
+    assert "not all confirmed within --drain-seconds (3 s)" in out
+    assert "WARNING: this example's order BUY TEST @ 99.960000 (request_ref" in out
+    assert "WARNING: this example's order SELL TEST @ 100.040000 (request_ref" in out
 
 
 class LostFirstCancel(FakeExchange):
