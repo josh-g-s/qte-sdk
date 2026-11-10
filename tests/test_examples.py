@@ -5913,7 +5913,11 @@ async def test_each_reconnecting_example_stops_when_its_first_connection_fails(
 
 class LateStateOnReconnect(FakeExchange):
     """Withholds the session state from a reconnect's first ticks, so that connection's
-    first books come before any session state."""
+    first books come before any session state. On the first connection the book shows
+    no ask, so only the buy has a price to quote there (the ask is back by the reconnect),
+    and the first new is taken but never answered and never rests: the connection drops
+    on it. However slow the runner, the first connection carries that one new and no
+    other."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -5925,19 +5929,33 @@ class LateStateOnReconnect(FakeExchange):
         if type_ == "session_state" and self.connections > 1 and self.states_held < 5:
             self.states_held += 1
             return
+        if type_ == "book" and self.connections == 1:
+            payload = {**payload, "ask_levels": []}
+        elif type_ == "book":
+            # The ask is back, in a book of a later grid time.
+            payload = {**payload, "grid_time": str(int(payload["grid_time"]) + 1)}
         await super().send(ws, type_, payload, **envelope)
+
+    async def on_order(self, ws: ServerConnection, type_: str, p: dict[str, Any]) -> None:
+        if type_ == "new" and self.connections == 1:
+            self._withhold = True  # nothing more is sent: the connection drops on it
+            return
+        await super().on_order(ws, type_, p)
 
 
 async def test_quote_both_sides_quotes_after_a_drop_only_once_a_new_session_state_says_open():
-    # The connection drops after its first book, as the buy goes out; the sell is never
-    # sent, so it goes out on the new connection. The market may have closed meanwhile,
-    # so it waits for that connection's session state, though fresh books come first.
-    exchange = LateStateOnReconnect(drop_after_books=1)
+    # The first connection's book shows only a bid, so only the buy goes out on it, and
+    # the connection drops on the buy's new; the sell is never sent, so it goes out on the
+    # new connection. The market may have closed meanwhile, so it waits for that
+    # connection's session state, though fresh books come first.
+    exchange = LateStateOnReconnect()
     code, out, err = await run_quoter(exchange)
-    # The buy's new may have been sent, and no reply comes for it: the run names it.
+    # The buy's new was sent, and no reply comes for it: the run names it.
     assert code == 1, out + err
     assert "no reply came for the new sent to BUY TEST @ 99.960000" in out
     assert exchange.connections == 2
+    assert [p["side"] for p in payloads(exchange, "new")][:1] == ["BUY"]
+    assert len(orders_on(exchange, 1, "new")) == 1
     sends = orders_on(exchange, 2, "new", "amend")
     assert sends, out
     assert first_sent(exchange, 2, "book") < first_sent(exchange, 2, "session_state") < sends[0]
