@@ -512,8 +512,8 @@ def _marks_ticket_states(ack: SessionAck, payload: dict[str, Any] | None) -> boo
         return True
     if payload is None:
         return None
-    sent = payload.get("marks_ticket_states", payload.get("marksTicketStates"))
-    return False if sent is not None else None
+    # The gateway writes proto field names and always sends false (EmitDefaultValues).
+    return False if "marks_ticket_states" in payload else None
 
 
 def _log_id(ack: SessionAck) -> str | None:
