@@ -470,6 +470,16 @@ class SessionInfo:
     it for equality only. A `last_report_seq` you save to pass to a later session's
     `resume` belongs to the log named here: reuse it only when both this `log_id` and
     that session's are known and equal, and otherwise resume from 0.
+
+    `marks_ticket_states` says whether this connection will be sent `ticket_states_complete`
+    after its connect-time `ticket_state` and `break_request_state` messages (see the
+    `qte_sdk.tickets` docs). True: it is sent after the set, unless the connection closes
+    first or a state cannot be reported, and then ends the connect-time set; wait for it
+    with a bound.
+    False: the exchange marks the end of that set, but this session is not sent the set, so
+    no `ticket_states_complete` comes on this connection. None: the exchange sent no
+    `marks_ticket_states` (one that predates it, or an ack built without its payload), so
+    no marker can be relied on: treat the states as they come, as before.
     """
 
     session_id: str
@@ -478,9 +488,12 @@ class SessionInfo:
     contract_version: str
     unscored: bool
     log_id: str | None = None
+    marks_ticket_states: bool | None = None
 
     @classmethod
-    def from_ack(cls, ack: SessionAck) -> "SessionInfo":
+    def from_ack(cls, ack: SessionAck, payload: dict[str, Any] | None = None) -> "SessionInfo":
+        """The fields of `ack`. `payload` is its JSON payload as received, which alone tells
+        a `marks_ticket_states` sent false from one not sent; without it a false reads None."""
         return cls(
             session_id=ack.session_id,
             team=ack.team,
@@ -488,7 +501,19 @@ class SessionInfo:
             contract_version=ack.contract_version,
             unscored=ack.unscored,
             log_id=_log_id(ack),
+            marks_ticket_states=_marks_ticket_states(ack, payload),
         )
+
+
+def _marks_ticket_states(ack: SessionAck, payload: dict[str, Any] | None) -> bool | None:
+    """`ack`'s `marks_ticket_states`, or None when the exchange did not send it. The field
+    has no presence on the wire type, so a false is told from an absent field by `payload`."""
+    if ack.marks_ticket_states:
+        return True
+    if payload is None:
+        return None
+    # The gateway writes proto field names and always sends false (EmitDefaultValues).
+    return False if "marks_ticket_states" in payload else None
 
 
 def _log_id(ack: SessionAck) -> str | None:
