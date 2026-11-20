@@ -2505,7 +2505,7 @@ def test_quote_both_sides_warns_without_a_size_and_quotes_one_share(
     assert args.size == 1
     err = capsys.readouterr().err
     assert err.count(example.SIZE_WARNING) == 1
-    assert "round lot" in example.SIZE_WARNING and "obligations panel" in example.SIZE_WARNING
+    assert "round lot" in example.SIZE_WARNING and "round_lot" in example.SIZE_WARNING
     args = example.parse_args(
         ["--instrument", INSTRUMENT, "--strat-id", "quote-test", "--size", "40"]
     )
