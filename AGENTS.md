@@ -1,6 +1,6 @@
 # Using qte-sdk
 
-**Version:** 1.79
+**Version:** 1.80
 
 This file is for anyone building a trading program for the Queen's Tower Exchange (QTE) with this SDK, and for the coding agent helping them. It ships inside the package, so after an install of 1.2.0 or later, or of `main`, even one from a zip with no clone, `python -m qte_sdk.agents` prints it. With an earlier release, read [AGENTS.md on GitHub](https://github.com/josh-g-s/qte-sdk/blob/main/AGENTS.md) instead. You can also copy it into your own project so your agent follows it there.
 
@@ -61,6 +61,8 @@ Never build these into code as constants. They are set by the exchange and can c
 - trading days, holidays and hours. Read them from the calendar the exchange sends after you authenticate (`session.wait_for_calendar()`, then `qte_sdk.calendar.next_open` and `next_close`).
 
 Act on what the exchange reports instead: cancel or amend after the order's `order_state` arrives rather than after a fixed sleep, trade only while `SessionState.state` is `OPEN`, and handle each reject by its reason.
+
+A Market Making desk (an equity desk; whether an Options Market Making desk is sent it too is not yet confirmed) is sent its own `obligation_state` message (`ObligationState`) after every whole-second close of a session, private to the desk and never on the public feed, with one `ObligationEntry` per assigned instrument. `qualifying` says whether the second just closed counted towards its presence; `spread_compliant` and `size_compliant` whether its quote met the spread and size tests; `in_tier_m` whether it is in the live Tier-M state, which means it qualified in at least 85% of its last 900 eligible seconds; a second that is not eligible (an outage or a halt, say) neither counts nor moves the window. An entry may also carry `graced`, present and then always true, only on a second that counted because of the obligation grace (a term with a grace amendment); it is absent on every other second and never false, so read it with `entry.HasField("graced")`. A graced second counts as qualifying, in `session_qualifying_seconds` and `tier_m_qualifying_seconds` too, even when `spread_compliant` or `size_compliant` is false, since those two still show what the quote did; a qualifying second without `graced` was earned by the quote. The exchange sends `graced` from the release that carries it (planned for 28/29 November 2026); until then no entry has it.
 
 ## Orders
 

@@ -46,20 +46,22 @@ class Auth(_message.Message):
     def __init__(self, token: _Optional[str] = ..., subscribe_tickets: bool = ...) -> None: ...
 
 class SessionAck(_message.Message):
-    __slots__ = ("session_id", "team", "server_time", "contract_version", "unscored", "log_id")
+    __slots__ = ("session_id", "team", "server_time", "contract_version", "unscored", "log_id", "marks_ticket_states")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     TEAM_FIELD_NUMBER: _ClassVar[int]
     SERVER_TIME_FIELD_NUMBER: _ClassVar[int]
     CONTRACT_VERSION_FIELD_NUMBER: _ClassVar[int]
     UNSCORED_FIELD_NUMBER: _ClassVar[int]
     LOG_ID_FIELD_NUMBER: _ClassVar[int]
+    MARKS_TICKET_STATES_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     team: str
     server_time: int
     contract_version: str
     unscored: bool
     log_id: str
-    def __init__(self, session_id: _Optional[str] = ..., team: _Optional[str] = ..., server_time: _Optional[int] = ..., contract_version: _Optional[str] = ..., unscored: bool = ..., log_id: _Optional[str] = ...) -> None: ...
+    marks_ticket_states: bool
+    def __init__(self, session_id: _Optional[str] = ..., team: _Optional[str] = ..., server_time: _Optional[int] = ..., contract_version: _Optional[str] = ..., unscored: bool = ..., log_id: _Optional[str] = ..., marks_ticket_states: bool = ...) -> None: ...
 
 class CalendarSession(_message.Message):
     __slots__ = ("session_date", "open_time", "close_time", "early_close")
@@ -114,7 +116,7 @@ class OptionTerms(_message.Message):
     def __init__(self, underlying: _Optional[str] = ..., expiry: _Optional[str] = ..., right: _Optional[_Union[OptionRight, str]] = ..., strike: _Optional[int] = ..., multiplier: _Optional[int] = ...) -> None: ...
 
 class InstrumentInfo(_message.Message):
-    __slots__ = ("instrument", "display_name", "kind", "tick_size", "lot_size", "status", "tradable", "option", "sector_limit")
+    __slots__ = ("instrument", "display_name", "kind", "tick_size", "lot_size", "status", "tradable", "option", "sector_limit", "round_lot")
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
     DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
@@ -124,6 +126,7 @@ class InstrumentInfo(_message.Message):
     TRADABLE_FIELD_NUMBER: _ClassVar[int]
     OPTION_FIELD_NUMBER: _ClassVar[int]
     SECTOR_LIMIT_FIELD_NUMBER: _ClassVar[int]
+    ROUND_LOT_FIELD_NUMBER: _ClassVar[int]
     instrument: str
     display_name: str
     kind: InstrumentKind
@@ -133,7 +136,8 @@ class InstrumentInfo(_message.Message):
     tradable: bool
     option: OptionTerms
     sector_limit: str
-    def __init__(self, instrument: _Optional[str] = ..., display_name: _Optional[str] = ..., kind: _Optional[_Union[InstrumentKind, str]] = ..., tick_size: _Optional[int] = ..., lot_size: _Optional[int] = ..., status: _Optional[_Union[InstrumentStatus, str]] = ..., tradable: bool = ..., option: _Optional[_Union[OptionTerms, _Mapping]] = ..., sector_limit: _Optional[str] = ...) -> None: ...
+    round_lot: int
+    def __init__(self, instrument: _Optional[str] = ..., display_name: _Optional[str] = ..., kind: _Optional[_Union[InstrumentKind, str]] = ..., tick_size: _Optional[int] = ..., lot_size: _Optional[int] = ..., status: _Optional[_Union[InstrumentStatus, str]] = ..., tradable: bool = ..., option: _Optional[_Union[OptionTerms, _Mapping]] = ..., sector_limit: _Optional[str] = ..., round_lot: _Optional[int] = ...) -> None: ...
 
 class OptionUnderlying(_message.Message):
     __slots__ = ("underlying", "strike_increment", "contracts")

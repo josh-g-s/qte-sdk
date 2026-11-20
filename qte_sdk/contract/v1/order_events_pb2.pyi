@@ -160,7 +160,7 @@ class ObligationState(_message.Message):
     def __init__(self, entries: _Optional[_Iterable[_Union[ObligationEntry, _Mapping]]] = ..., timestamp: _Optional[int] = ...) -> None: ...
 
 class ObligationEntry(_message.Message):
-    __slots__ = ("instrument", "eligible", "qualifying", "spread_compliant", "size_compliant", "session_qualifying_seconds", "session_eligible_seconds", "in_tier_m", "tier_m_qualifying_seconds", "tier_m_eligible_seconds")
+    __slots__ = ("instrument", "eligible", "qualifying", "spread_compliant", "size_compliant", "session_qualifying_seconds", "session_eligible_seconds", "in_tier_m", "tier_m_qualifying_seconds", "tier_m_eligible_seconds", "min_size_per_side", "graced")
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
     ELIGIBLE_FIELD_NUMBER: _ClassVar[int]
     QUALIFYING_FIELD_NUMBER: _ClassVar[int]
@@ -171,6 +171,8 @@ class ObligationEntry(_message.Message):
     IN_TIER_M_FIELD_NUMBER: _ClassVar[int]
     TIER_M_QUALIFYING_SECONDS_FIELD_NUMBER: _ClassVar[int]
     TIER_M_ELIGIBLE_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    MIN_SIZE_PER_SIDE_FIELD_NUMBER: _ClassVar[int]
+    GRACED_FIELD_NUMBER: _ClassVar[int]
     instrument: str
     eligible: bool
     qualifying: bool
@@ -181,7 +183,9 @@ class ObligationEntry(_message.Message):
     in_tier_m: bool
     tier_m_qualifying_seconds: int
     tier_m_eligible_seconds: int
-    def __init__(self, instrument: _Optional[str] = ..., eligible: bool = ..., qualifying: bool = ..., spread_compliant: bool = ..., size_compliant: bool = ..., session_qualifying_seconds: _Optional[int] = ..., session_eligible_seconds: _Optional[int] = ..., in_tier_m: bool = ..., tier_m_qualifying_seconds: _Optional[int] = ..., tier_m_eligible_seconds: _Optional[int] = ...) -> None: ...
+    min_size_per_side: int
+    graced: bool
+    def __init__(self, instrument: _Optional[str] = ..., eligible: bool = ..., qualifying: bool = ..., spread_compliant: bool = ..., size_compliant: bool = ..., session_qualifying_seconds: _Optional[int] = ..., session_eligible_seconds: _Optional[int] = ..., in_tier_m: bool = ..., tier_m_qualifying_seconds: _Optional[int] = ..., tier_m_eligible_seconds: _Optional[int] = ..., min_size_per_side: _Optional[int] = ..., graced: bool = ...) -> None: ...
 
 class RiskNotice(_message.Message):
     __slots__ = ("kind", "timestamp", "cure_deadline", "breached_limits")
@@ -424,3 +428,7 @@ class TermEnd(_message.Message):
     session_date: str
     term_id: str
     def __init__(self, session_date: _Optional[str] = ..., term_id: _Optional[str] = ...) -> None: ...
+
+class TicketStatesComplete(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...

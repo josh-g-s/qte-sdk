@@ -285,7 +285,12 @@ logs nothing; its `request_kind` says which (`BREAK_REQUEST_SUBMIT` or
 named by `ticket_reason_code_name`. Two codes are its own: `BREAK_REQUEST_NOT_IN_BREAK` (1721), a
 request sent outside a break (before the final close, or from the next term's first
 session on), and `BREAK_REQUEST_EXISTS` (1722), a request in an instrument where the pod
-already holds a pending or approved one. A side that does not reduce the position, a
+already holds a pending or approved one. A third, `BREAK_REQUEST_NO_CLOSE_LEFT` (1723), is a
+request stamped with no break day's closing window, the last 300 seconds before its official
+close, left to begin after it before the next term's first session: at or after the first
+sample of the last break day's window, or in a break that serves no break day, as such a
+request could never fill. It is checked after `BREAK_REQUEST_NOT_IN_BREAK`. A side that
+does not reduce the position, a
 flat position or more shares than the position is `TICKET_CROSSES_ZERO`; a withdrawal
 naming no request of the pod is `TICKET_NOT_FOUND`, and one of a request already refused
 or withdrawn `TICKET_NOT_WORKING`.

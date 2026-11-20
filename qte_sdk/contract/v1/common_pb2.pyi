@@ -345,6 +345,7 @@ class TicketReasonCodes(_message.Message):
         TICKET_AMEND_AT_OR_BELOW_FILLED: _ClassVar[TicketReasonCodes.TicketReasonCode]
         BREAK_REQUEST_NOT_IN_BREAK: _ClassVar[TicketReasonCodes.TicketReasonCode]
         BREAK_REQUEST_EXISTS: _ClassVar[TicketReasonCodes.TicketReasonCode]
+        BREAK_REQUEST_NO_CLOSE_LEFT: _ClassVar[TicketReasonCodes.TicketReasonCode]
     TICKET_REASON_CODE_UNSPECIFIED: TicketReasonCodes.TicketReasonCode
     NOT_AUTHENTICATED: TicketReasonCodes.TicketReasonCode
     VERSION_MISMATCH: TicketReasonCodes.TicketReasonCode
@@ -382,6 +383,7 @@ class TicketReasonCodes(_message.Message):
     TICKET_AMEND_AT_OR_BELOW_FILLED: TicketReasonCodes.TicketReasonCode
     BREAK_REQUEST_NOT_IN_BREAK: TicketReasonCodes.TicketReasonCode
     BREAK_REQUEST_EXISTS: TicketReasonCodes.TicketReasonCode
+    BREAK_REQUEST_NO_CLOSE_LEFT: TicketReasonCodes.TicketReasonCode
     def __init__(self) -> None: ...
 
 class ReasonCodes(_message.Message):

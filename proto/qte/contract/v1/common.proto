@@ -1,7 +1,7 @@
 // Common types shared across the wire contract: the enums the message files
 // in this package use.
 //
-// **Version:** 1.31
+// **Version:** 1.32
 //
 // A field is never renumbered, and a retired field's number is never reused.
 syntax = "proto3";
@@ -498,7 +498,11 @@ message TicketReasonCodes {
     // that is pending or approved (SPEC 23.7: "a pod holds at most one
     // request in each instrument").
     BREAK_REQUEST_EXISTS = 1722;
-    // 1723-1799 reserved for band 1700 growth.
+    // A break_request, or a Director's approval of one, once no break day's
+    // closing window is left to begin after it before the next term's first
+    // session: it could never fill (SPEC 23.7).
+    BREAK_REQUEST_NO_CLOSE_LEFT = 1723;
+    // 1724-1799 reserved for band 1700 growth.
   }
 }
 

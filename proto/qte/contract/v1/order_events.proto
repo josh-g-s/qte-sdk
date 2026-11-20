@@ -1,6 +1,6 @@
 // Outbound order events.
 //
-// **Version:** 1.30
+// **Version:** 1.34
 //
 // Message types on the envelope `type` field: `accepted`, `reject`,
 // `execution`, `order_cancelled`, `order_state`, `account_summary`,
@@ -236,36 +236,54 @@ message ObligationEntry {
   // loss halt, and in the term's final closing window; a 15-minute exposure
   // cure does not make it false. SPEC 16.2, 9.3.5, 13.3, 13.5
   bool eligible = 2;
-  // Present iff eligible. Whether that second counted: both a non-stale
-  // executable bid and offer existed, their full spread was at most 60% of the
-  // band width in force, and the quantity displayed at each of those prices
-  // met the minimum size. SPEC 16.2
+  // Present iff eligible. Whether that second counted: either both a
+  // non-stale executable bid and offer existed, their full spread was at most
+  // the term's spread ratio of the band width in force (90% in the Winter
+  // term), and the quantity displayed at each of those prices met the minimum
+  // size, or the second was graced (`graced`). SPEC 16.2
   optional bool qualifying = 3;
   // Present iff eligible and the desk had both a non-stale executable bid and
-  // offer. Whether the full quoted spread was at most 60% of the full
-  // two-sided band width in force. SPEC 16.2, 5.2
+  // offer. Whether the full quoted spread was at most the term's spread ratio
+  // (90% in the Winter term) of the full two-sided band width in force. It
+  // shows what the quote did, so it can be false on a graced second.
+  // SPEC 16.2, 5.2
   optional bool spread_compliant = 4;
   // Present iff eligible and the desk had both a non-stale executable bid and
   // offer. Whether the quantity displayed at the bid price and at the offer
   // price, each summed across the desk's orders at that price, independently
   // met the minimum size. Size at other prices does not count. SPEC 16.2
   optional bool size_compliant = 5;
-  // Whole seconds. Qualifying seconds so far in the current instrument-session.
-  // SPEC 16.2
+  // Whole seconds. Qualifying seconds so far in the current instrument-session,
+  // graced seconds included. SPEC 16.2
   int32 session_qualifying_seconds = 6;
   // Whole seconds. Eligible seconds so far in the current instrument-session.
   // Presence is qualifying over eligible; no ratio is sent. SPEC 16.2
   int32 session_eligible_seconds = 7;
   // Whether the desk is in the live Tier-M state for this instrument: over the
   // trailing 900 seconds it qualified in at least 85% of that window's
-  // eligible seconds. False with no eligible second yet, and for a desk under a
+  // eligible seconds, a graced second counting as qualified. False with no
+  // eligible second yet, and for a desk under a
   // daily loss halt or a penalty suspension. SPEC 9.3.5, 16.2
   bool in_tier_m = 8;
-  // Whole seconds. Qualifying seconds in the trailing 900-second window.
-  // SPEC 9.3.5
+  // Whole seconds. Qualifying seconds in the trailing 900-second window,
+  // graced seconds included. SPEC 9.3.5
   int32 tier_m_qualifying_seconds = 9;
   // Whole seconds. Eligible seconds in the same window. SPEC 9.3.5
   int32 tier_m_eligible_seconds = 10;
+  // The minimum quantity size_compliant holds the bid and the offer each to,
+  // in force for the second this entry is as of: an equity's round lot in
+  // shares, in a term with the round-lot table, as term amendments leave it
+  // (a lot amendment takes effect at its session's open); an option
+  // contract's displayed size in contracts. Absent for an equity in a term
+  // without the round-lot table. SPEC 16.2, 18.5
+  optional int64 min_size_per_side = 11;
+  // Present only on a second that counted because of the obligation grace (the
+  // desk had quoted the pair for the streak and this failing second fell within
+  // the grace), and then true. Absent on every other second, so a qualifying
+  // second without it was earned by the quote, and a log with no grace
+  // amendment carries it on no second. `spread_compliant` and `size_compliant`
+  // still show what the quote did. SPEC 16.2
+  optional bool graced = 12;
 }
 
 // SPEC 11.1. A team is told on this connection, when the engine records it,
@@ -346,7 +364,9 @@ message AccountState {
   optional string session_date = 5;
   // timestamp. The exchange's own timestamp of the state this reply reads, the
   // same instant as `summary.timestamp`. It does not order the reply against
-  // the private reports: as_of_report_seq does. SPEC 9.2
+  // the private reports: as_of_report_seq does, and for the house's reply the
+  // Director session's wire does (every house fill sent before the reply is in
+  // it, none after). SPEC 9.2
   int64 as_of = 6;
   // int64-micro. The account's cash balance. Present only for an account that
   // holds a cash balance, and equal to `summary.cash` when `summary` is
@@ -362,7 +382,8 @@ message AccountState {
   // whatever their report_seq (the reply holds no resting-order state). The
   // client's contiguous cursor and resume rules are unchanged. Absent when the
   // team has had no private report in this term, so a client applies every
-  // one. The reply itself carries no report_seq.
+  // one. Never present in the house's reply: a house report takes no
+  // report_seq. The reply itself carries no report_seq.
   optional int64 as_of_report_seq = 8;
 }
 
@@ -614,3 +635,10 @@ message TermEnd {
   string session_date = 1; // The final session's date, ISO 8601 (YYYY-MM-DD)
   string term_id = 2;      // id. The term the gateway serves
 }
+
+// The end of the connect states: sent once per successful auth, after the
+// last connect-time ticket_state and break_request_state, to a session that is
+// sent them (a Fundamentals pod's, an Execution desk's, and a Director
+// session's that is not read-only), also when the set is empty. It carries no
+// report_seq and is not sent again after a resume. The payload is empty.
+message TicketStatesComplete {}

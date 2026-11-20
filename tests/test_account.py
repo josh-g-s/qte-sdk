@@ -412,6 +412,23 @@ async def test_account_summary_and_obligation_state_decode_typed():
     assert obligations.entries[0].instrument == "AAPL"
 
 
+async def test_obligation_entry_graced_is_true_on_a_graced_second_and_absent_otherwise():
+    # Contract 03 (qte-platform #3731): `graced` is present, and then true, only on a
+    # second that qualified through the obligation grace; it is never sent false.
+    base = {"instrument": "AAPL", "eligible": True, "qualifying": True, "size_compliant": True}
+    graced = {**base, "spread_compliant": False, "graced": True}
+    ordinary = {**base, "spread_compliant": True}
+    [event] = await received(
+        frame("obligation_state", {"entries": [graced, ordinary], "timestamp": "3"}, 1),
+    )
+    assert isinstance(event, Received)
+    first, second = event.message.entries
+    assert first.HasField("graced") and first.graced is True
+    assert first.qualifying and not first.spread_compliant and first.size_compliant
+    assert not second.HasField("graced")
+    assert second.qualifying and second.spread_compliant and second.size_compliant
+
+
 async def test_query_accepts_a_request_ref_of_exactly_32_bytes():
     sender = Recorder()
     ref = await send_account_query(sender, request_ref="x" * 32)

@@ -208,6 +208,17 @@ async def test_a_break_request_reject_decodes_with_its_reason():
     assert event.report_seq is None
 
 
+async def test_a_break_request_with_no_close_left_is_refused_by_name():
+    # qte-platform #3689: a request stamped after the last break day's closing window
+    # has begun could never fill.
+    payload = {**NOT_IN_BREAK, "reason_code": "BREAK_REQUEST_NO_CLOSE_LEFT"}
+    [event] = await received(frame("break_request_reject", payload))
+    reject = event.message
+    assert isinstance(reject, BreakRequestReject)
+    assert reject.reason_code == TicketReasonCodes.BREAK_REQUEST_NO_CLOSE_LEFT == 1723
+    assert ticket_reason_code_name(reject.reason_code) == "BREAK_REQUEST_NO_CLOSE_LEFT"
+
+
 async def test_a_break_request_reject_with_no_request_ref_echoes_none():
     payload = {
         "request_kind": "BREAK_REQUEST_WITHDRAW",
