@@ -1,6 +1,6 @@
 // Session and subscription messages.
 //
-// **Version:** 1.14
+// **Version:** 1.17
 //
 // Message types on the envelope `type` field: `auth`, `session_ack`,
 // `calendar`, `instruments`, `session_reject`, `heartbeat`, `resume`,
@@ -51,7 +51,7 @@ message SessionAck {
   string team = 2;            // id. The team the authenticated account trades for. SPEC 2.1, SPEC 2.5
   int64 server_time = 3;       // timestamp. Milliseconds since the Unix epoch, UTC. Its other rules are not yet specified
   string contract_version = 4; // string. Not yet specified
-  // bool. True when this is an unscored recorded session: no metric, score or
+  // bool. True when this is an unscored session: no metric, score or
   // leaderboard counts it. False in a scored session. Always present, false
   // included. The exchange records the same flag when the session opens, so
   // what a team is told and what is scored cannot differ. SPEC 4.2. The
@@ -67,6 +67,11 @@ message SessionAck {
   // before resume. Absent only while the log holds no durable record.
   // Compare it for equality only; never parse it.
   optional string log_id = 6;
+  // bool. Present on every `session_ack` from a gateway that marks the end of
+  // the connect states: true when the session is sent `ticket_states_complete`
+  // (contract 11), false otherwise. An absent field means the gateway does not
+  // mark it.
+  bool marks_ticket_states = 7;
 }
 
 // One trading session's date and hours (SPEC 13.1, 13.2), an entry of
@@ -205,6 +210,18 @@ message InstrumentInfo {
   // client treats a value it does not know as an unknown sector, never as an
   // error. SPEC 3.1, SPEC 11.1, SPEC 23.6
   string sector_limit = 9;
+  // int64-qty, optional. The equity's round lot in shares: the minimum size
+  // per side its Market Making obligation holds the bid and the offer each
+  // to, in force when the message is sent, as the term's amendments leave it
+  // (a lot amendment takes effect at its session's open, and the message is
+  // resent then). It is the value ObligationEntry.min_size_per_side carries
+  // for the same equity. Present for an equity that has a lot in the
+  // term's round-lot table. Absent for an equity without one (the term has
+  // no table, or its table leaves the equity out), for every option
+  // contract (an option's minimum is its displayed size in contracts), and
+  // from an exchange that predates the field. It is not
+  // lot_size: an order need not be a multiple of it. SPEC 16.2, SPEC 18.5
+  optional int64 round_lot = 10;
 }
 
 // One underlying of the option chain, an entry of
@@ -382,7 +399,10 @@ message Unsubscribe {
 // stopped (TEAM_DISABLED, SPEC 8.2), gets a `reject` echoing `request_ref` as
 // sent, with request_type ACCOUNT_QUERY. The 32-byte identifier limit of
 // `order_entry.proto` applies to this message's request_ref: one over 32 bytes
-// is a malformed message.
+// is a malformed message. On a Director session it asks for the house's
+// account, answered to that session only; the house kill switch stops house
+// orders, not this query, and a read-only Director credential's query is
+// rejected NO_MARKET_ACCESS.
 message AccountQuery {
   string request_ref = 1; // id, 1 to 32 bytes. Required, echoed on the reply and on any reject
 }

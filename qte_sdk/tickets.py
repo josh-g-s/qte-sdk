@@ -289,7 +289,8 @@ already holds a pending or approved one. A third, `BREAK_REQUEST_NO_CLOSE_LEFT` 
 request stamped with no break day's closing window, the last 300 seconds before its official
 close, left to begin after it before the next term's first session: at or after the first
 sample of the last break day's window, or in a break that serves no break day, as such a
-request could never fill. It is checked after `BREAK_REQUEST_NOT_IN_BREAK`. A side that does not reduce the position, a
+request could never fill. It is checked after `BREAK_REQUEST_NOT_IN_BREAK`. A side that
+does not reduce the position, a
 flat position or more shares than the position is `TICKET_CROSSES_ZERO`; a withdrawal
 naming no request of the pod is `TICKET_NOT_FOUND`, and one of a request already refused
 or withdrawn `TICKET_NOT_WORKING`.
