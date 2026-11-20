@@ -473,7 +473,9 @@ class SessionInfo:
 
     `marks_ticket_states` says whether this connection will be sent `ticket_states_complete`
     after its connect-time `ticket_state` and `break_request_state` messages (see the
-    `qte_sdk.tickets` docs). True: it will, so that message ends the connect-time set.
+    `qte_sdk.tickets` docs). True: it is sent after the set, unless the connection closes
+    first or a state cannot be reported, and then ends the connect-time set; wait for it
+    with a bound.
     False: the exchange marks the end of that set, but this session is not sent the set, so
     no `ticket_states_complete` comes on this connection. None: the exchange sent no
     `marks_ticket_states` (one that predates it, or an ack built without its payload), so
