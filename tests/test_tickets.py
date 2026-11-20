@@ -10,15 +10,17 @@ from google.protobuf import descriptor_pb2
 from google.protobuf.message import Message
 from test_reconnect import Clock, resume_ack
 from test_resume import NEXT_TERM, TERM, Scripted, book, kinds, order_state
-from test_session import synthetic_token
+from test_session import Server, ack, synthetic_token
 
 from qte_sdk import tickets
 from qte_sdk.connection import (
+    Connected,
     Connection,
     ContractVersionMismatch,
     Disconnected,
     Received,
     SeqGap,
+    SessionInfo,
 )
 from qte_sdk.contract.registry import INBOUND
 from qte_sdk.contract.v1 import common_pb2, order_events_pb2, session_pb2
@@ -78,6 +80,7 @@ from qte_sdk.session import open_session
 from qte_sdk.tickets import (
     EXECUTION_ROUTE_TYPE,
     TICKET_EVENT_TYPES,
+    TICKET_STATES_COMPLETE_TYPE,
     TWAP,
     URGENCY_HIGH,
     URGENCY_LOW,
@@ -86,6 +89,7 @@ from qte_sdk.tickets import (
     LatestTickets,
     is_execution_route,
     is_ticket_event,
+    is_ticket_states_complete,
     parent_ticket_of,
     send_ticket,
     send_ticket_cancel,
@@ -818,7 +822,11 @@ async def test_a_fresh_session_delivers_the_ticket_states_read_ahead_by_its_resu
     ]
 
 
-async def read_until_book(exchange: Scripted) -> tuple[list, LatestTickets, int | None]:
+async def read_until_book(
+    exchange: Scripted, connected: list[Connected] | None = None
+) -> tuple[list, LatestTickets, int | None]:
+    """Every event to the first book, the tickets held then, and the resume cursor. Each
+    `Connected` is also appended to `connected`, when given."""
     latest = LatestTickets()
     async with serve_local(exchange) as url:
         rs = ReconnectingSession(url, synthetic_token(), sleep=Clock().sleep)
@@ -828,6 +836,8 @@ async def read_until_book(exchange: Scripted) -> tuple[list, LatestTickets, int 
                 async for event in rs:
                     events.append(event)
                     latest.update(event)
+                    if connected is not None and isinstance(event, Connected):
+                        connected.append(event)
                     if isinstance(event, Received) and event.type == "book":
                         break
             return events, latest, rs.last_report_seq
@@ -1437,3 +1447,131 @@ async def test_the_connect_time_set_carries_each_tickets_whole_progress():
         (OPEN + 2 * HALF_HOUR, 300, 290),
     ]
     assert points(latest.get("18")) == []
+
+
+# The end of the connect-time states (contract 11 "ticket_states_complete", issue #393)
+
+TICKET_STATES_COMPLETE = frame("ticket_states_complete", {})
+
+# A pod's connect-time break request state, which follows its ticket states.
+BREAK_REQUEST_FRAME = frame(
+    "break_request_state",
+    {
+        "break_request_id": "5",
+        "instrument": "AAPL",
+        "side": "SELL",
+        "shares": "100",
+        "thesis_id": "t-1",
+        "thesis_version": 1,
+        "risk_statement": "Reduce before the break.",
+        "status": "BREAK_REQUEST_PENDING",
+        "accepted_time": "40",
+        "update_time": "40",
+        "pod": "pod-a",
+    },
+)
+
+
+async def test_ticket_states_complete_decodes_as_an_empty_typed_message():
+    assert INBOUND[TICKET_STATES_COMPLETE_TYPE] is order_events_pb2.TicketStatesComplete
+    server = Server(ack(marks_ticket_states=True), TICKET_STATES_COMPLETE)
+    latest = LatestTickets()
+    async with serve_local(server) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            async with asyncio.timeout(5):
+                event = await anext(aiter(session))
+    assert isinstance(event, Received)
+    assert event.type == "ticket_states_complete"
+    assert event.message == order_events_pb2.TicketStatesComplete()
+    assert event.report_seq is None
+    assert is_ticket_states_complete(event)
+    assert not is_ticket_event(event)
+    assert not latest.update(event)
+    assert not is_ticket_states_complete(Disconnected(None))
+
+
+@pytest.mark.parametrize(("sent", "seen"), [(True, True), (False, False), (None, None)])
+async def test_session_info_reads_marks_ticket_states_as_sent_or_none_when_absent(sent, seen):
+    server = Server(ack(marks_ticket_states=sent))
+    async with serve_local(server) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            info = session.info
+    assert info.marks_ticket_states is seen
+
+
+def test_session_info_from_an_ack_without_its_payload_cannot_tell_false_from_absent():
+    assert SessionInfo.from_ack(session_pb2.SessionAck()).marks_ticket_states is None
+    marked = session_pb2.SessionAck(marks_ticket_states=True)
+    assert SessionInfo.from_ack(marked).marks_ticket_states is True
+    assert SessionInfo.from_ack(session_pb2.SessionAck(), {}).marks_ticket_states is None
+    payload = {"marks_ticket_states": False}
+    assert SessionInfo.from_ack(session_pb2.SessionAck(), payload).marks_ticket_states is False
+
+
+async def test_a_marked_connect_sequence_ends_in_ticket_states_complete_and_not_after_a_resume():
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "marks_ticket_states": True,
+            "before_resume": connect_group(
+                ticket_frame("17", 10), BREAK_REQUEST_FRAME, TICKET_STATES_COMPLETE
+            ),
+            "answer": [resume_ack()],
+            "after": [order_state(1)],
+            "drop": True,
+        },
+        {
+            "term": TERM,
+            "marks_ticket_states": True,
+            "before_resume": connect_group(ticket_frame("17", 50), TICKET_STATES_COMPLETE),
+            # The resume replays reports only: no states and no marker follow it.
+            "answer": [resume_ack(True, 2), order_state(2)],
+            "after": [ticket_frame("17", 60, "TICKET_COMPLETE"), book(7)],
+        },
+    )
+    connected: list[Connected] = []
+    events, _, _ = await read_until_book(exchange, connected)
+    assert [c.info.marks_ticket_states for c in connected] == [True, True]
+    first = kinds(events)[: kinds(events).index("Disconnected")]
+    assert first[first.index("calendar:None") :] == [
+        "calendar:None",
+        "instruments:None",
+        "ticket_state:None",
+        "break_request_state:None",
+        "ticket_states_complete:None",
+        "resume_ack:None",
+        "ResumeComplete",
+        "order_state:1",
+    ]
+    second = kinds(events)[kinds(events).index("Disconnected") :]
+    assert second[3:] == [
+        "calendar:None",
+        "instruments:None",
+        "ticket_state:None",
+        "ticket_states_complete:None",
+        "resume_ack:None",
+        "order_state:2",
+        "ResumeComplete",
+        "ticket_state:None",
+        "book:None",
+    ]
+    # One marker per connection, each before its resume_ack.
+    markers = [i for i, e in enumerate(events) if is_ticket_states_complete(e)]
+    acks = [i for i, k in enumerate(kinds(events)) if k == "resume_ack:None"]
+    assert len(markers) == 2 and markers[0] < acks[0] < markers[1] < acks[1]
+
+
+async def test_a_session_from_an_unmarking_exchange_works_without_the_marker():
+    exchange = Scripted(
+        {
+            "term": TERM,
+            "before_resume": connect_group(ticket_frame("17", 10), BREAK_REQUEST_FRAME),
+            "answer": [resume_ack()],
+            "after": [ticket_frame("17", 20, "TICKET_COMPLETE"), book(7)],
+        }
+    )
+    connected: list[Connected] = []
+    events, latest, _ = await read_until_book(exchange, connected)
+    assert [c.info.marks_ticket_states for c in connected] == [None]
+    assert not any(is_ticket_states_complete(e) for e in events)
+    assert [(s.ticket_id, s.status) for s in latest] == [("17", TICKET_COMPLETE)]

@@ -166,7 +166,17 @@ None of the three answers carries a `report_seq`, and a resume replays none of t
 Instead, once on each connection of the pod or desk, straight after the `session_ack`,
 the calendar and the instruments table, the exchange sends one whole `ticket_state` for
 every ticket of the current term, working or stopped, in ascending order of `ticket_id`.
-It does not send the set again after a resume. If your program resumes (as a
+After them and the connection's connect-time `break_request_state` messages ("Break
+requests" below), a session whose `SessionInfo.marks_ticket_states` is True (the
+`session.info` of a session, `Connected.info` on each connection) is sent one
+`ticket_states_complete` (`TicketStatesComplete`, an empty message; pick it out with
+`is_ticket_states_complete`), even when the set is empty: the connect-time set is then
+whole, and a `ticket_state` or `break_request_state` after it reports a change. Wait for
+it with a bound: it does not come if the connection closes first, or if the exchange left
+out a state it could not report. When `marks_ticket_states` is False the connection is sent
+no marker, and when it is None the exchange predates the marker, so no marker can be
+relied on: take the states as they come. It does not send the set, or the marker, again
+after a resume. If your program resumes (as a
 `ReconnectingSession` does), the session keeps the states it reads while it waits for
 the `resume_ack` and delivers them to your loop in order, so pass every event to
 `LatestTickets` from the first. The set replaces whatever you held before: a ticket
@@ -279,7 +289,8 @@ Its `pod` names the pod that sent the request. Neither answer carries a `report_
 is replayed by a resume. Instead, once on each connection, after that connection's
 `ticket_state` messages, the pod's session is sent one `break_request_state` for each of
 the pod's requests, in ascending `break_request_id`, and not again after a resume, so
-let each replace the state you held. A `break_request_reject` refuses one message and
+let each replace the state you held. When the session is marked (above),
+`ticket_states_complete` follows them. A `break_request_reject` refuses one message and
 logs nothing; its `request_kind` says which (`BREAK_REQUEST_SUBMIT` or
 `BREAK_REQUEST_WITHDRAW`), and its `reason_code` is a `TicketReasonCodes.TicketReasonCode`,
 named by `ticket_reason_code_name`. Two codes are its own: `BREAK_REQUEST_NOT_IN_BREAK` (1721), a
@@ -344,6 +355,7 @@ __all__ = [
     "BREAK_REQUEST_WITHDRAWN",
     "EXECUTION_ROUTE_TYPE",
     "TICKET_EVENT_TYPES",
+    "TICKET_STATES_COMPLETE_TYPE",
     "TWAP",
     "URGENCY_HIGH",
     "URGENCY_LOW",
@@ -356,6 +368,7 @@ __all__ = [
     "is_break_request_event",
     "is_execution_route",
     "is_ticket_event",
+    "is_ticket_states_complete",
     "parent_ticket_of",
     "send_break_request",
     "send_break_request_withdraw",
@@ -380,6 +393,10 @@ BreakRequestEvent = BreakRequestReject | BreakRequestState
 
 # The envelope `type` token of the routing a pod's tickets get, sent to a pod only.
 EXECUTION_ROUTE_TYPE = "execution_route"
+
+# The envelope `type` token that ends a connection's connect-time ticket and break request
+# states.
+TICKET_STATES_COMPLETE_TYPE = "ticket_states_complete"
 
 _URGENCIES = (URGENCY_HIGH, URGENCY_MEDIUM, URGENCY_LOW)
 _ALGORITHMS = (TWAP, VWAP)
@@ -646,6 +663,13 @@ def is_execution_route(event: Event) -> TypeGuard[Received]:
     """Whether `event` is a decoded `execution_route`. Its `message` is then an
     `ExecutionRoute`: how the exchange routes the pod's new tickets."""
     return isinstance(event, Received) and event.type == EXECUTION_ROUTE_TYPE
+
+
+def is_ticket_states_complete(event: Event) -> TypeGuard[Received]:
+    """Whether `event` is a decoded `ticket_states_complete`. Its `message` is then an empty
+    `TicketStatesComplete`: the connection's connect-time `ticket_state` and
+    `break_request_state` messages have all been sent."""
+    return isinstance(event, Received) and event.type == TICKET_STATES_COMPLETE_TYPE
 
 
 def ticket_request_ref_of(message: Message) -> str | None:

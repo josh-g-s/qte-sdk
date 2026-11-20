@@ -55,7 +55,9 @@ def synthetic_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def ack(unscored: bool = False, log_id: str | None = None) -> str:
+def ack(
+    unscored: bool = False, log_id: str | None = None, marks_ticket_states: bool | None = None
+) -> str:
     payload: dict[str, object] = {
         "session_id": "s-1",
         "team": "team-a",
@@ -65,6 +67,8 @@ def ack(unscored: bool = False, log_id: str | None = None) -> str:
     }
     if log_id is not None:
         payload["log_id"] = log_id
+    if marks_ticket_states is not None:
+        payload["marks_ticket_states"] = marks_ticket_states
     return frame("session_ack", payload, 1)
 
 

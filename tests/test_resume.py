@@ -145,13 +145,12 @@ SCRIPTED_LOG = "00000000000000aa"
 
 
 class Scripted:
-    """Answers auth with an ack, carrying `log_id` if given, then the calendar of `term`
-    (start, end) if given, and
-    sends `before_resume`; then, if `answer` is given,
-    receives `resume` and sends `answer`; then sends `after` and holds the connection
-    open, unless `drop` is set, when it drops the connection, or `close` (a code and a
-    reason) is given, when it closes it with them. Each connection runs the next script in
-    `scripts`, the last one repeating."""
+    """Answers auth with an ack, carrying `log_id` and `marks_ticket_states` if given, then
+    the calendar of `term` (start, end) if given, and sends `before_resume`; then, if
+    `answer` is given, receives `resume` and sends `answer`; then sends `after` and holds
+    the connection open, unless `drop` is set, when it drops the connection, or `close` (a
+    code and a reason) is given, when it closes it with them. Each connection runs the next
+    script in `scripts`, the last one repeating."""
 
     def __init__(self, *scripts: dict) -> None:
         self.scripts = scripts
@@ -163,7 +162,8 @@ class Scripted:
         script = self.scripts[min(self.connections, len(self.scripts) - 1)]
         self.connections += 1
         self.received.append(json.loads(await ws.recv()))
-        await ws.send(ack(log_id=script.get("log_id", SCRIPTED_LOG)))
+        marks = script.get("marks_ticket_states")
+        await ws.send(ack(log_id=script.get("log_id", SCRIPTED_LOG), marks_ticket_states=marks))
         if script.get("term") is not None:
             # The calendar the exchange sends straight after the ack, naming the term.
             start, end = script["term"]

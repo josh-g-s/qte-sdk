@@ -1123,7 +1123,7 @@ async def _open_session(
         async with deadline:
             await conn.open()
             await _send_auth(conn, secret)
-            ack, early = await _wait_for_ack(conn)
+            ack, ack_payload, early = await _wait_for_ack(conn)
     except BaseException as error:
         interrupted = await _finish_closing(conn)
         # For `ReconnectingSession`: the close code the exchange sent, if any, is passed on
@@ -1142,7 +1142,8 @@ async def _open_session(
         if safe is None and not interrupted:
             raise
     else:
-        return Session(conn, SessionInfo.from_ack(ack), early, pacing, chain_halts)
+        info = SessionInfo.from_ack(ack, ack_payload)
+        return Session(conn, info, early, pacing, chain_halts)
     # Raised outside the handler, so the original error, which may mention the token, is
     # not chained to it.
     if interrupted:
@@ -1197,7 +1198,10 @@ async def _send_auth(conn: Connection, secret: "_Secret") -> None:
     raise replacement
 
 
-async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
+async def _wait_for_ack(
+    conn: Connection,
+) -> tuple[SessionAck, dict[str, Any] | None, list[Event]]:
+    """The `session_ack`, its JSON payload as received, and every event before it."""
     early: list[Event] = []
     events = conn.events()
     detail = ""
@@ -1208,7 +1212,7 @@ async def _wait_for_ack(conn: Connection) -> tuple[SessionAck, list[Event]]:
             if isinstance(event, Received):
                 if event.type == "session_ack":
                     assert isinstance(event.message, SessionAck)
-                    return event.message, early
+                    return event.message, event.payload, early
                 if event.type == "reject" and event.report_seq is None:
                     # Before the acknowledgement, the only request in flight is `auth`. A
                     # reject with a report_seq is one of the team's order reports, which can

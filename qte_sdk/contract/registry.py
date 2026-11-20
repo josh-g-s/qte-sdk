@@ -39,6 +39,7 @@ from qte_sdk.contract.v1.order_events_pb2 import (
     TicketAccepted,
     TicketReject,
     TicketState,
+    TicketStatesComplete,
 )
 from qte_sdk.contract.v1.session_pb2 import (
     AccountQuery,
@@ -83,6 +84,7 @@ INBOUND: dict[str, type[Message]] = {
     "ticket_state": TicketState,
     "break_request_reject": BreakRequestReject,
     "break_request_state": BreakRequestState,
+    "ticket_states_complete": TicketStatesComplete,
     "term_close_fill": TermCloseFill,
     "term_end": TermEnd,
     "execution_route": ExecutionRoute,
