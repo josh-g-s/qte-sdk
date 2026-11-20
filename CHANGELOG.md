@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.117
+**Version:** 0.118
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- The round lot is readable: `InstrumentInfo.round_lot` in the instruments table is each equity's round lot in force (absent for an equity with none in the term's table, for every option contract and from an older exchange), and `ObligationEntry.min_size_per_side` in `obligation_state` is the minimum each side is held to for that second. The quickstart, AGENTS.md, README and `examples/quote_both_sides.py` now say where to read it instead of that this SDK cannot.
 - `ObligationEntry` in a Market Making desk's `obligation_state` has `graced`, present and then always true, only on a second that counted as qualifying because of the obligation grace; it is absent on every other second and never false, so read it with `HasField("graced")`. `spread_compliant` and `size_compliant` still show what the quote did. The quickstart and both copies of AGENTS.md describe `obligation_state` and say that qualifying includes graced seconds (#391).
 - A `break_request` stamped with no break day's closing window left before the next term's first session is refused `BREAK_REQUEST_NO_CLOSE_LEFT` (1723); `ticket_reason_code_name` names it, and the `qte_sdk.tickets` docs list it with the other break request codes (qte-platform #3689).
 - `examples/quote_both_sides.py` exits 0 only when every message it sent was answered, each of its own orders was seen to end, and no order of its strategy rests on the instrument; otherwise its last lines name each order, message and fill it is unsure of, and it exits 1. An order is its own only once its new is answered with `accepted`, and it never cancels another, nor where its view shows another strategy's order. After missed messages, a resume cut short or refused, or an order it cannot tell is its own, it stops quoting but still sends one cancel to each of its own orders. An unanswered new is never settled by a resume, so no second new goes to that side; a fill of another origin no longer ends its order, and it follows its order when an amend from elsewhere moves it. After a budget reject (codes 1500 to 1502) of any message it sends no new, cancel or amend on either side for a full minute, its final cancels included, and exits 1 naming its orders if the minute outlasts `--drain-seconds`. It exits 1 if no snapshot loaded its view of resting orders (time up before the first session, or a first resume refused), and a risk notice of a kind it does not know or cannot read, or any other report of the team's it cannot read or of a type it does not know, stops quoting, cancels its own orders and exits 1. A connection that ends for good after orders were sent now names them and says cleanup was not possible, rather than "run it again" (#381).

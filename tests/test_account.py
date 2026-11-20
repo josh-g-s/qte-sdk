@@ -429,6 +429,22 @@ async def test_obligation_entry_graced_is_true_on_a_graced_second_and_absent_oth
     assert second.qualifying and second.spread_compliant and second.size_compliant
 
 
+async def test_obligation_entry_min_size_per_side_is_the_minimum_in_force_or_absent():
+    # Contract 03: `min_size_per_side` is the minimum each of the bid and the offer is held
+    # to for that second (the round lot for an equity, contracts for an option); absent for
+    # an equity in a term without the round-lot table.
+    base = {"eligible": True, "qualifying": True, "spread_compliant": True}
+    equity = {**base, "instrument": "AAPL", "size_compliant": True, "min_size_per_side": "100"}
+    no_table = {**base, "instrument": "XOM", "size_compliant": True}
+    [event] = await received(
+        frame("obligation_state", {"entries": [equity, no_table], "timestamp": "3"}, 1),
+    )
+    assert isinstance(event, Received)
+    first, second = event.message.entries
+    assert first.HasField("min_size_per_side") and first.min_size_per_side == 100
+    assert not second.HasField("min_size_per_side")
+
+
 async def test_query_accepts_a_request_ref_of_exactly_32_bytes():
     sender = Recorder()
     ref = await send_account_query(sender, request_ref="x" * 32)

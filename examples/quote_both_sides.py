@@ -7,8 +7,9 @@ then:
         --size 100 --seconds 30
 
 --size is the shares to quote on each side. A Market Making desk must display at least one
-round lot of its name at its best bid and best offer: read the round lot from the console's
-obligations panel and pass at least that (100 above is an example). Without --size the
+round lot of its name at its best bid and best offer: read the round lot from `round_lot` in the
+instruments table, or the console's obligations panel, and pass at least that (100 above is an
+example). Without --size the
 example quotes 1 share and warns at start; a later release will require --size.
 
 The example quotes one limit order of --size shares on each side, --inside dollars inside
@@ -202,8 +203,9 @@ BUDGET_WAIT_SECONDS = 60.0
 
 SIZE_WARNING = (
     "warning: --size not set, so this example quotes 1 share per side. The market maker "
-    "minimum is one round lot per side: set --size to your instrument's round lot, shown in "
-    "the console's obligations panel. A later release will require --size."
+    "minimum is one round lot per side: set --size to your instrument's round lot, "
+    "`round_lot` in the instruments table or the console's obligations panel. A later "
+    "release will require --size."
 )
 
 
@@ -226,7 +228,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "shares per side; a Market Making desk passes at least its name's round lot, "
-            "shown in the console's obligations panel (default 1, with a warning; a later "
+            "`round_lot` in the instruments table (default 1, with a warning; a later "
             "release will require it)"
         ),
     )

@@ -327,6 +327,35 @@ def test_instrument_info_and_instruments_by_id():
     assert not by_id["SPY"].HasField("display_name")
 
 
+async def test_the_round_lot_is_read_from_the_table_and_replaced_by_a_resend():
+    # Contract 01 (qte-platform #3089, #3103, #3139): `round_lot` is present for an equity in
+    # the term's round-lot table, absent for one without a lot, for every option contract
+    # and from an exchange that predates the field. A lot amendment resends the table whole.
+    with_lot = {**TABLE, "instruments": [dict(i) for i in TABLE["instruments"]]}
+    with_lot["instruments"][0]["round_lot"] = "100"
+    amended = {"instruments": [{**with_lot["instruments"][0], "round_lot": "200"}]}
+    server = Server(
+        ack(),
+        calendar_frame(2),
+        instruments(3, with_lot),
+        instruments(4, amended),
+        hold_open=False,
+    )
+    async with serve_local(server) as url:
+        async with await open_session(url, synthetic_token()) as session:
+            found = await session.wait_for_instrument_table(timeout=5)
+            by_id = instruments_by_id(found)
+            assert by_id["AAPL"].HasField("round_lot") and by_id["AAPL"].round_lot == 100
+            assert by_id["AAPL"].lot_size == 1  # the smallest order size, not the round lot
+            assert not by_id["SPY"].HasField("round_lot")
+            assert not by_id[CALL_ID].HasField("round_lot")
+            _ = [event async for event in session]
+            latest = instrument_info(session.instrument_table, "AAPL")
+            assert latest is not None and latest.round_lot == 200
+    # A table from before the field has no round lot anywhere.
+    assert not any(info.HasField("round_lot") for info in table().instruments)
+
+
 def test_each_instruments_sector_for_the_sector_limit():
     by_id = instruments_by_id(table())
     assert by_id["AAPL"].sector_limit == "Information Technology"
