@@ -1,6 +1,6 @@
 # Developing your algo
 
-**Version:** 0.12
+**Version:** 0.13
 
 This guide is one path from an idea to a program trading on the exchange: explore past market data, run your strategy's loop on a replay of a past session, keep its order logic separate so you can test it, check your setup with the smoke test, then try it on the exchange during a session. Most of it works at any hour, so you can do it while the market is closed.
 
@@ -240,6 +240,27 @@ The October term (from 12 October 2026) and the Winter term (from 26 October 202
 | Agentic AI (closed in Winter) | 4,800 | 800 | 480 |
 | Execution | 7,200 | 800 | no cap |
 | Fundamentals | sends no orders; tickets do not count | | |
+
+### Keeping up with market data
+
+The open is the busiest moment of a session: books and trades for many instruments can arrive within the same second. A program that falls behind sees the market late, on top of any delay of the exchange's own. Three things keep it up to date:
+
+- **Subscribe only to what you trade.** `await market_data.subscribe(session, ["AAPL", "MSFT"])` (from `qte_sdk`) asks for those instruments alone. Every instrument you subscribe to is data your loop must read, whether or not you use it.
+- **Keep the loop reading.** The SDK reads the connection on the same thread as your loop, and `async for event in session` takes the next event only when your code returns to it. So never block inside it (no `time.sleep`, no blocking network call), and never wait inline for slow work, not even `await asyncio.to_thread(...)`: that frees the thread, but your loop still reads nothing until the work is done. Start slow work in the background and keep reading, for example with `asyncio.create_task(asyncio.to_thread(work, ...))`, or by putting events on an `asyncio.Queue` that a separate worker task, or a worker process for heavy Python computation, takes from.
+- **Give the receive queue room for the open.** The `websockets` library queues frames for your loop and stops reading the connection once more than `max_queue` are waiting (16 by default), until your loop has taken most of them. Pass a larger value as a connection option, which `open_session` and `ReconnectingSession` hand on to `websockets`:
+
+```python
+session = await open_session(max_queue=1024)  # or ReconnectingSession(..., max_queue=1024)
+```
+
+A larger queue absorbs a burst at the cost of memory; it does not help a loop that is always slower than the feed.
+
+What falling behind looks like: while the library is not reading the connection, it cannot answer the exchange's pings or see the answers to its own, so if your loop stays behind, the connection ends:
+
+- with close code 1011 and reason `keepalive ping timeout`, closed by the library itself after its `ping_timeout`; or
+- with `ping_interval=None`, with close code 4000 and reason `heartbeat timeout`, closed by the exchange.
+
+From a `Session`, iteration then raises a `ConnectionClosedError`. A `ReconnectingSession` instead delivers a `Disconnected` event, logs the drop as `QTE-SESSION-DISCONNECTED` with its close code (see [errors](errors.md#qte-session-disconnected)), reconnects and subscribes again. Either way, market data sent while you were disconnected is not recovered: your books start again from what the exchange sends after the new subscribe.
 
 ## What the replay is not
 

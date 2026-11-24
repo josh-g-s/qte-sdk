@@ -1,6 +1,6 @@
 # Changelog
 
-**Version:** 0.119
+**Version:** 0.120
 
 The changes in each release of qte-sdk. A release is a `vX.Y.Z` tag on `main` whose number matches `qte_sdk.__version__`. `python -m qte_sdk.update` says whether yours is the latest, and `pip install "git+https://github.com/josh-g-s/qte-sdk@v1.0.0"` installs a given release.
 
@@ -8,6 +8,7 @@ Changes merged since the last release are listed under "Unreleased" at the top. 
 
 ## Unreleased
 
+- Docs: a new "Keeping up with market data" section in docs/developing-your-algo.md, linked from the README: subscribe only to the instruments you trade, keep `async for event in session` reading (no blocking, and slow work run in the background rather than awaited inline), pass `max_queue=1024` to absorb the burst at the open, and what happens when a loop falls behind (1011 `keepalive ping timeout` or 4000 `heartbeat timeout`, with the missed market data not recovered). No change to any default.
 - The contract's `ticket_states_complete` (qte-platform 184a4403) is now a typed event, `TicketStatesComplete`, which `qte_sdk.tickets.is_ticket_states_complete` picks out: sent once on each connection after its connect-time `ticket_state` and `break_request_state` messages, and never after a resume. `SessionInfo.marks_ticket_states` says whether it will come: True when it is sent after the set, unless the connection closes first or a state cannot be reported, False when this connection is sent no marker, and None from an exchange that predates it, when the states are taken as they come, as before. Wait for it with a bound. The `qte_sdk.tickets` docs, the quickstart, docs/automatic-execution.md and both copies of AGENTS.md describe it.
 - The round lot is readable: `InstrumentInfo.round_lot` in the instruments table is each equity's round lot in force (absent for an equity with none in the term's table, for every option contract and from an older exchange), and `ObligationEntry.min_size_per_side` in `obligation_state` is the minimum each side is held to for that second. The quickstart, AGENTS.md, README and `examples/quote_both_sides.py` now say where to read it instead of that this SDK cannot.
 - `ObligationEntry` in a Market Making desk's `obligation_state` has `graced`, present and then always true, only on a second that counted as qualifying because of the obligation grace; it is absent on every other second and never false, so read it with `HasField("graced")`. `spread_compliant` and `size_compliant` still show what the quote did. The quickstart and both copies of AGENTS.md describe `obligation_state` and say that qualifying includes graced seconds (#391).
